@@ -5,12 +5,17 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <string_view>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "trainvm/authority_time.hpp"
 #include "trainvm/host_ledger.hpp"
@@ -78,6 +83,255 @@ public:
 
 private:
   int descriptor_;
+};
+
+std::string bounded_status_reason(std::string_view reason) {
+  constexpr std::size_t maximum = 512U;
+  return std::string(reason.substr(0U, maximum));
+}
+
+void apply_spawn_status(HostdProcessAuthorityStatus &status,
+                        const HostProcessSpawnReceipt &spawn) {
+  status.phase = HostdProcessAuthorityPhase::spawned;
+  status.host_pid = spawn.request.host_pid;
+  status.process_starttime_ticks = spawn.request.process_starttime_ticks;
+  if (spawn.request.device_policy) {
+    status.device_policy_installed = true;
+    status.device_policy_installation_digest =
+        spawn.request.device_policy->installation_digest;
+  }
+  if (spawn.request.process_policy) {
+    status.process_policy_installed = true;
+    status.process_policy_installation_digest =
+        spawn.request.process_policy->installation_digest;
+  }
+}
+
+HostdProcessAuthorityStatus process_status(
+    const ResourceBundleGrant &grant, const HostProcessLaunchIntent &intent,
+    const std::optional<HostProcessSpawnReceipt> &spawn) {
+  const HostProcessLaunchRequest &request = intent.request;
+  HostdProcessAuthorityStatus status;
+  status.allocation_id = grant.allocation_id;
+  status.journal_id = grant.journal_id;
+  status.run_id = grant.run_id;
+  status.logical_lease_id = grant.logical_lease_id;
+  status.logical_fencing_token = grant.logical_fencing_token;
+  status.launch_id = request.launch_id;
+  status.phase = HostdProcessAuthorityPhase::launch_intent;
+  status.cgroup_path = request.cgroup_path;
+  status.device_policy_intended = request.device_policy.has_value();
+  status.device_policy_digest = request.device_policy
+                                    ? request.device_policy->policy_digest
+                                    : std::string{};
+  status.process_policy_intended = request.process_policy.has_value();
+  status.process_policy_digest = request.process_policy
+                                     ? request.process_policy->policy_digest
+                                     : std::string{};
+  if (spawn)
+    apply_spawn_status(status, *spawn);
+  return status;
+}
+
+HostdProcessAuthorityStatus process_status(
+    const HostProcessTerminalReleaseRecord &record) {
+  HostdProcessAuthorityStatus status =
+      process_status(record.grant, record.intent, record.spawn);
+  status.phase = HostdProcessAuthorityPhase::terminal_pending_release;
+  if (record.child_exit) {
+    status.cgroup_empty = record.child_exit->request.cgroup_empty;
+    status.accelerator_contexts_empty =
+        record.child_exit->request.accelerator_contexts_empty;
+    status.context_audit_digest =
+        record.child_exit->request.context_audit_digest;
+    status.terminal_receipt_digest = record.child_exit->receipt_digest;
+  } else if (record.recovery_exit) {
+    status.cgroup_empty = record.recovery_exit->request.cgroup_empty;
+    status.accelerator_contexts_empty =
+        record.recovery_exit->request.accelerator_contexts_empty;
+    status.context_audit_digest =
+        record.recovery_exit->request.context_audit_digest;
+    status.terminal_receipt_digest = record.recovery_exit->receipt_digest;
+  }
+  return status;
+}
+
+class RuntimeAuthorityStatusSource final
+    : public IHostdAuthorityStatusSource {
+public:
+  static constexpr std::int64_t inventory_refresh_interval_ns =
+      30'000'000'000LL;
+
+  RuntimeAuthorityStatusSource(
+      std::shared_ptr<SQLiteHostLedger> ledger,
+      std::shared_ptr<HostGrantCoordinator> coordinator,
+      HostdStartupController &startup, IHostKernel &inventory_kernel,
+      bool process_launch_enabled)
+      : ledger_(std::move(ledger)), coordinator_(std::move(coordinator)),
+        startup_(startup), inventory_kernel_(inventory_kernel),
+        process_launch_enabled_(process_launch_enabled) {
+    if (!ledger_ || !coordinator_)
+      throw HostdDaemonRuntimeError(
+          "hostd status source requires ledger and coordinator authority");
+  }
+
+  [[nodiscard]] HostdAuthorityStatus snapshot() const override {
+    const HostdStartupControllerStatus startup = startup_.status();
+    const HostdCoordinatorStatus coordinator = coordinator_->status();
+    std::string verification_reason;
+    const bool verified = ledger_->verify(&verification_reason);
+    const HostLedgerChainHead chain_head = ledger_->chain_head();
+    const ResourceOccupancySnapshot occupancy = ledger_->occupancy();
+    const auto unclosed = ledger_->active_process_recovery_records();
+    const auto terminal = ledger_->active_terminal_process_release_records();
+
+    HostdAuthorityStatus status;
+    status.api_version = std::string(kHostdAuthorityStatusApiVersion);
+    status.startup_phase = startup.phase;
+    status.startup_recovery_steps = startup.recovery_steps;
+    status.remaining_unclosed_process_records = unclosed.size();
+    status.remaining_terminal_release_records = terminal.size();
+    status.ledger_verified = verified;
+    status.ledger_verification_reason =
+        verified ? std::string{}
+                 : bounded_status_reason(
+                       verification_reason.empty()
+                           ? std::string_view("host ledger verification failed")
+                           : std::string_view(verification_reason));
+    status.ledger_chain_head = chain_head;
+    status.ledger_record_count = ledger_->record_count();
+    status.occupancy_ledger_sequence = occupancy.ledger_sequence;
+    status.occupancy_digest = occupancy.occupancy_digest;
+    const InventoryObservation observation = inventory_observation();
+    status.resource_inventory_observation_age_ns = observation.age_ns;
+    if (observation.receipt) {
+      const HostInventoryReceipt &current = *observation.receipt;
+      status.resource_inventory_observed = true;
+      status.current_inventory_digest = current.inventory_digest;
+      status.current_inventory_receipt_digest = current.receipt_digest;
+      for (const ResourceFence &fence : occupancy.active_fences) {
+        const auto observed = std::find_if(
+            current.resources.begin(), current.resources.end(),
+            [&](const ObservedHostResource &resource) {
+              return resource.id.stable_id == fence.resource.stable_id;
+            });
+        if (current.host_id != coordinator.host_id ||
+            current.boot_id != coordinator.boot_id ||
+            current.topology_digest != fence.topology_digest ||
+            observed == current.resources.end() ||
+            observed->id != fence.resource) {
+          ++status.degraded_resource_count;
+        }
+      }
+      if (status.degraded_resource_count != 0U) {
+        status.resource_degradation_reason =
+            std::to_string(status.degraded_resource_count) +
+            " active resource fence(s) no longer match the current "
+            "inventory receipt";
+      }
+    } else {
+      status.resource_degradation_reason = observation.failure_reason;
+    }
+    status.active_fence_count = occupancy.active_fences.size();
+    status.active_fences_truncated =
+        occupancy.active_fences.size() >
+        HostdAuthorityStatus::maximum_reported_rows;
+    status.active_process_count = unclosed.size() + terminal.size();
+    status.active_processes_truncated =
+        status.active_process_count > HostdAuthorityStatus::maximum_reported_rows;
+    status.process_launch_enabled = process_launch_enabled_;
+
+    const std::size_t fence_count = std::min(
+        occupancy.active_fences.size(),
+        HostdAuthorityStatus::maximum_reported_rows);
+    status.active_fences.assign(occupancy.active_fences.begin(),
+                                occupancy.active_fences.begin() +
+                                    static_cast<std::ptrdiff_t>(fence_count));
+    status.active_processes.reserve(std::min(
+        status.active_process_count,
+        HostdAuthorityStatus::maximum_reported_rows));
+    for (const HostProcessRecoveryRecord &record : unclosed) {
+      if (status.active_processes.size() ==
+          HostdAuthorityStatus::maximum_reported_rows)
+        break;
+      status.active_processes.push_back(
+          process_status(record.grant, record.intent, record.spawn));
+    }
+    for (const HostProcessTerminalReleaseRecord &record : terminal) {
+      if (status.active_processes.size() ==
+          HostdAuthorityStatus::maximum_reported_rows)
+        break;
+      status.active_processes.push_back(process_status(record));
+    }
+
+    if (!verified) {
+      status.mutation_disabled_reason = verification_reason.empty()
+                                            ? "host ledger verification failed"
+                                            : bounded_status_reason(
+                                                  verification_reason);
+    } else if (startup.phase != HostdStartupPhase::admitting) {
+      status.mutation_disabled_reason =
+          "hostd startup recovery has not reached admission";
+    } else if (coordinator.lifecycle != HostdLifecycle::admitting) {
+      status.mutation_disabled_reason = coordinator.poison_reason.empty()
+                                            ? "hostd coordinator is not admitting"
+                                            : bounded_status_reason(
+                                                  coordinator.poison_reason);
+    } else if (!process_launch_enabled_) {
+      status.mutation_disabled_reason =
+          "strict process-launch enforcement is unavailable";
+    } else {
+      status.mutation_enabled = true;
+    }
+    return status;
+  }
+
+private:
+  struct InventoryObservation final {
+    std::optional<HostInventoryReceipt> receipt;
+    std::string failure_reason;
+    std::uint64_t age_ns{};
+  };
+
+  [[nodiscard]] InventoryObservation inventory_observation() const {
+    std::scoped_lock lock(inventory_mutex_);
+    const std::int64_t now = hostd_monotonic_now_ns();
+    if (!inventory_observed_at_ns_ || now < *inventory_observed_at_ns_ ||
+        now - *inventory_observed_at_ns_ >= inventory_refresh_interval_ns) {
+      try {
+        cached_inventory_ = capture_host_inventory(inventory_kernel_);
+        cached_inventory_failure_.clear();
+      } catch (const std::exception &exception) {
+        cached_inventory_.reset();
+        cached_inventory_failure_ = bounded_status_reason(
+            std::string("current inventory observation failed: ") +
+            exception.what());
+      } catch (...) {
+        cached_inventory_.reset();
+        cached_inventory_failure_ =
+            "current inventory observation failed with a non-standard exception";
+      }
+      inventory_observed_at_ns_ = hostd_monotonic_now_ns();
+    }
+    const std::int64_t observed_at = *inventory_observed_at_ns_;
+    const std::int64_t sampled_now = hostd_monotonic_now_ns();
+    const std::uint64_t age = sampled_now > observed_at
+                                  ? static_cast<std::uint64_t>(sampled_now - observed_at)
+                                  : 0U;
+    return {.receipt = cached_inventory_,
+            .failure_reason = cached_inventory_failure_,
+            .age_ns = age};
+  }
+
+  std::shared_ptr<SQLiteHostLedger> ledger_;
+  std::shared_ptr<HostGrantCoordinator> coordinator_;
+  HostdStartupController &startup_;
+  IHostKernel &inventory_kernel_;
+  mutable std::mutex inventory_mutex_;
+  mutable std::optional<HostInventoryReceipt> cached_inventory_;
+  mutable std::string cached_inventory_failure_;
+  mutable std::optional<std::int64_t> inventory_observed_at_ns_;
+  bool process_launch_enabled_{};
 };
 
 } // namespace
@@ -158,6 +412,8 @@ struct HostdDaemonRuntime::Implementation final {
     startup = std::make_unique<HostdStartupController>(
         *restart_recovery, *startup_admission, *startup_auditor, *clock,
         configuration.startup_controller());
+    authority_status_source = std::make_shared<RuntimeAuthorityStatusSource>(
+        ledger, coordinator, *startup, *inventory_kernel, launch_capable);
 
     nonce_source =
         std::make_shared<HostdLinuxCSPRNGNonceSource>(session_kernel);
@@ -189,7 +445,7 @@ struct HostdDaemonRuntime::Implementation final {
         std::make_shared<HostdSocketAuthority>(std::move(bound));
     auto candidate_status = std::make_unique<HostdStatusServer>(
         candidate_socket, coordinator, configuration.status_peer(),
-        configuration.status_transport());
+        configuration.status_transport(), authority_status_source);
     auto candidate_mutation = std::make_unique<HostdMutationServer>(
         candidate_socket, coordinator, challenge_verifier, session_kernel,
         service_identity, ledger_time, configuration.mutation_transport(),
@@ -231,6 +487,7 @@ struct HostdDaemonRuntime::Implementation final {
   std::unique_ptr<HostdConfiguredStartupAuditor> startup_auditor;
   std::unique_ptr<HostdCoordinatorStartupAdmission> startup_admission;
   std::unique_ptr<HostdStartupController> startup;
+  std::shared_ptr<IHostdAuthorityStatusSource> authority_status_source;
   std::shared_ptr<IHostdLinuxSessionKernel> session_kernel;
   std::shared_ptr<HostdLinuxCSPRNGNonceSource> nonce_source;
   std::shared_ptr<HostdLinuxBoottimeSource> challenge_time;

@@ -1,6 +1,7 @@
 #include "trainvm/profiler_launch_profiles.hpp"
 
 #include <algorithm>
+#include <fcntl.h>
 #include <iostream>
 #include <optional>
 #include <stdexcept>
@@ -8,6 +9,8 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include <unistd.h>
 
 namespace {
 
@@ -116,6 +119,114 @@ void out_of_range_step_counts_are_refused() {
                  "a negative skip_steps must be refused");
 }
 
+void external_collectors_follow_optimizer_steps_not_kernel_counts() {
+  const auto nsys = profiler_capture_argv(capture(ProfilerBackend::nsys),
+                                          "/tmp/trainvm-nsys");
+  require(std::ranges::find(
+              nsys, std::string("--capture-range=cudaProfilerApi")) !=
+              nsys.end(),
+          "nsys collection is gated by the worker step lifecycle");
+
+  const auto ncu = profiler_capture_argv(capture(ProfilerBackend::ncu),
+                                         "/tmp/trainvm-ncu");
+  require(std::ranges::find(ncu, std::string("--launch-skip")) == ncu.end() &&
+              std::ranges::find(ncu, std::string("--launch-count")) ==
+                  ncu.end(),
+          "ncu must not reinterpret kernel launch counts as optimizer steps");
+  const auto include =
+      std::ranges::find(ncu, std::string("--nvtx-include"));
+  require(include != ncu.end() && std::next(include) != ncu.end() &&
+              *std::next(include) == "trainvm.profile.capture",
+          "ncu is filtered by the fixed TrainVM capture range");
+  const auto log_file = std::ranges::find(ncu, std::string("--log-file"));
+  require(log_file != ncu.end() && std::next(log_file) != ncu.end() &&
+              *std::next(log_file) == "/tmp/trainvm-ncu.csv",
+          "ncu emits a fixed raw CSV summary beside its restricted report");
+}
+
+void external_lifecycle_is_exact_and_bounded() {
+  ProfilerStepLifecycle lifecycle(capture(ProfilerBackend::nsys));
+  require(lifecycle.enter() == ProfilerLifecycleAction::none,
+          "leading steps defer profiler start");
+  for (std::uint64_t index = 0U; index < 14U; ++index) {
+    require(lifecycle.optimizer_step(100U + index) ==
+                ProfilerLifecycleAction::none,
+            "skip and warmup steps do not transition early");
+  }
+  require(lifecycle.optimizer_step(114U) ==
+              ProfilerLifecycleAction::start_capture,
+          "the worker starts collection after the leading window");
+  require(lifecycle.optimizer_step(115U) == ProfilerLifecycleAction::none &&
+              lifecycle.optimizer_step(116U) == ProfilerLifecycleAction::none,
+          "captured optimizer steps keep collection active");
+  require(lifecycle.optimizer_step(117U) ==
+              ProfilerLifecycleAction::stop_capture,
+          "the worker stops after exactly three optimizer updates");
+  require(lifecycle.complete() &&
+              lifecycle.captured_steps() ==
+                  std::vector<std::uint64_t>{115U, 116U, 117U},
+          "the lifecycle retains the exact captured step identities");
+  require(lifecycle.optimizer_step(118U) == ProfilerLifecycleAction::none &&
+              lifecycle.complete(),
+          "training continues normally after the bounded capture window");
+  require(lifecycle.finish(false) == ProfilerLifecycleAction::none,
+          "a complete lifecycle finishes without another transition");
+
+  auto zero_leading = capture(ProfilerBackend::ncu);
+  zero_leading.skip_steps = 0;
+  zero_leading.warmup_steps = 0;
+  ProfilerStepLifecycle starts_immediately(zero_leading);
+  require(starts_immediately.enter() ==
+              ProfilerLifecycleAction::start_capture,
+          "a zero-leading capture starts before the first optimizer update");
+  require(starts_immediately.optimizer_step(9U) ==
+              ProfilerLifecycleAction::none,
+          "the first captured update remains inside the range");
+  require_throws(
+      [&] { (void)starts_immediately.optimizer_step(9U); },
+      "duplicate optimizer steps are refused");
+
+  ProfilerStepLifecycle incomplete(capture(ProfilerBackend::nsys));
+  (void)incomplete.enter();
+  require_throws([&] { (void)incomplete.finish(false); },
+                 "a short successful run cannot publish an incomplete trace");
+}
+
+void external_authority_is_sealed_and_content_addressed() {
+  ExternalProfilerAuthoritySpec value{
+      .api_version = std::string(kExternalProfilerAuthorityApiVersion),
+      .backend = ProfilerBackend::nsys,
+      .run_id = "run-1",
+      .node_id = "train",
+      .attempt_id = "train@1",
+      .launch_profile_digest = "sha256:" + std::string(64U, 'a'),
+      .profiler_executable_digest = "sha256:" + std::string(64U, 'b'),
+      .authority_digest = {},
+  };
+  value = seal_external_profiler_authority(std::move(value));
+  const std::string canonical =
+      external_profiler_authority_canonical_json(value);
+  require(external_profiler_authority_from_canonical_json(canonical) == value,
+          "external profiler authority round-trips canonically");
+  auto sealed = create_sealed_external_profiler_authority(value);
+  const int descriptor = sealed.duplicate_fd();
+  require(external_profiler_authority_from_sealed_fd(
+              descriptor, value.authority_digest) == value,
+          "external profiler authority survives its sealed descriptor");
+  require((::fcntl(descriptor, F_GET_SEALS) &
+           (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) ==
+              (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL),
+          "external profiler authority descriptor is immutable");
+  (void)::close(descriptor);
+
+  auto torch = value;
+  torch.backend = ProfilerBackend::torch;
+  torch.authority_digest.clear();
+  require_throws(
+      [&] { (void)seal_external_profiler_authority(torch); },
+      "in-process Torch cannot claim external profiler authority");
+}
+
 // The card's second property. A raw capture carries kernel names, tensor
 // shapes, file paths, and dataset identity, which here can include private
 // corpora; only the normalized summary may be publishable.
@@ -179,6 +290,9 @@ int main() {
     a_capture_cannot_inject_arguments();
     a_hostile_output_path_never_reaches_a_command_line();
     out_of_range_step_counts_are_refused();
+    external_collectors_follow_optimizer_steps_not_kernel_counts();
+    external_lifecycle_is_exact_and_bounded();
+    external_authority_is_sealed_and_content_addressed();
     trace_sensitivity_is_declared_and_restrictive();
     the_in_process_backend_has_no_command_line();
     a_disabled_or_backendless_capture_has_no_invocation();

@@ -35,6 +35,9 @@ enum class ObservedInvocationKind {
   console_script,
   host_script,
   http_control_handler,
+  // Historical dashboard mutation surface retained as a migration obligation
+  // after its route and execution authority have been removed.
+  retired_legacy,
   library_only,
   design_only,
 };

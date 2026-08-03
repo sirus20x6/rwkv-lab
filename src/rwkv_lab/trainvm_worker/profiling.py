@@ -10,10 +10,12 @@ specific collection of command-line switches.
 from __future__ import annotations
 
 import errno
+import fcntl
 import hashlib
 import math
 import os
 import shutil
+import stat
 import tempfile
 import time
 from collections.abc import Iterable, Iterator, Mapping
@@ -23,7 +25,15 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any, Protocol, Self, TypeVar
 
-from ._canonical import canonical_dumps, is_bounded_text, sha256_digest
+from ._canonical import (
+    CanonicalJsonError,
+    canonical_dumps,
+    canonical_loads,
+    exact_fields,
+    is_bounded_text,
+    is_digest,
+    sha256_digest,
+)
 
 try:
     from trainvm.v1 import trainvm_pb2 as wire
@@ -34,8 +44,19 @@ except ImportError as error:  # pragma: no cover - installation contract
 
 
 GPU_TRACE_SCHEMA = "trainvm.gpu-trace.v1"
+EXTERNAL_PROFILER_AUTHORITY_SCHEMA = "trainvm.external-profiler-authority/v1"
+EXTERNAL_PROFILER_WINDOW_SCHEMA = "trainvm.external-profiler-window/v1"
+EXTERNAL_PROFILER_AUTHORITY_DESCRIPTOR = 5
+EXTERNAL_PROFILER_NVTX_RANGE = "trainvm.profile.capture"
 MAXIMUM_TRACE_BYTES = 2 * 1024 * 1024 * 1024
 MAXIMUM_KERNEL_ROWS = 256
+MAXIMUM_EXTERNAL_PROFILER_AUTHORITY_BYTES = 16 * 1024
+MAXIMUM_EXTERNAL_PROFILER_WINDOW_BYTES = 64 * 1024
+_F_GET_SEALS = getattr(fcntl, "F_GET_SEALS", 1034)
+_F_SEAL_SEAL = getattr(fcntl, "F_SEAL_SEAL", 0x0001)
+_F_SEAL_SHRINK = getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
+_F_SEAL_GROW = getattr(fcntl, "F_SEAL_GROW", 0x0004)
+_F_SEAL_WRITE = getattr(fcntl, "F_SEAL_WRITE", 0x0008)
 _InputItem = TypeVar("_InputItem")
 _TRACE_FIELDS = frozenset(
     {
@@ -55,6 +76,102 @@ _TRACE_FIELDS = frozenset(
 
 class GpuProfileError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalProfilerAuthority:
+    backend: str
+    run_id: str
+    node_id: str
+    attempt_id: str
+    launch_profile_digest: str
+    profiler_executable_digest: str
+    authority_digest: str
+
+
+_EXTERNAL_PROFILER_AUTHORITY_FIELDS = frozenset(
+    {
+        "api_version",
+        "attempt_id",
+        "authority_digest",
+        "backend",
+        "launch_profile_digest",
+        "node_id",
+        "profiler_executable_digest",
+        "run_id",
+    }
+)
+
+
+def load_external_profiler_authority(raw: bytes) -> ExternalProfilerAuthority:
+    """Decode hostd's sealed proof that this worker is profiler-wrapped."""
+
+    try:
+        document = canonical_loads(
+            raw, maximum_bytes=MAXIMUM_EXTERNAL_PROFILER_AUTHORITY_BYTES
+        )
+        exact_fields(document, _EXTERNAL_PROFILER_AUTHORITY_FIELDS)
+        authority_digest = document["authority_digest"]
+        body = dict(document)
+        del body["authority_digest"]
+        valid = (
+            body["api_version"] == EXTERNAL_PROFILER_AUTHORITY_SCHEMA
+            and body["backend"] in {"nsys", "ncu"}
+            and is_bounded_text(body["run_id"], 1024)
+            and is_bounded_text(body["node_id"], 1024)
+            and is_bounded_text(body["attempt_id"], 1024)
+            and is_digest(body["launch_profile_digest"])
+            and is_digest(body["profiler_executable_digest"])
+            and is_digest(authority_digest)
+            and sha256_digest(canonical_dumps(body)) == authority_digest
+        )
+        if not valid:
+            raise GpuProfileError("external profiler authority is invalid")
+        return ExternalProfilerAuthority(
+            backend=body["backend"],
+            run_id=body["run_id"],
+            node_id=body["node_id"],
+            attempt_id=body["attempt_id"],
+            launch_profile_digest=body["launch_profile_digest"],
+            profiler_executable_digest=body["profiler_executable_digest"],
+            authority_digest=authority_digest,
+        )
+    except GpuProfileError:
+        raise
+    except (CanonicalJsonError, KeyError, TypeError, ValueError) as error:
+        raise GpuProfileError(
+            "external profiler authority decoding failed closed"
+        ) from error
+
+
+def read_external_profiler_authority_fd(
+    descriptor: int = EXTERNAL_PROFILER_AUTHORITY_DESCRIPTOR,
+) -> ExternalProfilerAuthority:
+    """Read the fixed, sealed hostd authority descriptor without seeking it."""
+
+    try:
+        metadata = os.fstat(descriptor)
+        required_seals = _F_SEAL_WRITE | _F_SEAL_GROW | _F_SEAL_SHRINK | _F_SEAL_SEAL
+        seals = fcntl.fcntl(descriptor, _F_GET_SEALS)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size <= 0
+            or metadata.st_size > MAXIMUM_EXTERNAL_PROFILER_AUTHORITY_BYTES
+            or seals & required_seals != required_seals
+        ):
+            raise GpuProfileError(
+                "external profiler descriptor is not sealed authority"
+            )
+        raw = os.pread(descriptor, metadata.st_size, 0)
+        if len(raw) != metadata.st_size:
+            raise GpuProfileError("external profiler authority was read incompletely")
+        return load_external_profiler_authority(raw)
+    except GpuProfileError:
+        raise
+    except OSError as error:
+        raise GpuProfileError(
+            "external profiler authority descriptor is unavailable"
+        ) from error
 
 
 class _ArtifactSession(Protocol):
@@ -262,6 +379,105 @@ class GpuTracePublisher:
         root.mkdir(mode=0o750, exist_ok=True)
         return root
 
+    @property
+    def external_staging_root(self) -> Path:
+        """Create the private parent used by host-derived Nsight outputs."""
+
+        root = self._root / ".external"
+        root.mkdir(mode=0o750, exist_ok=True)
+        root = root.resolve(strict=True)
+        if root.parent != self._root:
+            raise GpuProfileError("external GPU trace staging escaped authority")
+        return root
+
+    @property
+    def external_capture_prefix(self) -> Path:
+        bootstrap = self._session.bootstrap
+        launch_id = (
+            f"{_text(bootstrap.run_id, 'run ID', 1024)}:worker-launch:"
+            f"{_text(bootstrap.node_id, 'node ID', 1024)}:"
+            f"{_text(bootstrap.attempt_id, 'attempt ID', 1024)}"
+        )
+        return (
+            self.external_staging_root
+            / hashlib.sha256(launch_id.encode("utf-8")).hexdigest()
+        )
+
+    def publish_external_window(
+        self,
+        *,
+        authority: ExternalProfilerAuthority,
+        optimizer_steps: tuple[int, ...],
+        input_stall_us: tuple[float | None, ...],
+        captured_step_wall_time_us: float,
+    ) -> Path:
+        """Freeze the worker-side evidence needed to normalize a parent trace."""
+
+        if (
+            authority.backend != self._request.backend
+            or len(optimizer_steps) != self._request.capture_steps
+            or len(input_stall_us) != len(optimizer_steps)
+            or any(step < 0 for step in optimizer_steps)
+            or any(right <= left for left, right in pairwise(optimizer_steps))
+            or any(
+                value is not None and (not math.isfinite(value) or value < 0)
+                for value in input_stall_us
+            )
+            or not math.isfinite(captured_step_wall_time_us)
+            or captured_step_wall_time_us <= 0
+        ):
+            raise GpuProfileError("external GPU trace window evidence is invalid")
+        bootstrap = self._session.bootstrap
+        invocation = self._session.invocation
+        body: dict[str, object] = {
+            "api_version": EXTERNAL_PROFILER_WINDOW_SCHEMA,
+            "attempt_id": _text(bootstrap.attempt_id, "attempt ID", 1024),
+            "authority_digest": _text(
+                authority.authority_digest, "authority digest", 128
+            ),
+            "backend": self._request.backend,
+            "capture_steps": self._request.capture_steps,
+            "captured_step_wall_time_us": captured_step_wall_time_us,
+            "input_stall_us": list(input_stall_us),
+            "invocation_digest": _text(
+                invocation.invocation_digest, "invocation digest", 128
+            ),
+            "node_id": _text(bootstrap.node_id, "node ID", 1024),
+            "optimizer_steps": list(optimizer_steps),
+            "run_id": _text(bootstrap.run_id, "run ID", 1024),
+            "skip_steps": self._request.skip_steps,
+            "warmup_steps": self._request.warmup_steps,
+        }
+        document = {
+            **body,
+            "canonical_window_digest": sha256_digest(canonical_dumps(body)),
+        }
+        encoded = canonical_dumps(document)
+        if len(encoded) > MAXIMUM_EXTERNAL_PROFILER_WINDOW_BYTES:
+            raise GpuProfileError("external GPU trace window exceeds its bound")
+        destination = Path(str(self.external_capture_prefix) + ".window.json")
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".window-", suffix=".json", dir=self.external_staging_root
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as target:
+                target.write(encoded)
+                target.flush()
+                os.fsync(target.fileno())
+            temporary.chmod(0o440)
+            try:
+                os.link(temporary, destination, follow_symlinks=False)
+                _fsync_directory(self.external_staging_root)
+            except FileExistsError:
+                if not destination.is_file() or destination.read_bytes() != encoded:
+                    raise GpuProfileError(
+                        "external GPU trace window identity already exists with different bytes"
+                    )
+            return destination
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def publish(
         self,
         *,
@@ -305,6 +521,7 @@ class GpuTracePublisher:
             "sensitivity": "restricted",
             "skip_steps": self._request.skip_steps,
             "summary": dict(summary),
+            "trace_file_name": "trace.json",
             "trace_sha256": trace_sha256,
             "trace_size_bytes": trace_size,
             "warmup_steps": self._request.warmup_steps,
@@ -417,6 +634,233 @@ class NullStepProfiler:
             raise GpuProfileError("optimizer step must be an integer")
 
 
+class _ExternalProfilerRuntime(Protocol):
+    def start_capture(self) -> None: ...
+
+    def stop_capture(self) -> None: ...
+
+
+class _TorchExternalProfilerRuntime:
+    """CUDA/NVTX controls used by a host-owned Nsight wrapper.
+
+    This class does not start a process and accepts no command-line or
+    environment input. It only opens and closes the fixed range already bound
+    by hostd's sealed launch authority.
+    """
+
+    def __init__(self) -> None:
+        try:
+            import torch
+        except ImportError as error:  # pragma: no cover - dependency contract
+            raise GpuProfileError(
+                "external GPU profiling requires the CUDA Torch runtime"
+            ) from error
+        if not torch.cuda.is_available():
+            raise GpuProfileError("external GPU profiler requires CUDA")
+        self._torch = torch
+
+    @staticmethod
+    def _require_cuda_success(status: object, operation: str) -> None:
+        if status is not None and status != 0:
+            raise GpuProfileError(
+                f"external GPU profiler {operation} returned {status!r}"
+            )
+
+    def start_capture(self) -> None:
+        self._require_cuda_success(
+            self._torch.cuda.cudart().cudaProfilerStart(), "start"
+        )
+        try:
+            self._torch.cuda.nvtx.range_push(EXTERNAL_PROFILER_NVTX_RANGE)
+        except Exception:
+            # Do not leave nsys collecting an unbounded run if NVTX setup
+            # fails after cudaProfilerStart succeeded.
+            self._torch.cuda.cudart().cudaProfilerStop()
+            raise
+
+    def stop_capture(self) -> None:
+        self._torch.cuda.nvtx.range_pop()
+        self._require_cuda_success(self._torch.cuda.cudart().cudaProfilerStop(), "stop")
+
+
+class ExternalStepProfiler:
+    """Optimizer-step authority for an already host-wrapped Nsight process."""
+
+    def __init__(
+        self,
+        session: _ArtifactSession,
+        request: GpuTraceRequest,
+        *,
+        authority: ExternalProfilerAuthority | None = None,
+        runtime: _ExternalProfilerRuntime | None = None,
+    ) -> None:
+        if request.backend not in {"nsys", "ncu"}:
+            raise GpuProfileError("external step profiler requires an Nsight backend")
+        self._session = session
+        self._request = request
+        self._authority = authority
+        self._runtime = runtime
+        self._publisher = GpuTracePublisher(session, request)
+        # The host owns the basename and passes it only through a sealed launch
+        # profile. The worker owns write authority for the run and prepares the
+        # fixed private parent before Nsight opens that basename.
+        _ = self._publisher.external_staging_root
+        self._steps_seen = 0
+        self._last_step: int | None = None
+        self._captured_steps: list[int] = []
+        self._pending_input_stall_us = 0.0
+        self._pending_input_observations = 0
+        self._captured_input_stall_us: list[float | None] = []
+        self._active = False
+        self._capture_started_ns: int | None = None
+        self._capture_wall_time_us: float | None = None
+        self._entered = False
+        self._finished = False
+
+    @property
+    def captured_steps(self) -> tuple[int, ...]:
+        return tuple(self._captured_steps)
+
+    @property
+    def complete(self) -> bool:
+        return (
+            self._entered
+            and not self._active
+            and self._steps_seen >= self._request.total_steps
+            and len(self._captured_steps) == self._request.capture_steps
+        )
+
+    def _validate_authority(self) -> None:
+        if self._authority is None:
+            self._authority = read_external_profiler_authority_fd()
+        bootstrap = self._session.bootstrap
+        if (
+            self._authority.backend != self._request.backend
+            or self._authority.run_id != getattr(bootstrap, "run_id", None)
+            or self._authority.node_id != getattr(bootstrap, "node_id", None)
+            or self._authority.attempt_id != getattr(bootstrap, "attempt_id", None)
+        ):
+            raise GpuProfileError(
+                "external profiler authority disagrees with this worker attempt"
+            )
+
+    def _start(self) -> None:
+        if self._active:
+            raise GpuProfileError("external GPU capture is already active")
+        assert self._runtime is not None
+        self._runtime.start_capture()
+        self._capture_started_ns = time.perf_counter_ns()
+        self._active = True
+
+    def _stop(self) -> None:
+        if not self._active:
+            raise GpuProfileError("external GPU capture is not active")
+        assert self._runtime is not None
+        try:
+            self._runtime.stop_capture()
+        finally:
+            stopped = time.perf_counter_ns()
+            if self._capture_started_ns is not None:
+                elapsed = (stopped - self._capture_started_ns) / 1000.0
+                if elapsed <= 0 or not math.isfinite(elapsed):
+                    raise GpuProfileError(
+                        "external GPU trace wall-clock observation is invalid"
+                    )
+                self._capture_wall_time_us = elapsed
+            self._active = False
+
+    def __enter__(self) -> Self:
+        if self._entered or self._finished:
+            raise GpuProfileError("external profiler entered more than once")
+        self._validate_authority()
+        if self._runtime is None:
+            self._runtime = _TorchExternalProfilerRuntime()
+        self._entered = True
+        if self._request.skip_steps + self._request.warmup_steps == 0:
+            self._start()
+        return self
+
+    @contextmanager
+    def input_wait(self) -> Iterator[None]:
+        started = time.perf_counter_ns()
+        try:
+            yield
+        finally:
+            elapsed = (time.perf_counter_ns() - started) / 1000.0
+            if elapsed < 0 or not math.isfinite(elapsed):
+                raise GpuProfileError("input-stall clock observation is invalid")
+            self._pending_input_stall_us += elapsed
+            self._pending_input_observations += 1
+
+    def track_input(self, values: Iterable[_InputItem]) -> Iterator[_InputItem]:
+        iterator = iter(values)
+        while True:
+            started = time.perf_counter_ns()
+            try:
+                value = next(iterator)
+            except StopIteration:
+                return
+            elapsed = (time.perf_counter_ns() - started) / 1000.0
+            if elapsed < 0 or not math.isfinite(elapsed):
+                raise GpuProfileError("input-stall clock observation is invalid")
+            self._pending_input_stall_us += elapsed
+            self._pending_input_observations += 1
+            yield value
+
+    def step(self, optimizer_step: int) -> None:
+        if (
+            not self._entered
+            or self._finished
+            or not isinstance(optimizer_step, int)
+            or isinstance(optimizer_step, bool)
+            or optimizer_step < 0
+            or (self._last_step is not None and optimizer_step <= self._last_step)
+        ):
+            raise GpuProfileError("external GPU trace optimizer steps must increase")
+        self._last_step = optimizer_step
+        capture_start = self._request.skip_steps + self._request.warmup_steps
+        if capture_start <= self._steps_seen < self._request.total_steps:
+            if not self._active:
+                raise GpuProfileError("external GPU trace window is not active")
+            self._captured_steps.append(optimizer_step)
+            self._captured_input_stall_us.append(
+                self._pending_input_stall_us
+                if self._pending_input_observations > 0
+                else None
+            )
+        self._pending_input_stall_us = 0.0
+        self._pending_input_observations = 0
+        self._steps_seen += 1
+        if self._steps_seen == self._request.total_steps:
+            self._stop()
+        elif self._steps_seen == capture_start:
+            self._start()
+
+    def __exit__(self, *exception: object) -> None:
+        if not self._entered or self._finished:
+            return
+        self._finished = True
+        if exception and exception[0] is not None:
+            if self._active:
+                self._stop()
+            return
+        if not self.complete:
+            if self._active:
+                self._stop()
+            raise GpuProfileError(
+                "training ended before the external GPU trace window completed"
+            )
+        assert self._authority is not None
+        if self._capture_wall_time_us is None:
+            raise GpuProfileError("external GPU trace has no captured wall time")
+        self._publisher.publish_external_window(
+            authority=self._authority,
+            optimizer_steps=tuple(self._captured_steps),
+            input_stall_us=tuple(self._captured_input_stall_us),
+            captured_step_wall_time_us=self._capture_wall_time_us,
+        )
+
+
 def _event_value(event: object, *names: str) -> float:
     for name in names:
         value = getattr(event, name, None)
@@ -473,7 +917,9 @@ def _profile_activity_summary(profile: object) -> dict[str, object]:
         if str(getattr(event, "key", "")) == "ProfilerStep*":
             step_intervals.append(interval)
     if not step_intervals:
-        raise GpuProfileError("torch profiler omitted captured optimizer-step intervals")
+        raise GpuProfileError(
+            "torch profiler omitted captured optimizer-step intervals"
+        )
     window_start = min(interval[0] for interval in step_intervals)
     window_end = max(interval[1] for interval in step_intervals)
     wall_time = window_end - window_start
@@ -735,11 +1181,19 @@ def step_profiler_from_invocation(
     request = trace_request_from_invocation(invocation)
     if request is None:
         return NullStepProfiler()
-    return TorchStepProfiler(session, request)
+    if request.backend == "torch":
+        return TorchStepProfiler(session, request)
+    return ExternalStepProfiler(session, request)
 
 
 __all__ = [
+    "EXTERNAL_PROFILER_AUTHORITY_DESCRIPTOR",
+    "EXTERNAL_PROFILER_AUTHORITY_SCHEMA",
+    "EXTERNAL_PROFILER_NVTX_RANGE",
+    "EXTERNAL_PROFILER_WINDOW_SCHEMA",
     "GPU_TRACE_SCHEMA",
+    "ExternalProfilerAuthority",
+    "ExternalStepProfiler",
     "GpuProfileError",
     "GpuTracePublisher",
     "GpuTraceRequest",
@@ -747,6 +1201,8 @@ __all__ = [
     "PublishedGpuTrace",
     "TorchStepProfiler",
     "WorkerStepProfiler",
+    "load_external_profiler_authority",
+    "read_external_profiler_authority_fd",
     "step_profiler_from_invocation",
     "trace_request_from_invocation",
 ]

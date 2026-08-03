@@ -254,7 +254,8 @@ std::string digest_descriptor(int source, std::uint64_t expected_size) {
 
 void validate_delegated_artifact(int descriptor,
                                  const VerifiedLaunchArtifact& identity,
-                                 bool executable) {
+                                 bool executable,
+                                 bool sealed_copy = true) {
   struct stat metadata {};
   const int seals = ::fcntl(descriptor, F_GET_SEALS);
   constexpr int required_seals =
@@ -262,8 +263,19 @@ void validate_delegated_artifact(int descriptor,
   if (::fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
       metadata.st_size < 0 ||
       static_cast<std::uint64_t>(metadata.st_size) != identity.source_size ||
-      seals < 0 || (seals & required_seals) != required_seals ||
-      (metadata.st_mode & 0777) != (executable ? 0500 : 0400) ||
+      (sealed_copy
+           ? seals < 0 || (seals & required_seals) != required_seals ||
+                 (metadata.st_mode & 0777) != (executable ? 0500 : 0400)
+           : static_cast<std::uint64_t>(metadata.st_dev) !=
+                     identity.source_device ||
+                 static_cast<std::uint64_t>(metadata.st_ino) !=
+                     identity.source_inode ||
+                 static_cast<std::uint32_t>(metadata.st_mode) !=
+                     identity.source_mode ||
+                 static_cast<std::uint32_t>(metadata.st_uid) !=
+                     identity.source_uid ||
+                 static_cast<std::uint32_t>(metadata.st_gid) !=
+                     identity.source_gid) ||
       digest_descriptor(descriptor, identity.source_size) !=
           identity.sealed_sha256) {
     throw HostLaunchResolutionError(
@@ -367,6 +379,60 @@ SealedArtifact resolve_artifact(
   };
 }
 
+SealedArtifact resolve_pinned_executable(
+    const std::vector<std::string>& roots, const std::string& path,
+    const std::string& expected_fingerprint) {
+  OpenedPath source = open_beneath(roots, path, O_RDONLY, false);
+  if ((source.metadata.st_mode & 0111) == 0) {
+    throw HostLaunchResolutionError(
+        "resolved profiler executable has no execute bit");
+  }
+  std::array<unsigned char, 4U> magic{};
+  const ssize_t count =
+      ::pread(source.descriptor.get(), magic.data(), magic.size(), 0);
+  if (count != static_cast<ssize_t>(magic.size()) ||
+      magic != std::array<unsigned char, 4U>{0x7fU, 'E', 'L', 'F'}) {
+    throw HostLaunchResolutionError(
+        "resolved profiler executable is not an ELF payload");
+  }
+  const std::string digest = digest_descriptor(
+      source.descriptor.get(),
+      static_cast<std::uint64_t>(source.metadata.st_size));
+  struct stat after {};
+  if (::fstat(source.descriptor.get(), &after) != 0 ||
+      source.metadata.st_dev != after.st_dev ||
+      source.metadata.st_ino != after.st_ino ||
+      source.metadata.st_size != after.st_size ||
+      source.metadata.st_mtim.tv_sec != after.st_mtim.tv_sec ||
+      source.metadata.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+      source.metadata.st_ctim.tv_sec != after.st_ctim.tv_sec ||
+      source.metadata.st_ctim.tv_nsec != after.st_ctim.tv_nsec) {
+    throw HostLaunchResolutionError(
+        "profiler executable changed while it was being pinned");
+  }
+  if (digest != expected_fingerprint) {
+    throw HostLaunchResolutionError(
+        "profiler executable bytes disagree with the trusted fingerprint");
+  }
+  return {
+      .descriptor = std::move(source.descriptor),
+      .identity = {.source_path = path,
+                   .source_device =
+                       static_cast<std::uint64_t>(source.metadata.st_dev),
+                   .source_inode =
+                       static_cast<std::uint64_t>(source.metadata.st_ino),
+                   .source_size =
+                       static_cast<std::uint64_t>(source.metadata.st_size),
+                   .source_mode =
+                       static_cast<std::uint32_t>(source.metadata.st_mode),
+                   .source_uid =
+                       static_cast<std::uint32_t>(source.metadata.st_uid),
+                   .source_gid =
+                       static_cast<std::uint32_t>(source.metadata.st_gid),
+                   .sealed_sha256 = digest},
+  };
+}
+
 std::string bounded_system_identity(const char* path, std::size_t maximum) {
   Descriptor descriptor(::open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
   if (descriptor.get() < 0) {
@@ -433,6 +499,27 @@ nlohmann::json directory_identity_json(
           {"mode", identity.mode},
           {"uid", identity.uid},
           {"gid", identity.gid}};
+}
+
+nlohmann::json resolved_profiler_identity_json(
+    const ResolvedProfilerLaunchIdentity& profiler) {
+  return {
+      {"api_version", profiler.api_version},
+      {"authority",
+       nlohmann::json::parse(
+           external_profiler_authority_canonical_json(profiler.authority))},
+      {"backend", enum_to_string(profiler.backend)},
+      {"capture", encode_json(profiler.capture)},
+      {"executable", file_identity_json(profiler.executable)},
+      {"execute_from_source", profiler.execute_from_source},
+      {"host_profiler_profile_digest",
+       profiler.host_profiler_profile_digest},
+      {"launch_profile_document_digest",
+       profiler.launch_profile_document_digest},
+      {"launch_profile_version", profiler.launch_profile_version},
+      {"public_arguments", profiler.public_arguments},
+      {"raw_output_path", profiler.raw_output_path},
+  };
 }
 
 bool canonical_absolute_path(const std::string& value) {
@@ -544,6 +631,45 @@ void validate_resolved_identity(const ResolvedLaunchIdentity& identity) {
     }
   };
   validate_artifact(identity.executable, true);
+  if (identity.profiler) {
+    const ResolvedProfilerLaunchIdentity& profiler = *identity.profiler;
+    if (profiler.api_version != "trainvm.resolved-profiler-launch/v1" ||
+        profiler.backend == ProfilerBackend::torch ||
+        profiler.launch_profile_version !=
+            profiler_launch_profile(profiler.backend).version ||
+        profiler.launch_profile_document_digest !=
+            profiler_launch_profiles().document_digest ||
+        profiler.execute_from_source !=
+            (profiler.backend == ProfilerBackend::nsys) ||
+        !sha256_digest(profiler.host_profiler_profile_digest) ||
+        !profiler_output_path_is_admissible(profiler.raw_output_path)) {
+      throw std::invalid_argument(
+          "resolved external profiler launch identity is malformed");
+    }
+    validate_artifact(profiler.executable, true);
+    std::vector<std::string> expected_arguments =
+        profiler_capture_argv(profiler.capture, profiler.raw_output_path);
+    if (expected_arguments.empty()) {
+      throw std::invalid_argument(
+          "resolved external profiler launch has no invocation");
+    }
+    expected_arguments.erase(expected_arguments.begin());
+    const ExternalProfilerAuthoritySpec authority =
+        external_profiler_authority_from_canonical_json(
+            external_profiler_authority_canonical_json(profiler.authority));
+    if (profiler.public_arguments != expected_arguments ||
+        authority.backend != profiler.backend ||
+        authority.run_id != identity.run_id ||
+        authority.node_id != identity.node_id ||
+        authority.attempt_id != identity.attempt_id ||
+        authority.launch_profile_digest !=
+            profiler.host_profiler_profile_digest ||
+        authority.profiler_executable_digest !=
+            profiler.executable.sealed_sha256) {
+      throw std::invalid_argument(
+          "resolved external profiler authority disagrees with its launch");
+    }
+  }
   if (key.runtime == ComponentRuntime::python_worker) {
     if (!identity.code) {
       throw std::invalid_argument(
@@ -633,6 +759,9 @@ nlohmann::json resolved_launch_identity_json(
   if (identity.host_grant) {
     output["host_grant"] = encode_json(*identity.host_grant);
   }
+  if (identity.profiler) {
+    output["profiler"] = resolved_profiler_identity_json(*identity.profiler);
+  }
   return output;
 }
 
@@ -664,32 +793,78 @@ ResolvedLaunchSpec resolved_launch_spec_from_json(
 
 ResolvedLaunch::ResolvedLaunch(ResolvedLaunchSpec spec, int executable_fd,
                                std::optional<int> code_fd,
-                               int working_directory_fd) noexcept
+                               int working_directory_fd,
+                               std::optional<int> profiler_executable_fd,
+                               std::optional<int> profiler_authority_fd) noexcept
     : spec_(std::move(spec)), executable_fd_(executable_fd),
-      code_fd_(code_fd), working_directory_fd_(working_directory_fd) {}
+      code_fd_(code_fd), working_directory_fd_(working_directory_fd),
+      profiler_executable_fd_(profiler_executable_fd),
+      profiler_authority_fd_(profiler_authority_fd) {}
 
 ResolvedLaunch ResolvedLaunch::adopt_delegated(
     ResolvedLaunchSpec spec, int executable_fd, std::optional<int> code_fd,
     int working_directory_fd) {
+  return adopt_delegated(std::move(spec), executable_fd, code_fd,
+                         working_directory_fd, std::nullopt, std::nullopt);
+}
+
+ResolvedLaunch ResolvedLaunch::adopt_delegated(
+    ResolvedLaunchSpec spec, int executable_fd, std::optional<int> code_fd,
+    int working_directory_fd, std::optional<int> profiler_executable_fd,
+    std::optional<int> profiler_authority_fd) {
   spec = resolved_launch_spec_from_json(resolved_launch_spec_json(spec));
   if ((spec.identity.code.has_value()) != code_fd.has_value()) {
     throw HostLaunchResolutionError(
         "delegated code descriptor presence is inexact");
+  }
+  if ((spec.identity.profiler.has_value()) !=
+          profiler_executable_fd.has_value() ||
+      profiler_executable_fd.has_value() !=
+          profiler_authority_fd.has_value()) {
+    throw HostLaunchResolutionError(
+        "delegated profiler descriptor presence is inexact");
   }
   validate_delegated_artifact(executable_fd, spec.identity.executable, true);
   if (code_fd)
     validate_delegated_artifact(*code_fd, *spec.identity.code, false);
   validate_delegated_directory(working_directory_fd,
                                spec.identity.working_directory);
+  if (profiler_executable_fd) {
+    validate_delegated_artifact(
+        *profiler_executable_fd, spec.identity.profiler->executable, true,
+        !spec.identity.profiler->execute_from_source);
+    const ExternalProfilerAuthoritySpec authority =
+        external_profiler_authority_from_sealed_fd(
+            *profiler_authority_fd,
+            spec.identity.profiler->authority.authority_digest);
+    if (authority != spec.identity.profiler->authority) {
+      throw HostLaunchResolutionError(
+          "delegated profiler authority descriptor is inexact");
+    }
+  }
   Descriptor executable(duplicate_delegated(executable_fd, "executable"));
   std::optional<Descriptor> code;
   if (code_fd) code.emplace(duplicate_delegated(*code_fd, "code"));
   Descriptor working_directory(
       duplicate_delegated(working_directory_fd, "working-directory"));
+  std::optional<Descriptor> profiler_executable;
+  std::optional<Descriptor> profiler_authority;
+  if (profiler_executable_fd) {
+    profiler_executable.emplace(duplicate_delegated(
+        *profiler_executable_fd, "profiler-executable"));
+    profiler_authority.emplace(duplicate_delegated(
+        *profiler_authority_fd, "profiler-authority"));
+  }
   return ResolvedLaunch(
       std::move(spec), executable.release(),
       code ? std::optional<int>(code->release()) : std::nullopt,
-      working_directory.release());
+      working_directory.release(),
+      profiler_executable
+          ? std::optional<int>(profiler_executable->release())
+          : std::nullopt,
+      profiler_authority
+          ? std::optional<int>(profiler_authority->release())
+          : std::nullopt);
 }
 
 ResolvedLaunch::ResolvedLaunch(ResolvedLaunch&& other) noexcept
@@ -697,7 +872,11 @@ ResolvedLaunch::ResolvedLaunch(ResolvedLaunch&& other) noexcept
       executable_fd_(std::exchange(other.executable_fd_, -1)),
       code_fd_(std::exchange(other.code_fd_, std::nullopt)),
       working_directory_fd_(
-          std::exchange(other.working_directory_fd_, -1)) {}
+          std::exchange(other.working_directory_fd_, -1)),
+      profiler_executable_fd_(
+          std::exchange(other.profiler_executable_fd_, std::nullopt)),
+      profiler_authority_fd_(
+          std::exchange(other.profiler_authority_fd_, std::nullopt)) {}
 
 ResolvedLaunch& ResolvedLaunch::operator=(ResolvedLaunch&& other) noexcept {
   if (this != &other) {
@@ -707,6 +886,10 @@ ResolvedLaunch& ResolvedLaunch::operator=(ResolvedLaunch&& other) noexcept {
     code_fd_ = std::exchange(other.code_fd_, std::nullopt);
     working_directory_fd_ =
         std::exchange(other.working_directory_fd_, -1);
+    profiler_executable_fd_ =
+        std::exchange(other.profiler_executable_fd_, std::nullopt);
+    profiler_authority_fd_ =
+        std::exchange(other.profiler_authority_fd_, std::nullopt);
   }
   return *this;
 }
@@ -719,9 +902,15 @@ void ResolvedLaunch::close_descriptors() noexcept {
   if (executable_fd_ >= 0) (void)::close(executable_fd_);
   if (code_fd_ && *code_fd_ >= 0) (void)::close(*code_fd_);
   if (working_directory_fd_ >= 0) (void)::close(working_directory_fd_);
+  if (profiler_executable_fd_ && *profiler_executable_fd_ >= 0)
+    (void)::close(*profiler_executable_fd_);
+  if (profiler_authority_fd_ && *profiler_authority_fd_ >= 0)
+    (void)::close(*profiler_authority_fd_);
   executable_fd_ = -1;
   code_fd_.reset();
   working_directory_fd_ = -1;
+  profiler_executable_fd_.reset();
+  profiler_authority_fd_.reset();
 }
 
 const ResolvedLaunchSpec& ResolvedLaunch::spec() const { return spec_; }
@@ -751,6 +940,28 @@ int ResolvedLaunch::duplicate_working_directory_fd() const {
   }
   return duplicate;
 }
+
+std::optional<int> ResolvedLaunch::duplicate_profiler_executable_fd() const {
+  if (!profiler_executable_fd_) return std::nullopt;
+  const int duplicate =
+      ::fcntl(*profiler_executable_fd_, F_DUPFD_CLOEXEC, 7);
+  if (duplicate < 0) {
+    throw HostLaunchResolutionError(
+        "could not duplicate sealed profiler executable descriptor");
+  }
+  return duplicate;
+}
+
+std::optional<int> ResolvedLaunch::duplicate_profiler_authority_fd() const {
+  if (!profiler_authority_fd_) return std::nullopt;
+  const int duplicate =
+      ::fcntl(*profiler_authority_fd_, F_DUPFD_CLOEXEC, 7);
+  if (duplicate < 0) {
+    throw HostLaunchResolutionError(
+        "could not duplicate sealed profiler authority descriptor");
+  }
+  return duplicate;
+}
 HostLaunchResolver::HostLaunchResolver(const HostLaunchRegistry& registry,
                                        HostIdentity host)
     : registry_(registry), host_(std::move(host)) {
@@ -773,7 +984,9 @@ HostIdentity HostLaunchResolver::local_host_identity() {
 }
 
 ResolvedLaunch HostLaunchResolver::resolve(
-    const WorkerLaunchTicket& ticket, const AdapterKey& key) const {
+    const WorkerLaunchTicket& ticket, const AdapterKey& key,
+    std::optional<GpuTraceCapture> capture,
+    std::string raw_output_path) const {
   if (ticket.run_id.empty() || ticket.node_id.empty() ||
       ticket.attempt_id.empty() || ticket.launch_nonce.empty() ||
       ticket.adapter != key.adapter ||
@@ -795,6 +1008,67 @@ ResolvedLaunch HostLaunchResolver::resolve(
   if (profile.code_path) {
     code = resolve_artifact(registry_.trusted_roots(), *profile.code_path,
                             profile.code_fingerprint, false);
+  }
+  std::optional<SealedArtifact> profiler_executable;
+  std::optional<SealedExternalProfilerAuthority> profiler_authority;
+  std::optional<ResolvedProfilerLaunchIdentity> profiler_identity;
+  if (capture && capture->enabled && capture->backend &&
+      *capture->backend != ProfilerBackend::torch) {
+    if (raw_output_path.empty()) {
+      throw HostLaunchResolutionError(
+          "external profiler launch has no authority-owned output path");
+    }
+    const HostProfilerExecutableProfile& host_profiler =
+        registry_.resolve_profiler(*capture->backend);
+    const bool execute_from_source =
+        *capture->backend == ProfilerBackend::nsys;
+    profiler_executable = execute_from_source
+        ? resolve_pinned_executable(registry_.trusted_roots(),
+                                    host_profiler.executable_path,
+                                    host_profiler.executable_fingerprint)
+        : resolve_artifact(registry_.trusted_roots(),
+                           host_profiler.executable_path,
+                           host_profiler.executable_fingerprint, true);
+    const std::string host_profiler_profile_digest =
+        registry_.profiler_profile_digest(*capture->backend);
+    profiler_authority.emplace(create_sealed_external_profiler_authority({
+        .api_version =
+            std::string(kExternalProfilerAuthorityApiVersion),
+        .backend = *capture->backend,
+        .run_id = ticket.run_id,
+        .node_id = ticket.node_id,
+        .attempt_id = ticket.attempt_id,
+        .launch_profile_digest = host_profiler_profile_digest,
+        .profiler_executable_digest =
+            profiler_executable->identity.sealed_sha256,
+        .authority_digest = {},
+    }));
+    std::vector<std::string> arguments =
+        profiler_capture_argv(*capture, raw_output_path);
+    if (arguments.empty() ||
+        arguments.front() != profiler_launch_profile(*capture->backend).program) {
+      throw HostLaunchResolutionError(
+          "external profiler invocation disagrees with its launch profile");
+    }
+    arguments.erase(arguments.begin());
+    profiler_identity = ResolvedProfilerLaunchIdentity{
+        .api_version = "trainvm.resolved-profiler-launch/v1",
+        .backend = *capture->backend,
+        .launch_profile_version =
+            profiler_launch_profile(*capture->backend).version,
+        .launch_profile_document_digest =
+            profiler_launch_profiles().document_digest,
+        .host_profiler_profile_digest = host_profiler_profile_digest,
+        .executable = profiler_executable->identity,
+        .execute_from_source = execute_from_source,
+        .capture = *capture,
+        .raw_output_path = std::move(raw_output_path),
+        .public_arguments = std::move(arguments),
+        .authority = profiler_authority->spec(),
+    };
+  } else if (!raw_output_path.empty()) {
+    throw HostLaunchResolutionError(
+        "non-external profiler launch retained an output path");
   }
   OpenedPath working_directory = open_beneath(
       registry_.trusted_roots(), profile.working_directory, O_PATH, true);
@@ -837,17 +1111,31 @@ ResolvedLaunch HostLaunchResolver::resolve(
                working_directory.metadata.st_uid),
            .gid = static_cast<std::uint32_t>(
                working_directory.metadata.st_gid)},
+      .profiler = std::move(profiler_identity),
   };
   const std::string spec_digest =
       "sha256:" + sha256_hex(resolved_launch_identity_json(identity).dump());
   ResolvedLaunchSpec spec{.identity = std::move(identity),
                           .spec_digest = spec_digest};
+  std::optional<Descriptor> profiler_authority_duplicate;
+  if (profiler_authority) {
+    profiler_authority_duplicate.emplace(profiler_authority->duplicate_fd());
+  }
   const int executable_fd = executable.descriptor.release();
   const std::optional<int> code_fd =
       code ? std::optional<int>(code->descriptor.release()) : std::nullopt;
   const int working_directory_fd = working_directory.descriptor.release();
+  const std::optional<int> profiler_executable_fd =
+      profiler_executable
+          ? std::optional<int>(profiler_executable->descriptor.release())
+          : std::nullopt;
+  const std::optional<int> profiler_authority_fd =
+      profiler_authority_duplicate
+          ? std::optional<int>(profiler_authority_duplicate->release())
+          : std::nullopt;
   return ResolvedLaunch(std::move(spec), executable_fd, code_fd,
-                        working_directory_fd);
+                        working_directory_fd, profiler_executable_fd,
+                        profiler_authority_fd);
 }
 
 }  // namespace trainvm

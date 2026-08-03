@@ -125,6 +125,21 @@
     {
       "key": {
         "category": "parameter_router",
+        "name": "mageflow_full_backbone",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.parameter_router.mageflow_full_backbone.v1",
+      "model_families": ["mageflow"],
+      "required_capabilities": ["parameter_router.mageflow_full_backbone.v1"],
+      "configuration": [],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "parameter_router",
         "name": "mageflow_terminal_expert",
         "version": "1.0.0"
       },
@@ -283,6 +298,42 @@
     {
       "key": {
         "category": "learning_rate_schedule",
+        "name": "linear_warmup_constant",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.schedule.linear_warmup_constant.v1",
+      "model_families": ["rwkv", "transformer"],
+      "required_capabilities": ["schedule.linear_warmup_constant.v1"],
+      "configuration": [
+        {"name": "warmup_steps", "type": "integer", "required": true, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"}
+      ],
+      "state": [
+        {"name": "cursor", "type": "integer", "required": true}
+      ],
+      "step_domain": "optimizer_step",
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "learning_rate_schedule",
+        "name": "constant",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.schedule.constant.v1",
+      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
+      "required_capabilities": ["schedule.constant.v1"],
+      "configuration": [],
+      "state": [],
+      "step_domain": "optimizer_step",
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "learning_rate_schedule",
         "name": "linear_warmup_cosine",
         "version": "1.0.0"
       },
@@ -338,6 +389,26 @@
       "required_capabilities": ["precision.bf16_parameters_fp32_reductions.v1"],
       "configuration": [
         {"name": "parameter_dtype", "type": "enumeration", "required": false, "default": "bfloat16", "values": ["bfloat16"]},
+        {"name": "compute_dtype", "type": "enumeration", "required": false, "default": "bfloat16", "values": ["bfloat16"]},
+        {"name": "reduction_dtype", "type": "enumeration", "required": false, "default": "float32", "values": ["float32"]},
+        {"name": "gradient_scaling", "type": "boolean", "required": false, "default": false}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "precision",
+        "name": "fp32_parameters_bf16_compute",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.precision.fp32_parameters_bf16_compute.v1",
+      "model_families": ["vision"],
+      "required_capabilities": ["precision.fp32_parameters_bf16_compute.v1"],
+      "configuration": [
+        {"name": "parameter_dtype", "type": "enumeration", "required": false, "default": "float32", "values": ["float32"]},
         {"name": "compute_dtype", "type": "enumeration", "required": false, "default": "bfloat16", "values": ["bfloat16"]},
         {"name": "reduction_dtype", "type": "enumeration", "required": false, "default": "float32", "values": ["float32"]},
         {"name": "gradient_scaling", "type": "boolean", "required": false, "default": false}

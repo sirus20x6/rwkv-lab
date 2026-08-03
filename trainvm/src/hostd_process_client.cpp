@@ -94,6 +94,13 @@ HostdProcessPreparedResult HostdProcessClient::prepare_process(
   Descriptor code(code_value.value_or(-1));
   Descriptor working_directory(resolved.duplicate_working_directory_fd());
   Descriptor bootstrap_descriptor(bootstrap.duplicate_fd());
+  const std::optional<int> profiler_executable_value =
+      resolved.duplicate_profiler_executable_fd();
+  const std::optional<int> profiler_authority_value =
+      resolved.duplicate_profiler_authority_fd();
+  Descriptor profiler_executable(
+      profiler_executable_value.value_or(-1));
+  Descriptor profiler_authority(profiler_authority_value.value_or(-1));
   HostdMutationRequest mutation{
       .open = std::move(open),
       .mutation = HostdMutationKind::prepare_process,
@@ -104,7 +111,15 @@ HostdProcessPreparedResult HostdProcessClient::prepare_process(
               .code_fd = code_value ? std::optional<int>{code.get()}
                                     : std::nullopt,
               .working_directory_fd = working_directory.get(),
-              .worker_bootstrap_fd = bootstrap_descriptor.get()},
+              .worker_bootstrap_fd = bootstrap_descriptor.get(),
+              .profiler_executable_fd =
+                  profiler_executable_value
+                      ? std::optional<int>{profiler_executable.get()}
+                      : std::nullopt,
+              .profiler_authority_fd =
+                  profiler_authority_value
+                      ? std::optional<int>{profiler_authority.get()}
+                      : std::nullopt},
   };
   const HostdMutationReply reply = channel_.request(std::move(mutation));
   if (reply.kind != HostdMutationReplyKind::process_prepared ||

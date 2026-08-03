@@ -165,7 +165,9 @@ class IHostdProcessSupervisor {
   [[nodiscard]] virtual HostdProcessPreparedResult prepare(
       const HostdProcessPrepareRequest& request, int executable_fd,
       std::optional<int> code_fd, int working_directory_fd,
-      int worker_bootstrap_fd) = 0;
+      int worker_bootstrap_fd,
+      std::optional<int> profiler_executable_fd,
+      std::optional<int> profiler_authority_fd) = 0;
   [[nodiscard]] virtual HostdProcessCommittedResult commit(
       const HostdProcessCommitRequest& request) = 0;
   [[nodiscard]] virtual HostProcessExitResult finalize(
@@ -205,7 +207,9 @@ class HostdLinuxProcessSupervisor final : public IHostdProcessSupervisor,
   [[nodiscard]] HostdProcessPreparedResult prepare(
       const HostdProcessPrepareRequest& request, int executable_fd,
       std::optional<int> code_fd, int working_directory_fd,
-      int worker_bootstrap_fd) override;
+      int worker_bootstrap_fd,
+      std::optional<int> profiler_executable_fd,
+      std::optional<int> profiler_authority_fd) override;
   [[nodiscard]] HostdProcessCommittedResult commit(
       const HostdProcessCommitRequest& request) override;
   [[nodiscard]] HostProcessExitResult finalize(

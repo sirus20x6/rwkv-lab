@@ -11,8 +11,9 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 )
 
-// Training entrypoints we recognize for compatibility observation. This is not
-// launch authority; launchableScripts below is the deliberately narrower set.
+// Training entrypoints recognized strictly for compatibility observation.
+// Sysmon identifies live process families but does not authorize or describe
+// how the dashboard could launch them.
 var trainingScripts = []string{
 	"convert_train.py", "distill_consolidate.py", "drive_isolation.py",
 	"train_mla.py", "train_mla_engram.py", "rlvr_train.py", "rlvr_campaign.py",
@@ -38,35 +39,6 @@ var trainingModules = map[string]string{
 	"qwen_ao3_cpt.py":           "rwkv_lab.qwen_ao3_cpt",
 	"mage_flow_pretrain.py":     "rwkv_lab.mage_flow_pretrain",
 	"mage_flow_expert_train.py": "rwkv_lab.mage_flow_expert_train",
-}
-
-// Legacy dashboard launch authority is intentionally narrower than process
-// observation. The canonical MLA family is now owned by exact TrainVM adapter
-// profiles; keeping these names observable lets the compatibility dashboard
-// report old runs without retaining a second executable control path.
-var launchableScripts = map[string]struct{}{
-	"convert_train.py": {}, "distill_consolidate.py": {}, "drive_isolation.py": {},
-	"rlvr_train.py": {}, "rlvr_campaign.py": {}, "recursive_improve.py": {},
-	"adapter_recursive.py": {}, "posttrain_train.py": {}, "posttrain_campaign.py": {},
-	"vision_train.py": {}, "vision_cache.py": {}, "qwen_ao3_cpt.py": {},
-	"mage_flow_pretrain.py": {}, "mage_flow_expert_train.py": {},
-}
-
-// AllowedScript reports whether basename(path) is a recognized training
-// entrypoint (the launch allowlist).
-func AllowedScript(path string) bool {
-	_, ok := launchableScripts[filepath.Base(path)]
-	return ok
-}
-
-// ModuleForScript returns the Python module launched for an allowlisted script.
-func ModuleForScript(path string) (string, bool) {
-	base := filepath.Base(path)
-	if !AllowedScript(base) {
-		return "", false
-	}
-	mod, ok := trainingModules[base]
-	return mod, ok
 }
 
 func matchedScript(cmdline []string) string {

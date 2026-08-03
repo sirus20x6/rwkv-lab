@@ -232,6 +232,47 @@ the package's own dense-GQA measurements report FA4 roughly 4–10 percent slowe
 - Expose compiler/cache/warmup state and trace artifacts generically in the dashboard; adapters may
   add family-specific panels without changing lifecycle code.
 
+### LibTorch C++ profiling parity
+
+Use the analysis workflow in
+[PyTorch Profiling 101 with Modded-NanoGPT](https://blog.underfit.ai/profiling-101-nanogpt) as the
+cross-runtime acceptance reference, while implementing the worker integration through LibTorch,
+Kineto/RecordFunction where supported, NVTX, and NVIDIA's external profilers. The required outcome
+is equivalent evidence, not dependence on the Python `torch.profiler` wrapper.
+
+- Give every LibTorch worker the same declarative wait/warmup/capture step state machine as the
+  Python Torch worker. The training loop, not an external timer, advances the schedule at exact
+  optimizer-step boundaries.
+- Add low-overhead C++ NVTX domains and RAII ranges for input wait, host-to-device transfer,
+  forward, backward, optimizer, communication, evaluation, and checkpoint publication. Nsight
+  Systems remains the stable whole-process collector because it observes LibTorch's ATen, cuBLAS,
+  cuDNN, custom CUDA, runtime, and stream activity without a Python dependency.
+- Add an optional in-process Kineto/RecordFunction collector when the pinned LibTorch distribution
+  exposes the required C++ profiler API. Treat that API as version-locked rather than assuming the
+  Python profiler's compatibility guarantees apply to C++.
+- Normalize both collectors into `trainvm.gpu-trace.v1`: exact run/node/attempt and optimizer-step
+  interval, GPU-active ratio, input-stall time, launch count, allocator pressure, communication
+  overlap, bounded operator/kernel tables, raw-trace digest, and explicit instrumentation overhead.
+- Preserve raw trace sensitivity and publication rules. Python stacks and TorchInductor/Triton
+  kernel names are optional evidence, not schema requirements; pure LibTorch traces instead retain
+  C++ symbols, ATen operations, NVTX ranges, and CUDA kernel identities.
+- Emit Perfetto/Chrome-trace-compatible flow events that preserve CPU operator -> CUDA runtime ->
+  GPU kernel causality. When the collector exposes them, retain bounded tensor shape/stride and
+  source-symbol metadata so an operator can connect a slow kernel to its model geometry and exact
+  C++ call site; stack capture remains a separately declared high-overhead mode.
+- Derive a machine-readable temporal breakdown from each completed window: compute, communication,
+  input/host wait, and unattributed GPU idle time; top operators and kernels by self/total time and
+  call count; launch latency; and communication-compute overlap. The dashboard must link each
+  summary row back to the corresponding trace interval rather than presenting an untraceable
+  aggregate.
+- Qualify the implementation with matching unprofiled, NVTX-only, Kineto, and Nsight windows so the
+  dashboard can show profiler overhead and never mistake instrumented timing for production
+  throughput.
+- Acceptance requires one bounded LibTorch training fixture whose trace can be opened directly in
+  Perfetto, whose optimizer-step and phase ranges agree with independently counted runtime events,
+  and whose synthetic input stall and communication overlap are classified within declared error
+  tolerances. A C++-only worker must pass without importing Python or TensorBoard.
+
 The bounded Torch path is implemented end to end for the native MageFlow appearance/terminal and
 Qwen adapters. One shared optimizer-step hook drives the declared wait/warmup/capture schedule; it
 freezes a Chrome trace and bounded operator summary into `trainvm.gpu-trace.v1`, binds the exact
@@ -250,6 +291,16 @@ compare windows whose node, backend, schedule, activities, profiler options, or 
 overlap classification differ. Trace cards also show the run's declared compile, warmup, and
 qualification state; warmup overlap is explicitly unknown when warmup is enabled without a declared
 step count, rather than being reported as steady state.
+
+The external-profiler launch path now binds the collector, fixed argv, capture declaration,
+run/node/attempt, worker executable, runtime closure, and output identity into the resolved host
+launch. Hostd delegates the collector and a sealed worker authority separately, and the stopped
+launcher exposes only fixed descriptors 3-6 with an empty environment. NCU executes as an immutable
+sealed copy. NSYS is instead digest-verified and inode-pinned beneath a trusted, non-worker-writable
+root because its CLI intentionally refuses anonymous executable images while discovering its
+installed support tree from `/proc/self/exe`. CPU-only qualification verifies both empty-environment
+startup and that NSYS preserves the worker authority and target descriptors through its wrapper.
+
 The shared profiler protocol also exposes an explicit input-wait context and iterable wrapper. The
 native MageFlow appearance/terminal and Qwen paths place it around their actual prefetched-batch or
 packed-row acquisition, so a complete capture publishes measured input-stall time and ratio. The
@@ -349,9 +400,18 @@ startup orphan recovery are defined in
   verdict. The gate cannot release the fence it runs under, the journal refuses a self-contradictory
   verdict, and replay revalidates the verdict against its own receipt. Throughput and peak-memory
   gates are part of that same qualification receipt, so `benchmark` is not a separate executor.
-  Compile and warmup remain declaration-only: both are worker-side phases, so an authority-side
-  node would have to attest work it never observed. They need the typed worker phase protocol
-  (request/receipt messages plus SDK support) before they can become real executors.
+  Compile and warmup now have a typed worker phase protocol. The authority lowers their immutable
+  declarations into digest-bound Welcome requests and accepts only fenced receipts with exact step,
+  timing, diagnostic, and before/after trajectory-state evidence. Successful or skipped phases must
+  prove state restoration, recovery-safe repeats remain separate receipts, and the generic dashboard
+  renders the receipt history. Scratch RWKV now consumes the requests, triggers lazy compilation,
+  counts exact disposable warmup workloads, restores RNG/gradients, and content-hashes the complete
+  model/optimizer trajectory around both phases. The MageFlow appearance route now also lowers the
+  phase declaration into VAE/regional compilation and real-shaped disposable forwards/backwards,
+  with complete tensor, schedule, control, RNG, and cursor proofs. The terminal/TREAD route shares
+  that bridge and covers its configured REPA, immiscible-flow, weighted/directional, and loop
+  objectives. Remaining RWKV paths, transformer, and vision-loop adoption plus privileged CUDA
+  qualification remain before these phases are production-qualified.
 - Fingerprinted cache namespaces; typed CPU/I/O policy lowering and recovery attestation are
   implemented, with privileged real-host qualification remaining.
 - Declarative bounded Torch GPU profiling and dashboard trace artifacts are implemented; qualified

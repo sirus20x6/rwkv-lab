@@ -87,7 +87,8 @@ func trainVMGPUTraceFixture(t *testing.T) (*Server, string, string) {
 			}},
 		},
 		"trace_sha256": prefixedTestSHA256(trace), "trace_size_bytes": uint64(len(trace)),
-		"warmup_steps": uint64(2),
+		"trace_file_name": "trace.json",
+		"warmup_steps":    uint64(2),
 	}
 	canonicalBody, err := json.Marshal(body)
 	if err != nil {
@@ -131,6 +132,7 @@ func TestTrainVMGPUTraceSummaryAndExplicitVerifiedDownload(t *testing.T) {
 		!strings.Contains(response.Body.String(), `"accelerator_launch_count":17`) ||
 		!strings.Contains(response.Body.String(), `"gpu_active_ratio":0.6`) ||
 		!strings.Contains(response.Body.String(), `"input_stall_ratio":0.2`) ||
+		!strings.Contains(response.Body.String(), `"trace_file_name":"trace.json"`) ||
 		!strings.Contains(response.Body.String(), `"sensitivity":"restricted"`) {
 		t.Fatalf("profile list status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -330,5 +332,106 @@ func TestRichGPUTraceSummaryIsAllOrNothingAndInternallyConsistent(t *testing.T) 
 	ratio = 0.4
 	if validRichGPUTraceSummary(summary) {
 		t.Fatal("active ratio inconsistent with active and wall time was accepted")
+	}
+}
+
+func TestExternalGPUTraceSummaryAndRawFormats(t *testing.T) {
+	launches := uint64(7)
+	wall := 100.0
+	active := 65.0
+	activeRatio := 0.65
+	input := 10.0
+	inputRatio := 0.1
+	summary := trainVMGPUTraceSummaryValues{
+		AcceleratorLaunchCount: &launches, CapturedStepWallTimeUS: &wall,
+		GPUActiveTimeUS: &active, GPUActiveRatio: &activeRatio,
+		InputStallTimeUS: &input, InputStallRatio: &inputRatio,
+	}
+	if !validExternalGPUTraceSummary("nsys", summary) ||
+		!validExternalGPUTraceSummary("ncu", summary) {
+		t.Fatal("consistent external summary was rejected")
+	}
+	summary.GPUActiveRatio = nil
+	summary.GPUActiveTimeUS = nil
+	if validExternalGPUTraceSummary("nsys", summary) ||
+		!validExternalGPUTraceSummary("ncu", summary) {
+		t.Fatal("backend-specific activity evidence was not enforced")
+	}
+	if !validGPUTraceFileName("torch", "trace.json") ||
+		!validGPUTraceFileName("nsys", "trace.sqlite") ||
+		!validGPUTraceFileName("ncu", "trace.ncu-rep") ||
+		validGPUTraceFileName("nsys", "../trace.sqlite") ||
+		validGPUTraceFileName("ncu", "trace.csv") {
+		t.Fatal("raw trace format allowlist is invalid")
+	}
+}
+
+func TestNsightSystemsTraceManifestAndRestrictedDownload(t *testing.T) {
+	srv, manifestPath, tracePath := trainVMGPUTraceFixture(t)
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	delete(manifest, "canonical_manifest_digest")
+	manifest["backend"] = "nsys"
+	manifest["trace_file_name"] = "trace.sqlite"
+	summary := manifest["summary"].(map[string]any)
+	delete(summary, "allocator_baseline_allocated_bytes")
+	delete(summary, "allocator_baseline_reserved_bytes")
+	delete(summary, "allocator_peak_allocated_bytes")
+	delete(summary, "allocator_peak_reserved_bytes")
+	body, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest["canonical_manifest_digest"] = prefixedTestSHA256(body)
+	data, err = json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(manifestPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, data, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	sqlitePath := filepath.Join(filepath.Dir(tracePath), "trace.sqlite")
+	if err := os.Rename(tracePath, sqlitePath); err != nil {
+		t.Fatal(err)
+	}
+	reader := srv.trainvm.(*profileReadModel)
+	var payload map[string]any
+	if err := json.Unmarshal(reader.events[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	payload["fingerprint"] = prefixedTestSHA256(data)
+	payload["size_bytes"] = len(data) + int(manifest["trace_size_bytes"].(float64))
+	reader.events[0].Payload, err = json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader.events[0].WorkerSequence = 0
+
+	request := httptest.NewRequest(http.MethodGet, "/api/trainvm/runs/vm-run/profiles", nil)
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	var profiles []trainVMGPUTraceSummary
+	if response.Code != http.StatusOK {
+		t.Fatalf("NSYS profile list status=%d body=%s", response.Code, response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &profiles); err != nil || len(profiles) != 1 ||
+		profiles[0].Backend != "nsys" || profiles[0].TraceFileName != "trace.sqlite" {
+		t.Fatalf("NSYS profile projection=%#v err=%v", profiles, err)
+	}
+	request = httptest.NewRequest(http.MethodGet, profiles[0].TraceDownloadURL, nil)
+	response = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/vnd.sqlite3" ||
+		!strings.Contains(response.Header().Get("Content-Disposition"), ".sqlite") {
+		t.Fatalf("NSYS trace download status=%d headers=%v", response.Code, response.Header())
 	}
 }

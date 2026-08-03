@@ -38,10 +38,21 @@ struct HostLaunchProfile {
   bool operator==(const HostLaunchProfile&) const = default;
 };
 
+struct HostProfilerExecutableProfile {
+  ProfilerBackend backend{};
+  std::string version;
+  std::string executable_path;
+  std::string executable_fingerprint;
+
+  bool operator==(const HostProfilerExecutableProfile&) const = default;
+};
+
 struct HostLaunchRegistryDocument {
   std::string api_version;
   std::vector<std::string> trusted_roots;
   std::vector<HostLaunchProfile> profiles;
+  std::optional<std::vector<HostProfilerExecutableProfile>>
+      profiler_executables = std::nullopt;
 
   bool operator==(const HostLaunchRegistryDocument&) const = default;
 };
@@ -67,10 +78,16 @@ class HostLaunchRegistry {
   [[nodiscard]] const std::string& registry_digest() const;
   [[nodiscard]] std::string profile_digest(
       const AdapterKey& key, std::string_view code_fingerprint) const;
+  [[nodiscard]] const HostProfilerExecutableProfile& resolve_profiler(
+      ProfilerBackend backend) const;
+  [[nodiscard]] std::string profiler_profile_digest(
+      ProfilerBackend backend) const;
 
  private:
   std::vector<std::string> trusted_roots_;
   std::map<AdapterKey, HostLaunchProfile> profiles_;
+  std::map<ProfilerBackend, HostProfilerExecutableProfile>
+      profiler_executables_;
   std::string registry_digest_;
 };
 

@@ -225,6 +225,47 @@ func TestMonitoringSuspendedAlertIsOneShotAndClears(t *testing.T) {
 	}
 }
 
+func TestCriticalAlertsAndSteeringDiagnosticsAreObservationOnly(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "trainboard.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	runID, err := database.EnsureRun("vision", t.TempDir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAlertRows(t, database, runID, nil, []db.EvalRow{
+		{Step: 1, PPL: alertMetric(1), TS: 1},
+		{Step: 2, PPL: alertMetric(1), TS: 2},
+		{Step: 3, PPL: alertMetric(2), TS: 3, Extra: `{"loop_max_rw":0,"loop_lr_mult":2,"loop_live":1}`},
+	})
+	detector := &Detector{
+		db: database, runsDir: t.TempDir(), lastRaised: map[string]float64{},
+	}
+	proc := sysmon.Proc{RunName: "vision", PID: int32(os.Getpid())}
+	if !detector.raise(proc, "codec_collapse", "critical", 900, "critical observation") {
+		t.Fatal("critical observation was not recorded")
+	}
+	detector.scanRun(proc, runID, db.TrainStats{
+		N: 10, LastStep: 900, LastLoss: 1, OldestLoss: 2,
+	}, nil, nil)
+
+	kinds := alertKinds(t, database)
+	if kinds["codec_collapse"] != 1 || kinds["auto_stop"] != 0 ||
+		kinds["loop_stall"] != 1 || kinds["anti_grokking_collapse"] != 1 {
+		t.Fatalf("unexpected observation-only alerts: %v", kinds)
+	}
+	controls, err := database.GetControls("vision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(controls) != 0 {
+		t.Fatalf("alert detector wrote legacy trainer controls: %+v", controls)
+	}
+}
+
 func TestMemoryPathDeadRequiresPersistentValidRecallEvidence(t *testing.T) {
 	mostlyLive := make([]float64, 20)
 	for i := range mostlyLive {

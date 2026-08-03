@@ -10,7 +10,7 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:52c6cbe4b8a4aaa6b51d1e99af0e44bc26e4ae9af6a04459d7abd65aa7df3e6f",
+  "source_tree_digest": "sha256:34993ceda01afedb37467663f3828be108541c8ec3980147b5729bf269f17a0a",
   "entries": [
     {
       "source_path": "src/rwkv_lab/__init__.py",
@@ -1348,7 +1348,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "mageflow.routed-expert-train",
-      "source_sha256": "sha256:b02849a7be48a47a52accf80391539e43354600705e297cf3d12b999c465d4aa",
+      "source_sha256": "sha256:86b929c206da895713fed82dc61ae9ae65e3105e37cfaf7ce62d9454dff4d3e7",
       "family": "mageflow_diffusion",
       "coverage": "direct",
       "consumers": [
@@ -1373,7 +1373,7 @@
       ],
       "resume_relevance": "consumer_owned",
       "compatibility_workflow_id": null,
-      "source_sha256": "sha256:b378a96a27f4e7ad86530560ca940b5037b29c1b0f486940e9c0387598dc9c04",
+      "source_sha256": "sha256:dd5ec830baf8ca03260b47f05f330e8688c8d89b0ac725f8b86f5140082965d1",
       "family": "mageflow_diffusion",
       "coverage": "transitive",
       "consumers": [
@@ -1393,7 +1393,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "mageflow.full-backbone-pretrain",
-      "source_sha256": "sha256:161dd8bb772c4e547aa2aab4d21af85747b4f7c61cb108a2a150e3d66b3a7c94",
+      "source_sha256": "sha256:ac426866f3d9fede2a7c54c25fd800fbb3f12238d0b381c8b8574cc8dfacf6f2",
       "family": "mageflow_diffusion",
       "coverage": "direct",
       "consumers": [
@@ -1422,7 +1422,7 @@
       ],
       "resume_relevance": "consumer_owned",
       "compatibility_workflow_id": null,
-      "source_sha256": "sha256:07e0e616d65d7d030810971b9d88dc4f9be2c5b9cdbd337522e7c5ff4ca48fc2",
+      "source_sha256": "sha256:4a6a1087131c3e738523a011870bec248c2b4db4d33d241f16e2c84b691c30db",
       "family": "mageflow_diffusion",
       "coverage": "transitive",
       "consumers": [
@@ -1444,7 +1444,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "mageflow.terminal-tread-train",
-      "source_sha256": "sha256:49ed27bee937b71c67e031efe8f55344e16d70d4ace5ce46d06166b4d9484b82",
+      "source_sha256": "sha256:07bb691ad0e56a5787493381ee3d4f4ddcac1fd96a5d064cbdff5b192cc4f7e4",
       "family": "mageflow_diffusion",
       "coverage": "direct",
       "consumers": [
@@ -1474,7 +1474,7 @@
       ],
       "resume_relevance": "consumer_owned",
       "compatibility_workflow_id": null,
-      "source_sha256": "sha256:77f5895a732f6ea89d38518d23ec056e60e1e0b46689aa880ba02a77c5419c78",
+      "source_sha256": "sha256:77647ea80bb3b7df5a2cd6cbba2bab4c28a03b0e299734b75442062edc1b8f82",
       "family": "mageflow_diffusion",
       "coverage": "transitive",
       "consumers": [
@@ -1872,7 +1872,7 @@
       ],
       "resume_relevance": "restart_only",
       "compatibility_workflow_id": "posttraining.rwkv-adapter",
-      "source_sha256": "sha256:02eb9619762c1cdff410b2ddebd0be1952017f8fef84b2269e6315019f3f0cc4",
+      "source_sha256": "sha256:8809c5648a5a354264b5657cdc14223b667fe2a098f1e9d46ec8424accdbfdcc",
       "family": "rwkv_posttraining",
       "coverage": "direct",
       "compatibility_workflow_ids": [
@@ -1984,7 +1984,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "transformer.qwen-ao3-cpt",
-      "source_sha256": "sha256:1634391d122887bd775c49b95e6a3ba708e88e47644e795092b5b237c054098d",
+      "source_sha256": "sha256:443efdedd607923b4d7145520ad8e7a11311b5f423d24b482e5568d4ffb3f61a",
       "family": "transformer",
       "coverage": "direct",
       "consumers": [
@@ -2233,7 +2233,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "rlvr.rwkv-train",
-      "source_sha256": "sha256:79fddebc0c58654f85d00bb442a77f7f4368e8d802ca97d3f91162fbef72ae20",
+      "source_sha256": "sha256:75dfbf2e6911dd4b2d98c16512eb9c2c4ddcfe8e7860e8cb28fd8584ee446bd1",
       "family": "rwkv_rlvr",
       "coverage": "direct",
       "consumers": [
@@ -2391,7 +2391,7 @@
       ],
       "resume_relevance": "consumer_owned",
       "compatibility_workflow_id": null,
-      "source_sha256": "sha256:d6b44a1d8d82ed79a979a79fb8bc68732b41815ea80549b4b135b4208dd6eb3b",
+      "source_sha256": "sha256:5495898843ad9783d27210b6c4335cd6eeae7870c641328be7904990b0078290",
       "family": "rwkv",
       "coverage": "transitive",
       "consumers": [
@@ -2442,7 +2442,7 @@
       ],
       "resume_relevance": "terminal_checkpoint",
       "compatibility_workflow_id": "rwkv.scratch-pretrain",
-      "source_sha256": "sha256:af3ed21bdd0e3dfe07746529c47651c269247d00a29304f4529f4a6a81d8d097",
+      "source_sha256": "sha256:2deff18e549a75932176878d4531e6e0a7dd85e6c914644c44dece47ac6751c9",
       "family": "rwkv",
       "coverage": "direct",
       "consumers": [
@@ -2813,7 +2813,7 @@
       ],
       "resume_relevance": "consumer_owned",
       "compatibility_workflow_id": null,
-      "source_sha256": "sha256:3c1592227fdf316f3edcdca5117be76b6845aa86b65c3439311079d2edfe7a2e",
+      "source_sha256": "sha256:e93677a0895eaada5b6ecb6f661793e82c9d33f6091cc304cd42f14c84e1be39",
       "family": "rwkv",
       "coverage": "transitive",
       "consumers": [
@@ -3048,7 +3048,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "vision.native-head-train",
-      "source_sha256": "sha256:f49349122fb95633cb1eaca9748f1f67d9b90cb5577bb25a3b0b2a0a1dec2646",
+      "source_sha256": "sha256:9d6dd1bedc85fb15e2f0e11eb49732a3d43066216b4f4a5fc319bcb6ffad6e11",
       "family": "vision_multimodal",
       "coverage": "direct",
       "consumers": [
@@ -3107,7 +3107,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "vision.raw-pixel-student",
-      "source_sha256": "sha256:ce6f32aa0f2f830bce32e7776b107684b62fbbf7d4c57897df71efbc1b0b823c",
+      "source_sha256": "sha256:7c8a8d0111a6dccaf464fbd362b8d4023b9d6593a95b9e2c1e600bbc6a1e7ff8",
       "family": "vision_multimodal",
       "coverage": "direct",
       "consumers": [
@@ -3164,9 +3164,9 @@
         "read_source",
         "write_artifact"
       ],
-      "resume_relevance": "exact_candidate",
+      "resume_relevance": "compatible",
       "compatibility_workflow_id": "vision.teacher-compressor",
-      "source_sha256": "sha256:8ab953ee5cc2c2e6f237e86d48c82a763f8b52d14a33809756124f74c51eaf2c",
+      "source_sha256": "sha256:d7e9697920bdc1294539282b0698ef8c8f30421b06e6af2e3b3f02b768d48323",
       "family": "vision_multimodal",
       "coverage": "direct",
       "consumers": [
@@ -3205,15 +3205,16 @@
         "read_source",
         "write_artifact"
       ],
-      "resume_relevance": "exact_candidate",
+      "resume_relevance": "compatible",
       "compatibility_workflow_id": "vision.frozen-adapter-train",
-      "source_sha256": "sha256:c0940032c073c39ed7f3ae213288380bed414af8a55b846df329dfc08c7927ec",
+      "source_sha256": "sha256:16bb7eec0eef43c1c6fcbe1197f8fbbe60573ecc708482b308956dd0cac07e34",
       "family": "vision_multimodal",
       "coverage": "direct",
       "consumers": [
         "src/rwkv_lab/vision_caption.py",
         "src/rwkv_lab/vision_native_train.py",
         "src/rwkv_lab/vision_rwkv_student_train.py",
+        "src/rwkv_lab/trainvm_adapters/handlers.py",
         "scripts/caption_radio1d_directory.py",
         "scripts/run_radio1d_captioning_first.sh",
         "scripts/run_radio1d_civitai_joy_continuation.sh"

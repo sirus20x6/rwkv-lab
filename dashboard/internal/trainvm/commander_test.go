@@ -471,3 +471,73 @@ func TestNativeReadProjectionConversionsRejectUnsetWireScalars(t *testing.T) {
 		t.Fatal("unset authority scalar unexpectedly crossed the dashboard boundary")
 	}
 }
+
+func TestHostAuthorityStatusConversionPreservesReceiptEvidence(t *testing.T) {
+	pid, starttime, empty := int64(4242), uint64(77), true
+	response := &trainvmv1.GetHostAuthorityStatusResponse{
+		ApiVersion: "trainvm.hostd-authority-status/v1",
+		Coordinator: &trainvmv1.HostdCoordinatorAuthorityStatus{
+			ApiVersion: "trainvm.hostd-coordinator/v1",
+			Lifecycle:  trainvmv1.HostdLifecycle_HOSTD_LIFECYCLE_ADMITTING,
+			HostId:     "host-1", BootId: "boot-1", BrokerEpoch: "epoch-1",
+			InventoryDigest:                  "sha256:" + strings.Repeat("a", 64),
+			AdmissionCountsAreCachedEvidence: true,
+			StartupAuditReceiptDigest:        "sha256:" + strings.Repeat("b", 64),
+			StartupAuditPassed:               true,
+		},
+		StartupPhase:   trainvmv1.HostdStartupPhase_HOSTD_STARTUP_PHASE_ADMITTING,
+		LedgerVerified: true, LedgerSequence: 9,
+		LedgerChainHash: "sha256:" + strings.Repeat("c", 64), LedgerRecordCount: 9,
+		OccupancyLedgerSequence: 9, OccupancyDigest: "sha256:" + strings.Repeat("d", 64),
+		ResourceInventoryObserved:     true,
+		CurrentInventoryDigest:        "sha256:" + strings.Repeat("4", 64),
+		CurrentInventoryReceiptDigest: "sha256:" + strings.Repeat("5", 64),
+		ActiveFenceCount:              1,
+		ActiveFences: []*trainvmv1.HostResourceFenceStatus{{
+			Kind:     trainvmv1.HostResourceKind_HOST_RESOURCE_KIND_ACCELERATOR,
+			Vendor:   trainvmv1.HostAcceleratorVendor_HOST_ACCELERATOR_VENDOR_NVIDIA,
+			StableId: "GPU-00000000-0000-0000-0000-000000000001", Generation: 3,
+			InventoryDigest: "sha256:" + strings.Repeat("a", 64),
+			TopologyDigest:  "sha256:" + strings.Repeat("e", 64),
+		}},
+		ActiveProcessCount: 1, RemainingTerminalReleaseRecords: 1,
+		ActiveProcesses: []*trainvmv1.HostdProcessAuthorityStatus{{
+			AllocationId: "allocation-1", JournalId: "journal-1", RunId: "run-1",
+			LogicalLeaseId: "lease-1", LogicalFencingToken: 4, LaunchId: "launch-1",
+			Phase:      trainvmv1.HostdProcessPhase_HOSTD_PROCESS_PHASE_TERMINAL_PENDING_RELEASE,
+			CgroupPath: "/sys/fs/cgroup/trainvm/run-1", HostPid: &pid, ProcessStarttimeTicks: &starttime,
+			DevicePolicyIntended: true, DevicePolicyInstalled: true,
+			DevicePolicyDigest:             "sha256:" + strings.Repeat("f", 64),
+			DevicePolicyInstallationDigest: "sha256:" + strings.Repeat("1", 64),
+			CgroupEmpty:                    &empty, AcceleratorContextsEmpty: &empty,
+			ContextAuditDigest:    "sha256:" + strings.Repeat("2", 64),
+			TerminalReceiptDigest: "sha256:" + strings.Repeat("3", 64),
+		}},
+		ProcessLaunchEnabled: true, MutationEnabled: true,
+		LeaseRenewalTrackedCount: 1,
+	}
+	view, err := hostAuthorityStatusFromProto(response)
+	if err != nil || !view.MutationEnabled || view.Coordinator.Lifecycle != "admitting" ||
+		view.StartupPhase != "admitting" || len(view.ActiveFences) != 1 ||
+		len(view.ActiveProcesses) != 1 || view.ActiveProcesses[0].HostPID == nil ||
+		*view.ActiveProcesses[0].HostPID != pid || view.ActiveProcesses[0].CgroupEmpty == nil ||
+		view.LeaseRenewalTrackedCount != 1 || !view.ResourceInventoryObserved {
+		t.Fatalf("unexpected host authority conversion: %#v err=%v", view, err)
+	}
+
+	broken := proto.Clone(response).(*trainvmv1.GetHostAuthorityStatusResponse)
+	broken.MutationEnabled = false
+	if _, err := hostAuthorityStatusFromProto(broken); err == nil {
+		t.Fatal("contradictory mutation authority unexpectedly crossed the Go boundary")
+	}
+	broken = proto.Clone(response).(*trainvmv1.GetHostAuthorityStatusResponse)
+	broken.ActiveProcesses[0].Phase = trainvmv1.HostdProcessPhase_HOSTD_PROCESS_PHASE_UNSPECIFIED
+	if _, err := hostAuthorityStatusFromProto(broken); err == nil {
+		t.Fatal("unknown process authority phase unexpectedly crossed the Go boundary")
+	}
+	broken = proto.Clone(response).(*trainvmv1.GetHostAuthorityStatusResponse)
+	broken.ResourceInventoryObserved = false
+	if _, err := hostAuthorityStatusFromProto(broken); err == nil {
+		t.Fatal("contradictory resource observation unexpectedly crossed the Go boundary")
+	}
+}

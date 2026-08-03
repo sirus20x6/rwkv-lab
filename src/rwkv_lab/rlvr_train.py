@@ -32,29 +32,38 @@ Commands are executed directly (never through a shell) with a timeout.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
 import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import random
 import shlex
 import subprocess
 import time
-from typing import Any, Sequence
+from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn.functional as F
 
-from rwkv_lab.rlvr import (ExactAnswerVerifier, NumericAnswerVerifier,
-                           PythonExpressionVerifier, group_advantages,
-                           policy_loss)
-from rwkv_lab.rlvr_evaluation import (audit_task_splits, curriculum_pool,
-                                      promotion_gates, reward_diversity,
-                                      stratified_tasks, task_reward_summary)
-
+from rwkv_lab.rlvr import (
+    ExactAnswerVerifier,
+    NumericAnswerVerifier,
+    PythonExpressionVerifier,
+    group_advantages,
+    policy_loss,
+)
+from rwkv_lab.rlvr_evaluation import (
+    audit_task_splits,
+    curriculum_pool,
+    promotion_gates,
+    reward_diversity,
+    stratified_tasks,
+    task_reward_summary,
+)
 
 TASK_SCHEMA = "rwkv-lab.rlvr-task.v1"
 VERIFY_REQUEST_SCHEMA = "rwkv-lab.rlvr-verify-request.v1"
@@ -72,7 +81,7 @@ class RLVRTask:
     metadata: dict[str, Any] | None = None
 
     @classmethod
-    def from_dict(cls, value: dict[str, Any], *, line: int = 0) -> "RLVRTask":
+    def from_dict(cls, value: dict[str, Any], *, line: int = 0) -> RLVRTask:
         verifier = value.get("verifier", {})
         if isinstance(verifier, str):
             verifier = {"kind": verifier, "expected": value.get("expected")}
@@ -158,7 +167,7 @@ def staged_arithmetic_curriculum(count: int, *, seed: int, split: str,
                                  exclude_prompts: Sequence[str] = (),
                                  unique: bool = False) -> list[RLVRTask]:
     """Build a balanced deterministic pool across curriculum difficulties."""
-    stages = sorted(set(int(value) for value in difficulties)) or [1]
+    stages = sorted({int(value) for value in difficulties}) or [1]
     tasks, seen = [], set()
     blocked = {" ".join(value.split()).casefold() for value in exclude_prompts}
     for index, difficulty in enumerate(stages):
@@ -623,14 +632,15 @@ def optimize_rollouts(model, optimizer, rollouts: Sequence[Rollout], rewards: to
                       group_size: int, algorithm: str, epochs: int, clip_low: float,
                       clip_high: float, kl_coef: float, grad_clip: float,
                       reference_model=None, token_normalizer: int | None = None,
-                      prepared: PreparedRolloutScoring | None = None) -> dict[str, float]:
+                      prepared: PreparedRolloutScoring | None = None,
+                      worker_components=None) -> dict[str, float]:
     """Apply one grouped RLVR update and return optimization diagnostics."""
 
     device = next(model.parameters()).device
     prepared = prepared or prepare_rollout_scoring(rollouts)
     model.eval()
     with torch.no_grad():
-        old_logp, mask = response_log_probs(model, rollouts, prepared=prepared)
+        old_logp, _mask = response_log_probs(model, rollouts, prepared=prepared)
         if reference_model is None:
             reference_logp = old_logp
         else:
@@ -657,7 +667,11 @@ def optimize_rollouts(model, optimizer, rollouts: Sequence[Rollout], rewards: to
                           reference_logp=reference_logp, kl_coef=kl_coef,
                           token_normalizer=token_normalizer)
         out.loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        grad_norm = (
+            worker_components.gradient_clipping(model.parameters())
+            if worker_components is not None
+            else torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        )
         optimizer.step()
         diagnostics = {"loss": float(out.loss.detach()), "approx_kl": float(out.approx_kl),
                        "clip_fraction": float(out.clip_fraction), "grad_norm": float(grad_norm),
@@ -708,7 +722,14 @@ def evaluate_policy(model, tokenizer, tasks: Sequence[RLVRTask], *, group_size: 
             "generation": generation}, rollouts
 
 
-def run(args) -> dict[str, Any]:
+def run(
+    args,
+    *,
+    worker_components=None,
+    worker_step_profiler=None,
+    worker_observability=None,
+    worker_controls=None,
+) -> dict[str, Any]:
     from rwkv_lab.generate import WorldVocab, build_from_ckpt
     from rwkv_lab.rwkv_pretrain import build_optimizer
 
@@ -724,6 +745,76 @@ def run(args) -> dict[str, Any]:
         raise ValueError("preflight reward thresholds must satisfy 0 <= min < max <= 1")
     if args.max_family_regression < 0:
         raise ValueError("max-family-regression must be non-negative")
+    if worker_controls is not None and dict(
+        getattr(worker_controls, "effective_values", {})
+    ):
+        raise ValueError("RLVR v1 does not declare initial controls")
+    component_evidence = None
+    component_composition_digest = None
+    if worker_components is not None:
+        if args.optimizer != "adamw":
+            raise ValueError(
+                "RLVR v1 component authority currently requires the AdamW backend"
+            )
+        worker_components.require_implementation(
+            "optimizer",
+            category="optimizer",
+            allowed=frozenset({"rwkv_lab.optimizer.torch_adamw_no_decay.v2"}),
+        )
+        expected_optimizer = {
+            "learning_rate": args.lr,
+            "beta1": 0.9,
+            "beta2": 0.95,
+            "epsilon": 1.0e-8,
+            "foreach": False,
+            "fused": True,
+        }
+        if dict(
+            worker_components.configuration("optimizer", category="optimizer")
+        ) != expected_optimizer:
+            raise ValueError(
+                "authority optimizer composition disagrees with RLVR configuration"
+            )
+        worker_components.require_implementation(
+            "learning_rate",
+            category="learning_rate_schedule",
+            allowed=frozenset(
+                {"rwkv_lab.schedule.linear_warmup_constant.v1"}
+            ),
+        )
+        if dict(
+            worker_components.configuration(
+                "learning_rate", category="learning_rate_schedule"
+            )
+        ) != {"warmup_steps": args.warmup}:
+            raise ValueError(
+                "authority learning-rate composition disagrees with RLVR configuration"
+            )
+        if dict(
+            worker_components.configuration(
+                "gradient_clipping", category="gradient_clipping"
+            )
+        ) != {
+            "max_norm": args.grad_clip,
+            "norm_type": 2.0,
+            "error_if_nonfinite": False,
+        }:
+            raise ValueError(
+                "authority gradient clipping disagrees with RLVR configuration"
+            )
+        if dict(
+            worker_components.configuration(
+                "weight_decay", category="weight_decay_schedule"
+            )
+        ) != {"weight_decay": args.weight_decay}:
+            raise ValueError(
+                "authority weight decay disagrees with RLVR configuration"
+            )
+        component_evidence = dict(worker_components.evidence())
+        component_composition_digest = (
+            worker_components.composition.composition_digest
+        )
+
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     source_path = args.resume or args.ckpt
@@ -773,7 +864,13 @@ def run(args) -> dict[str, Any]:
     split_audit = audit_task_splits(train_tasks, eval_tasks)
     if not split_audit["passed"]:
         raise ValueError(f"train/held-out contamination audit failed: {split_audit}")
-    external_command = shlex.split(args.verifier_command) if args.verifier_command else []
+    external_command = (
+        list(args.verifier_command)
+        if isinstance(args.verifier_command, (tuple, list))
+        else shlex.split(args.verifier_command)
+        if args.verifier_command
+        else []
+    )
     if any(t.verifier.get("kind") == "external" for t in all_tasks) and not external_command:
         raise ValueError("external verifier tasks require --verifier-command")
     rollout_devices = tuple(value.strip() for value in args.rollout_devices.split(",")
@@ -785,8 +882,24 @@ def run(args) -> dict[str, Any]:
         from rwkv_lab.u_mup import UMuPConfig
         u_mup_cfg = UMuPConfig(int(arch["u_mup_base_width"]), int(arch["d_model"]),
                                int(arch["n_layers"]), int(arch.get("u_mup_base_depth") or 1))
-    optimizer = build_optimizer(model.named_parameters(), args.optimizer, args.lr,
-                                args.weight_decay, u_mup_config=u_mup_cfg)
+    optimizer = build_optimizer(
+        model.named_parameters(),
+        args.optimizer,
+        args.lr,
+        args.weight_decay,
+        u_mup_config=u_mup_cfg,
+        worker_components=worker_components,
+    )
+    learning_rate_schedule = (
+        worker_components.learning_rate_schedule(optimizer)
+        if worker_components is not None
+        else None
+    )
+    weight_decay_schedule = (
+        worker_components.weight_decay_schedule(optimizer)
+        if worker_components is not None
+        else None
+    )
     start_step = int(source_blob.get("rlvr_step", 0)) if args.resume else 0
     if args.steps < start_step:
         raise ValueError(f"--steps {args.steps} precedes resumed RLVR step {start_step}")
@@ -803,6 +916,8 @@ def run(args) -> dict[str, Any]:
                 "temperature": args.temperature, "top_p": args.top_p, "top_k": args.top_k,
                 "rollout_engine": args.rollout_engine, "curriculum_stages": curriculum_stages,
                 "split_audit": split_audit,
+                "component_evidence": component_evidence,
+                "component_composition_digest": component_composition_digest,
                 "created_ts": time.time()}
     rng = random.Random(args.seed)
     if args.resume and source_blob.get("rlvr_python_rng"):
@@ -813,10 +928,40 @@ def run(args) -> dict[str, Any]:
             torch_rng = torch_rng.to(device="cpu", dtype=torch.uint8)
         torch.set_rng_state(torch_rng)
     clip_high = (0.28 if args.algorithm == "dapo" else 0.2) if args.clip_high < 0 else args.clip_high
-    log = open(out_dir / "train.jsonl", "a" if args.resume else "w", buffering=1)
+    log = open(  # noqa: SIM115 - one outer finally owns the complete run lifetime
+        out_dir / "train.jsonl", "a" if args.resume else "w", buffering=1
+    )
     try:
         def emit(row):
-            return log.write(json.dumps(row, sort_keys=True) + "\n")
+            written = log.write(json.dumps(row, sort_keys=True) + "\n")
+            if worker_observability is not None:
+                step = int(row.get("step", 0))
+                kind = row.get("kind")
+                values = (
+                    {
+                        "train.reward": row.get("reward"),
+                        "train.pass_at_k": row.get("pass_at_k"),
+                        "train.loss": row.get("loss"),
+                        "train.approximate_kl": row.get("approx_kl"),
+                        "train.gradient_norm": row.get("grad_norm"),
+                        "train.learning_rate": row.get("lr"),
+                    }
+                    if kind == "train"
+                    else {
+                        "eval.reward": row.get("reward"),
+                        "eval.pass_at_k": row.get("pass_at_k"),
+                    }
+                    if kind == "eval"
+                    else {}
+                )
+                for name, value in values.items():
+                    if isinstance(value, (int, float)) and not isinstance(
+                        value, bool
+                    ):
+                        worker_observability.publish_if_declared(
+                            name, float(value), step=step
+                        )
+            return written
         fixed_eval = stratified_tasks(eval_tasks, min(args.eval_prompts, len(eval_tasks)),
                                       seed=args.seed + 8_000_003)
         final_eval_reserve = len(fixed_eval) * args.eval_group_size * args.max_new
@@ -928,9 +1073,11 @@ def run(args) -> dict[str, Any]:
                 timeout=args.verifier_timeout)
             prepared_scoring = prepare_rollout_scoring(rollouts)
             rewards, verifier_details = verify_future.result()
-            lr = args.lr * min(1.0, (step + 1) / max(args.warmup, 1))
-            for group in optimizer.param_groups:
-                group["lr"] = lr * group.get("u_mup_lr_mult", 1.0)
+            lr = float(optimizer.param_groups[0]["lr"])
+            if learning_rate_schedule is None:
+                lr = args.lr * min(1.0, (step + 1) / max(args.warmup, 1))
+                for group in optimizer.param_groups:
+                    group["lr"] = lr * group.get("u_mup_lr_mult", 1.0)
             ref = reference_model if args.reference == "initial" else None
             diagnostics = optimize_rollouts(model, optimizer, rollouts, rewards,
                                             group_size=args.group_size, algorithm=args.algorithm,
@@ -938,7 +1085,16 @@ def run(args) -> dict[str, Any]:
                                             clip_high=clip_high, kl_coef=(args.kl_coef if args.reference != "none" else 0),
                                             grad_clip=args.grad_clip, reference_model=ref,
                                             token_normalizer=args.max_new,
-                                            prepared=prepared_scoring)
+                                            prepared=prepared_scoring,
+                                            worker_components=worker_components)
+            if learning_rate_schedule is not None:
+                learning_rate_schedule.step()
+            if weight_decay_schedule is not None:
+                weight_decay_schedule.step(step + 1)
+            if worker_step_profiler is not None:
+                worker_step_profiler.step(step + 1)
+            if worker_observability is not None:
+                worker_observability.optimizer_step(step + 1)
             metrics = {**grouped_metrics(rewards, args.group_size), **diagnostics}
             updates_applied += int(diagnostics["update_applied"] > 0)
             steps_completed = step + 1

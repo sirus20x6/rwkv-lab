@@ -1,21 +1,18 @@
 package server
 
-// Post-training data + behavior panel. Dataset paths are repository-confined and validation is
-// delegated to rwkv_lab.posttrain_data. Paired generation uses the same prompt, seed, temperature,
-// and token budget for both checkpoints. Explicit operator choices append training preferences;
-// they never enter held-out evaluation data and never trigger training or publication.
+// Post-training evidence panel. Dataset inspection and persisted campaign evidence
+// remain available, while dataset mutation, campaign launch, generation, and
+// preference writes have moved out of dashboard authority.
 
 import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
-	"math"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -150,33 +147,12 @@ func (s *Server) handlePosttraining(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(&b, `<option value="%s"></option>`, esc(path))
 	}
 	b.WriteString(`</datalist><button class="btn" data-on:click="@post('/api/posttraining/inspect')">inspect</button></div>`)
-	b.WriteString(`<div class="ctl-row"><input class="ctl-input" placeholder="optional additional JSONL paths, comma-separated" data-bind="ptMerge"><button class="btn" data-on:click="confirm('Validate and create an immutable merged dataset version?') && @post('/api/posttraining/version')">version / merge</button></div>`)
+	b.WriteString(`<div class="empty">Dataset versioning is read-only here. Create immutable dataset versions through an external or future descriptor-backed operation.</div>`)
 	b.WriteString(`<div id="posttraining-inspect"><div class="empty">select a repository JSONL dataset</div></div>`)
-	b.WriteString(`<div class="panel-title">post-training campaigns <span class="sub">equal token budget · paired seeds · fresh confirmation · immutable promotion receipt</span></div>`)
-	b.WriteString(`<div class="pt-campaign-grid"><div><table class="field-tbl">`)
-	b.WriteString(`<tr><td class="f-l">parent</td><td><input data-bind="ptCampaignCkpt" value="runs/gen_smoke/ckpt.pt"></td></tr>`)
-	b.WriteString(`<tr><td class="f-l">train / held-out</td><td><input data-bind="ptCampaignData" placeholder="datasets/train.jsonl"><input data-bind="ptCampaignEval" placeholder="datasets/eval.jsonl"></td></tr>`)
-	b.WriteString(`<tr><td class="f-l">output</td><td><input data-bind="ptCampaignOut" value="runs/posttrain-campaign"></td></tr>`)
-	b.WriteString(`<tr><td class="f-l">objectives</td><td><input data-bind="ptCampaignObjectives" value="sft,dpo,kto,orpo,simpo"></td></tr>`)
-	b.WriteString(`<tr><td class="f-l">explore / confirm</td><td><input data-bind="ptCampaignSeeds" value="0,1,2"><input data-bind="ptCampaignConfirm" value="100,101,102"></td></tr>`)
-	b.WriteString(`<tr><td class="f-l">token budget</td><td><input type="number" data-bind="ptCampaignBudget" value="100000"></td></tr>`)
-	b.WriteString(`<tr><td class="f-l">base</td><td><select data-bind="ptCampaignQuant"><option value="none">dense LoRA</option><option value="nf4">native NF4 QLoRA</option></select></td></tr>`)
-	b.WriteString(`<tr><td class="f-l">NF4 backend</td><td><select data-bind="ptCampaignBackend"><option value="auto">auto · parity + speed gate</option><option value="portable">portable reference</option><option value="torchao">require TorchAO</option></select></td></tr>`)
-	b.WriteString(`<tr><td class="f-l">packing</td><td><select data-bind="ptCampaignPacking"><option value="reset">reset-mask multipack</option><option value="audit">audit only</option><option value="off">off</option></select></td></tr>`)
-	b.WriteString(`<tr><td class="f-l">device slots</td><td><input data-bind="ptCampaignDevices" value="cuda:0" placeholder="cuda:0,cuda:1"></td></tr>`)
-	b.WriteString(`<tr><td class="f-l">timeout / retries</td><td><input data-bind="ptCampaignTimeout" value="0" title="seconds; 0 disables"><input type="number" data-bind="ptCampaignRetries" value="1" min="0" max="10"></td></tr>`)
-	b.WriteString(`</table><details class="advanced-fields"><summary>advanced adapter, objective &amp; evidence controls</summary><table class="field-tbl">`)
-	b.WriteString(`<tr><td class="f-l">batch / rank / alpha</td><td><input type="number" min="1" data-bind="ptCampaignBatch" value="2"><input type="number" min="1" data-bind="ptCampaignRank" value="16"><input data-bind="ptCampaignAlpha" value="32"></td></tr>`)
-	b.WriteString(`<tr><td class="f-l">LR / beta / gamma</td><td><input data-bind="ptCampaignLR" value="2e-4"><input data-bind="ptCampaignBeta" value="0.1"><input data-bind="ptCampaignGamma" value="1.0"></td></tr>`)
-	b.WriteString(`<tr><td class="f-l">max length / quant block</td><td><input type="number" min="2" data-bind="ptCampaignMaxLength" value="2048"><input type="number" min="1" data-bind="ptCampaignQuantBlock" value="64"></td></tr>`)
-	b.WriteString(`<tr><td class="f-l">targets</td><td><input data-bind="ptCampaignTargets" placeholder="optional comma-separated module suffixes"></td></tr>`)
-	b.WriteString(`<tr><td class="f-l">template / token cache</td><td><input data-bind="ptCampaignTemplate" placeholder="optional template JSON"><input data-bind="ptCampaignCache" placeholder="optional cache directory"></td></tr>`)
-	b.WriteString(`<tr><td class="f-l">activation offload</td><td><input type="checkbox" data-bind="ptCampaignOffload"></td></tr>`)
-	b.WriteString(`<tr><td class="f-l">promotion Δ / family regression</td><td><input data-bind="ptCampaignMinDelta" value="0"><input data-bind="ptCampaignFamily" value="0"></td></tr>`)
-	b.WriteString(`<tr><td class="f-l">confidence / bootstrap</td><td><input data-bind="ptCampaignConfidence" value="0.95"><input type="number" min="100" data-bind="ptCampaignBootstrap" value="10000"></td></tr>`)
-	b.WriteString(`<tr><td class="f-l">parallel / retry delay</td><td><input type="number" min="0" data-bind="ptCampaignParallel" value="0"><input data-bind="ptCampaignRetryDelay" value="0"></td></tr>`)
-	b.WriteString(`<tr><td class="f-l">telemetry every</td><td><input type="number" min="1" data-bind="ptCampaignLogEvery" value="10"></td></tr>`)
-	b.WriteString(`</table></details><button class="btn" data-on:click="confirm('Launch paired post-training and confirmation campaign?') && @post('/api/posttraining/campaign')">▶ run campaign</button></div><div class="pt-campaign-results">`)
+	b.WriteString(`<div class="panel-title">post-training execution <span class="sub">declarative single-run adapter training</span></div>`)
+	b.WriteString(`<div class="empty">The descriptor-backed <code>rwkv-lab.rwkv-posttraining@1.0.0</code> operation is available in the <a href="#trainvm-authoring">TrainVM composer</a> for SFT, DPO, KTO, ORPO, SimPO, reward-model, and PRM runs. Legacy multi-arm campaigns and recursive promotion remain read-only below.</div>`)
+	b.WriteString(`<div class="panel-title">legacy post-training campaigns · read-only <span class="sub">persisted evidence and promotion receipts</span></div>`)
+	b.WriteString(`<div class="pt-campaign-results">`)
 	campaigns, loops := s.readPosttrainCampaigns()
 	if len(campaigns) == 0 {
 		b.WriteString(`<div class="empty">no post-training campaigns yet</div>`)
@@ -214,13 +190,9 @@ func (s *Server) handlePosttraining(w http.ResponseWriter, r *http.Request) {
 		}
 		b.WriteString(`</table>`)
 	}
-	b.WriteString(`</div></div>`)
-	b.WriteString(`<div class="panel-title">paired behavior <span class="sub">same prompt · seed · sampling settings · explicit preference capture</span></div>`)
-	b.WriteString(`<div class="ctl-row"><input class="ctl-input" placeholder="run A" data-bind="ptRunA"><input class="ctl-input" placeholder="run B" data-bind="ptRunB"></div>`)
-	b.WriteString(`<textarea class="ctl-input" rows="2" placeholder="comparison prompt" data-bind="ptPrompt"></textarea>`)
-	b.WriteString(`<div class="ctl-row"><input class="ctl-input" style="max-width:90px" title="seed" data-bind="ptSeed"><input class="ctl-input" style="max-width:100px" title="max new" data-bind="ptMaxNew"><input class="ctl-input" style="max-width:90px" title="temperature" data-bind="ptTemp"><button class="btn" data-attr-disabled="$ptBusy" data-on:click="@post('/api/posttraining/compare')">compare</button></div>`)
-	b.WriteString(`<div id="posttraining-compare"><div class="empty">choose two completed LM runs with ckpt.pt</div></div>`)
-	b.WriteString(`<div class="ctl-row"><select class="ctl-input" data-bind="ptChosen"><option value="">choose preferred output</option><option value="a">A preferred</option><option value="b">B preferred</option></select><button class="btn" data-on:click="confirm('Append this pair to datasets/trainboard_preferences.jsonl?') && @post('/api/posttraining/feedback')">save training preference</button></div></div>`)
+	b.WriteString(`</div>`)
+	b.WriteString(`<div class="panel-title">paired behavior · read-only</div>`)
+	b.WriteString(`<div class="empty">Dashboard generation and preference writes are retired. No descriptor-backed paired-generation operation is available yet.</div></div>`)
 	_ = sse.PatchElements(b.String())
 }
 
@@ -296,381 +268,24 @@ func (s *Server) handleInspectPosttraining(w http.ResponseWriter, r *http.Reques
 	toastOK(sse, fmt.Sprintf("validated %d post-training examples", result.Examples))
 }
 
-func (s *Server) handleVersionPosttraining(w http.ResponseWriter, r *http.Request) {
-	var sig struct {
-		Dataset string `json:"ptDataset"`
-		Merge   string `json:"ptMerge"`
-	}
-	_ = datastar.ReadSignals(r, &sig)
-	sse := datastar.NewSSE(w, r)
-	values := []string{sig.Dataset}
-	values = append(values, strings.Split(sig.Merge, ",")...)
-	paths := []string{}
-	seen := map[string]bool{}
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		path, err := s.pathUnderRepo(value, true)
-		if err != nil || !strings.HasSuffix(strings.ToLower(path), ".jsonl") {
-			toastErr(sse, "every version source must be an existing repository .jsonl file")
-			return
-		}
-		if !seen[path] {
-			seen[path] = true
-			paths = append(paths, path)
-		}
-	}
-	if len(paths) == 0 {
-		toastErr(sse, "select at least one dataset to version")
-		return
-	}
-	root := filepath.Join(s.cfg.RepoRoot, "datasets", "versions")
-	args := []string{"-m", "rwkv_lab.posttrain_data"}
-	args = append(args, paths...)
-	args = append(args, "--version-root", root, "--json")
-	cmd := exec.Command(filepath.Join(s.cfg.RepoRoot, ".venv", "bin", "python"), args...)
-	cmd.Dir = s.cfg.RepoRoot
-	cmd.Env = append(os.Environ(), "PYTHONPATH=src")
-	out, err := cmd.Output()
-	if err != nil {
-		toastErr(sse, "dataset version failed: "+commandError(err))
-		return
-	}
-	var result struct {
-		Dataset string `json:"dataset"`
-		Version string `json:"version"`
-	}
-	if json.Unmarshal(out, &result) != nil || result.Dataset == "" {
-		toastErr(sse, "dataset versioner returned invalid output")
-		return
-	}
-	relative, _ := filepath.Rel(s.cfg.RepoRoot, result.Dataset)
-	_ = sse.MarshalAndPatchSignals(map[string]any{"ptDataset": filepath.ToSlash(relative), "ptMerge": ""})
-	toastOK(sse, "created immutable dataset version "+result.Version+"; inspect to preview it")
+func (s *Server) handleVersionPosttraining(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "dashboard dataset versioning is retired; no descriptor-backed operation is available", http.StatusGone)
 }
 
-func (s *Server) handleLaunchPosttrainingCampaign(w http.ResponseWriter, r *http.Request) {
-	var sig struct {
-		Checkpoint string `json:"ptCampaignCkpt"`
-		Data       string `json:"ptCampaignData"`
-		Eval       string `json:"ptCampaignEval"`
-		Output     string `json:"ptCampaignOut"`
-		Objectives string `json:"ptCampaignObjectives"`
-		Seeds      string `json:"ptCampaignSeeds"`
-		Confirm    string `json:"ptCampaignConfirm"`
-		Budget     string `json:"ptCampaignBudget"`
-		Quant      string `json:"ptCampaignQuant"`
-		Backend    string `json:"ptCampaignBackend"`
-		Packing    string `json:"ptCampaignPacking"`
-		Devices    string `json:"ptCampaignDevices"`
-		Timeout    string `json:"ptCampaignTimeout"`
-		Retries    string `json:"ptCampaignRetries"`
-		Batch      string `json:"ptCampaignBatch"`
-		Rank       string `json:"ptCampaignRank"`
-		Alpha      string `json:"ptCampaignAlpha"`
-		LR         string `json:"ptCampaignLR"`
-		Beta       string `json:"ptCampaignBeta"`
-		Gamma      string `json:"ptCampaignGamma"`
-		MaxLength  string `json:"ptCampaignMaxLength"`
-		QuantBlock string `json:"ptCampaignQuantBlock"`
-		Targets    string `json:"ptCampaignTargets"`
-		Template   string `json:"ptCampaignTemplate"`
-		Cache      string `json:"ptCampaignCache"`
-		Offload    bool   `json:"ptCampaignOffload"`
-		MinDelta   string `json:"ptCampaignMinDelta"`
-		Family     string `json:"ptCampaignFamily"`
-		Confidence string `json:"ptCampaignConfidence"`
-		Bootstrap  string `json:"ptCampaignBootstrap"`
-		Parallel   string `json:"ptCampaignParallel"`
-		RetryDelay string `json:"ptCampaignRetryDelay"`
-		LogEvery   string `json:"ptCampaignLogEvery"`
-	}
-	_ = datastar.ReadSignals(r, &sig)
-	sse := datastar.NewSSE(w, r)
-	checkpoint, err := s.pathUnderRepo(sig.Checkpoint, true)
-	if err != nil || checkpoint == "" {
-		toastErr(sse, "campaign parent must be an existing repository checkpoint")
-		return
-	}
-	data, err := s.pathUnderRepo(sig.Data, true)
-	if err != nil || data == "" || !strings.HasSuffix(strings.ToLower(data), ".jsonl") {
-		toastErr(sse, "campaign train data must be an existing JSONL")
-		return
-	}
-	eval, err := s.pathUnderRepo(sig.Eval, true)
-	if err != nil || eval == "" || !strings.HasSuffix(strings.ToLower(eval), ".jsonl") {
-		toastErr(sse, "campaign requires separate held-out JSONL")
-		return
-	}
-	out, err := s.pathUnderRepo(sig.Output, false)
-	if err != nil || out == "" {
-		toastErr(sse, "campaign output is invalid")
-		return
-	}
-	rel, _ := filepath.Rel(s.cfg.RunsDir, out)
-	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		toastErr(sse, "campaign output must be under runs/")
-		return
-	}
-	allowed := map[string]bool{"sft": true, "dpo": true, "kto": true, "orpo": true, "simpo": true, "reward": true, "prm": true}
-	objectives := strings.Split(sig.Objectives, ",")
-	for _, value := range objectives {
-		if !allowed[strings.TrimSpace(value)] {
-			toastErr(sse, "campaign objective is not allowlisted")
-			return
-		}
-	}
-	validateSeeds := func(raw string) bool {
-		values := strings.Split(raw, ",")
-		if len(values) < 1 || len(values) > 8 {
-			return false
-		}
-		seen := map[int]bool{}
-		for _, item := range values {
-			value, parseErr := strconv.Atoi(strings.TrimSpace(item))
-			if parseErr != nil || seen[value] {
-				return false
-			}
-			seen[value] = true
-		}
-		return true
-	}
-	if !validateSeeds(sig.Seeds) || !validateSeeds(sig.Confirm) {
-		toastErr(sse, "exploration and confirmation each need 1–8 unique integer seeds")
-		return
-	}
-	budget, err := boundedInt(sig.Budget, 100000, 1, 2_000_000_000)
-	if err != nil {
-		toastErr(sse, "campaign token budget is invalid")
-		return
-	}
-	if sig.Quant != "none" && sig.Quant != "nf4" {
-		toastErr(sse, "campaign base must be dense or NF4")
-		return
-	}
-	if sig.Backend != "auto" && sig.Backend != "portable" && sig.Backend != "torchao" {
-		toastErr(sse, "NF4 backend must be auto, portable, or torchao")
-		return
-	}
-	if sig.Packing != "off" && sig.Packing != "audit" && sig.Packing != "reset" {
-		toastErr(sse, "packing must be off, audit, or reset")
-		return
-	}
-	deviceValues := strings.Split(sig.Devices, ",")
-	seenDevices := map[string]bool{}
-	for _, raw := range deviceValues {
-		value := strings.TrimSpace(raw)
-		valid := value == "auto" || value == "cpu" || value == "cuda"
-		if strings.HasPrefix(value, "cuda:") {
-			_, parseErr := strconv.Atoi(strings.TrimPrefix(value, "cuda:"))
-			valid = parseErr == nil
-		}
-		if !valid || seenDevices[value] {
-			toastErr(sse, "device slots must be unique auto, cpu, cuda, or cuda:N values")
-			return
-		}
-		seenDevices[value] = true
-	}
-	timeout, parseErr := strconv.ParseFloat(strings.TrimSpace(sig.Timeout), 64)
-	if parseErr != nil || timeout < 0 {
-		toastErr(sse, "arm timeout must be non-negative seconds")
-		return
-	}
-	retries, err := boundedInt(sig.Retries, 1, 0, 10)
-	if err != nil {
-		toastErr(sse, "campaign retries are invalid")
-		return
-	}
-	batch, err := boundedInt(sig.Batch, 2, 1, 4096)
-	if err != nil {
-		toastErr(sse, "campaign batch size invalid")
-		return
-	}
-	rank, err := boundedInt(sig.Rank, 16, 1, 4096)
-	if err != nil {
-		toastErr(sse, "campaign adapter rank invalid")
-		return
-	}
-	maxLength, err := boundedInt(sig.MaxLength, 2048, 2, 1_000_000)
-	if err != nil {
-		toastErr(sse, "campaign max length invalid")
-		return
-	}
-	quantBlock, err := boundedInt(sig.QuantBlock, 64, 1, 65536)
-	if err != nil {
-		toastErr(sse, "campaign quant block invalid")
-		return
-	}
-	bootstrap, err := boundedInt(sig.Bootstrap, 10000, 100, 1_000_000)
-	if err != nil {
-		toastErr(sse, "campaign bootstrap count invalid")
-		return
-	}
-	parallel, err := boundedInt(sig.Parallel, 0, 0, 128)
-	if err != nil {
-		toastErr(sse, "campaign parallelism invalid")
-		return
-	}
-	logEvery, err := boundedInt(sig.LogEvery, 10, 1, 100000)
-	if err != nil {
-		toastErr(sse, "campaign telemetry cadence invalid")
-		return
-	}
-	advanced := map[string]struct {
-		raw      string
-		min, max float64
-	}{
-		"alpha": {sig.Alpha, 0, 1e9}, "learning rate": {sig.LR, 0, 1},
-		"beta": {sig.Beta, 0, 1e6}, "gamma": {sig.Gamma, 0, 1e6},
-		"minimum delta": {sig.MinDelta, 0, 1}, "family regression": {sig.Family, 0, 1},
-		"confidence": {sig.Confidence, 1e-12, 1 - 1e-12}, "retry delay": {sig.RetryDelay, 0, 1e9},
-	}
-	for name, spec := range advanced {
-		value, parseErr := strconv.ParseFloat(strings.TrimSpace(spec.raw), 64)
-		if parseErr != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < spec.min || value > spec.max {
-			toastErr(sse, "campaign "+name+" is outside its allowed range")
-			return
-		}
-	}
-	template, cache := "", ""
-	if strings.TrimSpace(sig.Template) != "" {
-		template, err = s.pathUnderRepo(sig.Template, true)
-		if err != nil || !strings.HasSuffix(strings.ToLower(template), ".json") {
-			toastErr(sse, "campaign template must be an existing JSON file")
-			return
-		}
-	}
-	if strings.TrimSpace(sig.Cache) != "" {
-		cache, err = s.pathUnderRepo(sig.Cache, false)
-		if err != nil {
-			toastErr(sse, "campaign token cache path invalid")
-			return
-		}
-	}
-	args := []string{"-m", "rwkv_lab.posttrain_campaign", "--checkpoint", checkpoint,
-		"--data", data, "--eval-data", eval, "--output", out, "--objectives", sig.Objectives,
-		"--seeds", sig.Seeds, "--confirm-seeds", sig.Confirm, "--token-budget", budget,
-		"--base-quantization", sig.Quant, "--quant-backend", sig.Backend,
-		"--packing", sig.Packing, "--devices", sig.Devices,
-		"--arm-timeout", strconv.FormatFloat(timeout, 'f', -1, 64), "--retries", retries,
-		"--batch-size", batch, "--rank", rank, "--adapter-alpha", sig.Alpha,
-		"--learning-rate", sig.LR, "--beta", sig.Beta, "--gamma", sig.Gamma,
-		"--max-length", maxLength, "--quant-block-size", quantBlock,
-		"--minimum-delta", sig.MinDelta, "--maximum-family-regression", sig.Family,
-		"--confidence", sig.Confidence, "--bootstrap-samples", bootstrap,
-		"--max-parallel", parallel, "--retry-delay", sig.RetryDelay, "--log-every", logEvery}
-	if strings.TrimSpace(sig.Targets) != "" {
-		args = append(args, "--targets", strings.TrimSpace(sig.Targets))
-	}
-	if template != "" {
-		args = append(args, "--template", template)
-	}
-	if cache != "" {
-		args = append(args, "--token-cache", cache)
-	}
-	if sig.Offload {
-		args = append(args, "--activation-offload")
-	}
-	pid, err := s.spawnPy(args, fmt.Sprintf("posttrain_campaign_%d.log", time.Now().Unix()))
-	if err != nil {
-		toastErr(sse, "post-training campaign launch failed: "+err.Error())
-		return
-	}
-	toastOK(sse, fmt.Sprintf("launched %d-objective post-training campaign (pid %d)", len(objectives), pid))
+func (s *Server) handleLaunchPosttrainingCampaign(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "dashboard post-training campaign launch is retired; no descriptor-backed operation is available", http.StatusGone)
 }
 
-type pairedSignals struct {
-	RunA, RunB, Prompt, Seed, MaxNew, Temp string
-	OutA, OutB                             string
-	Chosen                                 string
+func (s *Server) handleComparePosttraining(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "dashboard paired generation is retired; no descriptor-backed operation is available", http.StatusGone)
 }
 
-func readPairedSignals(r *http.Request) pairedSignals {
-	var raw struct {
-		RunA   string `json:"ptRunA"`
-		RunB   string `json:"ptRunB"`
-		Prompt string `json:"ptPrompt"`
-		Seed   string `json:"ptSeed"`
-		MaxNew string `json:"ptMaxNew"`
-		Temp   string `json:"ptTemp"`
-		OutA   string `json:"ptOutA"`
-		OutB   string `json:"ptOutB"`
-		Chosen string `json:"ptChosen"`
-	}
-	_ = datastar.ReadSignals(r, &raw)
-	return pairedSignals{raw.RunA, raw.RunB, raw.Prompt, raw.Seed, raw.MaxNew, raw.Temp,
-		raw.OutA, raw.OutB, raw.Chosen}
+func (s *Server) handlePosttrainingFeedback(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "dashboard preference mutation is retired; no descriptor-backed operation is available", http.StatusGone)
 }
 
-func (s *Server) handleComparePosttraining(w http.ResponseWriter, r *http.Request) {
-	sig := readPairedSignals(r)
-	sse := datastar.NewSSE(w, r)
-	ckptA, errA := s.posttrainRunCheckpoint(sig.RunA)
-	ckptB, errB := s.posttrainRunCheckpoint(sig.RunB)
-	if errA != nil || errB != nil || strings.TrimSpace(sig.Prompt) == "" {
-		toastErr(sse, "comparison needs two valid run names and a non-empty prompt")
-		return
-	}
-	seed, err := boundedInt(sig.Seed, 0, 0, 2147483647)
-	if err != nil {
-		toastErr(sse, "invalid comparison seed")
-		return
-	}
-	maxNew, err := boundedInt(sig.MaxNew, 200, 1, 2048)
-	if err != nil {
-		toastErr(sse, "invalid max-new value")
-		return
-	}
-	temp := "0.8"
-	if value, parseErr := strconv.ParseFloat(strings.TrimSpace(sig.Temp), 64); parseErr == nil && value >= 0 && value <= 4 {
-		temp = strconv.FormatFloat(value, 'f', -1, 64)
-	}
-	_ = sse.MarshalAndPatchSignals(map[string]any{"ptBusy": true})
-	a, err := s.generateCheckpoint(ckptA, sig.Prompt, maxNew, temp, seed)
-	if err != nil {
-		_ = sse.MarshalAndPatchSignals(map[string]any{"ptBusy": false})
-		toastErr(sse, "run A: "+err.Error())
-		return
-	}
-	b, err := s.generateCheckpoint(ckptB, sig.Prompt, maxNew, temp, seed)
-	_ = sse.MarshalAndPatchSignals(map[string]any{"ptBusy": false})
-	if err != nil {
-		toastErr(sse, "run B: "+err.Error())
-		return
-	}
-	_ = sse.MarshalAndPatchSignals(map[string]any{"ptOutA": a.Completion, "ptOutB": b.Completion,
-		"ptChosen": "", "ptSeed": seed, "ptMaxNew": maxNew, "ptTemp": temp})
-	html := `<div id="posttraining-compare" class="compare-grid"><div><b>A · ` + esc(sig.RunA) +
-		`</b><pre class="sample-out">` + esc(a.Completion) + `</pre></div><div><b>B · ` + esc(sig.RunB) +
-		`</b><pre class="sample-out">` + esc(b.Completion) + `</pre></div></div>`
-	_ = sse.PatchElements(html)
-	toastOK(sse, "paired generation complete")
-}
-
-type generationResult struct {
-	Completion string `json:"completion"`
-}
-
-func (s *Server) generateCheckpoint(ckpt, prompt, maxNew, temp, seed string) (generationResult, error) {
-	cmd := exec.Command(filepath.Join(s.cfg.RepoRoot, ".venv", "bin", "python"), "-m", "rwkv_lab.generate",
-		"--ckpt", ckpt, "--prompt", prompt, "--max-new", maxNew, "--temperature", temp,
-		"--seed", seed, "--json")
-	cmd.Dir = s.cfg.RepoRoot
-	cmd.Env = append(os.Environ(), "PYTHONPATH=src")
-	out, err := cmd.Output()
-	if err != nil {
-		return generationResult{}, fmt.Errorf("generation failed: %s", commandError(err))
-	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	var result generationResult
-	if len(lines) == 0 || json.Unmarshal([]byte(lines[len(lines)-1]), &result) != nil {
-		return generationResult{}, fmt.Errorf("generator returned invalid output")
-	}
-	return result, nil
-}
-
+// posttrainRunCheckpoint remains a read-only inspector used by legacy evidence tests.
+// It deliberately does not map the sampled run name to a TrainVM run identity.
 func (s *Server) posttrainRunCheckpoint(name string) (string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || filepath.Base(name) != name || strings.ContainsAny(name, `/\\`) {
@@ -681,48 +296,6 @@ func (s *Server) posttrainRunCheckpoint(name string) (string, error) {
 		return "", fmt.Errorf("checkpoint missing")
 	}
 	return path, nil
-}
-
-func (s *Server) handlePosttrainingFeedback(w http.ResponseWriter, r *http.Request) {
-	sig := readPairedSignals(r)
-	sse := datastar.NewSSE(w, r)
-	if sig.Chosen != "a" && sig.Chosen != "b" {
-		toastErr(sse, "choose A or B first")
-		return
-	}
-	if sig.OutA == "" || sig.OutB == "" || sig.OutA == sig.OutB || strings.TrimSpace(sig.Prompt) == "" {
-		toastErr(sse, "run a non-identical paired comparison first")
-		return
-	}
-	chosen, rejected := sig.OutA, sig.OutB
-	chosenRun, rejectedRun := sig.RunA, sig.RunB
-	if sig.Chosen == "b" {
-		chosen, rejected = rejected, chosen
-		chosenRun, rejectedRun = rejectedRun, chosenRun
-	}
-	record := map[string]any{"schema": "rwkv-lab.posttrain.v1", "kind": "preference", "split": "train",
-		"id":       fmt.Sprintf("trainboard-%d", time.Now().UnixNano()),
-		"messages": []map[string]string{{"role": "user", "content": sig.Prompt}},
-		"chosen":   chosen, "rejected": rejected,
-		"metadata": map[string]any{"source": "trainboard", "chosen_run": chosenRun,
-			"rejected_run": rejectedRun, "seed": sig.Seed, "temperature": sig.Temp}}
-	data, _ := json.Marshal(record)
-	directory := filepath.Join(s.cfg.RepoRoot, "datasets")
-	if err := os.MkdirAll(directory, 0o755); err != nil {
-		toastErr(sse, err.Error())
-		return
-	}
-	path := filepath.Join(directory, "trainboard_preferences.jsonl")
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err == nil {
-		_, err = file.Write(append(data, '\n'))
-		_ = file.Close()
-	}
-	if err != nil {
-		toastErr(sse, "preference save failed: "+err.Error())
-		return
-	}
-	toastOK(sse, "saved explicit training preference")
 }
 
 func commandError(err error) string {

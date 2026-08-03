@@ -83,13 +83,17 @@ Json prepare_json(const HostdProcessPrepareRequest& value) {
       identity.host.boot_id != value.grant.boot_id) {
     reject("hostd process prepare launch and grant are inexact");
   }
-  const std::vector<std::string> expected_roles =
+  std::vector<std::string> expected_roles =
       identity.code ? std::vector<std::string>{"executable", "code",
                                                 "working_directory",
                                                 "worker_bootstrap"}
                     : std::vector<std::string>{"executable",
                                                 "working_directory",
                                                 "worker_bootstrap"};
+  if (identity.profiler) {
+    expected_roles.push_back("profiler_executable");
+    expected_roles.push_back("profiler_authority");
+  }
   if (!valid_digest(value.worker_bootstrap_digest) ||
       value.descriptor_roles != expected_roles)
     reject("hostd process prepare descriptor roles are inexact");

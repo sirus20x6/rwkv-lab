@@ -8,6 +8,7 @@ from rwkv_lab.trainvm_worker import (
     WorkerBootstrap,
     WorkerCancellationRequested,
     WorkerControlRuntime,
+    WorkerExecutionPhases,
     WorkerInvocation,
     WorkerObservability,
     WorkerResourcesReleasedPause,
@@ -16,6 +17,7 @@ from rwkv_lab.trainvm_worker import (
     apply_worker_runtime_policy,
     controls_from_invocation,
     observability_from_invocation,
+    publish_artifact_requests,
     publish_checkpoint_requests,
     read_worker_bootstrap_fd,
     step_profiler_from_invocation,
@@ -37,6 +39,7 @@ InvocationExecutor = Callable[
         WorkerStepProfiler,
         WorkerObservability,
         WorkerControlRuntime,
+        WorkerExecutionPhases,
     ],
     HandlerResult,
 ]
@@ -76,13 +79,18 @@ def run_worker(
                     session, session.invocation
                 )
                 controls = controls_from_invocation(session, session.invocation)
+                execution_phases = WorkerExecutionPhases(
+                    session, session.execution_phase_requests
+                )
                 observability.optimizer_step(0, "initializing")
                 result = executor(
                     session.invocation,
                     step_profiler,
                     observability,
                     controls,
+                    execution_phases,
                 )
+                execution_phases.require_complete()
             published_checkpoints = publish_checkpoint_requests(
                 session,
                 result.checkpoint_requests,
@@ -98,6 +106,23 @@ def run_worker(
                         "checkpoint_artifact_ids": [
                             checkpoint.artifact_id
                             for checkpoint in published_checkpoints
+                        ],
+                    },
+                )
+            published_artifacts = publish_artifact_requests(
+                session,
+                result.artifact_requests,
+                progress=lambda: observability.optimizer_step(
+                    result.optimizer_step or 0, "publishing_artifact"
+                ),
+            )
+            if published_artifacts:
+                result = replace(
+                    result,
+                    payload={
+                        **result.payload,
+                        "artifact_ids": [
+                            artifact.artifact_id for artifact in published_artifacts
                         ],
                     },
                 )

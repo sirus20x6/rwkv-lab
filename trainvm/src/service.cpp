@@ -4,6 +4,7 @@
 
 #include "trainvm/controller.hpp"
 #include "trainvm/document.hpp"
+#include "trainvm/external_profiler_artifact.hpp"
 #include "trainvm/reflection_json.hpp"
 
 #include <fcntl.h>
@@ -431,6 +432,79 @@ v1::ControlCommandResult::Status wire_command_status(ControlCommandStatus status
       return v1::ControlCommandResult::STATUS_RESTART_REQUIRED;
   }
   return v1::ControlCommandResult::STATUS_UNSPECIFIED;
+}
+
+v1::HostdLifecycle wire_hostd_lifecycle(HostdLifecycle lifecycle) {
+  switch (lifecycle) {
+    case HostdLifecycle::sealed:
+      return v1::HOSTD_LIFECYCLE_SEALED;
+    case HostdLifecycle::startup_auditing:
+      return v1::HOSTD_LIFECYCLE_STARTUP_AUDITING;
+    case HostdLifecycle::startup_blocked:
+      return v1::HOSTD_LIFECYCLE_STARTUP_BLOCKED;
+    case HostdLifecycle::admitting:
+      return v1::HOSTD_LIFECYCLE_ADMITTING;
+    case HostdLifecycle::poisoned:
+      return v1::HOSTD_LIFECYCLE_POISONED;
+  }
+  return v1::HOSTD_LIFECYCLE_UNSPECIFIED;
+}
+
+v1::HostdStartupPhase wire_hostd_startup_phase(HostdStartupPhase phase) {
+  switch (phase) {
+    case HostdStartupPhase::reconciling:
+      return v1::HOSTD_STARTUP_PHASE_RECONCILING;
+    case HostdStartupPhase::auditing:
+      return v1::HOSTD_STARTUP_PHASE_AUDITING;
+    case HostdStartupPhase::admitting:
+      return v1::HOSTD_STARTUP_PHASE_ADMITTING;
+    case HostdStartupPhase::exhausted:
+      return v1::HOSTD_STARTUP_PHASE_EXHAUSTED;
+    case HostdStartupPhase::failed:
+      return v1::HOSTD_STARTUP_PHASE_FAILED;
+  }
+  return v1::HOSTD_STARTUP_PHASE_UNSPECIFIED;
+}
+
+v1::HostdProcessPhase wire_hostd_process_phase(
+    HostdProcessAuthorityPhase phase) {
+  switch (phase) {
+    case HostdProcessAuthorityPhase::launch_intent:
+      return v1::HOSTD_PROCESS_PHASE_LAUNCH_INTENT;
+    case HostdProcessAuthorityPhase::spawned:
+      return v1::HOSTD_PROCESS_PHASE_SPAWNED;
+    case HostdProcessAuthorityPhase::terminal_pending_release:
+      return v1::HOSTD_PROCESS_PHASE_TERMINAL_PENDING_RELEASE;
+  }
+  return v1::HOSTD_PROCESS_PHASE_UNSPECIFIED;
+}
+
+v1::HostResourceKind wire_host_resource_kind(HostResourceKind kind) {
+  switch (kind) {
+    case HostResourceKind::accelerator:
+      return v1::HOST_RESOURCE_KIND_ACCELERATOR;
+    case HostResourceKind::accelerator_partition:
+      return v1::HOST_RESOURCE_KIND_ACCELERATOR_PARTITION;
+    case HostResourceKind::host_mutex:
+      return v1::HOST_RESOURCE_KIND_HOST_MUTEX;
+  }
+  return v1::HOST_RESOURCE_KIND_UNSPECIFIED;
+}
+
+v1::HostAcceleratorVendor wire_host_accelerator_vendor(
+    const std::optional<HostAcceleratorVendor>& vendor) {
+  if (!vendor) return v1::HOST_ACCELERATOR_VENDOR_UNSPECIFIED;
+  switch (*vendor) {
+    case HostAcceleratorVendor::nvidia:
+      return v1::HOST_ACCELERATOR_VENDOR_NVIDIA;
+    case HostAcceleratorVendor::amd:
+      return v1::HOST_ACCELERATOR_VENDOR_AMD;
+    case HostAcceleratorVendor::intel:
+      return v1::HOST_ACCELERATOR_VENDOR_INTEL;
+    case HostAcceleratorVendor::other:
+      return v1::HOST_ACCELERATOR_VENDOR_OTHER;
+  }
+  return v1::HOST_ACCELERATOR_VENDOR_UNSPECIFIED;
 }
 
 nlohmann::json assignment_value(const v1::ScalarValue& input) {
@@ -1241,6 +1315,36 @@ void populate_invocation(v1::WorkerWelcome& welcome,
       worker_invocation_canonical_json(invocation);
   welcome.set_canonical_invocation_json(canonical);
   welcome.set_invocation_digest(invocation.invocation_digest);
+
+  if (!invocation.execution.is_object()) return;
+  const auto append_phase = [&](std::string_view name,
+                                v1::WorkerExecutionPhaseRequest::Phase phase) {
+    const auto declaration = invocation.execution.find(name);
+    if (declaration == invocation.execution.end() ||
+        !declaration->is_object()) {
+      return;
+    }
+    const bool enabled = declaration->value("enabled", false);
+    nlohmann::json digest_body{{"api_version",
+                                "trainvm.worker-execution-phase-request/v1"},
+                               {"enabled", enabled},
+                               {"invocation_digest",
+                                invocation.invocation_digest},
+                               {"phase", name}};
+    auto* request = welcome.add_execution_phase_requests();
+    request->set_phase(phase);
+    request->set_enabled(enabled);
+    if (name == "warmup" && declaration->contains("steps")) {
+      const auto steps = declaration->at("steps").get<std::uint64_t>();
+      request->set_steps(steps);
+      digest_body["steps"] = steps;
+    }
+    request->set_request_digest("sha256:" + sha256_hex(digest_body.dump()));
+  };
+  append_phase("compile",
+               v1::WorkerExecutionPhaseRequest::PHASE_COMPILE);
+  append_phase("warmup",
+               v1::WorkerExecutionPhaseRequest::PHASE_WARMUP);
 }
 
 }  // namespace
@@ -1346,6 +1450,8 @@ void TrainVMService::configure_hostd(
   hostd_claim_provider_ = std::move(bundle.claim_provider);
   host_grant_client_ = std::move(bundle.resource_client);
   host_process_client_ = std::move(bundle.process_client);
+  hostd_status_client_ = configuration.status();
+  hostd_status_timeout_ns_ = configuration.request_timeout_ns();
   controller_target_ = std::move(controller_target);
   host_grant_saga_ = std::make_unique<HostGrantSagaReconciler>(
       journal_, *host_grant_client_);
@@ -1455,6 +1561,7 @@ void TrainVMService::reconcile_until_quiescent(const std::string& run_id) {
       case ReconcileDisposition::lease_acquired:
       case ReconcileDisposition::host_grant_acquired:
       case ReconcileDisposition::host_process_exited:
+      case ReconcileDisposition::external_profiler_artifact_published:
       case ReconcileDisposition::host_grant_released:
       case ReconcileDisposition::builtin_completed:
       // A committed qualification verdict advances the node either way, so the
@@ -1899,6 +2006,32 @@ std::optional<ReconcileDisposition> TrainVMService::reconcile_host_release(
       }
       return ReconcileDisposition::host_process_exited;
     }
+    const auto binding = journal_.launch_binding(launch_id);
+    if (!binding) {
+      throw OperationPreconditionError(
+          "release node has a process without its durable launch binding");
+    }
+    if (binding->identity.profiler) {
+      const auto window = std::filesystem::path(
+          binding->identity.profiler->raw_output_path + ".window.json");
+      std::error_code filesystem_error;
+      const bool has_window = std::filesystem::exists(window, filesystem_error);
+      if (filesystem_error) {
+        throw std::runtime_error(
+            "external profiler window identity could not be inspected");
+      }
+      if (has_window) {
+        const auto& exit = process->exited->receipt.request;
+        if (exit.wait_code != CLD_EXITED || exit.wait_status != 0) {
+          throw OperationPreconditionError(
+              "external profiler exited unsuccessfully after sealing a capture window");
+        }
+        if (reconcile_external_profiler_artifact(*projection, *plan, *process,
+                                                 *binding)) {
+          return ReconcileDisposition::external_profiler_artifact_published;
+        }
+      }
+    }
   }
 
   const std::string& concurrency_key =
@@ -1942,6 +2075,103 @@ std::optional<ReconcileDisposition> TrainVMService::reconcile_host_release(
         "host release reconciliation returned no receipt");
   }
   return ReconcileDisposition::host_grant_released;
+}
+
+bool TrainVMService::reconcile_external_profiler_artifact(
+    const RunProjection& projection, const CompiledPlan& plan,
+    const HostProcessSagaSnapshot& process,
+    const ResolvedLaunchSpec& binding) {
+  if (!binding.identity.profiler || !process.exited) {
+    throw std::invalid_argument(
+        "external profiler publication requires a terminal profiler launch");
+  }
+  const auto& profiler = *binding.identity.profiler;
+  const std::string dispatch_id = projection.run_id + ":dispatch:" +
+                                  binding.identity.node_id + ":" +
+                                  binding.identity.attempt_id;
+  const auto dispatch = journal_.dispatch(dispatch_id);
+  const auto invocation = journal_.worker_invocation(dispatch_id);
+  if (!dispatch || dispatch->status != DispatchStatus::completed ||
+      !dispatch->result_event_id || !invocation ||
+      invocation->run_id != projection.run_id ||
+      invocation->node_id != binding.identity.node_id ||
+      invocation->attempt_id != binding.identity.attempt_id) {
+    throw OperationPreconditionError(
+        "external profiler publication has no completed immutable invocation");
+  }
+  if (!profiler.capture.output_artifact) {
+    throw OperationPreconditionError(
+        "external profiler publication has no declared logical artifact");
+  }
+  const nlohmann::json* publication = nullptr;
+  for (const auto& [output_name, candidate] : invocation->publishes.items()) {
+    (void)output_name;
+    if (candidate.is_object() &&
+        candidate.value("logical_name", std::string{}) ==
+            *profiler.capture.output_artifact) {
+      if (publication != nullptr) {
+        throw OperationPreconditionError(
+            "external profiler publication authority is ambiguous");
+      }
+      publication = &candidate;
+    }
+  }
+  if (!publication || !publication->contains("declaration") ||
+      !publication->at("declaration").is_object() ||
+      publication->at("declaration").value("type", std::string{}) !=
+          "opaque" ||
+      publication->at("declaration").value("schema", std::string{}) !=
+          "trainvm.gpu-trace.v1" ||
+      publication->at("declaration").value("fingerprint", std::string{}) !=
+          "adapter") {
+    throw OperationPreconditionError(
+        "external profiler output declaration is incompatible");
+  }
+  const ExternalProfilerPublishedArtifact artifact =
+      publish_external_profiler_artifact({
+          .backend = profiler.backend,
+          .run_id = projection.run_id,
+          .node_id = binding.identity.node_id,
+          .attempt_id = binding.identity.attempt_id,
+          .authority_digest = profiler.authority.authority_digest,
+          .invocation_digest = invocation->invocation_digest,
+          .capture = profiler.capture,
+          .raw_output_prefix = profiler.raw_output_path,
+          .run_directory = plan.experiment.spec.workspace.run_directory,
+      });
+  const std::int64_t published_at_ns =
+      process.exited->receipt.observed_wall_time_ns;
+  const Event event{
+      .event_id = dispatch_id + ":artifact:" +
+                  sha256_hex(artifact.artifact_id),
+      .run_id = projection.run_id,
+      .run_revision = projection.run_revision,
+      .plan_revision = invocation->plan_revision,
+      .node_id = binding.identity.node_id,
+      .attempt_id = binding.identity.attempt_id,
+      .worker_sequence = 0U,
+      .event_type = "artifact.published",
+      .event_version = 1U,
+      .wall_time_ns = published_at_ns,
+      .monotonic_time_ns = 0,
+      .optimizer_step = std::nullopt,
+      .payload = {
+          {"artifact_id", artifact.artifact_id},
+          {"logical_name", *profiler.capture.output_artifact},
+          {"kind", "opaque"},
+          {"schema", "trainvm.gpu-trace.v1"},
+          {"uri", "file://" + artifact.manifest_path.string()},
+          {"size_bytes", artifact.size_bytes},
+          {"fingerprint_algorithm", "adapter"},
+          {"fingerprint", artifact.manifest_fingerprint},
+          {"complete", true},
+          {"producer_node_id", binding.identity.node_id},
+          {"producer_attempt_id", binding.identity.attempt_id},
+          {"parent_artifact_ids", nlohmann::json::array()},
+          {"published_at_ns", published_at_ns},
+      },
+  };
+  return journal_.publish_external_profiler_artifact(event);
 }
 
 std::optional<ReconcileDisposition> TrainVMService::reconcile_host_grant(
@@ -2045,6 +2275,14 @@ void TrainVMService::require_retained_launch_capacity(
             "retained host launch byte accounting overflowed");
       }
       bytes += launch.identity.code->source_size;
+    }
+    if (launch.identity.profiler) {
+      if (launch.identity.profiler->executable.source_size >
+          std::numeric_limits<std::uint64_t>::max() - bytes) {
+        throw HostLaunchResolutionError(
+            "retained host launch byte accounting overflowed");
+      }
+      bytes += launch.identity.profiler->executable.source_size;
     }
     return bytes;
   };
@@ -2180,7 +2418,26 @@ ResolvedLaunchSpec TrainVMService::bind_worker_launch(
     return durable;
   }
 
-  ResolvedLaunch resolved = host_launch_resolver_.resolve(launch, key);
+  std::optional<GpuTraceCapture> profiler_capture;
+  std::string profiler_output_path;
+  if (plan->experiment.spec.execution &&
+      plan->experiment.spec.execution->component == node.invoke.component &&
+      plan->experiment.spec.execution->operation == node.invoke.operation &&
+      plan->experiment.spec.execution->gpu_trace &&
+      plan->experiment.spec.execution->gpu_trace->enabled) {
+    profiler_capture = plan->experiment.spec.execution->gpu_trace;
+    if (profiler_capture->backend &&
+        *profiler_capture->backend != ProfilerBackend::torch) {
+      profiler_output_path =
+          (std::filesystem::path(plan->experiment.spec.workspace.run_directory) /
+           "trainvm_artifacts" / "gpu_traces" / ".external" /
+           sha256_hex(launch_id))
+              .string();
+    }
+  }
+  ResolvedLaunch resolved = host_launch_resolver_.resolve(
+      launch, key, std::move(profiler_capture),
+      std::move(profiler_output_path));
   require_retained_launch_capacity(resolved.spec());
   const ResolvedLaunchSpec durable = controller.bind_worker_launch(
       resolved, host_launch_registry_, authority_host_, authority_now());
@@ -2581,6 +2838,28 @@ grpc::Status TrainVMService::commit_worker_observation(
       return {grpc::StatusCode::DATA_LOSS,
               "worker run has no persisted compiled plan"};
     }
+    if (event.event_type == "metric.sampled") {
+      const std::string name =
+          event.payload.value("name", std::string{});
+      const auto& declared = plan->canonical_plan.at("spec")
+                                 .at("observability")
+                                 .at("metrics");
+      const auto match = std::ranges::find_if(
+          declared, [&](const nlohmann::json& metric) {
+            return metric.value("name", std::string{}) == name;
+          });
+      if (match == declared.end()) {
+        throw std::invalid_argument(
+            "worker metric is not present in the sealed observability declaration");
+      }
+      if (match->value("unit", std::string{}) !=
+              event.payload.value("unit", std::string{}) ||
+          match->value("step_domain", std::string{}) !=
+              event.payload.value("step_domain", std::string{})) {
+        throw std::invalid_argument(
+            "worker metric unit or step domain disagrees with the sealed observability declaration");
+      }
+    }
     const std::uint64_t latest = journal_.latest_worker_sequence(
         connection.identity.run_id, connection.identity.node_id,
         connection.identity.attempt_id);
@@ -2683,7 +2962,9 @@ grpc::Status TrainVMService::record_worker_metric(
         .event_version = 1,
         .wall_time_ns = timestamp_ns(metric.observed_at()),
         .monotonic_time_ns = 0,
-        .optimizer_step = metric.step(),
+        .optimizer_step = metric.step_domain() == "optimizer_step"
+                              ? std::optional<std::uint64_t>{metric.step()}
+                              : std::nullopt,
         .payload = {{"name", metric.name()},
                     {"value", assignment_value(metric.value())},
                     {"unit", metric.unit()},
@@ -2788,6 +3069,140 @@ grpc::Status TrainVMService::record_worker_artifact(
                     {"producer_attempt_id", artifact.producer_attempt_id()},
                     {"parent_artifact_ids", std::move(parent_ids)},
                     {"published_at_ns", published_at_ns}},
+    };
+    return commit_worker_observation(event, connection, acknowledged);
+  } catch (const std::exception& exception) {
+    return worker_failure(exception);
+  }
+}
+
+grpc::Status TrainVMService::record_worker_execution_phase_receipt(
+    const v1::WorkerExecutionPhaseReceipt& receipt,
+    const WorkerConnection& connection, std::uint64_t& acknowledged) {
+  if (receipt.ByteSizeLong() > kMaximumWorkerMessageBytes) {
+    return {grpc::StatusCode::RESOURCE_EXHAUSTED,
+            "worker execution-phase receipt exceeds 64 KiB"};
+  }
+  try {
+    const auto valid_digest = [](std::string_view value) {
+      return value.size() == 71U && value.starts_with("sha256:") &&
+             std::ranges::all_of(value.substr(7U), [](char character) {
+               return (character >= '0' && character <= '9') ||
+                      (character >= 'a' && character <= 'f');
+             });
+    };
+    if (receipt.worker_sequence() == 0U ||
+        !valid_digest(receipt.request_digest()) ||
+        !valid_digest(receipt.state_fingerprint_before()) ||
+        !valid_digest(receipt.state_fingerprint_after()) ||
+        receipt.concurrency_key() != connection.identity.concurrency_key ||
+        receipt.lease_id() != connection.identity.lease_id ||
+        receipt.fencing_token() != connection.identity.fencing_token ||
+        !receipt.has_started_at() || !receipt.has_completed_at()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "execution-phase receipt has invalid content or fenced identity"};
+    }
+
+    std::string phase_name;
+    switch (receipt.phase()) {
+      case v1::WorkerExecutionPhaseRequest::PHASE_COMPILE:
+        phase_name = "compile";
+        break;
+      case v1::WorkerExecutionPhaseRequest::PHASE_WARMUP:
+        phase_name = "warmup";
+        break;
+      case v1::WorkerExecutionPhaseRequest::PHASE_UNSPECIFIED:
+      default:
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "execution-phase receipt phase is invalid"};
+    }
+    const v1::WorkerExecutionPhaseRequest* request = nullptr;
+    for (const auto& candidate :
+         connection.welcome.execution_phase_requests()) {
+      if (candidate.phase() != receipt.phase()) continue;
+      if (request != nullptr) {
+        return {grpc::StatusCode::DATA_LOSS,
+                "worker invocation has duplicate execution-phase requests"};
+      }
+      request = &candidate;
+    }
+    if (request == nullptr ||
+        request->request_digest() != receipt.request_digest()) {
+      return {grpc::StatusCode::PERMISSION_DENIED,
+              "execution-phase receipt is not authorized by its immutable request"};
+    }
+
+    std::string disposition;
+    switch (receipt.disposition()) {
+      case v1::WorkerExecutionPhaseReceipt::DISPOSITION_COMPLETED:
+        disposition = "completed";
+        break;
+      case v1::WorkerExecutionPhaseReceipt::DISPOSITION_SKIPPED:
+        disposition = "skipped";
+        break;
+      case v1::WorkerExecutionPhaseReceipt::DISPOSITION_FAILED:
+        disposition = "failed";
+        break;
+      case v1::WorkerExecutionPhaseReceipt::DISPOSITION_UNSPECIFIED:
+      default:
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "execution-phase receipt disposition is invalid"};
+    }
+    const nlohmann::json diagnostics = acknowledgement_diagnostics(receipt);
+    const bool completed = disposition == "completed";
+    const bool skipped = disposition == "skipped";
+    const bool failed = disposition == "failed";
+    if ((request->enabled() && skipped) ||
+        (!request->enabled() && !skipped) ||
+        (failed && diagnostics.empty()) ||
+        ((completed || skipped) &&
+         receipt.state_fingerprint_before() !=
+             receipt.state_fingerprint_after())) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "execution-phase disposition or restored-state proof is inconsistent"};
+    }
+    const std::uint64_t requested_steps =
+        request->has_steps() ? request->steps() : 0U;
+    if ((skipped && receipt.steps_executed() != 0U) ||
+        (completed && receipt.steps_executed() != requested_steps) ||
+        (failed && receipt.steps_executed() > requested_steps)) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "execution-phase receipt step count disagrees with its request"};
+    }
+    const std::int64_t started_at_ns = timestamp_ns(receipt.started_at());
+    const std::int64_t completed_at_ns = timestamp_ns(receipt.completed_at());
+    if (completed_at_ns < started_at_ns) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "execution-phase receipt timestamps are reversed"};
+    }
+
+    const Event event{
+        .event_id = connection.dispatch.dispatch_id + ":phase:" + phase_name +
+                    ":" + std::to_string(receipt.worker_sequence()),
+        .run_id = connection.identity.run_id,
+        .run_revision = connection.dispatch.run_revision,
+        .plan_revision = connection.dispatch.plan_revision,
+        .node_id = connection.identity.node_id,
+        .attempt_id = connection.identity.attempt_id,
+        .worker_sequence = receipt.worker_sequence(),
+        .event_type = "worker.execution_phase_receipted",
+        .event_version = 1,
+        .wall_time_ns = completed_at_ns,
+        .monotonic_time_ns = 0,
+        .optimizer_step = std::nullopt,
+        .payload = {{"phase", phase_name},
+                    {"enabled", request->enabled()},
+                    {"requested_steps", requested_steps},
+                    {"request_digest", receipt.request_digest()},
+                    {"disposition", disposition},
+                    {"steps_executed", receipt.steps_executed()},
+                    {"state_fingerprint_before",
+                     receipt.state_fingerprint_before()},
+                    {"state_fingerprint_after",
+                     receipt.state_fingerprint_after()},
+                    {"started_at_ns", started_at_ns},
+                    {"completed_at_ns", completed_at_ns},
+                    {"diagnostics", diagnostics}},
     };
     return commit_worker_observation(event, connection, acknowledged);
   } catch (const std::exception& exception) {
@@ -3240,6 +3655,9 @@ grpc::Status TrainVMService::Connect(
     } else if (message.has_lifecycle_ack()) {
       status = acknowledge_worker_lifecycle(message.lifecycle_ack(), connection,
                                             acknowledged);
+    } else if (message.has_phase_receipt()) {
+      status = record_worker_execution_phase_receipt(
+          message.phase_receipt(), connection, acknowledged);
     } else {
       return finish({grpc::StatusCode::INVALID_ARGUMENT,
                      message.has_hello()
@@ -3961,7 +4379,19 @@ grpc::Status TrainVMService::WatchEvents(
   if (context == nullptr || request == nullptr || writer == nullptr ||
       request->ByteSizeLong() > kMaximumCommandBytes ||
       request->run_ids_size() > 64 || request->event_types_size() > 64 ||
-      request->replay_limit() > kMaximumReplayEvents) {
+      request->replay_limit() > kMaximumReplayEvents ||
+      ((request->through_journal_sequence() != 0U || request->newest_first()) &&
+       request->replay_limit() == 0U) ||
+      (request->through_journal_sequence() != 0U &&
+       request->after_journal_sequence() >=
+           request->through_journal_sequence()) ||
+      (request->newest_first() &&
+       request->through_journal_sequence() == 0U) ||
+      (request->newest_per_metric_series() &&
+       (request->newest_first() || request->replay_limit() == 0U ||
+        request->through_journal_sequence() == 0U ||
+        request->run_ids_size() != 1 || request->event_types_size() != 1 ||
+        request->event_types(0) != "metric.sampled"))) {
     return {grpc::StatusCode::INVALID_ARGUMENT,
             "watch-events request exceeds its bounds"};
   }
@@ -3977,6 +4407,7 @@ grpc::Status TrainVMService::WatchEvents(
               "watch-events filters must be unique"};
     }
     std::uint64_t cursor = request->after_journal_sequence();
+    std::uint64_t through = request->through_journal_sequence();
     std::size_t replayed = 0U;
     while (!cancelled(context)) {
       const std::size_t query_limit =
@@ -3991,9 +4422,13 @@ grpc::Status TrainVMService::WatchEvents(
         std::scoped_lock lock(command_mutex_);
         events = journal_.sequenced_events({
             .after_journal_sequence = cursor,
+            .through_journal_sequence = through,
             .run_ids = run_ids,
             .event_types = event_types,
             .limit = query_limit,
+            .newest_first = request->newest_first(),
+            .newest_per_metric_series =
+                request->newest_per_metric_series(),
         });
       }
       for (const SequencedEvent& event : events) {
@@ -4002,8 +4437,15 @@ grpc::Status TrainVMService::WatchEvents(
           return {grpc::StatusCode::CANCELLED,
                   "event stream closed by its reader"};
         }
-        cursor = event.journal_sequence;
+        if (request->newest_first()) {
+          through = event.journal_sequence - 1U;
+        } else {
+          cursor = event.journal_sequence;
+        }
         ++replayed;
+      }
+      if (request->newest_first() && through <= cursor) {
+        return grpc::Status::OK;
       }
       if (request->replay_limit() != 0U &&
           (replayed == static_cast<std::size_t>(request->replay_limit()) ||
@@ -4147,6 +4589,178 @@ grpc::Status TrainVMService::GetDescriptor(
       response->set_schema_hash(training_components_.registry_digest());
     }
     return grpc::Status::OK;
+  } catch (const std::exception& exception) {
+    return {grpc::StatusCode::DATA_LOSS, exception.what()};
+  }
+}
+
+grpc::Status TrainVMService::GetHostAuthorityStatus(
+    grpc::ServerContext* context,
+    const v1::GetHostAuthorityStatusRequest* request,
+    v1::GetHostAuthorityStatusResponse* response) {
+  if (request == nullptr || response == nullptr ||
+      request->ByteSizeLong() > 64U) {
+    return {grpc::StatusCode::INVALID_ARGUMENT,
+            "host authority status requires an empty bounded request"};
+  }
+  if (cancelled(context)) return cancellation_status();
+  if (!hostd_status_client_ || hostd_status_timeout_ns_ <= 0) {
+    return {grpc::StatusCode::FAILED_PRECONDITION,
+            "TrainVM has no configured hostd authority status source"};
+  }
+  try {
+    const std::int64_t now = hostd_monotonic_now_ns();
+    if (hostd_status_timeout_ns_ >
+        std::numeric_limits<std::int64_t>::max() - now) {
+      return {grpc::StatusCode::INTERNAL,
+              "hostd status deadline exceeds the authority clock range"};
+    }
+    std::uint64_t correlation =
+        hostd_status_correlation_.fetch_add(1U, std::memory_order_relaxed);
+    if (correlation == 0U) {
+      correlation =
+          hostd_status_correlation_.fetch_add(1U, std::memory_order_relaxed);
+    }
+    const HostdStatusReply reply = hostd_request_status(
+        *hostd_status_client_, correlation, now + hostd_status_timeout_ns_);
+    if (cancelled(context)) return cancellation_status();
+    if (reply.kind == HostdStatusReplyKind::error) {
+      const std::string detail = reply.error
+                                     ? reply.error->code + ": " +
+                                           reply.error->message
+                                     : "hostd returned an incomplete typed error";
+      return {grpc::StatusCode::UNAVAILABLE, detail};
+    }
+    if (!reply.status || !reply.authority_status) {
+      return {grpc::StatusCode::DATA_LOSS,
+              "hostd omitted its typed authority snapshot"};
+    }
+    const HostdCoordinatorStatus& coordinator = *reply.status;
+    const HostdAuthorityStatus& authority = *reply.authority_status;
+    response->set_api_version(authority.api_version);
+    auto* wire_coordinator = response->mutable_coordinator();
+    wire_coordinator->set_api_version(coordinator.api_version);
+    wire_coordinator->set_lifecycle(
+        wire_hostd_lifecycle(coordinator.lifecycle));
+    wire_coordinator->set_host_id(coordinator.host_id);
+    wire_coordinator->set_boot_id(coordinator.boot_id);
+    wire_coordinator->set_broker_epoch(coordinator.broker_epoch);
+    wire_coordinator->set_inventory_digest(coordinator.inventory_digest);
+    wire_coordinator->set_live_sessions(coordinator.live_sessions);
+    wire_coordinator->set_admission_sessions(coordinator.admission_sessions);
+    wire_coordinator->set_stale_admission_sessions(
+        coordinator.stale_admission_sessions);
+    wire_coordinator->set_release_only_sessions(
+        coordinator.release_only_sessions);
+    wire_coordinator->set_admission_counts_are_cached_evidence(
+        coordinator.admission_counts_are_cached_evidence);
+    if (coordinator.startup_audit) {
+      wire_coordinator->set_startup_audit_receipt_digest(
+          coordinator.startup_audit->receipt_digest);
+      wire_coordinator->set_startup_audit_passed(
+          coordinator.startup_audit->disposition ==
+          HostStartupAuditDisposition::passed);
+    }
+    wire_coordinator->set_poison_reason(coordinator.poison_reason);
+
+    response->set_startup_phase(
+        wire_hostd_startup_phase(authority.startup_phase));
+    response->set_startup_recovery_steps(authority.startup_recovery_steps);
+    response->set_remaining_unclosed_process_records(
+        authority.remaining_unclosed_process_records);
+    response->set_remaining_terminal_release_records(
+        authority.remaining_terminal_release_records);
+    response->set_ledger_verified(authority.ledger_verified);
+    response->set_ledger_verification_reason(
+        authority.ledger_verification_reason);
+    response->set_ledger_sequence(
+        authority.ledger_chain_head.ledger_sequence);
+    response->set_ledger_chain_hash(authority.ledger_chain_head.chain_hash);
+    response->set_ledger_record_count(authority.ledger_record_count);
+    response->set_occupancy_ledger_sequence(
+        authority.occupancy_ledger_sequence);
+    response->set_occupancy_digest(authority.occupancy_digest);
+    response->set_active_fence_count(authority.active_fence_count);
+    response->set_active_fences_truncated(
+        authority.active_fences_truncated);
+    for (const ResourceFence& fence : authority.active_fences) {
+      auto* output = response->add_active_fences();
+      output->set_kind(wire_host_resource_kind(fence.resource.kind));
+      output->set_vendor(
+          wire_host_accelerator_vendor(fence.resource.vendor));
+      output->set_stable_id(fence.resource.stable_id);
+      output->set_parent_id(fence.resource.parent_id.value_or(""));
+      output->set_generation(fence.generation);
+      output->set_inventory_digest(fence.inventory_digest);
+      output->set_topology_digest(fence.topology_digest);
+    }
+    response->set_active_process_count(authority.active_process_count);
+    response->set_active_processes_truncated(
+        authority.active_processes_truncated);
+    for (const HostdProcessAuthorityStatus& process :
+         authority.active_processes) {
+      auto* output = response->add_active_processes();
+      output->set_allocation_id(process.allocation_id);
+      output->set_journal_id(process.journal_id);
+      output->set_run_id(process.run_id);
+      output->set_logical_lease_id(process.logical_lease_id);
+      output->set_logical_fencing_token(process.logical_fencing_token);
+      output->set_launch_id(process.launch_id);
+      output->set_phase(wire_hostd_process_phase(process.phase));
+      output->set_cgroup_path(process.cgroup_path);
+      if (process.host_pid) output->set_host_pid(*process.host_pid);
+      if (process.process_starttime_ticks) {
+        output->set_process_starttime_ticks(
+            *process.process_starttime_ticks);
+      }
+      output->set_device_policy_intended(process.device_policy_intended);
+      output->set_device_policy_installed(process.device_policy_installed);
+      output->set_device_policy_digest(process.device_policy_digest);
+      output->set_device_policy_installation_digest(
+          process.device_policy_installation_digest);
+      output->set_process_policy_intended(process.process_policy_intended);
+      output->set_process_policy_installed(process.process_policy_installed);
+      output->set_process_policy_digest(process.process_policy_digest);
+      output->set_process_policy_installation_digest(
+          process.process_policy_installation_digest);
+      if (process.cgroup_empty)
+        output->set_cgroup_empty(*process.cgroup_empty);
+      if (process.accelerator_contexts_empty) {
+        output->set_accelerator_contexts_empty(
+            *process.accelerator_contexts_empty);
+      }
+      output->set_context_audit_digest(process.context_audit_digest);
+      output->set_terminal_receipt_digest(process.terminal_receipt_digest);
+    }
+    response->set_process_launch_enabled(authority.process_launch_enabled);
+    response->set_mutation_enabled(authority.mutation_enabled);
+    response->set_mutation_disabled_reason(
+        authority.mutation_disabled_reason);
+    const LeaseRenewalCoordinatorSnapshot renewal =
+        lease_renewals_.snapshot();
+    response->set_lease_renewal_tracked_count(renewal.tracked_count);
+    response->set_lease_renewal_poisoned(renewal.poisoned);
+    const std::optional<std::string> renewal_failure =
+        reconciliation_failure("__lease_renewal__");
+    response->set_lease_renewal_failure(
+        renewal.poison_reason.empty()
+            ? renewal_failure.value_or("")
+            : renewal.poison_reason);
+    response->set_resource_inventory_observed(
+        authority.resource_inventory_observed);
+    response->set_resource_inventory_observation_age_ns(
+        authority.resource_inventory_observation_age_ns);
+    response->set_current_inventory_digest(
+        authority.current_inventory_digest);
+    response->set_current_inventory_receipt_digest(
+        authority.current_inventory_receipt_digest);
+    response->set_degraded_resource_count(
+        authority.degraded_resource_count);
+    response->set_resource_degradation_reason(
+        authority.resource_degradation_reason);
+    return grpc::Status::OK;
+  } catch (const HostdTransportError& exception) {
+    return {grpc::StatusCode::UNAVAILABLE, exception.what()};
   } catch (const std::exception& exception) {
     return {grpc::StatusCode::DATA_LOSS, exception.what()};
   }

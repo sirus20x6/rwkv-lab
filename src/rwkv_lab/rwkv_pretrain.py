@@ -16,9 +16,11 @@ value and later layers lerp toward it, threaded through the stack. Logs to a tra
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import os
+import random
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -38,6 +40,7 @@ from rwkv_lab.optimizer_speedups import (
     tie_embedding_head,
 )
 from rwkv_lab.rwkv8_deltanet import RWKV8ChannelMixDeltaNet, RWKV8TimeMixDeltaNet
+from rwkv_lab.trainvm_worker import ExecutionPhase, torch_trajectory_state
 from rwkv_lab.training_components import (
     AdamWConfiguration,
     ContextLengthCurriculumConfiguration,
@@ -45,8 +48,8 @@ from rwkv_lab.training_components import (
     OptimizerImplementation,
     PowerCoolConfiguration,
     ScheduleImplementation,
-    build_registered_optimizer,
     build_registered_curriculum,
+    build_registered_optimizer,
     powercool_multiplier,
 )
 
@@ -55,6 +58,7 @@ if TYPE_CHECKING:
     from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
     from rwkv_lab.trainvm_worker import (
         WorkerControlRuntime,
+        WorkerExecutionPhases,
         WorkerObservability,
         WorkerStepProfiler,
     )
@@ -838,6 +842,7 @@ def main(
     worker_step_profiler: WorkerStepProfiler | None = None,
     worker_observability: WorkerObservability | None = None,
     worker_controls: WorkerControlRuntime | None = None,
+    worker_execution_phases: WorkerExecutionPhases | None = None,
 ):
     enable_fast_matmul()
     ap = argparse.ArgumentParser()
@@ -1721,12 +1726,24 @@ def main(
     # Compiled handle for the TRAIN forward only: eager `model` still owns state_dict/params, so
     # checkpoints stay uncompiled (no `_orig_mod.` prefix) and the eval path (below) never toggles
     # the compiled graph's train/eval mode (which would force costly recompiles).
-    fwd = (
-        torch.compile(model, dynamic=False, fullgraph=args.compile_fullgraph)
-        if args.compile else model
+    compile_request = (
+        worker_execution_phases.request(ExecutionPhase.COMPILE)
+        if worker_execution_phases is not None
+        else None
     )
-    if args.compile:
-        print("torch.compile: enabled (step 0 compiles; forward only, checkpoints uncompiled)", flush=True)
+    compile_enabled = (
+        compile_request.enabled if compile_request is not None else args.compile
+    )
+    fwd = model
+    if compile_enabled and worker_execution_phases is None:
+        fwd = torch.compile(
+            model, dynamic=False, fullgraph=args.compile_fullgraph
+        )
+        print(
+            "torch.compile: enabled (step 0 compiles; forward only, "
+            "checkpoints uncompiled)",
+            flush=True,
+        )
     # Training-batch sampler. Hold the corpus on GPU (int32) when it fits, so each step's window
     # sampling is a pure GPU gather — no per-step CPU gather, no H2D. This lets tiny models run
     # data-unbound at very high step rates (the memmap CPU path serializes the GPU behind Python).
@@ -1830,42 +1847,103 @@ def main(
             return (ids.to(dev, non_blocking=True),
                     RecallResult(*(v.to(dev, non_blocking=True) for v in rr)))
         print("engram recall: CPU-prefetched one step ahead (pinned async H2D)", flush=True)
-    if args.compile and args.compile_prewarm and lmb is None:
-        shapes = {
+    prewarm_shapes = sorted(
+        {
             (
                 stage.seq_len,
                 max(1, round(T * args.batch / stage.seq_len)),
             )
             for stage in context_stages
-        } if context_stages else {(T, args.batch)}
+        }
+        if context_stages
+        else {(T, args.batch)}
+    )
+
+    def disposable_steps(
+        count: int,
+        mark_step,
+        *,
+        mark_each: bool,
+    ) -> None:
         cpu_rng = torch.get_rng_state()
         cuda_rng = (
-            torch.cuda.get_rng_state(dev) if torch.cuda.is_available() else None
+            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
         )
+        python_rng = random.getstate()
+        numpy_rng = copy.deepcopy(rng.bit_generator.state)
         model.train()
-        print(f"compile prewarm: {sorted(shapes)}", flush=True)
-        for warm_seq, warm_batch in sorted(shapes):
-            opt.zero_grad(set_to_none=True)
-            warm_ids = torch.zeros(
-                warm_batch, warm_seq, dtype=torch.long, device=dev
-            )
-            warm_hidden = fwd(warm_ids, hidden_only=True)
-            if training_objective is not None:
-                warm_loss = training_objective(
-                    warm_hidden, model.head, warm_ids
+        try:
+            for index in range(count):
+                warm_seq, warm_batch = prewarm_shapes[index % len(prewarm_shapes)]
+                opt.zero_grad(set_to_none=True)
+                warm_ids = torch.zeros(
+                    warm_batch, warm_seq, dtype=torch.long, device=dev
                 )
-            else:
-                from rwkv_lab.fused_ce import lmhead_cross_entropy
+                warm_hidden = fwd(warm_ids, hidden_only=True)
+                if training_objective is not None:
+                    warm_loss = training_objective(
+                        warm_hidden, model.head, warm_ids
+                    )
+                else:
+                    from rwkv_lab.fused_ce import lmhead_cross_entropy
 
-                warm_loss = lmhead_cross_entropy(
-                    warm_hidden, model.head, warm_ids, fused=True
-                )
-            warm_loss.backward()
-        opt.zero_grad(set_to_none=True)
-        torch.set_rng_state(cpu_rng)
-        if cuda_rng is not None:
-            torch.cuda.set_rng_state(cuda_rng, device=dev)
-        print("compile prewarm: complete; parameters and optimizer were not stepped", flush=True)
+                    warm_loss = lmhead_cross_entropy(
+                        warm_hidden, model.head, warm_ids, fused=True
+                    )
+                warm_loss.backward()
+                if mark_each:
+                    mark_step()
+        finally:
+            opt.zero_grad(set_to_none=True)
+            torch.set_rng_state(cpu_rng)
+            if cuda_rng is not None:
+                torch.cuda.set_rng_state_all(cuda_rng)
+            random.setstate(python_rng)
+            rng.bit_generator.state = numpy_rng
+
+    if worker_execution_phases is not None:
+        if heads is not None or ema is not None or tail_ema is not None or lmb is not None:
+            raise ValueError(
+                "receipted scratch-RWKV phases require the closed baseline topology"
+            )
+
+        def phase_state():
+            return torch_trajectory_state(
+                model,
+                opt,
+                optimizer_step=step,
+                numpy_rng=rng,
+                extra={"data_cursor": step, "prewarm_shapes": prewarm_shapes},
+            )
+
+        def compile_phase(_steps, _mark_step):
+            nonlocal fwd
+            fwd = torch.compile(
+                model, dynamic=False, fullgraph=args.compile_fullgraph
+            )
+            # torch.compile is lazy.  One disposable forward/backward makes
+            # this a real cold-compile phase instead of a wrapper receipt.
+            disposable_steps(1, _mark_step, mark_each=False)
+
+        worker_execution_phases.run(
+            ExecutionPhase.COMPILE,
+            snapshot=phase_state,
+            execute=compile_phase,
+        )
+        worker_execution_phases.run(
+            ExecutionPhase.WARMUP,
+            snapshot=phase_state,
+            execute=lambda count, mark_step: disposable_steps(
+                count, mark_step, mark_each=True
+            ),
+        )
+    elif args.compile and args.compile_prewarm and lmb is None:
+        print(f"compile prewarm: {prewarm_shapes}", flush=True)
+        disposable_steps(len(prewarm_shapes), lambda: None, mark_each=False)
+        print(
+            "compile prewarm: complete; parameters and optimizer were not stepped",
+            flush=True,
+        )
 
     model.train(); t0 = time.time(); seen = 0; last_context_shape = None
     print(f"budget={'%.1f min' % args.minutes if not args.steps else str(args.steps)+' steps'}", flush=True)
@@ -2060,11 +2138,11 @@ def main(
             emit({"kind": "train", "step": step, "loss": float(loss.detach()),
                   "gnorm": float(gn.detach()),
                   "lr": lr, "tok_per_sec": int(seen / max(time.time() - t0, 1e-6))})
-            publish_metric("training_loss", float(loss.detach()), metric_step=step)
+            publish_metric("train.loss", float(loss.detach()), metric_step=step)
             publish_metric("gradient_norm", float(gn.detach()), metric_step=step)
             publish_metric("learning_rate", lr, metric_step=step)
             publish_metric(
-                "tokens_per_second",
+                "train.tokens_per_second",
                 int(seen / max(time.time() - t0, 1e-6)),
                 metric_step=step,
             )

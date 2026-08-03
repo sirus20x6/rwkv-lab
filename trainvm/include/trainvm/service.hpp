@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <atomic>
 #include <condition_variable>
 #include <filesystem>
 #include <functional>
@@ -111,6 +112,11 @@ class TrainVMService final : public v1::TrainVM::Service,
       const v1::DescriptorRequest* request,
       v1::DescriptorResponse* response) override;
 
+  grpc::Status GetHostAuthorityStatus(
+      grpc::ServerContext* context,
+      const v1::GetHostAuthorityStatusRequest* request,
+      v1::GetHostAuthorityStatusResponse* response) override;
+
   grpc::Status Connect(
       grpc::ServerContext* context,
       grpc::ServerReaderWriter<v1::ControllerToWorker,
@@ -143,6 +149,9 @@ class TrainVMService final : public v1::TrainVM::Service,
       std::uint64_t& acknowledged);
   grpc::Status record_worker_artifact(
       const v1::ArtifactManifest& artifact,
+      const WorkerConnection& connection, std::uint64_t& acknowledged);
+  grpc::Status record_worker_execution_phase_receipt(
+      const v1::WorkerExecutionPhaseReceipt& receipt,
       const WorkerConnection& connection, std::uint64_t& acknowledged);
   grpc::Status acknowledge_worker_control(
       const v1::ControlPatchAcknowledgement& acknowledgement,
@@ -178,6 +187,10 @@ class TrainVMService final : public v1::TrainVM::Service,
       const std::string& run_id);
   [[nodiscard]] std::optional<ReconcileDisposition> reconcile_host_release(
       const std::string& run_id);
+  [[nodiscard]] bool reconcile_external_profiler_artifact(
+      const RunProjection& projection, const CompiledPlan& plan,
+      const HostProcessSagaSnapshot& process,
+      const ResolvedLaunchSpec& binding);
   [[nodiscard]] std::optional<ReconcileDisposition> reconcile_cancellation(
       const std::string& run_id);
   [[nodiscard]] std::optional<ReconcileDisposition>
@@ -224,6 +237,9 @@ class TrainVMService final : public v1::TrainVM::Service,
   std::shared_ptr<IHostGrantClient> host_grant_client_;
   std::unique_ptr<HostGrantSagaReconciler> host_grant_saga_;
   std::shared_ptr<IHostProcessClient> host_process_client_;
+  std::optional<HostdStatusClientConfig> hostd_status_client_;
+  std::int64_t hostd_status_timeout_ns_{};
+  std::atomic<std::uint64_t> hostd_status_correlation_{1U};
   std::string controller_target_;
   std::unique_ptr<HostProcessSagaReconciler> host_process_saga_;
   Reconciler reconciler_;

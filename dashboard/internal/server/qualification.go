@@ -1,8 +1,7 @@
 package server
 
-// Production qualification panel. Hardware paths remain fail-closed in Python;
-// this UI only launches the allowlisted qualification command and renders its
-// persisted evidence. It never changes backend adoption or promotes a model.
+// Production qualification receipt panel. Qualification execution is no longer
+// owned by the dashboard; this file only discovers and renders persisted evidence.
 
 import (
 	"encoding/json"
@@ -12,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -87,17 +85,8 @@ func metricFloat(values map[string]any, key string) (float64, bool) {
 func (s *Server) handleQualification(w http.ResponseWriter, r *http.Request) {
 	sse := datastar.NewSSE(w, r)
 	var b strings.Builder
-	b.WriteString(`<div id="qualification-body" class="qualification-body"><div class="qual-build"><div class="exp-h">new qualification</div><table class="field-tbl">`)
-	b.WriteString(`<tr><td class="f-l">device</td><td><input data-bind="qualDevice" value="cuda"></td><td class="f-d">auto, cpu, cuda, or cuda:N</td></tr>`)
-	b.WriteString(`<tr><td class="f-l">checkpoint</td><td><input data-bind="qualCheckpoint" placeholder="optional runs/name/ckpt.pt"></td><td class="f-d">enables recurrent serving qualification</td></tr>`)
-	b.WriteString(`<tr><td class="f-l">prompt ids</td><td><input data-bind="qualPrompt" value="1,2,3,4"></td><td class="f-d">integer recurrent-decoding prompt</td></tr>`)
-	b.WriteString(`<tr><td class="f-l">megakernel tuning</td><td><select data-bind="qualMegakernelMode"><option value="max-autotune-no-cudagraphs">max autotune</option><option value="default">fast compile</option></select></td><td class="f-d">Inductor plan search; the outer CUDA Graph is always captured</td></tr>`)
-	b.WriteString(`<tr><td class="f-l">AOT artifact</td><td><input data-bind="qualMegakernelArtifact" value="runs/qualification/rwkv-megakernel.pt2"></td><td class="f-d">checkpoint-bound compiled plan; written only after adoption</td></tr>`)
-	b.WriteString(`<tr><td class="f-l">repeats / max new</td><td><input type="number" min="1" max="20" data-bind="qualRepeats" value="5"><input type="number" min="1" max="2048" data-bind="qualMaxNew" value="32"></td><td class="f-d">median timing samples · serving token budget</td></tr>`)
-	b.WriteString(`<tr><td class="f-l">baseline</td><td><input data-bind="qualBaseline" placeholder="optional prior receipt JSON"></td><td class="f-d">fails on lost adoption or performance regression</td></tr>`)
-	b.WriteString(`<tr><td class="f-l">regression limits</td><td><input data-bind="qualThroughput" value="0.05" title="throughput"><input data-bind="qualMemory" value="0.10" title="memory"><input data-bind="qualKernels" value="0.10" title="kernel count"></td><td class="f-d">fractional throughput · memory · launch limits</td></tr>`)
-	b.WriteString(`<tr><td class="f-l">output</td><td><input data-bind="qualOutput" value="runs/qualification/kernel-qualification.json"></td><td class="f-d">persisted receipt under runs/</td></tr>`)
-	b.WriteString(`</table><button class="btn" data-on:click="confirm('Run production kernel qualification?') && @post('/api/qualification/run')">▶ qualify backends</button></div>`)
+	b.WriteString(`<div id="qualification-body" class="qualification-body"><div class="qual-build"><div class="exp-h">qualification execution retired</div>`)
+	b.WriteString(`<div class="empty">This board is read-only. No descriptor-backed qualification operation is available yet; run qualification outside the dashboard and inspect its persisted receipt here.</div></div>`)
 	b.WriteString(`<div class="qual-results"><div class="exp-h">qualification receipts <button class="btn sm" data-on:click="@get('/api/qualification')">refresh</button></div>`)
 	receipts := s.qualificationReceipts()
 	if len(receipts) == 0 {
@@ -195,120 +184,6 @@ func (s *Server) handleQualification(w http.ResponseWriter, r *http.Request) {
 	_ = sse.PatchElements(b.String())
 }
 
-func (s *Server) handleRunQualification(w http.ResponseWriter, r *http.Request) {
-	var signals struct {
-		Device     string `json:"qualDevice"`
-		Checkpoint string `json:"qualCheckpoint"`
-		Prompt     string `json:"qualPrompt"`
-		MegaMode   string `json:"qualMegakernelMode"`
-		MegaAOT    string `json:"qualMegakernelArtifact"`
-		Repeats    string `json:"qualRepeats"`
-		MaxNew     string `json:"qualMaxNew"`
-		Baseline   string `json:"qualBaseline"`
-		Throughput string `json:"qualThroughput"`
-		Memory     string `json:"qualMemory"`
-		Kernels    string `json:"qualKernels"`
-		Output     string `json:"qualOutput"`
-	}
-	_ = datastar.ReadSignals(r, &signals)
-	sse := datastar.NewSSE(w, r)
-	device := strings.TrimSpace(signals.Device)
-	if device != "auto" && device != "cpu" && device != "cuda" && !strings.HasPrefix(device, "cuda:") {
-		toastErr(sse, "qualification device must be auto, cpu, cuda, or cuda:N")
-		return
-	}
-	if strings.HasPrefix(device, "cuda:") {
-		if index, parseErr := strconv.Atoi(strings.TrimPrefix(device, "cuda:")); parseErr != nil || index < 0 {
-			toastErr(sse, "qualification CUDA device index invalid")
-			return
-		}
-	}
-	megaMode := strings.TrimSpace(signals.MegaMode)
-	if megaMode == "" {
-		megaMode = "max-autotune-no-cudagraphs"
-	}
-	if megaMode != "default" && megaMode != "max-autotune-no-cudagraphs" {
-		toastErr(sse, "megakernel tuning mode invalid")
-		return
-	}
-	for _, token := range strings.Split(strings.TrimSpace(signals.Prompt), ",") {
-		if _, parseErr := strconv.Atoi(strings.TrimSpace(token)); parseErr != nil {
-			toastErr(sse, "qualification prompt IDs must be comma-separated integers")
-			return
-		}
-	}
-	repeats, err := boundedInt(signals.Repeats, 5, 1, 20)
-	if err != nil {
-		toastErr(sse, "qualification repeats invalid")
-		return
-	}
-	maxNew, err := boundedInt(signals.MaxNew, 32, 1, 2048)
-	if err != nil {
-		toastErr(sse, "qualification max-new invalid")
-		return
-	}
-	output, err := s.pathUnderRepo(strings.TrimSpace(signals.Output), false)
-	if err != nil || output == "" || !strings.HasSuffix(strings.ToLower(output), ".json") {
-		toastErr(sse, "qualification output path invalid")
-		return
-	}
-	rel, _ := filepath.Rel(s.cfg.RunsDir, output)
-	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		toastErr(sse, "qualification output must be under runs/")
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
-		toastErr(sse, "cannot create qualification output directory")
-		return
-	}
-	args := []string{"-m", "rwkv_lab.production_kernels", "--device", device,
-		"--repeats", repeats, "--prompt-ids", strings.TrimSpace(signals.Prompt),
-		"--max-new", maxNew, "--megakernel-compile-mode", megaMode, "--output", output}
-	if strings.TrimSpace(signals.MegaAOT) != "" {
-		artifact, pathErr := s.pathUnderRepo(signals.MegaAOT, false)
-		if pathErr != nil || !strings.HasSuffix(strings.ToLower(artifact), ".pt2") {
-			toastErr(sse, "megakernel artifact must be a repository-confined .pt2 path")
-			return
-		}
-		artifactRel, _ := filepath.Rel(s.cfg.RunsDir, artifact)
-		if artifactRel == "." || artifactRel == ".." || strings.HasPrefix(artifactRel, ".."+string(filepath.Separator)) {
-			toastErr(sse, "megakernel artifact must be under runs/")
-			return
-		}
-		args = append(args, "--megakernel-artifact", artifact)
-	}
-	if strings.TrimSpace(signals.Checkpoint) != "" {
-		checkpoint, pathErr := s.pathUnderRepo(signals.Checkpoint, true)
-		if pathErr != nil {
-			toastErr(sse, "qualification checkpoint invalid")
-			return
-		}
-		args = append(args, "--checkpoint", checkpoint)
-	}
-	if strings.TrimSpace(signals.Baseline) != "" {
-		baseline, pathErr := s.pathUnderRepo(signals.Baseline, true)
-		if pathErr != nil || !strings.HasSuffix(strings.ToLower(baseline), ".json") {
-			toastErr(sse, "qualification baseline invalid")
-			return
-		}
-		args = append(args, "--baseline", baseline)
-	}
-	for _, limit := range []struct{ flag, value string }{
-		{"--max-throughput-regression", signals.Throughput},
-		{"--max-memory-regression", signals.Memory},
-		{"--max-kernel-regression", signals.Kernels},
-	} {
-		parsed, parseErr := strconv.ParseFloat(strings.TrimSpace(limit.value), 64)
-		if parseErr != nil || parsed < 0 || parsed > 1 {
-			toastErr(sse, "qualification regression limits must be in [0,1]")
-			return
-		}
-		args = append(args, limit.flag, strconv.FormatFloat(parsed, 'f', -1, 64))
-	}
-	pid, err := s.spawnPy(args, fmt.Sprintf("qualification_%d.log", time.Now().Unix()))
-	if err != nil {
-		toastErr(sse, "qualification launch failed: "+err.Error())
-		return
-	}
-	toastOK(sse, fmt.Sprintf("launched production qualification (pid %d)", pid))
+func (s *Server) handleRunQualification(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "dashboard qualification execution is retired; no descriptor-backed operation is available", http.StatusGone)
 }

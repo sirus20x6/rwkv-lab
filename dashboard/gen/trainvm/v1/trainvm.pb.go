@@ -353,6 +353,281 @@ func (ControlType) EnumDescriptor() ([]byte, []int) {
 	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{4}
 }
 
+type HostdLifecycle int32
+
+const (
+	HostdLifecycle_HOSTD_LIFECYCLE_UNSPECIFIED      HostdLifecycle = 0
+	HostdLifecycle_HOSTD_LIFECYCLE_SEALED           HostdLifecycle = 1
+	HostdLifecycle_HOSTD_LIFECYCLE_STARTUP_AUDITING HostdLifecycle = 2
+	HostdLifecycle_HOSTD_LIFECYCLE_STARTUP_BLOCKED  HostdLifecycle = 3
+	HostdLifecycle_HOSTD_LIFECYCLE_ADMITTING        HostdLifecycle = 4
+	HostdLifecycle_HOSTD_LIFECYCLE_POISONED         HostdLifecycle = 5
+)
+
+// Enum value maps for HostdLifecycle.
+var (
+	HostdLifecycle_name = map[int32]string{
+		0: "HOSTD_LIFECYCLE_UNSPECIFIED",
+		1: "HOSTD_LIFECYCLE_SEALED",
+		2: "HOSTD_LIFECYCLE_STARTUP_AUDITING",
+		3: "HOSTD_LIFECYCLE_STARTUP_BLOCKED",
+		4: "HOSTD_LIFECYCLE_ADMITTING",
+		5: "HOSTD_LIFECYCLE_POISONED",
+	}
+	HostdLifecycle_value = map[string]int32{
+		"HOSTD_LIFECYCLE_UNSPECIFIED":      0,
+		"HOSTD_LIFECYCLE_SEALED":           1,
+		"HOSTD_LIFECYCLE_STARTUP_AUDITING": 2,
+		"HOSTD_LIFECYCLE_STARTUP_BLOCKED":  3,
+		"HOSTD_LIFECYCLE_ADMITTING":        4,
+		"HOSTD_LIFECYCLE_POISONED":         5,
+	}
+)
+
+func (x HostdLifecycle) Enum() *HostdLifecycle {
+	p := new(HostdLifecycle)
+	*p = x
+	return p
+}
+
+func (x HostdLifecycle) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (HostdLifecycle) Descriptor() protoreflect.EnumDescriptor {
+	return file_trainvm_v1_trainvm_proto_enumTypes[5].Descriptor()
+}
+
+func (HostdLifecycle) Type() protoreflect.EnumType {
+	return &file_trainvm_v1_trainvm_proto_enumTypes[5]
+}
+
+func (x HostdLifecycle) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use HostdLifecycle.Descriptor instead.
+func (HostdLifecycle) EnumDescriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{5}
+}
+
+type HostdStartupPhase int32
+
+const (
+	HostdStartupPhase_HOSTD_STARTUP_PHASE_UNSPECIFIED HostdStartupPhase = 0
+	HostdStartupPhase_HOSTD_STARTUP_PHASE_RECONCILING HostdStartupPhase = 1
+	HostdStartupPhase_HOSTD_STARTUP_PHASE_AUDITING    HostdStartupPhase = 2
+	HostdStartupPhase_HOSTD_STARTUP_PHASE_ADMITTING   HostdStartupPhase = 3
+	HostdStartupPhase_HOSTD_STARTUP_PHASE_EXHAUSTED   HostdStartupPhase = 4
+	HostdStartupPhase_HOSTD_STARTUP_PHASE_FAILED      HostdStartupPhase = 5
+)
+
+// Enum value maps for HostdStartupPhase.
+var (
+	HostdStartupPhase_name = map[int32]string{
+		0: "HOSTD_STARTUP_PHASE_UNSPECIFIED",
+		1: "HOSTD_STARTUP_PHASE_RECONCILING",
+		2: "HOSTD_STARTUP_PHASE_AUDITING",
+		3: "HOSTD_STARTUP_PHASE_ADMITTING",
+		4: "HOSTD_STARTUP_PHASE_EXHAUSTED",
+		5: "HOSTD_STARTUP_PHASE_FAILED",
+	}
+	HostdStartupPhase_value = map[string]int32{
+		"HOSTD_STARTUP_PHASE_UNSPECIFIED": 0,
+		"HOSTD_STARTUP_PHASE_RECONCILING": 1,
+		"HOSTD_STARTUP_PHASE_AUDITING":    2,
+		"HOSTD_STARTUP_PHASE_ADMITTING":   3,
+		"HOSTD_STARTUP_PHASE_EXHAUSTED":   4,
+		"HOSTD_STARTUP_PHASE_FAILED":      5,
+	}
+)
+
+func (x HostdStartupPhase) Enum() *HostdStartupPhase {
+	p := new(HostdStartupPhase)
+	*p = x
+	return p
+}
+
+func (x HostdStartupPhase) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (HostdStartupPhase) Descriptor() protoreflect.EnumDescriptor {
+	return file_trainvm_v1_trainvm_proto_enumTypes[6].Descriptor()
+}
+
+func (HostdStartupPhase) Type() protoreflect.EnumType {
+	return &file_trainvm_v1_trainvm_proto_enumTypes[6]
+}
+
+func (x HostdStartupPhase) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use HostdStartupPhase.Descriptor instead.
+func (HostdStartupPhase) EnumDescriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{6}
+}
+
+type HostdProcessPhase int32
+
+const (
+	HostdProcessPhase_HOSTD_PROCESS_PHASE_UNSPECIFIED              HostdProcessPhase = 0
+	HostdProcessPhase_HOSTD_PROCESS_PHASE_LAUNCH_INTENT            HostdProcessPhase = 1
+	HostdProcessPhase_HOSTD_PROCESS_PHASE_SPAWNED                  HostdProcessPhase = 2
+	HostdProcessPhase_HOSTD_PROCESS_PHASE_TERMINAL_PENDING_RELEASE HostdProcessPhase = 3
+)
+
+// Enum value maps for HostdProcessPhase.
+var (
+	HostdProcessPhase_name = map[int32]string{
+		0: "HOSTD_PROCESS_PHASE_UNSPECIFIED",
+		1: "HOSTD_PROCESS_PHASE_LAUNCH_INTENT",
+		2: "HOSTD_PROCESS_PHASE_SPAWNED",
+		3: "HOSTD_PROCESS_PHASE_TERMINAL_PENDING_RELEASE",
+	}
+	HostdProcessPhase_value = map[string]int32{
+		"HOSTD_PROCESS_PHASE_UNSPECIFIED":              0,
+		"HOSTD_PROCESS_PHASE_LAUNCH_INTENT":            1,
+		"HOSTD_PROCESS_PHASE_SPAWNED":                  2,
+		"HOSTD_PROCESS_PHASE_TERMINAL_PENDING_RELEASE": 3,
+	}
+)
+
+func (x HostdProcessPhase) Enum() *HostdProcessPhase {
+	p := new(HostdProcessPhase)
+	*p = x
+	return p
+}
+
+func (x HostdProcessPhase) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (HostdProcessPhase) Descriptor() protoreflect.EnumDescriptor {
+	return file_trainvm_v1_trainvm_proto_enumTypes[7].Descriptor()
+}
+
+func (HostdProcessPhase) Type() protoreflect.EnumType {
+	return &file_trainvm_v1_trainvm_proto_enumTypes[7]
+}
+
+func (x HostdProcessPhase) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use HostdProcessPhase.Descriptor instead.
+func (HostdProcessPhase) EnumDescriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{7}
+}
+
+type HostResourceKind int32
+
+const (
+	HostResourceKind_HOST_RESOURCE_KIND_UNSPECIFIED           HostResourceKind = 0
+	HostResourceKind_HOST_RESOURCE_KIND_ACCELERATOR           HostResourceKind = 1
+	HostResourceKind_HOST_RESOURCE_KIND_ACCELERATOR_PARTITION HostResourceKind = 2
+	HostResourceKind_HOST_RESOURCE_KIND_HOST_MUTEX            HostResourceKind = 3
+)
+
+// Enum value maps for HostResourceKind.
+var (
+	HostResourceKind_name = map[int32]string{
+		0: "HOST_RESOURCE_KIND_UNSPECIFIED",
+		1: "HOST_RESOURCE_KIND_ACCELERATOR",
+		2: "HOST_RESOURCE_KIND_ACCELERATOR_PARTITION",
+		3: "HOST_RESOURCE_KIND_HOST_MUTEX",
+	}
+	HostResourceKind_value = map[string]int32{
+		"HOST_RESOURCE_KIND_UNSPECIFIED":           0,
+		"HOST_RESOURCE_KIND_ACCELERATOR":           1,
+		"HOST_RESOURCE_KIND_ACCELERATOR_PARTITION": 2,
+		"HOST_RESOURCE_KIND_HOST_MUTEX":            3,
+	}
+)
+
+func (x HostResourceKind) Enum() *HostResourceKind {
+	p := new(HostResourceKind)
+	*p = x
+	return p
+}
+
+func (x HostResourceKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (HostResourceKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_trainvm_v1_trainvm_proto_enumTypes[8].Descriptor()
+}
+
+func (HostResourceKind) Type() protoreflect.EnumType {
+	return &file_trainvm_v1_trainvm_proto_enumTypes[8]
+}
+
+func (x HostResourceKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use HostResourceKind.Descriptor instead.
+func (HostResourceKind) EnumDescriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{8}
+}
+
+type HostAcceleratorVendor int32
+
+const (
+	HostAcceleratorVendor_HOST_ACCELERATOR_VENDOR_UNSPECIFIED HostAcceleratorVendor = 0
+	HostAcceleratorVendor_HOST_ACCELERATOR_VENDOR_NVIDIA      HostAcceleratorVendor = 1
+	HostAcceleratorVendor_HOST_ACCELERATOR_VENDOR_AMD         HostAcceleratorVendor = 2
+	HostAcceleratorVendor_HOST_ACCELERATOR_VENDOR_INTEL       HostAcceleratorVendor = 3
+	HostAcceleratorVendor_HOST_ACCELERATOR_VENDOR_OTHER       HostAcceleratorVendor = 4
+)
+
+// Enum value maps for HostAcceleratorVendor.
+var (
+	HostAcceleratorVendor_name = map[int32]string{
+		0: "HOST_ACCELERATOR_VENDOR_UNSPECIFIED",
+		1: "HOST_ACCELERATOR_VENDOR_NVIDIA",
+		2: "HOST_ACCELERATOR_VENDOR_AMD",
+		3: "HOST_ACCELERATOR_VENDOR_INTEL",
+		4: "HOST_ACCELERATOR_VENDOR_OTHER",
+	}
+	HostAcceleratorVendor_value = map[string]int32{
+		"HOST_ACCELERATOR_VENDOR_UNSPECIFIED": 0,
+		"HOST_ACCELERATOR_VENDOR_NVIDIA":      1,
+		"HOST_ACCELERATOR_VENDOR_AMD":         2,
+		"HOST_ACCELERATOR_VENDOR_INTEL":       3,
+		"HOST_ACCELERATOR_VENDOR_OTHER":       4,
+	}
+)
+
+func (x HostAcceleratorVendor) Enum() *HostAcceleratorVendor {
+	p := new(HostAcceleratorVendor)
+	*p = x
+	return p
+}
+
+func (x HostAcceleratorVendor) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (HostAcceleratorVendor) Descriptor() protoreflect.EnumDescriptor {
+	return file_trainvm_v1_trainvm_proto_enumTypes[9].Descriptor()
+}
+
+func (HostAcceleratorVendor) Type() protoreflect.EnumType {
+	return &file_trainvm_v1_trainvm_proto_enumTypes[9]
+}
+
+func (x HostAcceleratorVendor) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use HostAcceleratorVendor.Descriptor instead.
+func (HostAcceleratorVendor) EnumDescriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{9}
+}
+
 type Diagnostic_Severity int32
 
 const (
@@ -389,11 +664,11 @@ func (x Diagnostic_Severity) String() string {
 }
 
 func (Diagnostic_Severity) Descriptor() protoreflect.EnumDescriptor {
-	return file_trainvm_v1_trainvm_proto_enumTypes[5].Descriptor()
+	return file_trainvm_v1_trainvm_proto_enumTypes[10].Descriptor()
 }
 
 func (Diagnostic_Severity) Type() protoreflect.EnumType {
-	return &file_trainvm_v1_trainvm_proto_enumTypes[5]
+	return &file_trainvm_v1_trainvm_proto_enumTypes[10]
 }
 
 func (x Diagnostic_Severity) Number() protoreflect.EnumNumber {
@@ -444,11 +719,11 @@ func (x ControlCommandResult_Status) String() string {
 }
 
 func (ControlCommandResult_Status) Descriptor() protoreflect.EnumDescriptor {
-	return file_trainvm_v1_trainvm_proto_enumTypes[6].Descriptor()
+	return file_trainvm_v1_trainvm_proto_enumTypes[11].Descriptor()
 }
 
 func (ControlCommandResult_Status) Type() protoreflect.EnumType {
-	return &file_trainvm_v1_trainvm_proto_enumTypes[6]
+	return &file_trainvm_v1_trainvm_proto_enumTypes[11]
 }
 
 func (x ControlCommandResult_Status) Number() protoreflect.EnumNumber {
@@ -496,11 +771,11 @@ func (x CheckpointCommandResult_Status) String() string {
 }
 
 func (CheckpointCommandResult_Status) Descriptor() protoreflect.EnumDescriptor {
-	return file_trainvm_v1_trainvm_proto_enumTypes[7].Descriptor()
+	return file_trainvm_v1_trainvm_proto_enumTypes[12].Descriptor()
 }
 
 func (CheckpointCommandResult_Status) Type() protoreflect.EnumType {
-	return &file_trainvm_v1_trainvm_proto_enumTypes[7]
+	return &file_trainvm_v1_trainvm_proto_enumTypes[12]
 }
 
 func (x CheckpointCommandResult_Status) Number() protoreflect.EnumNumber {
@@ -548,11 +823,11 @@ func (x LifecycleCommandResult_Kind) String() string {
 }
 
 func (LifecycleCommandResult_Kind) Descriptor() protoreflect.EnumDescriptor {
-	return file_trainvm_v1_trainvm_proto_enumTypes[8].Descriptor()
+	return file_trainvm_v1_trainvm_proto_enumTypes[13].Descriptor()
 }
 
 func (LifecycleCommandResult_Kind) Type() protoreflect.EnumType {
-	return &file_trainvm_v1_trainvm_proto_enumTypes[8]
+	return &file_trainvm_v1_trainvm_proto_enumTypes[13]
 }
 
 func (x LifecycleCommandResult_Kind) Number() protoreflect.EnumNumber {
@@ -600,11 +875,11 @@ func (x LifecycleCommandResult_Status) String() string {
 }
 
 func (LifecycleCommandResult_Status) Descriptor() protoreflect.EnumDescriptor {
-	return file_trainvm_v1_trainvm_proto_enumTypes[9].Descriptor()
+	return file_trainvm_v1_trainvm_proto_enumTypes[14].Descriptor()
 }
 
 func (LifecycleCommandResult_Status) Type() protoreflect.EnumType {
-	return &file_trainvm_v1_trainvm_proto_enumTypes[9]
+	return &file_trainvm_v1_trainvm_proto_enumTypes[14]
 }
 
 func (x LifecycleCommandResult_Status) Number() protoreflect.EnumNumber {
@@ -655,11 +930,11 @@ func (x RunCommandResponse_Disposition) String() string {
 }
 
 func (RunCommandResponse_Disposition) Descriptor() protoreflect.EnumDescriptor {
-	return file_trainvm_v1_trainvm_proto_enumTypes[10].Descriptor()
+	return file_trainvm_v1_trainvm_proto_enumTypes[15].Descriptor()
 }
 
 func (RunCommandResponse_Disposition) Type() protoreflect.EnumType {
-	return &file_trainvm_v1_trainvm_proto_enumTypes[10]
+	return &file_trainvm_v1_trainvm_proto_enumTypes[15]
 }
 
 func (x RunCommandResponse_Disposition) Number() protoreflect.EnumNumber {
@@ -669,6 +944,107 @@ func (x RunCommandResponse_Disposition) Number() protoreflect.EnumNumber {
 // Deprecated: Use RunCommandResponse_Disposition.Descriptor instead.
 func (RunCommandResponse_Disposition) EnumDescriptor() ([]byte, []int) {
 	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{19, 0}
+}
+
+type WorkerExecutionPhaseRequest_Phase int32
+
+const (
+	WorkerExecutionPhaseRequest_PHASE_UNSPECIFIED WorkerExecutionPhaseRequest_Phase = 0
+	WorkerExecutionPhaseRequest_PHASE_COMPILE     WorkerExecutionPhaseRequest_Phase = 1
+	WorkerExecutionPhaseRequest_PHASE_WARMUP      WorkerExecutionPhaseRequest_Phase = 2
+)
+
+// Enum value maps for WorkerExecutionPhaseRequest_Phase.
+var (
+	WorkerExecutionPhaseRequest_Phase_name = map[int32]string{
+		0: "PHASE_UNSPECIFIED",
+		1: "PHASE_COMPILE",
+		2: "PHASE_WARMUP",
+	}
+	WorkerExecutionPhaseRequest_Phase_value = map[string]int32{
+		"PHASE_UNSPECIFIED": 0,
+		"PHASE_COMPILE":     1,
+		"PHASE_WARMUP":      2,
+	}
+)
+
+func (x WorkerExecutionPhaseRequest_Phase) Enum() *WorkerExecutionPhaseRequest_Phase {
+	p := new(WorkerExecutionPhaseRequest_Phase)
+	*p = x
+	return p
+}
+
+func (x WorkerExecutionPhaseRequest_Phase) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (WorkerExecutionPhaseRequest_Phase) Descriptor() protoreflect.EnumDescriptor {
+	return file_trainvm_v1_trainvm_proto_enumTypes[16].Descriptor()
+}
+
+func (WorkerExecutionPhaseRequest_Phase) Type() protoreflect.EnumType {
+	return &file_trainvm_v1_trainvm_proto_enumTypes[16]
+}
+
+func (x WorkerExecutionPhaseRequest_Phase) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use WorkerExecutionPhaseRequest_Phase.Descriptor instead.
+func (WorkerExecutionPhaseRequest_Phase) EnumDescriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{25, 0}
+}
+
+type WorkerExecutionPhaseReceipt_Disposition int32
+
+const (
+	WorkerExecutionPhaseReceipt_DISPOSITION_UNSPECIFIED WorkerExecutionPhaseReceipt_Disposition = 0
+	WorkerExecutionPhaseReceipt_DISPOSITION_COMPLETED   WorkerExecutionPhaseReceipt_Disposition = 1
+	WorkerExecutionPhaseReceipt_DISPOSITION_SKIPPED     WorkerExecutionPhaseReceipt_Disposition = 2
+	WorkerExecutionPhaseReceipt_DISPOSITION_FAILED      WorkerExecutionPhaseReceipt_Disposition = 3
+)
+
+// Enum value maps for WorkerExecutionPhaseReceipt_Disposition.
+var (
+	WorkerExecutionPhaseReceipt_Disposition_name = map[int32]string{
+		0: "DISPOSITION_UNSPECIFIED",
+		1: "DISPOSITION_COMPLETED",
+		2: "DISPOSITION_SKIPPED",
+		3: "DISPOSITION_FAILED",
+	}
+	WorkerExecutionPhaseReceipt_Disposition_value = map[string]int32{
+		"DISPOSITION_UNSPECIFIED": 0,
+		"DISPOSITION_COMPLETED":   1,
+		"DISPOSITION_SKIPPED":     2,
+		"DISPOSITION_FAILED":      3,
+	}
+)
+
+func (x WorkerExecutionPhaseReceipt_Disposition) Enum() *WorkerExecutionPhaseReceipt_Disposition {
+	p := new(WorkerExecutionPhaseReceipt_Disposition)
+	*p = x
+	return p
+}
+
+func (x WorkerExecutionPhaseReceipt_Disposition) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (WorkerExecutionPhaseReceipt_Disposition) Descriptor() protoreflect.EnumDescriptor {
+	return file_trainvm_v1_trainvm_proto_enumTypes[17].Descriptor()
+}
+
+func (WorkerExecutionPhaseReceipt_Disposition) Type() protoreflect.EnumType {
+	return &file_trainvm_v1_trainvm_proto_enumTypes[17]
+}
+
+func (x WorkerExecutionPhaseReceipt_Disposition) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use WorkerExecutionPhaseReceipt_Disposition.Descriptor instead.
+func (WorkerExecutionPhaseReceipt_Disposition) EnumDescriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{26, 0}
 }
 
 type ControlPatchAcknowledgement_Disposition int32
@@ -707,11 +1083,11 @@ func (x ControlPatchAcknowledgement_Disposition) String() string {
 }
 
 func (ControlPatchAcknowledgement_Disposition) Descriptor() protoreflect.EnumDescriptor {
-	return file_trainvm_v1_trainvm_proto_enumTypes[11].Descriptor()
+	return file_trainvm_v1_trainvm_proto_enumTypes[18].Descriptor()
 }
 
 func (ControlPatchAcknowledgement_Disposition) Type() protoreflect.EnumType {
-	return &file_trainvm_v1_trainvm_proto_enumTypes[11]
+	return &file_trainvm_v1_trainvm_proto_enumTypes[18]
 }
 
 func (x ControlPatchAcknowledgement_Disposition) Number() protoreflect.EnumNumber {
@@ -720,7 +1096,7 @@ func (x ControlPatchAcknowledgement_Disposition) Number() protoreflect.EnumNumbe
 
 // Deprecated: Use ControlPatchAcknowledgement_Disposition.Descriptor instead.
 func (ControlPatchAcknowledgement_Disposition) EnumDescriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{25, 0}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{27, 0}
 }
 
 type CheckpointAcknowledgement_Disposition int32
@@ -756,11 +1132,11 @@ func (x CheckpointAcknowledgement_Disposition) String() string {
 }
 
 func (CheckpointAcknowledgement_Disposition) Descriptor() protoreflect.EnumDescriptor {
-	return file_trainvm_v1_trainvm_proto_enumTypes[12].Descriptor()
+	return file_trainvm_v1_trainvm_proto_enumTypes[19].Descriptor()
 }
 
 func (CheckpointAcknowledgement_Disposition) Type() protoreflect.EnumType {
-	return &file_trainvm_v1_trainvm_proto_enumTypes[12]
+	return &file_trainvm_v1_trainvm_proto_enumTypes[19]
 }
 
 func (x CheckpointAcknowledgement_Disposition) Number() protoreflect.EnumNumber {
@@ -769,7 +1145,7 @@ func (x CheckpointAcknowledgement_Disposition) Number() protoreflect.EnumNumber 
 
 // Deprecated: Use CheckpointAcknowledgement_Disposition.Descriptor instead.
 func (CheckpointAcknowledgement_Disposition) EnumDescriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{26, 0}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{28, 0}
 }
 
 type LifecycleAcknowledgement_Kind int32
@@ -808,11 +1184,11 @@ func (x LifecycleAcknowledgement_Kind) String() string {
 }
 
 func (LifecycleAcknowledgement_Kind) Descriptor() protoreflect.EnumDescriptor {
-	return file_trainvm_v1_trainvm_proto_enumTypes[13].Descriptor()
+	return file_trainvm_v1_trainvm_proto_enumTypes[20].Descriptor()
 }
 
 func (LifecycleAcknowledgement_Kind) Type() protoreflect.EnumType {
-	return &file_trainvm_v1_trainvm_proto_enumTypes[13]
+	return &file_trainvm_v1_trainvm_proto_enumTypes[20]
 }
 
 func (x LifecycleAcknowledgement_Kind) Number() protoreflect.EnumNumber {
@@ -821,7 +1197,7 @@ func (x LifecycleAcknowledgement_Kind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use LifecycleAcknowledgement_Kind.Descriptor instead.
 func (LifecycleAcknowledgement_Kind) EnumDescriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{27, 0}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{29, 0}
 }
 
 type LifecycleAcknowledgement_Disposition int32
@@ -857,11 +1233,11 @@ func (x LifecycleAcknowledgement_Disposition) String() string {
 }
 
 func (LifecycleAcknowledgement_Disposition) Descriptor() protoreflect.EnumDescriptor {
-	return file_trainvm_v1_trainvm_proto_enumTypes[14].Descriptor()
+	return file_trainvm_v1_trainvm_proto_enumTypes[21].Descriptor()
 }
 
 func (LifecycleAcknowledgement_Disposition) Type() protoreflect.EnumType {
-	return &file_trainvm_v1_trainvm_proto_enumTypes[14]
+	return &file_trainvm_v1_trainvm_proto_enumTypes[21]
 }
 
 func (x LifecycleAcknowledgement_Disposition) Number() protoreflect.EnumNumber {
@@ -870,7 +1246,7 @@ func (x LifecycleAcknowledgement_Disposition) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use LifecycleAcknowledgement_Disposition.Descriptor instead.
 func (LifecycleAcknowledgement_Disposition) EnumDescriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{27, 1}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{29, 1}
 }
 
 type WorkerWelcome_Disposition int32
@@ -909,11 +1285,11 @@ func (x WorkerWelcome_Disposition) String() string {
 }
 
 func (WorkerWelcome_Disposition) Descriptor() protoreflect.EnumDescriptor {
-	return file_trainvm_v1_trainvm_proto_enumTypes[15].Descriptor()
+	return file_trainvm_v1_trainvm_proto_enumTypes[22].Descriptor()
 }
 
 func (WorkerWelcome_Disposition) Type() protoreflect.EnumType {
-	return &file_trainvm_v1_trainvm_proto_enumTypes[15]
+	return &file_trainvm_v1_trainvm_proto_enumTypes[22]
 }
 
 func (x WorkerWelcome_Disposition) Number() protoreflect.EnumNumber {
@@ -922,7 +1298,7 @@ func (x WorkerWelcome_Disposition) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use WorkerWelcome_Disposition.Descriptor instead.
 func (WorkerWelcome_Disposition) EnumDescriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{30, 0}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{32, 0}
 }
 
 type Diagnostic struct {
@@ -3346,6 +3722,221 @@ func (x *WorkerHeartbeat) GetObservedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+// One immutable execution phase selected by the authority from the compiled
+// experiment and the exact worker invocation.  The request digest binds the
+// declaration and invocation identity; workers must echo it in the receipt.
+type WorkerExecutionPhaseRequest struct {
+	state         protoimpl.MessageState            `protogen:"open.v1"`
+	Phase         WorkerExecutionPhaseRequest_Phase `protobuf:"varint,1,opt,name=phase,proto3,enum=trainvm.v1.WorkerExecutionPhaseRequest_Phase" json:"phase,omitempty"`
+	Enabled       bool                              `protobuf:"varint,2,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	Steps         *uint64                           `protobuf:"varint,3,opt,name=steps,proto3,oneof" json:"steps,omitempty"`
+	RequestDigest string                            `protobuf:"bytes,4,opt,name=request_digest,json=requestDigest,proto3" json:"request_digest,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkerExecutionPhaseRequest) Reset() {
+	*x = WorkerExecutionPhaseRequest{}
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkerExecutionPhaseRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkerExecutionPhaseRequest) ProtoMessage() {}
+
+func (x *WorkerExecutionPhaseRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkerExecutionPhaseRequest.ProtoReflect.Descriptor instead.
+func (*WorkerExecutionPhaseRequest) Descriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *WorkerExecutionPhaseRequest) GetPhase() WorkerExecutionPhaseRequest_Phase {
+	if x != nil {
+		return x.Phase
+	}
+	return WorkerExecutionPhaseRequest_PHASE_UNSPECIFIED
+}
+
+func (x *WorkerExecutionPhaseRequest) GetEnabled() bool {
+	if x != nil {
+		return x.Enabled
+	}
+	return false
+}
+
+func (x *WorkerExecutionPhaseRequest) GetSteps() uint64 {
+	if x != nil && x.Steps != nil {
+		return *x.Steps
+	}
+	return 0
+}
+
+func (x *WorkerExecutionPhaseRequest) GetRequestDigest() string {
+	if x != nil {
+		return x.RequestDigest
+	}
+	return ""
+}
+
+// Durable evidence that a worker executed (or deliberately skipped) one
+// authority-requested compile/warmup phase.  State fingerprints cover model,
+// optimizer, RNG, scaler, data cursor, schedule and effective controls so a
+// disposable warmup cannot silently advance the training trajectory.
+type WorkerExecutionPhaseReceipt struct {
+	state                  protoimpl.MessageState                  `protogen:"open.v1"`
+	Phase                  WorkerExecutionPhaseRequest_Phase       `protobuf:"varint,1,opt,name=phase,proto3,enum=trainvm.v1.WorkerExecutionPhaseRequest_Phase" json:"phase,omitempty"`
+	Disposition            WorkerExecutionPhaseReceipt_Disposition `protobuf:"varint,2,opt,name=disposition,proto3,enum=trainvm.v1.WorkerExecutionPhaseReceipt_Disposition" json:"disposition,omitempty"`
+	RequestDigest          string                                  `protobuf:"bytes,3,opt,name=request_digest,json=requestDigest,proto3" json:"request_digest,omitempty"`
+	StepsExecuted          uint64                                  `protobuf:"varint,4,opt,name=steps_executed,json=stepsExecuted,proto3" json:"steps_executed,omitempty"`
+	StateFingerprintBefore string                                  `protobuf:"bytes,5,opt,name=state_fingerprint_before,json=stateFingerprintBefore,proto3" json:"state_fingerprint_before,omitempty"`
+	StateFingerprintAfter  string                                  `protobuf:"bytes,6,opt,name=state_fingerprint_after,json=stateFingerprintAfter,proto3" json:"state_fingerprint_after,omitempty"`
+	Diagnostics            []*Diagnostic                           `protobuf:"bytes,7,rep,name=diagnostics,proto3" json:"diagnostics,omitempty"`
+	ConcurrencyKey         string                                  `protobuf:"bytes,8,opt,name=concurrency_key,json=concurrencyKey,proto3" json:"concurrency_key,omitempty"`
+	LeaseId                string                                  `protobuf:"bytes,9,opt,name=lease_id,json=leaseId,proto3" json:"lease_id,omitempty"`
+	FencingToken           uint64                                  `protobuf:"varint,10,opt,name=fencing_token,json=fencingToken,proto3" json:"fencing_token,omitempty"`
+	WorkerSequence         uint64                                  `protobuf:"varint,11,opt,name=worker_sequence,json=workerSequence,proto3" json:"worker_sequence,omitempty"`
+	StartedAt              *timestamppb.Timestamp                  `protobuf:"bytes,12,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
+	CompletedAt            *timestamppb.Timestamp                  `protobuf:"bytes,13,opt,name=completed_at,json=completedAt,proto3" json:"completed_at,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
+}
+
+func (x *WorkerExecutionPhaseReceipt) Reset() {
+	*x = WorkerExecutionPhaseReceipt{}
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkerExecutionPhaseReceipt) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkerExecutionPhaseReceipt) ProtoMessage() {}
+
+func (x *WorkerExecutionPhaseReceipt) ProtoReflect() protoreflect.Message {
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkerExecutionPhaseReceipt.ProtoReflect.Descriptor instead.
+func (*WorkerExecutionPhaseReceipt) Descriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *WorkerExecutionPhaseReceipt) GetPhase() WorkerExecutionPhaseRequest_Phase {
+	if x != nil {
+		return x.Phase
+	}
+	return WorkerExecutionPhaseRequest_PHASE_UNSPECIFIED
+}
+
+func (x *WorkerExecutionPhaseReceipt) GetDisposition() WorkerExecutionPhaseReceipt_Disposition {
+	if x != nil {
+		return x.Disposition
+	}
+	return WorkerExecutionPhaseReceipt_DISPOSITION_UNSPECIFIED
+}
+
+func (x *WorkerExecutionPhaseReceipt) GetRequestDigest() string {
+	if x != nil {
+		return x.RequestDigest
+	}
+	return ""
+}
+
+func (x *WorkerExecutionPhaseReceipt) GetStepsExecuted() uint64 {
+	if x != nil {
+		return x.StepsExecuted
+	}
+	return 0
+}
+
+func (x *WorkerExecutionPhaseReceipt) GetStateFingerprintBefore() string {
+	if x != nil {
+		return x.StateFingerprintBefore
+	}
+	return ""
+}
+
+func (x *WorkerExecutionPhaseReceipt) GetStateFingerprintAfter() string {
+	if x != nil {
+		return x.StateFingerprintAfter
+	}
+	return ""
+}
+
+func (x *WorkerExecutionPhaseReceipt) GetDiagnostics() []*Diagnostic {
+	if x != nil {
+		return x.Diagnostics
+	}
+	return nil
+}
+
+func (x *WorkerExecutionPhaseReceipt) GetConcurrencyKey() string {
+	if x != nil {
+		return x.ConcurrencyKey
+	}
+	return ""
+}
+
+func (x *WorkerExecutionPhaseReceipt) GetLeaseId() string {
+	if x != nil {
+		return x.LeaseId
+	}
+	return ""
+}
+
+func (x *WorkerExecutionPhaseReceipt) GetFencingToken() uint64 {
+	if x != nil {
+		return x.FencingToken
+	}
+	return 0
+}
+
+func (x *WorkerExecutionPhaseReceipt) GetWorkerSequence() uint64 {
+	if x != nil {
+		return x.WorkerSequence
+	}
+	return 0
+}
+
+func (x *WorkerExecutionPhaseReceipt) GetStartedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.StartedAt
+	}
+	return nil
+}
+
+func (x *WorkerExecutionPhaseReceipt) GetCompletedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CompletedAt
+	}
+	return nil
+}
+
 type ControlPatchAcknowledgement struct {
 	state           protoimpl.MessageState                  `protogen:"open.v1"`
 	ControlRevision uint64                                  `protobuf:"varint,1,opt,name=control_revision,json=controlRevision,proto3" json:"control_revision,omitempty"`
@@ -3366,7 +3957,7 @@ type ControlPatchAcknowledgement struct {
 
 func (x *ControlPatchAcknowledgement) Reset() {
 	*x = ControlPatchAcknowledgement{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[25]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3378,7 +3969,7 @@ func (x *ControlPatchAcknowledgement) String() string {
 func (*ControlPatchAcknowledgement) ProtoMessage() {}
 
 func (x *ControlPatchAcknowledgement) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[25]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3391,7 +3982,7 @@ func (x *ControlPatchAcknowledgement) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlPatchAcknowledgement.ProtoReflect.Descriptor instead.
 func (*ControlPatchAcknowledgement) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{25}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *ControlPatchAcknowledgement) GetControlRevision() uint64 {
@@ -3496,7 +4087,7 @@ type CheckpointAcknowledgement struct {
 
 func (x *CheckpointAcknowledgement) Reset() {
 	*x = CheckpointAcknowledgement{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[26]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3508,7 +4099,7 @@ func (x *CheckpointAcknowledgement) String() string {
 func (*CheckpointAcknowledgement) ProtoMessage() {}
 
 func (x *CheckpointAcknowledgement) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[26]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3521,7 +4112,7 @@ func (x *CheckpointAcknowledgement) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckpointAcknowledgement.ProtoReflect.Descriptor instead.
 func (*CheckpointAcknowledgement) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{26}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *CheckpointAcknowledgement) GetCommandId() string {
@@ -3613,7 +4204,7 @@ type LifecycleAcknowledgement struct {
 
 func (x *LifecycleAcknowledgement) Reset() {
 	*x = LifecycleAcknowledgement{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[27]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3625,7 +4216,7 @@ func (x *LifecycleAcknowledgement) String() string {
 func (*LifecycleAcknowledgement) ProtoMessage() {}
 
 func (x *LifecycleAcknowledgement) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[27]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3638,7 +4229,7 @@ func (x *LifecycleAcknowledgement) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LifecycleAcknowledgement.ProtoReflect.Descriptor instead.
 func (*LifecycleAcknowledgement) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{27}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *LifecycleAcknowledgement) GetCommandId() string {
@@ -3730,6 +4321,7 @@ type WorkerToController struct {
 	//	*WorkerToController_ControlAck
 	//	*WorkerToController_CheckpointAck
 	//	*WorkerToController_LifecycleAck
+	//	*WorkerToController_PhaseReceipt
 	Message       isWorkerToController_Message `protobuf_oneof:"message"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3737,7 +4329,7 @@ type WorkerToController struct {
 
 func (x *WorkerToController) Reset() {
 	*x = WorkerToController{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[28]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3749,7 +4341,7 @@ func (x *WorkerToController) String() string {
 func (*WorkerToController) ProtoMessage() {}
 
 func (x *WorkerToController) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[28]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3762,7 +4354,7 @@ func (x *WorkerToController) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkerToController.ProtoReflect.Descriptor instead.
 func (*WorkerToController) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{28}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *WorkerToController) GetMessage() isWorkerToController_Message {
@@ -3844,6 +4436,15 @@ func (x *WorkerToController) GetLifecycleAck() *LifecycleAcknowledgement {
 	return nil
 }
 
+func (x *WorkerToController) GetPhaseReceipt() *WorkerExecutionPhaseReceipt {
+	if x != nil {
+		if x, ok := x.Message.(*WorkerToController_PhaseReceipt); ok {
+			return x.PhaseReceipt
+		}
+	}
+	return nil
+}
+
 type isWorkerToController_Message interface {
 	isWorkerToController_Message()
 }
@@ -3880,6 +4481,10 @@ type WorkerToController_LifecycleAck struct {
 	LifecycleAck *LifecycleAcknowledgement `protobuf:"bytes,8,opt,name=lifecycle_ack,json=lifecycleAck,proto3,oneof"`
 }
 
+type WorkerToController_PhaseReceipt struct {
+	PhaseReceipt *WorkerExecutionPhaseReceipt `protobuf:"bytes,9,opt,name=phase_receipt,json=phaseReceipt,proto3,oneof"`
+}
+
 func (*WorkerToController_Hello) isWorkerToController_Message() {}
 
 func (*WorkerToController_Heartbeat) isWorkerToController_Message() {}
@@ -3895,6 +4500,8 @@ func (*WorkerToController_ControlAck) isWorkerToController_Message() {}
 func (*WorkerToController_CheckpointAck) isWorkerToController_Message() {}
 
 func (*WorkerToController_LifecycleAck) isWorkerToController_Message() {}
+
+func (*WorkerToController_PhaseReceipt) isWorkerToController_Message() {}
 
 type WorkerCommand struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
@@ -3914,7 +4521,7 @@ type WorkerCommand struct {
 
 func (x *WorkerCommand) Reset() {
 	*x = WorkerCommand{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[29]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3926,7 +4533,7 @@ func (x *WorkerCommand) String() string {
 func (*WorkerCommand) ProtoMessage() {}
 
 func (x *WorkerCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[29]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3939,7 +4546,7 @@ func (x *WorkerCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkerCommand.ProtoReflect.Descriptor instead.
 func (*WorkerCommand) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{29}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *WorkerCommand) GetControllerSequence() uint64 {
@@ -4043,32 +4650,33 @@ func (*WorkerCommand_Cancel) isWorkerCommand_Command() {}
 func (*WorkerCommand_Controls) isWorkerCommand_Command() {}
 
 type WorkerWelcome struct {
-	state                      protoimpl.MessageState    `protogen:"open.v1"`
-	Disposition                WorkerWelcome_Disposition `protobuf:"varint,1,opt,name=disposition,proto3,enum=trainvm.v1.WorkerWelcome_Disposition" json:"disposition,omitempty"`
-	JournalId                  string                    `protobuf:"bytes,2,opt,name=journal_id,json=journalId,proto3" json:"journal_id,omitempty"`
-	PlanHash                   string                    `protobuf:"bytes,3,opt,name=plan_hash,json=planHash,proto3" json:"plan_hash,omitempty"`
-	PlanRevision               uint64                    `protobuf:"varint,4,opt,name=plan_revision,json=planRevision,proto3" json:"plan_revision,omitempty"`
-	RunId                      string                    `protobuf:"bytes,5,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	RunRevision                uint64                    `protobuf:"varint,6,opt,name=run_revision,json=runRevision,proto3" json:"run_revision,omitempty"`
-	NodeId                     string                    `protobuf:"bytes,7,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
-	AttemptId                  string                    `protobuf:"bytes,8,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"`
-	LaunchNonce                string                    `protobuf:"bytes,9,opt,name=launch_nonce,json=launchNonce,proto3" json:"launch_nonce,omitempty"`
-	ConcurrencyKey             string                    `protobuf:"bytes,10,opt,name=concurrency_key,json=concurrencyKey,proto3" json:"concurrency_key,omitempty"`
-	LeaseId                    string                    `protobuf:"bytes,11,opt,name=lease_id,json=leaseId,proto3" json:"lease_id,omitempty"`
-	FencingToken               uint64                    `protobuf:"varint,12,opt,name=fencing_token,json=fencingToken,proto3" json:"fencing_token,omitempty"`
-	DispatchId                 string                    `protobuf:"bytes,13,opt,name=dispatch_id,json=dispatchId,proto3" json:"dispatch_id,omitempty"`
-	Component                  string                    `protobuf:"bytes,14,opt,name=component,proto3" json:"component,omitempty"`
-	Operation                  string                    `protobuf:"bytes,15,opt,name=operation,proto3" json:"operation,omitempty"`
-	AcknowledgedWorkerSequence uint64                    `protobuf:"varint,16,opt,name=acknowledged_worker_sequence,json=acknowledgedWorkerSequence,proto3" json:"acknowledged_worker_sequence,omitempty"`
-	CanonicalInvocationJson    []byte                    `protobuf:"bytes,17,opt,name=canonical_invocation_json,json=canonicalInvocationJson,proto3" json:"canonical_invocation_json,omitempty"`
-	InvocationDigest           string                    `protobuf:"bytes,18,opt,name=invocation_digest,json=invocationDigest,proto3" json:"invocation_digest,omitempty"`
+	state                      protoimpl.MessageState         `protogen:"open.v1"`
+	Disposition                WorkerWelcome_Disposition      `protobuf:"varint,1,opt,name=disposition,proto3,enum=trainvm.v1.WorkerWelcome_Disposition" json:"disposition,omitempty"`
+	JournalId                  string                         `protobuf:"bytes,2,opt,name=journal_id,json=journalId,proto3" json:"journal_id,omitempty"`
+	PlanHash                   string                         `protobuf:"bytes,3,opt,name=plan_hash,json=planHash,proto3" json:"plan_hash,omitempty"`
+	PlanRevision               uint64                         `protobuf:"varint,4,opt,name=plan_revision,json=planRevision,proto3" json:"plan_revision,omitempty"`
+	RunId                      string                         `protobuf:"bytes,5,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	RunRevision                uint64                         `protobuf:"varint,6,opt,name=run_revision,json=runRevision,proto3" json:"run_revision,omitempty"`
+	NodeId                     string                         `protobuf:"bytes,7,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	AttemptId                  string                         `protobuf:"bytes,8,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"`
+	LaunchNonce                string                         `protobuf:"bytes,9,opt,name=launch_nonce,json=launchNonce,proto3" json:"launch_nonce,omitempty"`
+	ConcurrencyKey             string                         `protobuf:"bytes,10,opt,name=concurrency_key,json=concurrencyKey,proto3" json:"concurrency_key,omitempty"`
+	LeaseId                    string                         `protobuf:"bytes,11,opt,name=lease_id,json=leaseId,proto3" json:"lease_id,omitempty"`
+	FencingToken               uint64                         `protobuf:"varint,12,opt,name=fencing_token,json=fencingToken,proto3" json:"fencing_token,omitempty"`
+	DispatchId                 string                         `protobuf:"bytes,13,opt,name=dispatch_id,json=dispatchId,proto3" json:"dispatch_id,omitempty"`
+	Component                  string                         `protobuf:"bytes,14,opt,name=component,proto3" json:"component,omitempty"`
+	Operation                  string                         `protobuf:"bytes,15,opt,name=operation,proto3" json:"operation,omitempty"`
+	AcknowledgedWorkerSequence uint64                         `protobuf:"varint,16,opt,name=acknowledged_worker_sequence,json=acknowledgedWorkerSequence,proto3" json:"acknowledged_worker_sequence,omitempty"`
+	CanonicalInvocationJson    []byte                         `protobuf:"bytes,17,opt,name=canonical_invocation_json,json=canonicalInvocationJson,proto3" json:"canonical_invocation_json,omitempty"`
+	InvocationDigest           string                         `protobuf:"bytes,18,opt,name=invocation_digest,json=invocationDigest,proto3" json:"invocation_digest,omitempty"`
+	ExecutionPhaseRequests     []*WorkerExecutionPhaseRequest `protobuf:"bytes,19,rep,name=execution_phase_requests,json=executionPhaseRequests,proto3" json:"execution_phase_requests,omitempty"`
 	unknownFields              protoimpl.UnknownFields
 	sizeCache                  protoimpl.SizeCache
 }
 
 func (x *WorkerWelcome) Reset() {
 	*x = WorkerWelcome{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[30]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4080,7 +4688,7 @@ func (x *WorkerWelcome) String() string {
 func (*WorkerWelcome) ProtoMessage() {}
 
 func (x *WorkerWelcome) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[30]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4093,7 +4701,7 @@ func (x *WorkerWelcome) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkerWelcome.ProtoReflect.Descriptor instead.
 func (*WorkerWelcome) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{30}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *WorkerWelcome) GetDisposition() WorkerWelcome_Disposition {
@@ -4222,6 +4830,13 @@ func (x *WorkerWelcome) GetInvocationDigest() string {
 	return ""
 }
 
+func (x *WorkerWelcome) GetExecutionPhaseRequests() []*WorkerExecutionPhaseRequest {
+	if x != nil {
+		return x.ExecutionPhaseRequests
+	}
+	return nil
+}
+
 type WorkerReceipt struct {
 	state                      protoimpl.MessageState `protogen:"open.v1"`
 	EventId                    string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
@@ -4237,7 +4852,7 @@ type WorkerReceipt struct {
 
 func (x *WorkerReceipt) Reset() {
 	*x = WorkerReceipt{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[31]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4249,7 +4864,7 @@ func (x *WorkerReceipt) String() string {
 func (*WorkerReceipt) ProtoMessage() {}
 
 func (x *WorkerReceipt) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[31]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4262,7 +4877,7 @@ func (x *WorkerReceipt) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkerReceipt.ProtoReflect.Descriptor instead.
 func (*WorkerReceipt) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{31}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *WorkerReceipt) GetEventId() string {
@@ -4329,7 +4944,7 @@ type ControllerToWorker struct {
 
 func (x *ControllerToWorker) Reset() {
 	*x = ControllerToWorker{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[32]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4341,7 +4956,7 @@ func (x *ControllerToWorker) String() string {
 func (*ControllerToWorker) ProtoMessage() {}
 
 func (x *ControllerToWorker) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[32]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4354,7 +4969,7 @@ func (x *ControllerToWorker) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControllerToWorker.ProtoReflect.Descriptor instead.
 func (*ControllerToWorker) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{32}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *ControllerToWorker) GetMessage() isControllerToWorker_Message {
@@ -4437,7 +5052,7 @@ type GetRunRequest struct {
 
 func (x *GetRunRequest) Reset() {
 	*x = GetRunRequest{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[33]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4449,7 +5064,7 @@ func (x *GetRunRequest) String() string {
 func (*GetRunRequest) ProtoMessage() {}
 
 func (x *GetRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[33]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4462,7 +5077,7 @@ func (x *GetRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRunRequest.ProtoReflect.Descriptor instead.
 func (*GetRunRequest) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{33}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *GetRunRequest) GetRunId() string {
@@ -4484,7 +5099,7 @@ type GetCompiledPlanRequest struct {
 
 func (x *GetCompiledPlanRequest) Reset() {
 	*x = GetCompiledPlanRequest{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[34]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4496,7 +5111,7 @@ func (x *GetCompiledPlanRequest) String() string {
 func (*GetCompiledPlanRequest) ProtoMessage() {}
 
 func (x *GetCompiledPlanRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[34]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4509,7 +5124,7 @@ func (x *GetCompiledPlanRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCompiledPlanRequest.ProtoReflect.Descriptor instead.
 func (*GetCompiledPlanRequest) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{34}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *GetCompiledPlanRequest) GetRunId() string {
@@ -4530,7 +5145,7 @@ type GetCompiledPlanResponse struct {
 
 func (x *GetCompiledPlanResponse) Reset() {
 	*x = GetCompiledPlanResponse{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[35]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4542,7 +5157,7 @@ func (x *GetCompiledPlanResponse) String() string {
 func (*GetCompiledPlanResponse) ProtoMessage() {}
 
 func (x *GetCompiledPlanResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[35]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4555,7 +5170,7 @@ func (x *GetCompiledPlanResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCompiledPlanResponse.ProtoReflect.Descriptor instead.
 func (*GetCompiledPlanResponse) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{35}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *GetCompiledPlanResponse) GetJournalId() string {
@@ -4591,7 +5206,7 @@ type ListRunsRequest struct {
 
 func (x *ListRunsRequest) Reset() {
 	*x = ListRunsRequest{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[36]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4603,7 +5218,7 @@ func (x *ListRunsRequest) String() string {
 func (*ListRunsRequest) ProtoMessage() {}
 
 func (x *ListRunsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[36]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4616,7 +5231,7 @@ func (x *ListRunsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRunsRequest.ProtoReflect.Descriptor instead.
 func (*ListRunsRequest) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{36}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *ListRunsRequest) GetObservedStates() []ObservedState {
@@ -4658,7 +5273,7 @@ type ListRunsResponse struct {
 
 func (x *ListRunsResponse) Reset() {
 	*x = ListRunsResponse{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[37]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4670,7 +5285,7 @@ func (x *ListRunsResponse) String() string {
 func (*ListRunsResponse) ProtoMessage() {}
 
 func (x *ListRunsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[37]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4683,7 +5298,7 @@ func (x *ListRunsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRunsResponse.ProtoReflect.Descriptor instead.
 func (*ListRunsResponse) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{37}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *ListRunsResponse) GetRuns() []*RunSummary {
@@ -4714,14 +5329,26 @@ type WatchEventsRequest struct {
 	EventTypes           []string               `protobuf:"bytes,3,rep,name=event_types,json=eventTypes,proto3" json:"event_types,omitempty"`
 	// A bounded replay closes successfully after this many events, or after the
 	// current durable prefix is exhausted. Zero keeps the live stream open.
-	ReplayLimit   uint32 `protobuf:"varint,4,opt,name=replay_limit,json=replayLimit,proto3" json:"replay_limit,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ReplayLimit uint32 `protobuf:"varint,4,opt,name=replay_limit,json=replayLimit,proto3" json:"replay_limit,omitempty"`
+	// Optional inclusive upper fence for a stable historical snapshot. It is
+	// valid only for bounded replay and must be greater than the after cursor.
+	ThroughJournalSequence uint64 `protobuf:"varint,5,opt,name=through_journal_sequence,json=throughJournalSequence,proto3" json:"through_journal_sequence,omitempty"`
+	// Return the newest matching events first. This is valid only for a bounded,
+	// upper-fenced replay and lets observers cold-load a fixed-size tail window.
+	NewestFirst bool `protobuf:"varint,6,opt,name=newest_first,json=newestFirst,proto3" json:"newest_first,omitempty"`
+	// Return only the newest event for each distinct metric series. A series is
+	// identified by run, node, attempt, metric name, and its complete label map.
+	// This is valid only for an upper-fenced bounded replay filtered to exactly
+	// metric.sampled; it prevents high-rate metrics from starving sparse series
+	// during a dashboard cold load.
+	NewestPerMetricSeries bool `protobuf:"varint,7,opt,name=newest_per_metric_series,json=newestPerMetricSeries,proto3" json:"newest_per_metric_series,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *WatchEventsRequest) Reset() {
 	*x = WatchEventsRequest{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[38]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4733,7 +5360,7 @@ func (x *WatchEventsRequest) String() string {
 func (*WatchEventsRequest) ProtoMessage() {}
 
 func (x *WatchEventsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[38]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4746,7 +5373,7 @@ func (x *WatchEventsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchEventsRequest.ProtoReflect.Descriptor instead.
 func (*WatchEventsRequest) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{38}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *WatchEventsRequest) GetRunIds() []string {
@@ -4777,6 +5404,27 @@ func (x *WatchEventsRequest) GetReplayLimit() uint32 {
 	return 0
 }
 
+func (x *WatchEventsRequest) GetThroughJournalSequence() uint64 {
+	if x != nil {
+		return x.ThroughJournalSequence
+	}
+	return 0
+}
+
+func (x *WatchEventsRequest) GetNewestFirst() bool {
+	if x != nil {
+		return x.NewestFirst
+	}
+	return false
+}
+
+func (x *WatchEventsRequest) GetNewestPerMetricSeries() bool {
+	if x != nil {
+		return x.NewestPerMetricSeries
+	}
+	return false
+}
+
 type GetControlViewRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
@@ -4786,7 +5434,7 @@ type GetControlViewRequest struct {
 
 func (x *GetControlViewRequest) Reset() {
 	*x = GetControlViewRequest{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[39]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4798,7 +5446,7 @@ func (x *GetControlViewRequest) String() string {
 func (*GetControlViewRequest) ProtoMessage() {}
 
 func (x *GetControlViewRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[39]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4811,7 +5459,7 @@ func (x *GetControlViewRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetControlViewRequest.ProtoReflect.Descriptor instead.
 func (*GetControlViewRequest) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{39}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *GetControlViewRequest) GetRunId() string {
@@ -4839,7 +5487,7 @@ type ControlDescriptor struct {
 
 func (x *ControlDescriptor) Reset() {
 	*x = ControlDescriptor{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[40]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4851,7 +5499,7 @@ func (x *ControlDescriptor) String() string {
 func (*ControlDescriptor) ProtoMessage() {}
 
 func (x *ControlDescriptor) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[40]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4864,7 +5512,7 @@ func (x *ControlDescriptor) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlDescriptor.ProtoReflect.Descriptor instead.
 func (*ControlDescriptor) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{40}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *ControlDescriptor) GetType() ControlType {
@@ -4955,7 +5603,7 @@ type ControlCommandView struct {
 
 func (x *ControlCommandView) Reset() {
 	*x = ControlCommandView{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[41]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4967,7 +5615,7 @@ func (x *ControlCommandView) String() string {
 func (*ControlCommandView) ProtoMessage() {}
 
 func (x *ControlCommandView) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[41]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4980,7 +5628,7 @@ func (x *ControlCommandView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlCommandView.ProtoReflect.Descriptor instead.
 func (*ControlCommandView) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{41}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *ControlCommandView) GetCommandId() string {
@@ -5066,7 +5714,7 @@ type GetControlViewResponse struct {
 
 func (x *GetControlViewResponse) Reset() {
 	*x = GetControlViewResponse{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[42]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5078,7 +5726,7 @@ func (x *GetControlViewResponse) String() string {
 func (*GetControlViewResponse) ProtoMessage() {}
 
 func (x *GetControlViewResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[42]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5091,7 +5739,7 @@ func (x *GetControlViewResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetControlViewResponse.ProtoReflect.Descriptor instead.
 func (*GetControlViewResponse) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{42}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *GetControlViewResponse) GetCatalog() map[string]*ControlDescriptor {
@@ -5139,7 +5787,7 @@ type DescriptorRequest struct {
 
 func (x *DescriptorRequest) Reset() {
 	*x = DescriptorRequest{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[43]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5151,7 +5799,7 @@ func (x *DescriptorRequest) String() string {
 func (*DescriptorRequest) ProtoMessage() {}
 
 func (x *DescriptorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[43]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5164,7 +5812,7 @@ func (x *DescriptorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DescriptorRequest.ProtoReflect.Descriptor instead.
 func (*DescriptorRequest) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{43}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *DescriptorRequest) GetAdapter() string {
@@ -5192,7 +5840,7 @@ type DescriptorResponse struct {
 
 func (x *DescriptorResponse) Reset() {
 	*x = DescriptorResponse{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[44]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5204,7 +5852,7 @@ func (x *DescriptorResponse) String() string {
 func (*DescriptorResponse) ProtoMessage() {}
 
 func (x *DescriptorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[44]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5217,7 +5865,7 @@ func (x *DescriptorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DescriptorResponse.ProtoReflect.Descriptor instead.
 func (*DescriptorResponse) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{44}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *DescriptorResponse) GetSchemaJson() string {
@@ -5232,6 +5880,778 @@ func (x *DescriptorResponse) GetSchemaHash() string {
 		return x.SchemaHash
 	}
 	return ""
+}
+
+type HostdCoordinatorAuthorityStatus struct {
+	state                            protoimpl.MessageState `protogen:"open.v1"`
+	ApiVersion                       string                 `protobuf:"bytes,1,opt,name=api_version,json=apiVersion,proto3" json:"api_version,omitempty"`
+	Lifecycle                        HostdLifecycle         `protobuf:"varint,2,opt,name=lifecycle,proto3,enum=trainvm.v1.HostdLifecycle" json:"lifecycle,omitempty"`
+	HostId                           string                 `protobuf:"bytes,3,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	BootId                           string                 `protobuf:"bytes,4,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
+	BrokerEpoch                      string                 `protobuf:"bytes,5,opt,name=broker_epoch,json=brokerEpoch,proto3" json:"broker_epoch,omitempty"`
+	InventoryDigest                  string                 `protobuf:"bytes,6,opt,name=inventory_digest,json=inventoryDigest,proto3" json:"inventory_digest,omitempty"`
+	LiveSessions                     uint64                 `protobuf:"varint,7,opt,name=live_sessions,json=liveSessions,proto3" json:"live_sessions,omitempty"`
+	AdmissionSessions                uint64                 `protobuf:"varint,8,opt,name=admission_sessions,json=admissionSessions,proto3" json:"admission_sessions,omitempty"`
+	StaleAdmissionSessions           uint64                 `protobuf:"varint,9,opt,name=stale_admission_sessions,json=staleAdmissionSessions,proto3" json:"stale_admission_sessions,omitempty"`
+	ReleaseOnlySessions              uint64                 `protobuf:"varint,10,opt,name=release_only_sessions,json=releaseOnlySessions,proto3" json:"release_only_sessions,omitempty"`
+	AdmissionCountsAreCachedEvidence bool                   `protobuf:"varint,11,opt,name=admission_counts_are_cached_evidence,json=admissionCountsAreCachedEvidence,proto3" json:"admission_counts_are_cached_evidence,omitempty"`
+	StartupAuditReceiptDigest        string                 `protobuf:"bytes,12,opt,name=startup_audit_receipt_digest,json=startupAuditReceiptDigest,proto3" json:"startup_audit_receipt_digest,omitempty"`
+	StartupAuditPassed               bool                   `protobuf:"varint,13,opt,name=startup_audit_passed,json=startupAuditPassed,proto3" json:"startup_audit_passed,omitempty"`
+	PoisonReason                     string                 `protobuf:"bytes,14,opt,name=poison_reason,json=poisonReason,proto3" json:"poison_reason,omitempty"`
+	unknownFields                    protoimpl.UnknownFields
+	sizeCache                        protoimpl.SizeCache
+}
+
+func (x *HostdCoordinatorAuthorityStatus) Reset() {
+	*x = HostdCoordinatorAuthorityStatus{}
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[47]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostdCoordinatorAuthorityStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostdCoordinatorAuthorityStatus) ProtoMessage() {}
+
+func (x *HostdCoordinatorAuthorityStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[47]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostdCoordinatorAuthorityStatus.ProtoReflect.Descriptor instead.
+func (*HostdCoordinatorAuthorityStatus) Descriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{47}
+}
+
+func (x *HostdCoordinatorAuthorityStatus) GetApiVersion() string {
+	if x != nil {
+		return x.ApiVersion
+	}
+	return ""
+}
+
+func (x *HostdCoordinatorAuthorityStatus) GetLifecycle() HostdLifecycle {
+	if x != nil {
+		return x.Lifecycle
+	}
+	return HostdLifecycle_HOSTD_LIFECYCLE_UNSPECIFIED
+}
+
+func (x *HostdCoordinatorAuthorityStatus) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *HostdCoordinatorAuthorityStatus) GetBootId() string {
+	if x != nil {
+		return x.BootId
+	}
+	return ""
+}
+
+func (x *HostdCoordinatorAuthorityStatus) GetBrokerEpoch() string {
+	if x != nil {
+		return x.BrokerEpoch
+	}
+	return ""
+}
+
+func (x *HostdCoordinatorAuthorityStatus) GetInventoryDigest() string {
+	if x != nil {
+		return x.InventoryDigest
+	}
+	return ""
+}
+
+func (x *HostdCoordinatorAuthorityStatus) GetLiveSessions() uint64 {
+	if x != nil {
+		return x.LiveSessions
+	}
+	return 0
+}
+
+func (x *HostdCoordinatorAuthorityStatus) GetAdmissionSessions() uint64 {
+	if x != nil {
+		return x.AdmissionSessions
+	}
+	return 0
+}
+
+func (x *HostdCoordinatorAuthorityStatus) GetStaleAdmissionSessions() uint64 {
+	if x != nil {
+		return x.StaleAdmissionSessions
+	}
+	return 0
+}
+
+func (x *HostdCoordinatorAuthorityStatus) GetReleaseOnlySessions() uint64 {
+	if x != nil {
+		return x.ReleaseOnlySessions
+	}
+	return 0
+}
+
+func (x *HostdCoordinatorAuthorityStatus) GetAdmissionCountsAreCachedEvidence() bool {
+	if x != nil {
+		return x.AdmissionCountsAreCachedEvidence
+	}
+	return false
+}
+
+func (x *HostdCoordinatorAuthorityStatus) GetStartupAuditReceiptDigest() string {
+	if x != nil {
+		return x.StartupAuditReceiptDigest
+	}
+	return ""
+}
+
+func (x *HostdCoordinatorAuthorityStatus) GetStartupAuditPassed() bool {
+	if x != nil {
+		return x.StartupAuditPassed
+	}
+	return false
+}
+
+func (x *HostdCoordinatorAuthorityStatus) GetPoisonReason() string {
+	if x != nil {
+		return x.PoisonReason
+	}
+	return ""
+}
+
+type HostResourceFenceStatus struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Kind            HostResourceKind       `protobuf:"varint,1,opt,name=kind,proto3,enum=trainvm.v1.HostResourceKind" json:"kind,omitempty"`
+	Vendor          HostAcceleratorVendor  `protobuf:"varint,2,opt,name=vendor,proto3,enum=trainvm.v1.HostAcceleratorVendor" json:"vendor,omitempty"`
+	StableId        string                 `protobuf:"bytes,3,opt,name=stable_id,json=stableId,proto3" json:"stable_id,omitempty"`
+	ParentId        string                 `protobuf:"bytes,4,opt,name=parent_id,json=parentId,proto3" json:"parent_id,omitempty"`
+	Generation      uint64                 `protobuf:"varint,5,opt,name=generation,proto3" json:"generation,omitempty"`
+	InventoryDigest string                 `protobuf:"bytes,6,opt,name=inventory_digest,json=inventoryDigest,proto3" json:"inventory_digest,omitempty"`
+	TopologyDigest  string                 `protobuf:"bytes,7,opt,name=topology_digest,json=topologyDigest,proto3" json:"topology_digest,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *HostResourceFenceStatus) Reset() {
+	*x = HostResourceFenceStatus{}
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[48]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostResourceFenceStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostResourceFenceStatus) ProtoMessage() {}
+
+func (x *HostResourceFenceStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[48]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostResourceFenceStatus.ProtoReflect.Descriptor instead.
+func (*HostResourceFenceStatus) Descriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{48}
+}
+
+func (x *HostResourceFenceStatus) GetKind() HostResourceKind {
+	if x != nil {
+		return x.Kind
+	}
+	return HostResourceKind_HOST_RESOURCE_KIND_UNSPECIFIED
+}
+
+func (x *HostResourceFenceStatus) GetVendor() HostAcceleratorVendor {
+	if x != nil {
+		return x.Vendor
+	}
+	return HostAcceleratorVendor_HOST_ACCELERATOR_VENDOR_UNSPECIFIED
+}
+
+func (x *HostResourceFenceStatus) GetStableId() string {
+	if x != nil {
+		return x.StableId
+	}
+	return ""
+}
+
+func (x *HostResourceFenceStatus) GetParentId() string {
+	if x != nil {
+		return x.ParentId
+	}
+	return ""
+}
+
+func (x *HostResourceFenceStatus) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *HostResourceFenceStatus) GetInventoryDigest() string {
+	if x != nil {
+		return x.InventoryDigest
+	}
+	return ""
+}
+
+func (x *HostResourceFenceStatus) GetTopologyDigest() string {
+	if x != nil {
+		return x.TopologyDigest
+	}
+	return ""
+}
+
+type HostdProcessAuthorityStatus struct {
+	state                           protoimpl.MessageState `protogen:"open.v1"`
+	AllocationId                    string                 `protobuf:"bytes,1,opt,name=allocation_id,json=allocationId,proto3" json:"allocation_id,omitempty"`
+	JournalId                       string                 `protobuf:"bytes,2,opt,name=journal_id,json=journalId,proto3" json:"journal_id,omitempty"`
+	RunId                           string                 `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	LogicalLeaseId                  string                 `protobuf:"bytes,4,opt,name=logical_lease_id,json=logicalLeaseId,proto3" json:"logical_lease_id,omitempty"`
+	LogicalFencingToken             uint64                 `protobuf:"varint,5,opt,name=logical_fencing_token,json=logicalFencingToken,proto3" json:"logical_fencing_token,omitempty"`
+	LaunchId                        string                 `protobuf:"bytes,6,opt,name=launch_id,json=launchId,proto3" json:"launch_id,omitempty"`
+	Phase                           HostdProcessPhase      `protobuf:"varint,7,opt,name=phase,proto3,enum=trainvm.v1.HostdProcessPhase" json:"phase,omitempty"`
+	CgroupPath                      string                 `protobuf:"bytes,8,opt,name=cgroup_path,json=cgroupPath,proto3" json:"cgroup_path,omitempty"`
+	HostPid                         *int64                 `protobuf:"varint,9,opt,name=host_pid,json=hostPid,proto3,oneof" json:"host_pid,omitempty"`
+	ProcessStarttimeTicks           *uint64                `protobuf:"varint,10,opt,name=process_starttime_ticks,json=processStarttimeTicks,proto3,oneof" json:"process_starttime_ticks,omitempty"`
+	DevicePolicyIntended            bool                   `protobuf:"varint,11,opt,name=device_policy_intended,json=devicePolicyIntended,proto3" json:"device_policy_intended,omitempty"`
+	DevicePolicyInstalled           bool                   `protobuf:"varint,12,opt,name=device_policy_installed,json=devicePolicyInstalled,proto3" json:"device_policy_installed,omitempty"`
+	DevicePolicyDigest              string                 `protobuf:"bytes,13,opt,name=device_policy_digest,json=devicePolicyDigest,proto3" json:"device_policy_digest,omitempty"`
+	DevicePolicyInstallationDigest  string                 `protobuf:"bytes,14,opt,name=device_policy_installation_digest,json=devicePolicyInstallationDigest,proto3" json:"device_policy_installation_digest,omitempty"`
+	ProcessPolicyIntended           bool                   `protobuf:"varint,15,opt,name=process_policy_intended,json=processPolicyIntended,proto3" json:"process_policy_intended,omitempty"`
+	ProcessPolicyInstalled          bool                   `protobuf:"varint,16,opt,name=process_policy_installed,json=processPolicyInstalled,proto3" json:"process_policy_installed,omitempty"`
+	ProcessPolicyDigest             string                 `protobuf:"bytes,17,opt,name=process_policy_digest,json=processPolicyDigest,proto3" json:"process_policy_digest,omitempty"`
+	ProcessPolicyInstallationDigest string                 `protobuf:"bytes,18,opt,name=process_policy_installation_digest,json=processPolicyInstallationDigest,proto3" json:"process_policy_installation_digest,omitempty"`
+	CgroupEmpty                     *bool                  `protobuf:"varint,19,opt,name=cgroup_empty,json=cgroupEmpty,proto3,oneof" json:"cgroup_empty,omitempty"`
+	AcceleratorContextsEmpty        *bool                  `protobuf:"varint,20,opt,name=accelerator_contexts_empty,json=acceleratorContextsEmpty,proto3,oneof" json:"accelerator_contexts_empty,omitempty"`
+	ContextAuditDigest              string                 `protobuf:"bytes,21,opt,name=context_audit_digest,json=contextAuditDigest,proto3" json:"context_audit_digest,omitempty"`
+	TerminalReceiptDigest           string                 `protobuf:"bytes,22,opt,name=terminal_receipt_digest,json=terminalReceiptDigest,proto3" json:"terminal_receipt_digest,omitempty"`
+	unknownFields                   protoimpl.UnknownFields
+	sizeCache                       protoimpl.SizeCache
+}
+
+func (x *HostdProcessAuthorityStatus) Reset() {
+	*x = HostdProcessAuthorityStatus{}
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[49]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostdProcessAuthorityStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostdProcessAuthorityStatus) ProtoMessage() {}
+
+func (x *HostdProcessAuthorityStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[49]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostdProcessAuthorityStatus.ProtoReflect.Descriptor instead.
+func (*HostdProcessAuthorityStatus) Descriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{49}
+}
+
+func (x *HostdProcessAuthorityStatus) GetAllocationId() string {
+	if x != nil {
+		return x.AllocationId
+	}
+	return ""
+}
+
+func (x *HostdProcessAuthorityStatus) GetJournalId() string {
+	if x != nil {
+		return x.JournalId
+	}
+	return ""
+}
+
+func (x *HostdProcessAuthorityStatus) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *HostdProcessAuthorityStatus) GetLogicalLeaseId() string {
+	if x != nil {
+		return x.LogicalLeaseId
+	}
+	return ""
+}
+
+func (x *HostdProcessAuthorityStatus) GetLogicalFencingToken() uint64 {
+	if x != nil {
+		return x.LogicalFencingToken
+	}
+	return 0
+}
+
+func (x *HostdProcessAuthorityStatus) GetLaunchId() string {
+	if x != nil {
+		return x.LaunchId
+	}
+	return ""
+}
+
+func (x *HostdProcessAuthorityStatus) GetPhase() HostdProcessPhase {
+	if x != nil {
+		return x.Phase
+	}
+	return HostdProcessPhase_HOSTD_PROCESS_PHASE_UNSPECIFIED
+}
+
+func (x *HostdProcessAuthorityStatus) GetCgroupPath() string {
+	if x != nil {
+		return x.CgroupPath
+	}
+	return ""
+}
+
+func (x *HostdProcessAuthorityStatus) GetHostPid() int64 {
+	if x != nil && x.HostPid != nil {
+		return *x.HostPid
+	}
+	return 0
+}
+
+func (x *HostdProcessAuthorityStatus) GetProcessStarttimeTicks() uint64 {
+	if x != nil && x.ProcessStarttimeTicks != nil {
+		return *x.ProcessStarttimeTicks
+	}
+	return 0
+}
+
+func (x *HostdProcessAuthorityStatus) GetDevicePolicyIntended() bool {
+	if x != nil {
+		return x.DevicePolicyIntended
+	}
+	return false
+}
+
+func (x *HostdProcessAuthorityStatus) GetDevicePolicyInstalled() bool {
+	if x != nil {
+		return x.DevicePolicyInstalled
+	}
+	return false
+}
+
+func (x *HostdProcessAuthorityStatus) GetDevicePolicyDigest() string {
+	if x != nil {
+		return x.DevicePolicyDigest
+	}
+	return ""
+}
+
+func (x *HostdProcessAuthorityStatus) GetDevicePolicyInstallationDigest() string {
+	if x != nil {
+		return x.DevicePolicyInstallationDigest
+	}
+	return ""
+}
+
+func (x *HostdProcessAuthorityStatus) GetProcessPolicyIntended() bool {
+	if x != nil {
+		return x.ProcessPolicyIntended
+	}
+	return false
+}
+
+func (x *HostdProcessAuthorityStatus) GetProcessPolicyInstalled() bool {
+	if x != nil {
+		return x.ProcessPolicyInstalled
+	}
+	return false
+}
+
+func (x *HostdProcessAuthorityStatus) GetProcessPolicyDigest() string {
+	if x != nil {
+		return x.ProcessPolicyDigest
+	}
+	return ""
+}
+
+func (x *HostdProcessAuthorityStatus) GetProcessPolicyInstallationDigest() string {
+	if x != nil {
+		return x.ProcessPolicyInstallationDigest
+	}
+	return ""
+}
+
+func (x *HostdProcessAuthorityStatus) GetCgroupEmpty() bool {
+	if x != nil && x.CgroupEmpty != nil {
+		return *x.CgroupEmpty
+	}
+	return false
+}
+
+func (x *HostdProcessAuthorityStatus) GetAcceleratorContextsEmpty() bool {
+	if x != nil && x.AcceleratorContextsEmpty != nil {
+		return *x.AcceleratorContextsEmpty
+	}
+	return false
+}
+
+func (x *HostdProcessAuthorityStatus) GetContextAuditDigest() string {
+	if x != nil {
+		return x.ContextAuditDigest
+	}
+	return ""
+}
+
+func (x *HostdProcessAuthorityStatus) GetTerminalReceiptDigest() string {
+	if x != nil {
+		return x.TerminalReceiptDigest
+	}
+	return ""
+}
+
+type GetHostAuthorityStatusRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetHostAuthorityStatusRequest) Reset() {
+	*x = GetHostAuthorityStatusRequest{}
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[50]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetHostAuthorityStatusRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetHostAuthorityStatusRequest) ProtoMessage() {}
+
+func (x *GetHostAuthorityStatusRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[50]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetHostAuthorityStatusRequest.ProtoReflect.Descriptor instead.
+func (*GetHostAuthorityStatusRequest) Descriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{50}
+}
+
+type GetHostAuthorityStatusResponse struct {
+	state                             protoimpl.MessageState           `protogen:"open.v1"`
+	ApiVersion                        string                           `protobuf:"bytes,1,opt,name=api_version,json=apiVersion,proto3" json:"api_version,omitempty"`
+	Coordinator                       *HostdCoordinatorAuthorityStatus `protobuf:"bytes,2,opt,name=coordinator,proto3" json:"coordinator,omitempty"`
+	StartupPhase                      HostdStartupPhase                `protobuf:"varint,3,opt,name=startup_phase,json=startupPhase,proto3,enum=trainvm.v1.HostdStartupPhase" json:"startup_phase,omitempty"`
+	StartupRecoverySteps              uint64                           `protobuf:"varint,4,opt,name=startup_recovery_steps,json=startupRecoverySteps,proto3" json:"startup_recovery_steps,omitempty"`
+	RemainingUnclosedProcessRecords   uint64                           `protobuf:"varint,5,opt,name=remaining_unclosed_process_records,json=remainingUnclosedProcessRecords,proto3" json:"remaining_unclosed_process_records,omitempty"`
+	RemainingTerminalReleaseRecords   uint64                           `protobuf:"varint,6,opt,name=remaining_terminal_release_records,json=remainingTerminalReleaseRecords,proto3" json:"remaining_terminal_release_records,omitempty"`
+	LedgerVerified                    bool                             `protobuf:"varint,7,opt,name=ledger_verified,json=ledgerVerified,proto3" json:"ledger_verified,omitempty"`
+	LedgerVerificationReason          string                           `protobuf:"bytes,8,opt,name=ledger_verification_reason,json=ledgerVerificationReason,proto3" json:"ledger_verification_reason,omitempty"`
+	LedgerSequence                    uint64                           `protobuf:"varint,9,opt,name=ledger_sequence,json=ledgerSequence,proto3" json:"ledger_sequence,omitempty"`
+	LedgerChainHash                   string                           `protobuf:"bytes,10,opt,name=ledger_chain_hash,json=ledgerChainHash,proto3" json:"ledger_chain_hash,omitempty"`
+	LedgerRecordCount                 uint64                           `protobuf:"varint,11,opt,name=ledger_record_count,json=ledgerRecordCount,proto3" json:"ledger_record_count,omitempty"`
+	OccupancyLedgerSequence           uint64                           `protobuf:"varint,12,opt,name=occupancy_ledger_sequence,json=occupancyLedgerSequence,proto3" json:"occupancy_ledger_sequence,omitempty"`
+	OccupancyDigest                   string                           `protobuf:"bytes,13,opt,name=occupancy_digest,json=occupancyDigest,proto3" json:"occupancy_digest,omitempty"`
+	ActiveFenceCount                  uint64                           `protobuf:"varint,14,opt,name=active_fence_count,json=activeFenceCount,proto3" json:"active_fence_count,omitempty"`
+	ActiveFences                      []*HostResourceFenceStatus       `protobuf:"bytes,15,rep,name=active_fences,json=activeFences,proto3" json:"active_fences,omitempty"`
+	ActiveFencesTruncated             bool                             `protobuf:"varint,16,opt,name=active_fences_truncated,json=activeFencesTruncated,proto3" json:"active_fences_truncated,omitempty"`
+	ActiveProcessCount                uint64                           `protobuf:"varint,17,opt,name=active_process_count,json=activeProcessCount,proto3" json:"active_process_count,omitempty"`
+	ActiveProcesses                   []*HostdProcessAuthorityStatus   `protobuf:"bytes,18,rep,name=active_processes,json=activeProcesses,proto3" json:"active_processes,omitempty"`
+	ActiveProcessesTruncated          bool                             `protobuf:"varint,19,opt,name=active_processes_truncated,json=activeProcessesTruncated,proto3" json:"active_processes_truncated,omitempty"`
+	ProcessLaunchEnabled              bool                             `protobuf:"varint,20,opt,name=process_launch_enabled,json=processLaunchEnabled,proto3" json:"process_launch_enabled,omitempty"`
+	MutationEnabled                   bool                             `protobuf:"varint,21,opt,name=mutation_enabled,json=mutationEnabled,proto3" json:"mutation_enabled,omitempty"`
+	MutationDisabledReason            string                           `protobuf:"bytes,22,opt,name=mutation_disabled_reason,json=mutationDisabledReason,proto3" json:"mutation_disabled_reason,omitempty"`
+	LeaseRenewalTrackedCount          uint64                           `protobuf:"varint,23,opt,name=lease_renewal_tracked_count,json=leaseRenewalTrackedCount,proto3" json:"lease_renewal_tracked_count,omitempty"`
+	LeaseRenewalPoisoned              bool                             `protobuf:"varint,24,opt,name=lease_renewal_poisoned,json=leaseRenewalPoisoned,proto3" json:"lease_renewal_poisoned,omitempty"`
+	LeaseRenewalFailure               string                           `protobuf:"bytes,25,opt,name=lease_renewal_failure,json=leaseRenewalFailure,proto3" json:"lease_renewal_failure,omitempty"`
+	ResourceInventoryObserved         bool                             `protobuf:"varint,26,opt,name=resource_inventory_observed,json=resourceInventoryObserved,proto3" json:"resource_inventory_observed,omitempty"`
+	CurrentInventoryDigest            string                           `protobuf:"bytes,27,opt,name=current_inventory_digest,json=currentInventoryDigest,proto3" json:"current_inventory_digest,omitempty"`
+	CurrentInventoryReceiptDigest     string                           `protobuf:"bytes,28,opt,name=current_inventory_receipt_digest,json=currentInventoryReceiptDigest,proto3" json:"current_inventory_receipt_digest,omitempty"`
+	DegradedResourceCount             uint64                           `protobuf:"varint,29,opt,name=degraded_resource_count,json=degradedResourceCount,proto3" json:"degraded_resource_count,omitempty"`
+	ResourceDegradationReason         string                           `protobuf:"bytes,30,opt,name=resource_degradation_reason,json=resourceDegradationReason,proto3" json:"resource_degradation_reason,omitempty"`
+	ResourceInventoryObservationAgeNs uint64                           `protobuf:"varint,31,opt,name=resource_inventory_observation_age_ns,json=resourceInventoryObservationAgeNs,proto3" json:"resource_inventory_observation_age_ns,omitempty"`
+	unknownFields                     protoimpl.UnknownFields
+	sizeCache                         protoimpl.SizeCache
+}
+
+func (x *GetHostAuthorityStatusResponse) Reset() {
+	*x = GetHostAuthorityStatusResponse{}
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[51]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetHostAuthorityStatusResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetHostAuthorityStatusResponse) ProtoMessage() {}
+
+func (x *GetHostAuthorityStatusResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[51]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetHostAuthorityStatusResponse.ProtoReflect.Descriptor instead.
+func (*GetHostAuthorityStatusResponse) Descriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{51}
+}
+
+func (x *GetHostAuthorityStatusResponse) GetApiVersion() string {
+	if x != nil {
+		return x.ApiVersion
+	}
+	return ""
+}
+
+func (x *GetHostAuthorityStatusResponse) GetCoordinator() *HostdCoordinatorAuthorityStatus {
+	if x != nil {
+		return x.Coordinator
+	}
+	return nil
+}
+
+func (x *GetHostAuthorityStatusResponse) GetStartupPhase() HostdStartupPhase {
+	if x != nil {
+		return x.StartupPhase
+	}
+	return HostdStartupPhase_HOSTD_STARTUP_PHASE_UNSPECIFIED
+}
+
+func (x *GetHostAuthorityStatusResponse) GetStartupRecoverySteps() uint64 {
+	if x != nil {
+		return x.StartupRecoverySteps
+	}
+	return 0
+}
+
+func (x *GetHostAuthorityStatusResponse) GetRemainingUnclosedProcessRecords() uint64 {
+	if x != nil {
+		return x.RemainingUnclosedProcessRecords
+	}
+	return 0
+}
+
+func (x *GetHostAuthorityStatusResponse) GetRemainingTerminalReleaseRecords() uint64 {
+	if x != nil {
+		return x.RemainingTerminalReleaseRecords
+	}
+	return 0
+}
+
+func (x *GetHostAuthorityStatusResponse) GetLedgerVerified() bool {
+	if x != nil {
+		return x.LedgerVerified
+	}
+	return false
+}
+
+func (x *GetHostAuthorityStatusResponse) GetLedgerVerificationReason() string {
+	if x != nil {
+		return x.LedgerVerificationReason
+	}
+	return ""
+}
+
+func (x *GetHostAuthorityStatusResponse) GetLedgerSequence() uint64 {
+	if x != nil {
+		return x.LedgerSequence
+	}
+	return 0
+}
+
+func (x *GetHostAuthorityStatusResponse) GetLedgerChainHash() string {
+	if x != nil {
+		return x.LedgerChainHash
+	}
+	return ""
+}
+
+func (x *GetHostAuthorityStatusResponse) GetLedgerRecordCount() uint64 {
+	if x != nil {
+		return x.LedgerRecordCount
+	}
+	return 0
+}
+
+func (x *GetHostAuthorityStatusResponse) GetOccupancyLedgerSequence() uint64 {
+	if x != nil {
+		return x.OccupancyLedgerSequence
+	}
+	return 0
+}
+
+func (x *GetHostAuthorityStatusResponse) GetOccupancyDigest() string {
+	if x != nil {
+		return x.OccupancyDigest
+	}
+	return ""
+}
+
+func (x *GetHostAuthorityStatusResponse) GetActiveFenceCount() uint64 {
+	if x != nil {
+		return x.ActiveFenceCount
+	}
+	return 0
+}
+
+func (x *GetHostAuthorityStatusResponse) GetActiveFences() []*HostResourceFenceStatus {
+	if x != nil {
+		return x.ActiveFences
+	}
+	return nil
+}
+
+func (x *GetHostAuthorityStatusResponse) GetActiveFencesTruncated() bool {
+	if x != nil {
+		return x.ActiveFencesTruncated
+	}
+	return false
+}
+
+func (x *GetHostAuthorityStatusResponse) GetActiveProcessCount() uint64 {
+	if x != nil {
+		return x.ActiveProcessCount
+	}
+	return 0
+}
+
+func (x *GetHostAuthorityStatusResponse) GetActiveProcesses() []*HostdProcessAuthorityStatus {
+	if x != nil {
+		return x.ActiveProcesses
+	}
+	return nil
+}
+
+func (x *GetHostAuthorityStatusResponse) GetActiveProcessesTruncated() bool {
+	if x != nil {
+		return x.ActiveProcessesTruncated
+	}
+	return false
+}
+
+func (x *GetHostAuthorityStatusResponse) GetProcessLaunchEnabled() bool {
+	if x != nil {
+		return x.ProcessLaunchEnabled
+	}
+	return false
+}
+
+func (x *GetHostAuthorityStatusResponse) GetMutationEnabled() bool {
+	if x != nil {
+		return x.MutationEnabled
+	}
+	return false
+}
+
+func (x *GetHostAuthorityStatusResponse) GetMutationDisabledReason() string {
+	if x != nil {
+		return x.MutationDisabledReason
+	}
+	return ""
+}
+
+func (x *GetHostAuthorityStatusResponse) GetLeaseRenewalTrackedCount() uint64 {
+	if x != nil {
+		return x.LeaseRenewalTrackedCount
+	}
+	return 0
+}
+
+func (x *GetHostAuthorityStatusResponse) GetLeaseRenewalPoisoned() bool {
+	if x != nil {
+		return x.LeaseRenewalPoisoned
+	}
+	return false
+}
+
+func (x *GetHostAuthorityStatusResponse) GetLeaseRenewalFailure() string {
+	if x != nil {
+		return x.LeaseRenewalFailure
+	}
+	return ""
+}
+
+func (x *GetHostAuthorityStatusResponse) GetResourceInventoryObserved() bool {
+	if x != nil {
+		return x.ResourceInventoryObserved
+	}
+	return false
+}
+
+func (x *GetHostAuthorityStatusResponse) GetCurrentInventoryDigest() string {
+	if x != nil {
+		return x.CurrentInventoryDigest
+	}
+	return ""
+}
+
+func (x *GetHostAuthorityStatusResponse) GetCurrentInventoryReceiptDigest() string {
+	if x != nil {
+		return x.CurrentInventoryReceiptDigest
+	}
+	return ""
+}
+
+func (x *GetHostAuthorityStatusResponse) GetDegradedResourceCount() uint64 {
+	if x != nil {
+		return x.DegradedResourceCount
+	}
+	return 0
+}
+
+func (x *GetHostAuthorityStatusResponse) GetResourceDegradationReason() string {
+	if x != nil {
+		return x.ResourceDegradationReason
+	}
+	return ""
+}
+
+func (x *GetHostAuthorityStatusResponse) GetResourceInventoryObservationAgeNs() uint64 {
+	if x != nil {
+		return x.ResourceInventoryObservationAgeNs
+	}
+	return 0
 }
 
 var File_trainvm_v1_trainvm_proto protoreflect.FileDescriptor
@@ -5511,7 +6931,38 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x0eoptimizer_step\x18\x02 \x01(\x04R\roptimizerStep\x12\x14\n" +
 	"\x05phase\x18\x03 \x01(\tR\x05phase\x12;\n" +
 	"\vobserved_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"observedAt\"\xfa\x05\n" +
+	"observedAt\"\x8d\x02\n" +
+	"\x1bWorkerExecutionPhaseRequest\x12C\n" +
+	"\x05phase\x18\x01 \x01(\x0e2-.trainvm.v1.WorkerExecutionPhaseRequest.PhaseR\x05phase\x12\x18\n" +
+	"\aenabled\x18\x02 \x01(\bR\aenabled\x12\x19\n" +
+	"\x05steps\x18\x03 \x01(\x04H\x00R\x05steps\x88\x01\x01\x12%\n" +
+	"\x0erequest_digest\x18\x04 \x01(\tR\rrequestDigest\"C\n" +
+	"\x05Phase\x12\x15\n" +
+	"\x11PHASE_UNSPECIFIED\x10\x00\x12\x11\n" +
+	"\rPHASE_COMPILE\x10\x01\x12\x10\n" +
+	"\fPHASE_WARMUP\x10\x02B\b\n" +
+	"\x06_steps\"\xb7\x06\n" +
+	"\x1bWorkerExecutionPhaseReceipt\x12C\n" +
+	"\x05phase\x18\x01 \x01(\x0e2-.trainvm.v1.WorkerExecutionPhaseRequest.PhaseR\x05phase\x12U\n" +
+	"\vdisposition\x18\x02 \x01(\x0e23.trainvm.v1.WorkerExecutionPhaseReceipt.DispositionR\vdisposition\x12%\n" +
+	"\x0erequest_digest\x18\x03 \x01(\tR\rrequestDigest\x12%\n" +
+	"\x0esteps_executed\x18\x04 \x01(\x04R\rstepsExecuted\x128\n" +
+	"\x18state_fingerprint_before\x18\x05 \x01(\tR\x16stateFingerprintBefore\x126\n" +
+	"\x17state_fingerprint_after\x18\x06 \x01(\tR\x15stateFingerprintAfter\x128\n" +
+	"\vdiagnostics\x18\a \x03(\v2\x16.trainvm.v1.DiagnosticR\vdiagnostics\x12'\n" +
+	"\x0fconcurrency_key\x18\b \x01(\tR\x0econcurrencyKey\x12\x19\n" +
+	"\blease_id\x18\t \x01(\tR\aleaseId\x12#\n" +
+	"\rfencing_token\x18\n" +
+	" \x01(\x04R\ffencingToken\x12'\n" +
+	"\x0fworker_sequence\x18\v \x01(\x04R\x0eworkerSequence\x129\n" +
+	"\n" +
+	"started_at\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x12=\n" +
+	"\fcompleted_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAt\"v\n" +
+	"\vDisposition\x12\x1b\n" +
+	"\x17DISPOSITION_UNSPECIFIED\x10\x00\x12\x19\n" +
+	"\x15DISPOSITION_COMPLETED\x10\x01\x12\x17\n" +
+	"\x13DISPOSITION_SKIPPED\x10\x02\x12\x16\n" +
+	"\x12DISPOSITION_FAILED\x10\x03\"\xfa\x05\n" +
 	"\x1bControlPatchAcknowledgement\x12)\n" +
 	"\x10control_revision\x18\x01 \x01(\x04R\x0fcontrolRevision\x12U\n" +
 	"\vdisposition\x18\x02 \x01(\x0e23.trainvm.v1.ControlPatchAcknowledgement.DispositionR\vdisposition\x127\n" +
@@ -5575,7 +7026,7 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\vDisposition\x12\x1b\n" +
 	"\x17DISPOSITION_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13DISPOSITION_APPLIED\x10\x01\x12\x18\n" +
-	"\x14DISPOSITION_REJECTED\x10\x02\"\x99\x04\n" +
+	"\x14DISPOSITION_REJECTED\x10\x02\"\xe9\x04\n" +
 	"\x12WorkerToController\x12/\n" +
 	"\x05hello\x18\x01 \x01(\v2\x17.trainvm.v1.WorkerHelloH\x00R\x05hello\x12;\n" +
 	"\theartbeat\x18\x02 \x01(\v2\x1b.trainvm.v1.WorkerHeartbeatH\x00R\theartbeat\x121\n" +
@@ -5585,7 +7036,8 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\vcontrol_ack\x18\x06 \x01(\v2'.trainvm.v1.ControlPatchAcknowledgementH\x00R\n" +
 	"controlAck\x12N\n" +
 	"\x0echeckpoint_ack\x18\a \x01(\v2%.trainvm.v1.CheckpointAcknowledgementH\x00R\rcheckpointAck\x12K\n" +
-	"\rlifecycle_ack\x18\b \x01(\v2$.trainvm.v1.LifecycleAcknowledgementH\x00R\flifecycleAckB\t\n" +
+	"\rlifecycle_ack\x18\b \x01(\v2$.trainvm.v1.LifecycleAcknowledgementH\x00R\flifecycleAck\x12N\n" +
+	"\rphase_receipt\x18\t \x01(\v2'.trainvm.v1.WorkerExecutionPhaseReceiptH\x00R\fphaseReceiptB\t\n" +
 	"\amessage\"\x86\x03\n" +
 	"\rWorkerCommand\x12/\n" +
 	"\x13controller_sequence\x18\x01 \x01(\x04R\x12controllerSequence\x12\x1d\n" +
@@ -5599,7 +7051,7 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"checkpoint\x123\n" +
 	"\x06cancel\x18\r \x01(\v2\x19.trainvm.v1.CancelCommandH\x00R\x06cancel\x12=\n" +
 	"\bcontrols\x18\x0e \x01(\v2\x1f.trainvm.v1.ControlPatchCommandH\x00R\bcontrolsB\t\n" +
-	"\acommand\"\xc3\x06\n" +
+	"\acommand\"\xa6\a\n" +
 	"\rWorkerWelcome\x12G\n" +
 	"\vdisposition\x18\x01 \x01(\x0e2%.trainvm.v1.WorkerWelcome.DispositionR\vdisposition\x12\x1d\n" +
 	"\n" +
@@ -5622,7 +7074,8 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\toperation\x18\x0f \x01(\tR\toperation\x12@\n" +
 	"\x1cacknowledged_worker_sequence\x18\x10 \x01(\x04R\x1aacknowledgedWorkerSequence\x12:\n" +
 	"\x19canonical_invocation_json\x18\x11 \x01(\fR\x17canonicalInvocationJson\x12+\n" +
-	"\x11invocation_digest\x18\x12 \x01(\tR\x10invocationDigest\"\x81\x01\n" +
+	"\x11invocation_digest\x18\x12 \x01(\tR\x10invocationDigest\x12a\n" +
+	"\x18execution_phase_requests\x18\x13 \x03(\v2'.trainvm.v1.WorkerExecutionPhaseRequestR\x16executionPhaseRequests\"\x81\x01\n" +
 	"\vDisposition\x12\x1b\n" +
 	"\x17DISPOSITION_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14DISPOSITION_ACCEPTED\x10\x01\x12\x18\n" +
@@ -5665,13 +7118,16 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x04runs\x18\x01 \x03(\v2\x16.trainvm.v1.RunSummaryR\x04runs\x12&\n" +
 	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\x12\x1d\n" +
 	"\n" +
-	"journal_id\x18\x03 \x01(\tR\tjournalId\"\xa7\x01\n" +
+	"journal_id\x18\x03 \x01(\tR\tjournalId\"\xbd\x02\n" +
 	"\x12WatchEventsRequest\x12\x17\n" +
 	"\arun_ids\x18\x01 \x03(\tR\x06runIds\x124\n" +
 	"\x16after_journal_sequence\x18\x02 \x01(\x04R\x14afterJournalSequence\x12\x1f\n" +
 	"\vevent_types\x18\x03 \x03(\tR\n" +
 	"eventTypes\x12!\n" +
-	"\freplay_limit\x18\x04 \x01(\rR\vreplayLimit\".\n" +
+	"\freplay_limit\x18\x04 \x01(\rR\vreplayLimit\x128\n" +
+	"\x18through_journal_sequence\x18\x05 \x01(\x04R\x16throughJournalSequence\x12!\n" +
+	"\fnewest_first\x18\x06 \x01(\bR\vnewestFirst\x127\n" +
+	"\x18newest_per_metric_series\x18\a \x01(\bR\x15newestPerMetricSeries\".\n" +
 	"\x15GetControlViewRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\"\xcb\x03\n" +
 	"\x11ControlDescriptor\x12+\n" +
@@ -5722,7 +7178,99 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\vschema_json\x18\x01 \x01(\tR\n" +
 	"schemaJson\x12\x1f\n" +
 	"\vschema_hash\x18\x02 \x01(\tR\n" +
-	"schemaHash*\xb6\x01\n" +
+	"schemaHash\"\xa6\x05\n" +
+	"\x1fHostdCoordinatorAuthorityStatus\x12\x1f\n" +
+	"\vapi_version\x18\x01 \x01(\tR\n" +
+	"apiVersion\x128\n" +
+	"\tlifecycle\x18\x02 \x01(\x0e2\x1a.trainvm.v1.HostdLifecycleR\tlifecycle\x12\x17\n" +
+	"\ahost_id\x18\x03 \x01(\tR\x06hostId\x12\x17\n" +
+	"\aboot_id\x18\x04 \x01(\tR\x06bootId\x12!\n" +
+	"\fbroker_epoch\x18\x05 \x01(\tR\vbrokerEpoch\x12)\n" +
+	"\x10inventory_digest\x18\x06 \x01(\tR\x0finventoryDigest\x12#\n" +
+	"\rlive_sessions\x18\a \x01(\x04R\fliveSessions\x12-\n" +
+	"\x12admission_sessions\x18\b \x01(\x04R\x11admissionSessions\x128\n" +
+	"\x18stale_admission_sessions\x18\t \x01(\x04R\x16staleAdmissionSessions\x122\n" +
+	"\x15release_only_sessions\x18\n" +
+	" \x01(\x04R\x13releaseOnlySessions\x12N\n" +
+	"$admission_counts_are_cached_evidence\x18\v \x01(\bR admissionCountsAreCachedEvidence\x12?\n" +
+	"\x1cstartup_audit_receipt_digest\x18\f \x01(\tR\x19startupAuditReceiptDigest\x120\n" +
+	"\x14startup_audit_passed\x18\r \x01(\bR\x12startupAuditPassed\x12#\n" +
+	"\rpoison_reason\x18\x0e \x01(\tR\fpoisonReason\"\xb4\x02\n" +
+	"\x17HostResourceFenceStatus\x120\n" +
+	"\x04kind\x18\x01 \x01(\x0e2\x1c.trainvm.v1.HostResourceKindR\x04kind\x129\n" +
+	"\x06vendor\x18\x02 \x01(\x0e2!.trainvm.v1.HostAcceleratorVendorR\x06vendor\x12\x1b\n" +
+	"\tstable_id\x18\x03 \x01(\tR\bstableId\x12\x1b\n" +
+	"\tparent_id\x18\x04 \x01(\tR\bparentId\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x05 \x01(\x04R\n" +
+	"generation\x12)\n" +
+	"\x10inventory_digest\x18\x06 \x01(\tR\x0finventoryDigest\x12'\n" +
+	"\x0ftopology_digest\x18\a \x01(\tR\x0etopologyDigest\"\xb2\t\n" +
+	"\x1bHostdProcessAuthorityStatus\x12#\n" +
+	"\rallocation_id\x18\x01 \x01(\tR\fallocationId\x12\x1d\n" +
+	"\n" +
+	"journal_id\x18\x02 \x01(\tR\tjournalId\x12\x15\n" +
+	"\x06run_id\x18\x03 \x01(\tR\x05runId\x12(\n" +
+	"\x10logical_lease_id\x18\x04 \x01(\tR\x0elogicalLeaseId\x122\n" +
+	"\x15logical_fencing_token\x18\x05 \x01(\x04R\x13logicalFencingToken\x12\x1b\n" +
+	"\tlaunch_id\x18\x06 \x01(\tR\blaunchId\x123\n" +
+	"\x05phase\x18\a \x01(\x0e2\x1d.trainvm.v1.HostdProcessPhaseR\x05phase\x12\x1f\n" +
+	"\vcgroup_path\x18\b \x01(\tR\n" +
+	"cgroupPath\x12\x1e\n" +
+	"\bhost_pid\x18\t \x01(\x03H\x00R\ahostPid\x88\x01\x01\x12;\n" +
+	"\x17process_starttime_ticks\x18\n" +
+	" \x01(\x04H\x01R\x15processStarttimeTicks\x88\x01\x01\x124\n" +
+	"\x16device_policy_intended\x18\v \x01(\bR\x14devicePolicyIntended\x126\n" +
+	"\x17device_policy_installed\x18\f \x01(\bR\x15devicePolicyInstalled\x120\n" +
+	"\x14device_policy_digest\x18\r \x01(\tR\x12devicePolicyDigest\x12I\n" +
+	"!device_policy_installation_digest\x18\x0e \x01(\tR\x1edevicePolicyInstallationDigest\x126\n" +
+	"\x17process_policy_intended\x18\x0f \x01(\bR\x15processPolicyIntended\x128\n" +
+	"\x18process_policy_installed\x18\x10 \x01(\bR\x16processPolicyInstalled\x122\n" +
+	"\x15process_policy_digest\x18\x11 \x01(\tR\x13processPolicyDigest\x12K\n" +
+	"\"process_policy_installation_digest\x18\x12 \x01(\tR\x1fprocessPolicyInstallationDigest\x12&\n" +
+	"\fcgroup_empty\x18\x13 \x01(\bH\x02R\vcgroupEmpty\x88\x01\x01\x12A\n" +
+	"\x1aaccelerator_contexts_empty\x18\x14 \x01(\bH\x03R\x18acceleratorContextsEmpty\x88\x01\x01\x120\n" +
+	"\x14context_audit_digest\x18\x15 \x01(\tR\x12contextAuditDigest\x126\n" +
+	"\x17terminal_receipt_digest\x18\x16 \x01(\tR\x15terminalReceiptDigestB\v\n" +
+	"\t_host_pidB\x1a\n" +
+	"\x18_process_starttime_ticksB\x0f\n" +
+	"\r_cgroup_emptyB\x1d\n" +
+	"\x1b_accelerator_contexts_empty\"\x1f\n" +
+	"\x1dGetHostAuthorityStatusRequest\"\xbc\x0e\n" +
+	"\x1eGetHostAuthorityStatusResponse\x12\x1f\n" +
+	"\vapi_version\x18\x01 \x01(\tR\n" +
+	"apiVersion\x12M\n" +
+	"\vcoordinator\x18\x02 \x01(\v2+.trainvm.v1.HostdCoordinatorAuthorityStatusR\vcoordinator\x12B\n" +
+	"\rstartup_phase\x18\x03 \x01(\x0e2\x1d.trainvm.v1.HostdStartupPhaseR\fstartupPhase\x124\n" +
+	"\x16startup_recovery_steps\x18\x04 \x01(\x04R\x14startupRecoverySteps\x12K\n" +
+	"\"remaining_unclosed_process_records\x18\x05 \x01(\x04R\x1fremainingUnclosedProcessRecords\x12K\n" +
+	"\"remaining_terminal_release_records\x18\x06 \x01(\x04R\x1fremainingTerminalReleaseRecords\x12'\n" +
+	"\x0fledger_verified\x18\a \x01(\bR\x0eledgerVerified\x12<\n" +
+	"\x1aledger_verification_reason\x18\b \x01(\tR\x18ledgerVerificationReason\x12'\n" +
+	"\x0fledger_sequence\x18\t \x01(\x04R\x0eledgerSequence\x12*\n" +
+	"\x11ledger_chain_hash\x18\n" +
+	" \x01(\tR\x0fledgerChainHash\x12.\n" +
+	"\x13ledger_record_count\x18\v \x01(\x04R\x11ledgerRecordCount\x12:\n" +
+	"\x19occupancy_ledger_sequence\x18\f \x01(\x04R\x17occupancyLedgerSequence\x12)\n" +
+	"\x10occupancy_digest\x18\r \x01(\tR\x0foccupancyDigest\x12,\n" +
+	"\x12active_fence_count\x18\x0e \x01(\x04R\x10activeFenceCount\x12H\n" +
+	"\ractive_fences\x18\x0f \x03(\v2#.trainvm.v1.HostResourceFenceStatusR\factiveFences\x126\n" +
+	"\x17active_fences_truncated\x18\x10 \x01(\bR\x15activeFencesTruncated\x120\n" +
+	"\x14active_process_count\x18\x11 \x01(\x04R\x12activeProcessCount\x12R\n" +
+	"\x10active_processes\x18\x12 \x03(\v2'.trainvm.v1.HostdProcessAuthorityStatusR\x0factiveProcesses\x12<\n" +
+	"\x1aactive_processes_truncated\x18\x13 \x01(\bR\x18activeProcessesTruncated\x124\n" +
+	"\x16process_launch_enabled\x18\x14 \x01(\bR\x14processLaunchEnabled\x12)\n" +
+	"\x10mutation_enabled\x18\x15 \x01(\bR\x0fmutationEnabled\x128\n" +
+	"\x18mutation_disabled_reason\x18\x16 \x01(\tR\x16mutationDisabledReason\x12=\n" +
+	"\x1blease_renewal_tracked_count\x18\x17 \x01(\x04R\x18leaseRenewalTrackedCount\x124\n" +
+	"\x16lease_renewal_poisoned\x18\x18 \x01(\bR\x14leaseRenewalPoisoned\x122\n" +
+	"\x15lease_renewal_failure\x18\x19 \x01(\tR\x13leaseRenewalFailure\x12>\n" +
+	"\x1bresource_inventory_observed\x18\x1a \x01(\bR\x19resourceInventoryObserved\x128\n" +
+	"\x18current_inventory_digest\x18\x1b \x01(\tR\x16currentInventoryDigest\x12G\n" +
+	" current_inventory_receipt_digest\x18\x1c \x01(\tR\x1dcurrentInventoryReceiptDigest\x126\n" +
+	"\x17degraded_resource_count\x18\x1d \x01(\x04R\x15degradedResourceCount\x12>\n" +
+	"\x1bresource_degradation_reason\x18\x1e \x01(\tR\x19resourceDegradationReason\x12P\n" +
+	"%resource_inventory_observation_age_ns\x18\x1f \x01(\x04R!resourceInventoryObservationAgeNs*\xb6\x01\n" +
 	"\fDesiredState\x12\x1d\n" +
 	"\x19DESIRED_STATE_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14DESIRED_STATE_QUEUED\x10\x01\x12\x19\n" +
@@ -5772,7 +7320,37 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x14CONTROL_TYPE_INTEGER\x10\x02\x12\x18\n" +
 	"\x14CONTROL_TYPE_BOOLEAN\x10\x03\x12\x17\n" +
 	"\x13CONTROL_TYPE_STRING\x10\x04\x12\x1c\n" +
-	"\x18CONTROL_TYPE_ENUMERATION\x10\x052\xd1\x05\n" +
+	"\x18CONTROL_TYPE_ENUMERATION\x10\x05*\xd5\x01\n" +
+	"\x0eHostdLifecycle\x12\x1f\n" +
+	"\x1bHOSTD_LIFECYCLE_UNSPECIFIED\x10\x00\x12\x1a\n" +
+	"\x16HOSTD_LIFECYCLE_SEALED\x10\x01\x12$\n" +
+	" HOSTD_LIFECYCLE_STARTUP_AUDITING\x10\x02\x12#\n" +
+	"\x1fHOSTD_LIFECYCLE_STARTUP_BLOCKED\x10\x03\x12\x1d\n" +
+	"\x19HOSTD_LIFECYCLE_ADMITTING\x10\x04\x12\x1c\n" +
+	"\x18HOSTD_LIFECYCLE_POISONED\x10\x05*\xe5\x01\n" +
+	"\x11HostdStartupPhase\x12#\n" +
+	"\x1fHOSTD_STARTUP_PHASE_UNSPECIFIED\x10\x00\x12#\n" +
+	"\x1fHOSTD_STARTUP_PHASE_RECONCILING\x10\x01\x12 \n" +
+	"\x1cHOSTD_STARTUP_PHASE_AUDITING\x10\x02\x12!\n" +
+	"\x1dHOSTD_STARTUP_PHASE_ADMITTING\x10\x03\x12!\n" +
+	"\x1dHOSTD_STARTUP_PHASE_EXHAUSTED\x10\x04\x12\x1e\n" +
+	"\x1aHOSTD_STARTUP_PHASE_FAILED\x10\x05*\xb2\x01\n" +
+	"\x11HostdProcessPhase\x12#\n" +
+	"\x1fHOSTD_PROCESS_PHASE_UNSPECIFIED\x10\x00\x12%\n" +
+	"!HOSTD_PROCESS_PHASE_LAUNCH_INTENT\x10\x01\x12\x1f\n" +
+	"\x1bHOSTD_PROCESS_PHASE_SPAWNED\x10\x02\x120\n" +
+	",HOSTD_PROCESS_PHASE_TERMINAL_PENDING_RELEASE\x10\x03*\xab\x01\n" +
+	"\x10HostResourceKind\x12\"\n" +
+	"\x1eHOST_RESOURCE_KIND_UNSPECIFIED\x10\x00\x12\"\n" +
+	"\x1eHOST_RESOURCE_KIND_ACCELERATOR\x10\x01\x12,\n" +
+	"(HOST_RESOURCE_KIND_ACCELERATOR_PARTITION\x10\x02\x12!\n" +
+	"\x1dHOST_RESOURCE_KIND_HOST_MUTEX\x10\x03*\xcb\x01\n" +
+	"\x15HostAcceleratorVendor\x12'\n" +
+	"#HOST_ACCELERATOR_VENDOR_UNSPECIFIED\x10\x00\x12\"\n" +
+	"\x1eHOST_ACCELERATOR_VENDOR_NVIDIA\x10\x01\x12\x1f\n" +
+	"\x1bHOST_ACCELERATOR_VENDOR_AMD\x10\x02\x12!\n" +
+	"\x1dHOST_ACCELERATOR_VENDOR_INTEL\x10\x03\x12!\n" +
+	"\x1dHOST_ACCELERATOR_VENDOR_OTHER\x10\x042\xc2\x06\n" +
 	"\aTrainVM\x12]\n" +
 	"\x10SubmitExperiment\x12#.trainvm.v1.SubmitExperimentRequest\x1a$.trainvm.v1.SubmitExperimentResponse\x12E\n" +
 	"\bDiffPlan\x12\x1b.trainvm.v1.PlanDiffRequest\x1a\x1c.trainvm.v1.PlanDiffResponse\x12K\n" +
@@ -5783,7 +7361,8 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\bListRuns\x12\x1b.trainvm.v1.ListRunsRequest\x1a\x1c.trainvm.v1.ListRunsResponse\x12J\n" +
 	"\vWatchEvents\x12\x1e.trainvm.v1.WatchEventsRequest\x1a\x19.trainvm.v1.EventEnvelope0\x01\x12W\n" +
 	"\x0eGetControlView\x12!.trainvm.v1.GetControlViewRequest\x1a\".trainvm.v1.GetControlViewResponse\x12N\n" +
-	"\rGetDescriptor\x12\x1d.trainvm.v1.DescriptorRequest\x1a\x1e.trainvm.v1.DescriptorResponse2^\n" +
+	"\rGetDescriptor\x12\x1d.trainvm.v1.DescriptorRequest\x1a\x1e.trainvm.v1.DescriptorResponse\x12o\n" +
+	"\x16GetHostAuthorityStatus\x12).trainvm.v1.GetHostAuthorityStatusRequest\x1a*.trainvm.v1.GetHostAuthorityStatusResponse2^\n" +
 	"\rWorkerControl\x12M\n" +
 	"\aConnect\x12\x1e.trainvm.v1.WorkerToController\x1a\x1e.trainvm.v1.ControllerToWorker(\x010\x01B%Z#trainboard/gen/trainvm/v1;trainvmv1b\x06proto3"
 
@@ -5799,191 +7378,223 @@ func file_trainvm_v1_trainvm_proto_rawDescGZIP() []byte {
 	return file_trainvm_v1_trainvm_proto_rawDescData
 }
 
-var file_trainvm_v1_trainvm_proto_enumTypes = make([]protoimpl.EnumInfo, 16)
-var file_trainvm_v1_trainvm_proto_msgTypes = make([]protoimpl.MessageInfo, 48)
+var file_trainvm_v1_trainvm_proto_enumTypes = make([]protoimpl.EnumInfo, 23)
+var file_trainvm_v1_trainvm_proto_msgTypes = make([]protoimpl.MessageInfo, 55)
 var file_trainvm_v1_trainvm_proto_goTypes = []any{
 	(DesiredState)(0),                            // 0: trainvm.v1.DesiredState
 	(ObservedState)(0),                           // 1: trainvm.v1.ObservedState
 	(ApplyPoint)(0),                              // 2: trainvm.v1.ApplyPoint
 	(ArtifactKind)(0),                            // 3: trainvm.v1.ArtifactKind
 	(ControlType)(0),                             // 4: trainvm.v1.ControlType
-	(Diagnostic_Severity)(0),                     // 5: trainvm.v1.Diagnostic.Severity
-	(ControlCommandResult_Status)(0),             // 6: trainvm.v1.ControlCommandResult.Status
-	(CheckpointCommandResult_Status)(0),          // 7: trainvm.v1.CheckpointCommandResult.Status
-	(LifecycleCommandResult_Kind)(0),             // 8: trainvm.v1.LifecycleCommandResult.Kind
-	(LifecycleCommandResult_Status)(0),           // 9: trainvm.v1.LifecycleCommandResult.Status
-	(RunCommandResponse_Disposition)(0),          // 10: trainvm.v1.RunCommandResponse.Disposition
-	(ControlPatchAcknowledgement_Disposition)(0), // 11: trainvm.v1.ControlPatchAcknowledgement.Disposition
-	(CheckpointAcknowledgement_Disposition)(0),   // 12: trainvm.v1.CheckpointAcknowledgement.Disposition
-	(LifecycleAcknowledgement_Kind)(0),           // 13: trainvm.v1.LifecycleAcknowledgement.Kind
-	(LifecycleAcknowledgement_Disposition)(0),    // 14: trainvm.v1.LifecycleAcknowledgement.Disposition
-	(WorkerWelcome_Disposition)(0),               // 15: trainvm.v1.WorkerWelcome.Disposition
-	(*Diagnostic)(nil),                           // 16: trainvm.v1.Diagnostic
-	(*ScalarValue)(nil),                          // 17: trainvm.v1.ScalarValue
-	(*RunIdentity)(nil),                          // 18: trainvm.v1.RunIdentity
-	(*RunSummary)(nil),                           // 19: trainvm.v1.RunSummary
-	(*SubmitExperimentRequest)(nil),              // 20: trainvm.v1.SubmitExperimentRequest
-	(*SubmitExperimentResponse)(nil),             // 21: trainvm.v1.SubmitExperimentResponse
-	(*PlanDiffRequest)(nil),                      // 22: trainvm.v1.PlanDiffRequest
-	(*PlanDiffResponse)(nil),                     // 23: trainvm.v1.PlanDiffResponse
-	(*PauseCommand)(nil),                         // 24: trainvm.v1.PauseCommand
-	(*ResumeCommand)(nil),                        // 25: trainvm.v1.ResumeCommand
-	(*CheckpointCommand)(nil),                    // 26: trainvm.v1.CheckpointCommand
-	(*CancelCommand)(nil),                        // 27: trainvm.v1.CancelCommand
-	(*ControlAssignment)(nil),                    // 28: trainvm.v1.ControlAssignment
-	(*ControlPatchCommand)(nil),                  // 29: trainvm.v1.ControlPatchCommand
-	(*AdoptPlanRevisionCommand)(nil),             // 30: trainvm.v1.AdoptPlanRevisionCommand
-	(*RunCommandRequest)(nil),                    // 31: trainvm.v1.RunCommandRequest
-	(*ControlCommandResult)(nil),                 // 32: trainvm.v1.ControlCommandResult
-	(*CheckpointCommandResult)(nil),              // 33: trainvm.v1.CheckpointCommandResult
-	(*LifecycleCommandResult)(nil),               // 34: trainvm.v1.LifecycleCommandResult
-	(*RunCommandResponse)(nil),                   // 35: trainvm.v1.RunCommandResponse
-	(*ArtifactManifest)(nil),                     // 36: trainvm.v1.ArtifactManifest
-	(*EventEnvelope)(nil),                        // 37: trainvm.v1.EventEnvelope
-	(*MetricSample)(nil),                         // 38: trainvm.v1.MetricSample
-	(*WorkerHello)(nil),                          // 39: trainvm.v1.WorkerHello
-	(*WorkerHeartbeat)(nil),                      // 40: trainvm.v1.WorkerHeartbeat
-	(*ControlPatchAcknowledgement)(nil),          // 41: trainvm.v1.ControlPatchAcknowledgement
-	(*CheckpointAcknowledgement)(nil),            // 42: trainvm.v1.CheckpointAcknowledgement
-	(*LifecycleAcknowledgement)(nil),             // 43: trainvm.v1.LifecycleAcknowledgement
-	(*WorkerToController)(nil),                   // 44: trainvm.v1.WorkerToController
-	(*WorkerCommand)(nil),                        // 45: trainvm.v1.WorkerCommand
-	(*WorkerWelcome)(nil),                        // 46: trainvm.v1.WorkerWelcome
-	(*WorkerReceipt)(nil),                        // 47: trainvm.v1.WorkerReceipt
-	(*ControllerToWorker)(nil),                   // 48: trainvm.v1.ControllerToWorker
-	(*GetRunRequest)(nil),                        // 49: trainvm.v1.GetRunRequest
-	(*GetCompiledPlanRequest)(nil),               // 50: trainvm.v1.GetCompiledPlanRequest
-	(*GetCompiledPlanResponse)(nil),              // 51: trainvm.v1.GetCompiledPlanResponse
-	(*ListRunsRequest)(nil),                      // 52: trainvm.v1.ListRunsRequest
-	(*ListRunsResponse)(nil),                     // 53: trainvm.v1.ListRunsResponse
-	(*WatchEventsRequest)(nil),                   // 54: trainvm.v1.WatchEventsRequest
-	(*GetControlViewRequest)(nil),                // 55: trainvm.v1.GetControlViewRequest
-	(*ControlDescriptor)(nil),                    // 56: trainvm.v1.ControlDescriptor
-	(*ControlCommandView)(nil),                   // 57: trainvm.v1.ControlCommandView
-	(*GetControlViewResponse)(nil),               // 58: trainvm.v1.GetControlViewResponse
-	(*DescriptorRequest)(nil),                    // 59: trainvm.v1.DescriptorRequest
-	(*DescriptorResponse)(nil),                   // 60: trainvm.v1.DescriptorResponse
-	nil,                                          // 61: trainvm.v1.MetricSample.LabelsEntry
-	nil,                                          // 62: trainvm.v1.ListRunsRequest.LabelsEntry
-	nil,                                          // 63: trainvm.v1.GetControlViewResponse.CatalogEntry
-	(*timestamppb.Timestamp)(nil),                // 64: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),                  // 65: google.protobuf.Duration
-	(*anypb.Any)(nil),                            // 66: google.protobuf.Any
+	(HostdLifecycle)(0),                          // 5: trainvm.v1.HostdLifecycle
+	(HostdStartupPhase)(0),                       // 6: trainvm.v1.HostdStartupPhase
+	(HostdProcessPhase)(0),                       // 7: trainvm.v1.HostdProcessPhase
+	(HostResourceKind)(0),                        // 8: trainvm.v1.HostResourceKind
+	(HostAcceleratorVendor)(0),                   // 9: trainvm.v1.HostAcceleratorVendor
+	(Diagnostic_Severity)(0),                     // 10: trainvm.v1.Diagnostic.Severity
+	(ControlCommandResult_Status)(0),             // 11: trainvm.v1.ControlCommandResult.Status
+	(CheckpointCommandResult_Status)(0),          // 12: trainvm.v1.CheckpointCommandResult.Status
+	(LifecycleCommandResult_Kind)(0),             // 13: trainvm.v1.LifecycleCommandResult.Kind
+	(LifecycleCommandResult_Status)(0),           // 14: trainvm.v1.LifecycleCommandResult.Status
+	(RunCommandResponse_Disposition)(0),          // 15: trainvm.v1.RunCommandResponse.Disposition
+	(WorkerExecutionPhaseRequest_Phase)(0),       // 16: trainvm.v1.WorkerExecutionPhaseRequest.Phase
+	(WorkerExecutionPhaseReceipt_Disposition)(0), // 17: trainvm.v1.WorkerExecutionPhaseReceipt.Disposition
+	(ControlPatchAcknowledgement_Disposition)(0), // 18: trainvm.v1.ControlPatchAcknowledgement.Disposition
+	(CheckpointAcknowledgement_Disposition)(0),   // 19: trainvm.v1.CheckpointAcknowledgement.Disposition
+	(LifecycleAcknowledgement_Kind)(0),           // 20: trainvm.v1.LifecycleAcknowledgement.Kind
+	(LifecycleAcknowledgement_Disposition)(0),    // 21: trainvm.v1.LifecycleAcknowledgement.Disposition
+	(WorkerWelcome_Disposition)(0),               // 22: trainvm.v1.WorkerWelcome.Disposition
+	(*Diagnostic)(nil),                           // 23: trainvm.v1.Diagnostic
+	(*ScalarValue)(nil),                          // 24: trainvm.v1.ScalarValue
+	(*RunIdentity)(nil),                          // 25: trainvm.v1.RunIdentity
+	(*RunSummary)(nil),                           // 26: trainvm.v1.RunSummary
+	(*SubmitExperimentRequest)(nil),              // 27: trainvm.v1.SubmitExperimentRequest
+	(*SubmitExperimentResponse)(nil),             // 28: trainvm.v1.SubmitExperimentResponse
+	(*PlanDiffRequest)(nil),                      // 29: trainvm.v1.PlanDiffRequest
+	(*PlanDiffResponse)(nil),                     // 30: trainvm.v1.PlanDiffResponse
+	(*PauseCommand)(nil),                         // 31: trainvm.v1.PauseCommand
+	(*ResumeCommand)(nil),                        // 32: trainvm.v1.ResumeCommand
+	(*CheckpointCommand)(nil),                    // 33: trainvm.v1.CheckpointCommand
+	(*CancelCommand)(nil),                        // 34: trainvm.v1.CancelCommand
+	(*ControlAssignment)(nil),                    // 35: trainvm.v1.ControlAssignment
+	(*ControlPatchCommand)(nil),                  // 36: trainvm.v1.ControlPatchCommand
+	(*AdoptPlanRevisionCommand)(nil),             // 37: trainvm.v1.AdoptPlanRevisionCommand
+	(*RunCommandRequest)(nil),                    // 38: trainvm.v1.RunCommandRequest
+	(*ControlCommandResult)(nil),                 // 39: trainvm.v1.ControlCommandResult
+	(*CheckpointCommandResult)(nil),              // 40: trainvm.v1.CheckpointCommandResult
+	(*LifecycleCommandResult)(nil),               // 41: trainvm.v1.LifecycleCommandResult
+	(*RunCommandResponse)(nil),                   // 42: trainvm.v1.RunCommandResponse
+	(*ArtifactManifest)(nil),                     // 43: trainvm.v1.ArtifactManifest
+	(*EventEnvelope)(nil),                        // 44: trainvm.v1.EventEnvelope
+	(*MetricSample)(nil),                         // 45: trainvm.v1.MetricSample
+	(*WorkerHello)(nil),                          // 46: trainvm.v1.WorkerHello
+	(*WorkerHeartbeat)(nil),                      // 47: trainvm.v1.WorkerHeartbeat
+	(*WorkerExecutionPhaseRequest)(nil),          // 48: trainvm.v1.WorkerExecutionPhaseRequest
+	(*WorkerExecutionPhaseReceipt)(nil),          // 49: trainvm.v1.WorkerExecutionPhaseReceipt
+	(*ControlPatchAcknowledgement)(nil),          // 50: trainvm.v1.ControlPatchAcknowledgement
+	(*CheckpointAcknowledgement)(nil),            // 51: trainvm.v1.CheckpointAcknowledgement
+	(*LifecycleAcknowledgement)(nil),             // 52: trainvm.v1.LifecycleAcknowledgement
+	(*WorkerToController)(nil),                   // 53: trainvm.v1.WorkerToController
+	(*WorkerCommand)(nil),                        // 54: trainvm.v1.WorkerCommand
+	(*WorkerWelcome)(nil),                        // 55: trainvm.v1.WorkerWelcome
+	(*WorkerReceipt)(nil),                        // 56: trainvm.v1.WorkerReceipt
+	(*ControllerToWorker)(nil),                   // 57: trainvm.v1.ControllerToWorker
+	(*GetRunRequest)(nil),                        // 58: trainvm.v1.GetRunRequest
+	(*GetCompiledPlanRequest)(nil),               // 59: trainvm.v1.GetCompiledPlanRequest
+	(*GetCompiledPlanResponse)(nil),              // 60: trainvm.v1.GetCompiledPlanResponse
+	(*ListRunsRequest)(nil),                      // 61: trainvm.v1.ListRunsRequest
+	(*ListRunsResponse)(nil),                     // 62: trainvm.v1.ListRunsResponse
+	(*WatchEventsRequest)(nil),                   // 63: trainvm.v1.WatchEventsRequest
+	(*GetControlViewRequest)(nil),                // 64: trainvm.v1.GetControlViewRequest
+	(*ControlDescriptor)(nil),                    // 65: trainvm.v1.ControlDescriptor
+	(*ControlCommandView)(nil),                   // 66: trainvm.v1.ControlCommandView
+	(*GetControlViewResponse)(nil),               // 67: trainvm.v1.GetControlViewResponse
+	(*DescriptorRequest)(nil),                    // 68: trainvm.v1.DescriptorRequest
+	(*DescriptorResponse)(nil),                   // 69: trainvm.v1.DescriptorResponse
+	(*HostdCoordinatorAuthorityStatus)(nil),      // 70: trainvm.v1.HostdCoordinatorAuthorityStatus
+	(*HostResourceFenceStatus)(nil),              // 71: trainvm.v1.HostResourceFenceStatus
+	(*HostdProcessAuthorityStatus)(nil),          // 72: trainvm.v1.HostdProcessAuthorityStatus
+	(*GetHostAuthorityStatusRequest)(nil),        // 73: trainvm.v1.GetHostAuthorityStatusRequest
+	(*GetHostAuthorityStatusResponse)(nil),       // 74: trainvm.v1.GetHostAuthorityStatusResponse
+	nil,                                          // 75: trainvm.v1.MetricSample.LabelsEntry
+	nil,                                          // 76: trainvm.v1.ListRunsRequest.LabelsEntry
+	nil,                                          // 77: trainvm.v1.GetControlViewResponse.CatalogEntry
+	(*timestamppb.Timestamp)(nil),                // 78: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),                  // 79: google.protobuf.Duration
+	(*anypb.Any)(nil),                            // 80: google.protobuf.Any
 }
 var file_trainvm_v1_trainvm_proto_depIdxs = []int32{
-	5,  // 0: trainvm.v1.Diagnostic.severity:type_name -> trainvm.v1.Diagnostic.Severity
-	18, // 1: trainvm.v1.RunSummary.identity:type_name -> trainvm.v1.RunIdentity
-	0,  // 2: trainvm.v1.RunSummary.desired_state:type_name -> trainvm.v1.DesiredState
-	1,  // 3: trainvm.v1.RunSummary.observed_state:type_name -> trainvm.v1.ObservedState
-	64, // 4: trainvm.v1.RunSummary.created_at:type_name -> google.protobuf.Timestamp
-	64, // 5: trainvm.v1.RunSummary.updated_at:type_name -> google.protobuf.Timestamp
-	64, // 6: trainvm.v1.RunSummary.last_heartbeat_at:type_name -> google.protobuf.Timestamp
-	16, // 7: trainvm.v1.SubmitExperimentResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
-	18, // 8: trainvm.v1.SubmitExperimentResponse.run:type_name -> trainvm.v1.RunIdentity
-	16, // 9: trainvm.v1.PlanDiffResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
-	65, // 10: trainvm.v1.CancelCommand.graceful_timeout:type_name -> google.protobuf.Duration
-	17, // 11: trainvm.v1.ControlAssignment.value:type_name -> trainvm.v1.ScalarValue
-	28, // 12: trainvm.v1.ControlPatchCommand.assignments:type_name -> trainvm.v1.ControlAssignment
-	2,  // 13: trainvm.v1.ControlPatchCommand.apply_point:type_name -> trainvm.v1.ApplyPoint
-	24, // 14: trainvm.v1.RunCommandRequest.pause:type_name -> trainvm.v1.PauseCommand
-	25, // 15: trainvm.v1.RunCommandRequest.resume:type_name -> trainvm.v1.ResumeCommand
-	26, // 16: trainvm.v1.RunCommandRequest.checkpoint:type_name -> trainvm.v1.CheckpointCommand
-	27, // 17: trainvm.v1.RunCommandRequest.cancel:type_name -> trainvm.v1.CancelCommand
-	29, // 18: trainvm.v1.RunCommandRequest.controls:type_name -> trainvm.v1.ControlPatchCommand
-	30, // 19: trainvm.v1.RunCommandRequest.adopt_plan:type_name -> trainvm.v1.AdoptPlanRevisionCommand
-	2,  // 20: trainvm.v1.ControlCommandResult.apply_point:type_name -> trainvm.v1.ApplyPoint
-	6,  // 21: trainvm.v1.ControlCommandResult.status:type_name -> trainvm.v1.ControlCommandResult.Status
-	28, // 22: trainvm.v1.ControlCommandResult.assignments:type_name -> trainvm.v1.ControlAssignment
-	7,  // 23: trainvm.v1.CheckpointCommandResult.status:type_name -> trainvm.v1.CheckpointCommandResult.Status
-	8,  // 24: trainvm.v1.LifecycleCommandResult.kind:type_name -> trainvm.v1.LifecycleCommandResult.Kind
-	9,  // 25: trainvm.v1.LifecycleCommandResult.status:type_name -> trainvm.v1.LifecycleCommandResult.Status
-	65, // 26: trainvm.v1.LifecycleCommandResult.graceful_timeout:type_name -> google.protobuf.Duration
-	10, // 27: trainvm.v1.RunCommandResponse.disposition:type_name -> trainvm.v1.RunCommandResponse.Disposition
-	19, // 28: trainvm.v1.RunCommandResponse.run:type_name -> trainvm.v1.RunSummary
-	16, // 29: trainvm.v1.RunCommandResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
-	32, // 30: trainvm.v1.RunCommandResponse.control:type_name -> trainvm.v1.ControlCommandResult
-	33, // 31: trainvm.v1.RunCommandResponse.checkpoint:type_name -> trainvm.v1.CheckpointCommandResult
-	34, // 32: trainvm.v1.RunCommandResponse.lifecycle:type_name -> trainvm.v1.LifecycleCommandResult
-	3,  // 33: trainvm.v1.ArtifactManifest.kind:type_name -> trainvm.v1.ArtifactKind
-	64, // 34: trainvm.v1.ArtifactManifest.published_at:type_name -> google.protobuf.Timestamp
-	64, // 35: trainvm.v1.EventEnvelope.wall_time:type_name -> google.protobuf.Timestamp
-	66, // 36: trainvm.v1.EventEnvelope.payload:type_name -> google.protobuf.Any
-	17, // 37: trainvm.v1.MetricSample.value:type_name -> trainvm.v1.ScalarValue
-	61, // 38: trainvm.v1.MetricSample.labels:type_name -> trainvm.v1.MetricSample.LabelsEntry
-	64, // 39: trainvm.v1.MetricSample.observed_at:type_name -> google.protobuf.Timestamp
-	64, // 40: trainvm.v1.WorkerHeartbeat.observed_at:type_name -> google.protobuf.Timestamp
-	11, // 41: trainvm.v1.ControlPatchAcknowledgement.disposition:type_name -> trainvm.v1.ControlPatchAcknowledgement.Disposition
-	2,  // 42: trainvm.v1.ControlPatchAcknowledgement.apply_point:type_name -> trainvm.v1.ApplyPoint
-	28, // 43: trainvm.v1.ControlPatchAcknowledgement.effective_values:type_name -> trainvm.v1.ControlAssignment
-	16, // 44: trainvm.v1.ControlPatchAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
-	64, // 45: trainvm.v1.ControlPatchAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
-	12, // 46: trainvm.v1.CheckpointAcknowledgement.disposition:type_name -> trainvm.v1.CheckpointAcknowledgement.Disposition
-	16, // 47: trainvm.v1.CheckpointAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
-	64, // 48: trainvm.v1.CheckpointAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
-	13, // 49: trainvm.v1.LifecycleAcknowledgement.kind:type_name -> trainvm.v1.LifecycleAcknowledgement.Kind
-	14, // 50: trainvm.v1.LifecycleAcknowledgement.disposition:type_name -> trainvm.v1.LifecycleAcknowledgement.Disposition
-	16, // 51: trainvm.v1.LifecycleAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
-	64, // 52: trainvm.v1.LifecycleAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
-	39, // 53: trainvm.v1.WorkerToController.hello:type_name -> trainvm.v1.WorkerHello
-	40, // 54: trainvm.v1.WorkerToController.heartbeat:type_name -> trainvm.v1.WorkerHeartbeat
-	37, // 55: trainvm.v1.WorkerToController.event:type_name -> trainvm.v1.EventEnvelope
-	38, // 56: trainvm.v1.WorkerToController.metric:type_name -> trainvm.v1.MetricSample
-	36, // 57: trainvm.v1.WorkerToController.artifact:type_name -> trainvm.v1.ArtifactManifest
-	41, // 58: trainvm.v1.WorkerToController.control_ack:type_name -> trainvm.v1.ControlPatchAcknowledgement
-	42, // 59: trainvm.v1.WorkerToController.checkpoint_ack:type_name -> trainvm.v1.CheckpointAcknowledgement
-	43, // 60: trainvm.v1.WorkerToController.lifecycle_ack:type_name -> trainvm.v1.LifecycleAcknowledgement
-	24, // 61: trainvm.v1.WorkerCommand.pause:type_name -> trainvm.v1.PauseCommand
-	25, // 62: trainvm.v1.WorkerCommand.resume:type_name -> trainvm.v1.ResumeCommand
-	26, // 63: trainvm.v1.WorkerCommand.checkpoint:type_name -> trainvm.v1.CheckpointCommand
-	27, // 64: trainvm.v1.WorkerCommand.cancel:type_name -> trainvm.v1.CancelCommand
-	29, // 65: trainvm.v1.WorkerCommand.controls:type_name -> trainvm.v1.ControlPatchCommand
-	15, // 66: trainvm.v1.WorkerWelcome.disposition:type_name -> trainvm.v1.WorkerWelcome.Disposition
-	1,  // 67: trainvm.v1.WorkerReceipt.observed_state:type_name -> trainvm.v1.ObservedState
-	45, // 68: trainvm.v1.ControllerToWorker.command:type_name -> trainvm.v1.WorkerCommand
-	46, // 69: trainvm.v1.ControllerToWorker.welcome:type_name -> trainvm.v1.WorkerWelcome
-	47, // 70: trainvm.v1.ControllerToWorker.receipt:type_name -> trainvm.v1.WorkerReceipt
-	18, // 71: trainvm.v1.GetCompiledPlanResponse.run:type_name -> trainvm.v1.RunIdentity
-	1,  // 72: trainvm.v1.ListRunsRequest.observed_states:type_name -> trainvm.v1.ObservedState
-	62, // 73: trainvm.v1.ListRunsRequest.labels:type_name -> trainvm.v1.ListRunsRequest.LabelsEntry
-	19, // 74: trainvm.v1.ListRunsResponse.runs:type_name -> trainvm.v1.RunSummary
-	4,  // 75: trainvm.v1.ControlDescriptor.type:type_name -> trainvm.v1.ControlType
-	17, // 76: trainvm.v1.ControlDescriptor.default_value:type_name -> trainvm.v1.ScalarValue
-	17, // 77: trainvm.v1.ControlDescriptor.values:type_name -> trainvm.v1.ScalarValue
-	2,  // 78: trainvm.v1.ControlDescriptor.apply_point:type_name -> trainvm.v1.ApplyPoint
-	2,  // 79: trainvm.v1.ControlCommandView.apply_point:type_name -> trainvm.v1.ApplyPoint
-	28, // 80: trainvm.v1.ControlCommandView.assignments:type_name -> trainvm.v1.ControlAssignment
-	6,  // 81: trainvm.v1.ControlCommandView.status:type_name -> trainvm.v1.ControlCommandResult.Status
-	28, // 82: trainvm.v1.ControlCommandView.effective_values:type_name -> trainvm.v1.ControlAssignment
-	16, // 83: trainvm.v1.ControlCommandView.diagnostics:type_name -> trainvm.v1.Diagnostic
-	63, // 84: trainvm.v1.GetControlViewResponse.catalog:type_name -> trainvm.v1.GetControlViewResponse.CatalogEntry
-	28, // 85: trainvm.v1.GetControlViewResponse.effective_values:type_name -> trainvm.v1.ControlAssignment
-	57, // 86: trainvm.v1.GetControlViewResponse.commands:type_name -> trainvm.v1.ControlCommandView
-	56, // 87: trainvm.v1.GetControlViewResponse.CatalogEntry.value:type_name -> trainvm.v1.ControlDescriptor
-	20, // 88: trainvm.v1.TrainVM.SubmitExperiment:input_type -> trainvm.v1.SubmitExperimentRequest
-	22, // 89: trainvm.v1.TrainVM.DiffPlan:input_type -> trainvm.v1.PlanDiffRequest
-	31, // 90: trainvm.v1.TrainVM.CommandRun:input_type -> trainvm.v1.RunCommandRequest
-	49, // 91: trainvm.v1.TrainVM.GetRun:input_type -> trainvm.v1.GetRunRequest
-	50, // 92: trainvm.v1.TrainVM.GetCompiledPlan:input_type -> trainvm.v1.GetCompiledPlanRequest
-	52, // 93: trainvm.v1.TrainVM.ListRuns:input_type -> trainvm.v1.ListRunsRequest
-	54, // 94: trainvm.v1.TrainVM.WatchEvents:input_type -> trainvm.v1.WatchEventsRequest
-	55, // 95: trainvm.v1.TrainVM.GetControlView:input_type -> trainvm.v1.GetControlViewRequest
-	59, // 96: trainvm.v1.TrainVM.GetDescriptor:input_type -> trainvm.v1.DescriptorRequest
-	44, // 97: trainvm.v1.WorkerControl.Connect:input_type -> trainvm.v1.WorkerToController
-	21, // 98: trainvm.v1.TrainVM.SubmitExperiment:output_type -> trainvm.v1.SubmitExperimentResponse
-	23, // 99: trainvm.v1.TrainVM.DiffPlan:output_type -> trainvm.v1.PlanDiffResponse
-	35, // 100: trainvm.v1.TrainVM.CommandRun:output_type -> trainvm.v1.RunCommandResponse
-	19, // 101: trainvm.v1.TrainVM.GetRun:output_type -> trainvm.v1.RunSummary
-	51, // 102: trainvm.v1.TrainVM.GetCompiledPlan:output_type -> trainvm.v1.GetCompiledPlanResponse
-	53, // 103: trainvm.v1.TrainVM.ListRuns:output_type -> trainvm.v1.ListRunsResponse
-	37, // 104: trainvm.v1.TrainVM.WatchEvents:output_type -> trainvm.v1.EventEnvelope
-	58, // 105: trainvm.v1.TrainVM.GetControlView:output_type -> trainvm.v1.GetControlViewResponse
-	60, // 106: trainvm.v1.TrainVM.GetDescriptor:output_type -> trainvm.v1.DescriptorResponse
-	48, // 107: trainvm.v1.WorkerControl.Connect:output_type -> trainvm.v1.ControllerToWorker
-	98, // [98:108] is the sub-list for method output_type
-	88, // [88:98] is the sub-list for method input_type
-	88, // [88:88] is the sub-list for extension type_name
-	88, // [88:88] is the sub-list for extension extendee
-	0,  // [0:88] is the sub-list for field type_name
+	10,  // 0: trainvm.v1.Diagnostic.severity:type_name -> trainvm.v1.Diagnostic.Severity
+	25,  // 1: trainvm.v1.RunSummary.identity:type_name -> trainvm.v1.RunIdentity
+	0,   // 2: trainvm.v1.RunSummary.desired_state:type_name -> trainvm.v1.DesiredState
+	1,   // 3: trainvm.v1.RunSummary.observed_state:type_name -> trainvm.v1.ObservedState
+	78,  // 4: trainvm.v1.RunSummary.created_at:type_name -> google.protobuf.Timestamp
+	78,  // 5: trainvm.v1.RunSummary.updated_at:type_name -> google.protobuf.Timestamp
+	78,  // 6: trainvm.v1.RunSummary.last_heartbeat_at:type_name -> google.protobuf.Timestamp
+	23,  // 7: trainvm.v1.SubmitExperimentResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
+	25,  // 8: trainvm.v1.SubmitExperimentResponse.run:type_name -> trainvm.v1.RunIdentity
+	23,  // 9: trainvm.v1.PlanDiffResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
+	79,  // 10: trainvm.v1.CancelCommand.graceful_timeout:type_name -> google.protobuf.Duration
+	24,  // 11: trainvm.v1.ControlAssignment.value:type_name -> trainvm.v1.ScalarValue
+	35,  // 12: trainvm.v1.ControlPatchCommand.assignments:type_name -> trainvm.v1.ControlAssignment
+	2,   // 13: trainvm.v1.ControlPatchCommand.apply_point:type_name -> trainvm.v1.ApplyPoint
+	31,  // 14: trainvm.v1.RunCommandRequest.pause:type_name -> trainvm.v1.PauseCommand
+	32,  // 15: trainvm.v1.RunCommandRequest.resume:type_name -> trainvm.v1.ResumeCommand
+	33,  // 16: trainvm.v1.RunCommandRequest.checkpoint:type_name -> trainvm.v1.CheckpointCommand
+	34,  // 17: trainvm.v1.RunCommandRequest.cancel:type_name -> trainvm.v1.CancelCommand
+	36,  // 18: trainvm.v1.RunCommandRequest.controls:type_name -> trainvm.v1.ControlPatchCommand
+	37,  // 19: trainvm.v1.RunCommandRequest.adopt_plan:type_name -> trainvm.v1.AdoptPlanRevisionCommand
+	2,   // 20: trainvm.v1.ControlCommandResult.apply_point:type_name -> trainvm.v1.ApplyPoint
+	11,  // 21: trainvm.v1.ControlCommandResult.status:type_name -> trainvm.v1.ControlCommandResult.Status
+	35,  // 22: trainvm.v1.ControlCommandResult.assignments:type_name -> trainvm.v1.ControlAssignment
+	12,  // 23: trainvm.v1.CheckpointCommandResult.status:type_name -> trainvm.v1.CheckpointCommandResult.Status
+	13,  // 24: trainvm.v1.LifecycleCommandResult.kind:type_name -> trainvm.v1.LifecycleCommandResult.Kind
+	14,  // 25: trainvm.v1.LifecycleCommandResult.status:type_name -> trainvm.v1.LifecycleCommandResult.Status
+	79,  // 26: trainvm.v1.LifecycleCommandResult.graceful_timeout:type_name -> google.protobuf.Duration
+	15,  // 27: trainvm.v1.RunCommandResponse.disposition:type_name -> trainvm.v1.RunCommandResponse.Disposition
+	26,  // 28: trainvm.v1.RunCommandResponse.run:type_name -> trainvm.v1.RunSummary
+	23,  // 29: trainvm.v1.RunCommandResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
+	39,  // 30: trainvm.v1.RunCommandResponse.control:type_name -> trainvm.v1.ControlCommandResult
+	40,  // 31: trainvm.v1.RunCommandResponse.checkpoint:type_name -> trainvm.v1.CheckpointCommandResult
+	41,  // 32: trainvm.v1.RunCommandResponse.lifecycle:type_name -> trainvm.v1.LifecycleCommandResult
+	3,   // 33: trainvm.v1.ArtifactManifest.kind:type_name -> trainvm.v1.ArtifactKind
+	78,  // 34: trainvm.v1.ArtifactManifest.published_at:type_name -> google.protobuf.Timestamp
+	78,  // 35: trainvm.v1.EventEnvelope.wall_time:type_name -> google.protobuf.Timestamp
+	80,  // 36: trainvm.v1.EventEnvelope.payload:type_name -> google.protobuf.Any
+	24,  // 37: trainvm.v1.MetricSample.value:type_name -> trainvm.v1.ScalarValue
+	75,  // 38: trainvm.v1.MetricSample.labels:type_name -> trainvm.v1.MetricSample.LabelsEntry
+	78,  // 39: trainvm.v1.MetricSample.observed_at:type_name -> google.protobuf.Timestamp
+	78,  // 40: trainvm.v1.WorkerHeartbeat.observed_at:type_name -> google.protobuf.Timestamp
+	16,  // 41: trainvm.v1.WorkerExecutionPhaseRequest.phase:type_name -> trainvm.v1.WorkerExecutionPhaseRequest.Phase
+	16,  // 42: trainvm.v1.WorkerExecutionPhaseReceipt.phase:type_name -> trainvm.v1.WorkerExecutionPhaseRequest.Phase
+	17,  // 43: trainvm.v1.WorkerExecutionPhaseReceipt.disposition:type_name -> trainvm.v1.WorkerExecutionPhaseReceipt.Disposition
+	23,  // 44: trainvm.v1.WorkerExecutionPhaseReceipt.diagnostics:type_name -> trainvm.v1.Diagnostic
+	78,  // 45: trainvm.v1.WorkerExecutionPhaseReceipt.started_at:type_name -> google.protobuf.Timestamp
+	78,  // 46: trainvm.v1.WorkerExecutionPhaseReceipt.completed_at:type_name -> google.protobuf.Timestamp
+	18,  // 47: trainvm.v1.ControlPatchAcknowledgement.disposition:type_name -> trainvm.v1.ControlPatchAcknowledgement.Disposition
+	2,   // 48: trainvm.v1.ControlPatchAcknowledgement.apply_point:type_name -> trainvm.v1.ApplyPoint
+	35,  // 49: trainvm.v1.ControlPatchAcknowledgement.effective_values:type_name -> trainvm.v1.ControlAssignment
+	23,  // 50: trainvm.v1.ControlPatchAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
+	78,  // 51: trainvm.v1.ControlPatchAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
+	19,  // 52: trainvm.v1.CheckpointAcknowledgement.disposition:type_name -> trainvm.v1.CheckpointAcknowledgement.Disposition
+	23,  // 53: trainvm.v1.CheckpointAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
+	78,  // 54: trainvm.v1.CheckpointAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
+	20,  // 55: trainvm.v1.LifecycleAcknowledgement.kind:type_name -> trainvm.v1.LifecycleAcknowledgement.Kind
+	21,  // 56: trainvm.v1.LifecycleAcknowledgement.disposition:type_name -> trainvm.v1.LifecycleAcknowledgement.Disposition
+	23,  // 57: trainvm.v1.LifecycleAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
+	78,  // 58: trainvm.v1.LifecycleAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
+	46,  // 59: trainvm.v1.WorkerToController.hello:type_name -> trainvm.v1.WorkerHello
+	47,  // 60: trainvm.v1.WorkerToController.heartbeat:type_name -> trainvm.v1.WorkerHeartbeat
+	44,  // 61: trainvm.v1.WorkerToController.event:type_name -> trainvm.v1.EventEnvelope
+	45,  // 62: trainvm.v1.WorkerToController.metric:type_name -> trainvm.v1.MetricSample
+	43,  // 63: trainvm.v1.WorkerToController.artifact:type_name -> trainvm.v1.ArtifactManifest
+	50,  // 64: trainvm.v1.WorkerToController.control_ack:type_name -> trainvm.v1.ControlPatchAcknowledgement
+	51,  // 65: trainvm.v1.WorkerToController.checkpoint_ack:type_name -> trainvm.v1.CheckpointAcknowledgement
+	52,  // 66: trainvm.v1.WorkerToController.lifecycle_ack:type_name -> trainvm.v1.LifecycleAcknowledgement
+	49,  // 67: trainvm.v1.WorkerToController.phase_receipt:type_name -> trainvm.v1.WorkerExecutionPhaseReceipt
+	31,  // 68: trainvm.v1.WorkerCommand.pause:type_name -> trainvm.v1.PauseCommand
+	32,  // 69: trainvm.v1.WorkerCommand.resume:type_name -> trainvm.v1.ResumeCommand
+	33,  // 70: trainvm.v1.WorkerCommand.checkpoint:type_name -> trainvm.v1.CheckpointCommand
+	34,  // 71: trainvm.v1.WorkerCommand.cancel:type_name -> trainvm.v1.CancelCommand
+	36,  // 72: trainvm.v1.WorkerCommand.controls:type_name -> trainvm.v1.ControlPatchCommand
+	22,  // 73: trainvm.v1.WorkerWelcome.disposition:type_name -> trainvm.v1.WorkerWelcome.Disposition
+	48,  // 74: trainvm.v1.WorkerWelcome.execution_phase_requests:type_name -> trainvm.v1.WorkerExecutionPhaseRequest
+	1,   // 75: trainvm.v1.WorkerReceipt.observed_state:type_name -> trainvm.v1.ObservedState
+	54,  // 76: trainvm.v1.ControllerToWorker.command:type_name -> trainvm.v1.WorkerCommand
+	55,  // 77: trainvm.v1.ControllerToWorker.welcome:type_name -> trainvm.v1.WorkerWelcome
+	56,  // 78: trainvm.v1.ControllerToWorker.receipt:type_name -> trainvm.v1.WorkerReceipt
+	25,  // 79: trainvm.v1.GetCompiledPlanResponse.run:type_name -> trainvm.v1.RunIdentity
+	1,   // 80: trainvm.v1.ListRunsRequest.observed_states:type_name -> trainvm.v1.ObservedState
+	76,  // 81: trainvm.v1.ListRunsRequest.labels:type_name -> trainvm.v1.ListRunsRequest.LabelsEntry
+	26,  // 82: trainvm.v1.ListRunsResponse.runs:type_name -> trainvm.v1.RunSummary
+	4,   // 83: trainvm.v1.ControlDescriptor.type:type_name -> trainvm.v1.ControlType
+	24,  // 84: trainvm.v1.ControlDescriptor.default_value:type_name -> trainvm.v1.ScalarValue
+	24,  // 85: trainvm.v1.ControlDescriptor.values:type_name -> trainvm.v1.ScalarValue
+	2,   // 86: trainvm.v1.ControlDescriptor.apply_point:type_name -> trainvm.v1.ApplyPoint
+	2,   // 87: trainvm.v1.ControlCommandView.apply_point:type_name -> trainvm.v1.ApplyPoint
+	35,  // 88: trainvm.v1.ControlCommandView.assignments:type_name -> trainvm.v1.ControlAssignment
+	11,  // 89: trainvm.v1.ControlCommandView.status:type_name -> trainvm.v1.ControlCommandResult.Status
+	35,  // 90: trainvm.v1.ControlCommandView.effective_values:type_name -> trainvm.v1.ControlAssignment
+	23,  // 91: trainvm.v1.ControlCommandView.diagnostics:type_name -> trainvm.v1.Diagnostic
+	77,  // 92: trainvm.v1.GetControlViewResponse.catalog:type_name -> trainvm.v1.GetControlViewResponse.CatalogEntry
+	35,  // 93: trainvm.v1.GetControlViewResponse.effective_values:type_name -> trainvm.v1.ControlAssignment
+	66,  // 94: trainvm.v1.GetControlViewResponse.commands:type_name -> trainvm.v1.ControlCommandView
+	5,   // 95: trainvm.v1.HostdCoordinatorAuthorityStatus.lifecycle:type_name -> trainvm.v1.HostdLifecycle
+	8,   // 96: trainvm.v1.HostResourceFenceStatus.kind:type_name -> trainvm.v1.HostResourceKind
+	9,   // 97: trainvm.v1.HostResourceFenceStatus.vendor:type_name -> trainvm.v1.HostAcceleratorVendor
+	7,   // 98: trainvm.v1.HostdProcessAuthorityStatus.phase:type_name -> trainvm.v1.HostdProcessPhase
+	70,  // 99: trainvm.v1.GetHostAuthorityStatusResponse.coordinator:type_name -> trainvm.v1.HostdCoordinatorAuthorityStatus
+	6,   // 100: trainvm.v1.GetHostAuthorityStatusResponse.startup_phase:type_name -> trainvm.v1.HostdStartupPhase
+	71,  // 101: trainvm.v1.GetHostAuthorityStatusResponse.active_fences:type_name -> trainvm.v1.HostResourceFenceStatus
+	72,  // 102: trainvm.v1.GetHostAuthorityStatusResponse.active_processes:type_name -> trainvm.v1.HostdProcessAuthorityStatus
+	65,  // 103: trainvm.v1.GetControlViewResponse.CatalogEntry.value:type_name -> trainvm.v1.ControlDescriptor
+	27,  // 104: trainvm.v1.TrainVM.SubmitExperiment:input_type -> trainvm.v1.SubmitExperimentRequest
+	29,  // 105: trainvm.v1.TrainVM.DiffPlan:input_type -> trainvm.v1.PlanDiffRequest
+	38,  // 106: trainvm.v1.TrainVM.CommandRun:input_type -> trainvm.v1.RunCommandRequest
+	58,  // 107: trainvm.v1.TrainVM.GetRun:input_type -> trainvm.v1.GetRunRequest
+	59,  // 108: trainvm.v1.TrainVM.GetCompiledPlan:input_type -> trainvm.v1.GetCompiledPlanRequest
+	61,  // 109: trainvm.v1.TrainVM.ListRuns:input_type -> trainvm.v1.ListRunsRequest
+	63,  // 110: trainvm.v1.TrainVM.WatchEvents:input_type -> trainvm.v1.WatchEventsRequest
+	64,  // 111: trainvm.v1.TrainVM.GetControlView:input_type -> trainvm.v1.GetControlViewRequest
+	68,  // 112: trainvm.v1.TrainVM.GetDescriptor:input_type -> trainvm.v1.DescriptorRequest
+	73,  // 113: trainvm.v1.TrainVM.GetHostAuthorityStatus:input_type -> trainvm.v1.GetHostAuthorityStatusRequest
+	53,  // 114: trainvm.v1.WorkerControl.Connect:input_type -> trainvm.v1.WorkerToController
+	28,  // 115: trainvm.v1.TrainVM.SubmitExperiment:output_type -> trainvm.v1.SubmitExperimentResponse
+	30,  // 116: trainvm.v1.TrainVM.DiffPlan:output_type -> trainvm.v1.PlanDiffResponse
+	42,  // 117: trainvm.v1.TrainVM.CommandRun:output_type -> trainvm.v1.RunCommandResponse
+	26,  // 118: trainvm.v1.TrainVM.GetRun:output_type -> trainvm.v1.RunSummary
+	60,  // 119: trainvm.v1.TrainVM.GetCompiledPlan:output_type -> trainvm.v1.GetCompiledPlanResponse
+	62,  // 120: trainvm.v1.TrainVM.ListRuns:output_type -> trainvm.v1.ListRunsResponse
+	44,  // 121: trainvm.v1.TrainVM.WatchEvents:output_type -> trainvm.v1.EventEnvelope
+	67,  // 122: trainvm.v1.TrainVM.GetControlView:output_type -> trainvm.v1.GetControlViewResponse
+	69,  // 123: trainvm.v1.TrainVM.GetDescriptor:output_type -> trainvm.v1.DescriptorResponse
+	74,  // 124: trainvm.v1.TrainVM.GetHostAuthorityStatus:output_type -> trainvm.v1.GetHostAuthorityStatusResponse
+	57,  // 125: trainvm.v1.WorkerControl.Connect:output_type -> trainvm.v1.ControllerToWorker
+	115, // [115:126] is the sub-list for method output_type
+	104, // [104:115] is the sub-list for method input_type
+	104, // [104:104] is the sub-list for extension type_name
+	104, // [104:104] is the sub-list for extension extendee
+	0,   // [0:104] is the sub-list for field type_name
 }
 
 func init() { file_trainvm_v1_trainvm_proto_init() }
@@ -6006,7 +7617,8 @@ func file_trainvm_v1_trainvm_proto_init() {
 		(*RunCommandRequest_AdoptPlan)(nil),
 	}
 	file_trainvm_v1_trainvm_proto_msgTypes[21].OneofWrappers = []any{}
-	file_trainvm_v1_trainvm_proto_msgTypes[28].OneofWrappers = []any{
+	file_trainvm_v1_trainvm_proto_msgTypes[25].OneofWrappers = []any{}
+	file_trainvm_v1_trainvm_proto_msgTypes[30].OneofWrappers = []any{
 		(*WorkerToController_Hello)(nil),
 		(*WorkerToController_Heartbeat)(nil),
 		(*WorkerToController_Event)(nil),
@@ -6015,29 +7627,31 @@ func file_trainvm_v1_trainvm_proto_init() {
 		(*WorkerToController_ControlAck)(nil),
 		(*WorkerToController_CheckpointAck)(nil),
 		(*WorkerToController_LifecycleAck)(nil),
+		(*WorkerToController_PhaseReceipt)(nil),
 	}
-	file_trainvm_v1_trainvm_proto_msgTypes[29].OneofWrappers = []any{
+	file_trainvm_v1_trainvm_proto_msgTypes[31].OneofWrappers = []any{
 		(*WorkerCommand_Pause)(nil),
 		(*WorkerCommand_Resume)(nil),
 		(*WorkerCommand_Checkpoint)(nil),
 		(*WorkerCommand_Cancel)(nil),
 		(*WorkerCommand_Controls)(nil),
 	}
-	file_trainvm_v1_trainvm_proto_msgTypes[32].OneofWrappers = []any{
+	file_trainvm_v1_trainvm_proto_msgTypes[34].OneofWrappers = []any{
 		(*ControllerToWorker_Command)(nil),
 		(*ControllerToWorker_AcknowledgeWorkerSequence)(nil),
 		(*ControllerToWorker_Welcome)(nil),
 		(*ControllerToWorker_Receipt)(nil),
 	}
-	file_trainvm_v1_trainvm_proto_msgTypes[40].OneofWrappers = []any{}
-	file_trainvm_v1_trainvm_proto_msgTypes[41].OneofWrappers = []any{}
+	file_trainvm_v1_trainvm_proto_msgTypes[42].OneofWrappers = []any{}
+	file_trainvm_v1_trainvm_proto_msgTypes[43].OneofWrappers = []any{}
+	file_trainvm_v1_trainvm_proto_msgTypes[49].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_trainvm_v1_trainvm_proto_rawDesc), len(file_trainvm_v1_trainvm_proto_rawDesc)),
-			NumEnums:      16,
-			NumMessages:   48,
+			NumEnums:      23,
+			NumMessages:   55,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

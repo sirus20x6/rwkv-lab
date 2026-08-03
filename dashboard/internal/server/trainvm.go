@@ -23,6 +23,27 @@ import (
 const trainVMDraftLimit = 2 << 20
 const trainVMCommandLimit = 64 << 10
 
+func (s *Server) handleTrainVMHostAuthority(w http.ResponseWriter, r *http.Request) {
+	if s.commander == nil {
+		http.Error(w, "TrainVM authority is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	authority, err := s.commander.GetHostAuthorityStatus(r.Context())
+	if err != nil {
+		// A missing hostd binding is an operationally unavailable inspection
+		// source, not a conflicting user mutation.
+		if status.Code(err) == codes.FailedPrecondition {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		writeTrainVMAuthorityError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(authority)
+}
+
 func (s *Server) handleTrainVMRuns(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -148,9 +169,45 @@ func (s *Server) handleTrainVMArtifacts(w http.ResponseWriter, r *http.Request) 
 		writeTrainVMAuthorityError(w, err)
 		return
 	}
+	public := make([]trainvmstore.ObservableArtifact, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		public = append(public, trainvmstore.RedactArtifact(artifact))
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(artifacts)
+	_ = json.NewEncoder(w).Encode(public)
+}
+
+func (s *Server) handleTrainVMObservability(w http.ResponseWriter, r *http.Request) {
+	if s.trainvm == nil {
+		http.Error(w, "TrainVM authority is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	after, parseErr := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
+	if r.URL.Query().Get("after") == "" {
+		after, parseErr = 0, nil
+	}
+	limit, limitErr := strconv.Atoi(r.URL.Query().Get("limit"))
+	if r.URL.Query().Get("limit") == "" {
+		limit, limitErr = 250, nil
+	}
+	if parseErr != nil || limitErr != nil || limit < 1 || limit > 1_000 {
+		http.Error(w, "observability query requires a uint64 cursor and limit from 1 through 1000", http.StatusBadRequest)
+		return
+	}
+	snapshot, found, err := trainvmstore.ProjectTelemetrySnapshot(
+		r.Context(), s.trainvm, r.PathValue("run"), after, limit)
+	if err != nil {
+		writeTrainVMAuthorityError(w, err)
+		return
+	}
+	if !found {
+		http.Error(w, "no such TrainVM run or persisted plan", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(snapshot)
 }
 
 func (s *Server) handleTrainVMSchema(w http.ResponseWriter, _ *http.Request) {

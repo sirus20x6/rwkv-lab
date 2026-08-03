@@ -8,6 +8,7 @@ from rwkv_lab.vision_fusion import (
     VisionTowerConfig, factor_grid, pool_grid_tokens, pool_tokens,
     sam_cropped_tokens, sam_dense_cache_key, sam_live_cells,
     valid_aligned_feature, valid_sam_dense_feature)
+from rwkv_lab.vision_train import _row_fusion_cache_path, cached_fusion_features
 
 
 def test_pool_tokens_shape_and_mean_preservation():
@@ -58,6 +59,25 @@ def test_aligned_fusion_supports_so400m_width_without_aliasing_base():
     assert adapter(features).shape == (2, 4, 32)
     assert valid_aligned_feature(features[0], 4, so400m.width)
     assert not valid_aligned_feature(features[0], 4, base.width)
+
+
+def test_cache_only_fusion_refuses_and_preserves_invalid_archive(tmp_path):
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"source")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    tower = AlignedFrozenVisionFeatures(VisionTowerConfig(siglip_width=768))
+    tower.cache_only = True
+    row = {"image": image}
+    path = _row_fusion_cache_path(
+        row, cache, tokens=4, tower_fingerprint=tower.cache_fingerprint)
+    original = b"sealed fusion input is not a torch archive"
+    path.write_bytes(original)
+
+    with pytest.raises(FileNotFoundError, match="sealed fusion cache"):
+        cached_fusion_features([row], tower, 4, cache)
+
+    assert path.read_bytes() == original
 
 
 def test_so400m_prefix_projection_uses_configured_width():

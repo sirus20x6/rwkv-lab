@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include "trainvm/host_launch_registry.hpp"
+#include "trainvm/profiler_launch_profiles.hpp"
 #include "trainvm/worker.hpp"
 
 namespace trainvm {
@@ -46,6 +47,24 @@ struct OpenedDirectoryIdentity {
   bool operator==(const OpenedDirectoryIdentity&) const = default;
 };
 
+struct ResolvedProfilerLaunchIdentity final {
+  std::string api_version;
+  ProfilerBackend backend{};
+  std::string launch_profile_version;
+  std::string launch_profile_document_digest;
+  std::string host_profiler_profile_digest;
+  VerifiedLaunchArtifact executable;
+  // Nsight Systems discovers its support tree from /proc/self/exe and refuses
+  // an anonymous memfd. NCU is self-contained and remains a sealed copy.
+  bool execute_from_source{};
+  GpuTraceCapture capture;
+  std::string raw_output_path;
+  std::vector<std::string> public_arguments;
+  ExternalProfilerAuthoritySpec authority;
+
+  bool operator==(const ResolvedProfilerLaunchIdentity&) const = default;
+};
+
 // Public, persistable launch identity. It deliberately contains no resolved
 // secret value and no raw per-process authentication token.
 struct ResolvedLaunchIdentity {
@@ -72,6 +91,7 @@ struct ResolvedLaunchIdentity {
   std::uint16_t code_argument_index{};
   std::vector<std::string> public_arguments;
   OpenedDirectoryIdentity working_directory;
+  std::optional<ResolvedProfilerLaunchIdentity> profiler = std::nullopt;
 
   bool operator==(const ResolvedLaunchIdentity&) const = default;
 };
@@ -100,6 +120,11 @@ class ResolvedLaunch final {
   [[nodiscard]] static ResolvedLaunch adopt_delegated(
       ResolvedLaunchSpec spec, int executable_fd,
       std::optional<int> code_fd, int working_directory_fd);
+  [[nodiscard]] static ResolvedLaunch adopt_delegated(
+      ResolvedLaunchSpec spec, int executable_fd,
+      std::optional<int> code_fd, int working_directory_fd,
+      std::optional<int> profiler_executable_fd,
+      std::optional<int> profiler_authority_fd);
 
   ResolvedLaunch(ResolvedLaunch&& other) noexcept;
   ResolvedLaunch& operator=(ResolvedLaunch&& other) noexcept;
@@ -114,12 +139,17 @@ class ResolvedLaunch final {
   [[nodiscard]] int duplicate_executable_fd() const;
   [[nodiscard]] std::optional<int> duplicate_code_fd() const;
   [[nodiscard]] int duplicate_working_directory_fd() const;
+  [[nodiscard]] std::optional<int> duplicate_profiler_executable_fd() const;
+  [[nodiscard]] std::optional<int> duplicate_profiler_authority_fd() const;
 
  private:
   friend class HostLaunchResolver;
   ResolvedLaunch(ResolvedLaunchSpec spec, int executable_fd,
                  std::optional<int> code_fd,
-                 int working_directory_fd) noexcept;
+                 int working_directory_fd,
+                 std::optional<int> profiler_executable_fd = std::nullopt,
+                 std::optional<int> profiler_authority_fd =
+                     std::nullopt) noexcept;
 
   void close_descriptors() noexcept;
 
@@ -127,6 +157,8 @@ class ResolvedLaunch final {
   int executable_fd_{-1};
   std::optional<int> code_fd_;
   int working_directory_fd_{-1};
+  std::optional<int> profiler_executable_fd_;
+  std::optional<int> profiler_authority_fd_;
 };
 
 class HostLaunchResolver final {
@@ -138,7 +170,10 @@ class HostLaunchResolver final {
   // Resolves and seals exact host bytes. No fork, exec, signal, cgroup, lease
   // mutation, or journal mutation occurs here.
   [[nodiscard]] ResolvedLaunch resolve(const WorkerLaunchTicket& ticket,
-                                       const AdapterKey& key) const;
+                                       const AdapterKey& key,
+                                       std::optional<GpuTraceCapture> capture =
+                                           std::nullopt,
+                                       std::string raw_output_path = {}) const;
 
  private:
   const HostLaunchRegistry& registry_;

@@ -75,6 +75,7 @@ HostdStatusReply status_reply(const HostIdentity& host,
           .startup_audit = std::nullopt,
           .poison_reason = {},
       },
+      .authority_status = std::nullopt,
       .error = std::nullopt,
   };
 }

@@ -11,10 +11,14 @@ from rwkv_lab.trainvm_worker import (
     CheckpointDisposition,
     CommandKind,
     ControlDisposition,
+    ExecutionPhase,
+    ExecutionPhaseDisposition,
     LifecycleDisposition,
     WorkerSession,
     load_worker_bootstrap,
+    state_fingerprint,
 )
+from rwkv_lab.trainvm_worker._canonical import canonical_dumps, sha256_digest
 from rwkv_lab.trainvm_worker.session import wire
 
 
@@ -25,11 +29,13 @@ class FakeController:
         send_control: bool = False,
         send_checkpoint: bool = False,
         send_cancel: bool = False,
+        execution: object = None,
     ) -> None:
         self.received: list[wire.WorkerToController] = []
         self.send_control = send_control
         self.send_checkpoint = send_checkpoint
         self.send_cancel = send_cancel
+        self.execution = execution
         self.control_sent = threading.Event()
 
     def __call__(
@@ -39,7 +45,31 @@ class FakeController:
         hello_message = next(iterator)
         self.received.append(hello_message)
         hello = hello_message.hello
-        invocation = json.loads(invocation_document())
+        raw_invocation = invocation_document(execution=self.execution)
+        invocation = json.loads(raw_invocation)
+        phase_requests: list[wire.WorkerExecutionPhaseRequest] = []
+        for phase_name, phase_value in (
+            ("compile", wire.WorkerExecutionPhaseRequest.PHASE_COMPILE),
+            ("warmup", wire.WorkerExecutionPhaseRequest.PHASE_WARMUP),
+        ):
+            if not isinstance(self.execution, dict) or phase_name not in self.execution:
+                continue
+            declaration = self.execution[phase_name]
+            body = {
+                "api_version": "trainvm.worker-execution-phase-request/v1",
+                "enabled": declaration["enabled"],
+                "invocation_digest": invocation["invocation_digest"],
+                "phase": phase_name,
+            }
+            request = wire.WorkerExecutionPhaseRequest(
+                phase=phase_value,
+                enabled=declaration["enabled"],
+            )
+            if "steps" in declaration:
+                request.steps = declaration["steps"]
+                body["steps"] = declaration["steps"]
+            request.request_digest = sha256_digest(canonical_dumps(body))
+            phase_requests.append(request)
         yield wire.ControllerToWorker(
             welcome=wire.WorkerWelcome(
                 disposition=wire.WorkerWelcome.DISPOSITION_ACCEPTED,
@@ -58,8 +88,9 @@ class FakeController:
                 component="trainer",
                 operation="train",
                 acknowledged_worker_sequence=0,
-                canonical_invocation_json=invocation_document(),
+                canonical_invocation_json=raw_invocation,
                 invocation_digest=invocation["invocation_digest"],
+                execution_phase_requests=phase_requests,
             )
         )
         if self.send_control:
@@ -215,6 +246,49 @@ def test_checkpoint_command_is_typed_and_acknowledges_published_artifact() -> No
     session.close()
 
 
+def test_execution_phase_request_is_bound_and_receipted_with_state_proof() -> None:
+    controller = FakeController(
+        execution={
+            "component": "trainer",
+            "operation": "train",
+            "compile": {"enabled": True},
+            "warmup": {"enabled": True, "steps": 3},
+        }
+    )
+    session = WorkerSession(
+        load_worker_bootstrap(bootstrap_document()), connector=controller
+    )
+    session.start()
+    requests = session.execution_phase_requests
+    assert [request.phase for request in requests] == [
+        ExecutionPhase.COMPILE,
+        ExecutionPhase.WARMUP,
+    ]
+    warmup = requests[1]
+    fingerprint = state_fingerprint(
+        {"model": "m1", "optimizer": "o1", "rng": 17, "cursor": 0}
+    )
+    assert (
+        session.execution_phase_receipt(
+            warmup,
+            ExecutionPhaseDisposition.COMPLETED,
+            steps_executed=3,
+            state_fingerprint_before=fingerprint,
+            state_fingerprint_after=fingerprint,
+            started_at_ns=10,
+            completed_at_ns=20,
+            wait=True,
+        )
+        == 1
+    )
+    session.finish("node.completed", {"ok": True}, optimizer_step=1)
+    phase_receipt = controller.received[-2].phase_receipt
+    assert phase_receipt.request_digest == warmup.request_digest
+    assert phase_receipt.steps_executed == 3
+    assert phase_receipt.concurrency_key == "gpu:0"
+    session.close()
+
+
 def test_cancel_command_is_typed_and_has_a_fenced_lifecycle_ack() -> None:
     controller = FakeController(send_cancel=True)
     session = WorkerSession(
@@ -236,8 +310,7 @@ def test_cancel_command_is_typed_and_has_a_fenced_lifecycle_ack() -> None:
     acknowledgement = controller.received[-2].lifecycle_ack
     assert acknowledgement.kind == wire.LifecycleAcknowledgement.KIND_CANCEL
     assert (
-        acknowledgement.disposition
-        == wire.LifecycleAcknowledgement.DISPOSITION_APPLIED
+        acknowledgement.disposition == wire.LifecycleAcknowledgement.DISPOSITION_APPLIED
     )
     session.close()
 

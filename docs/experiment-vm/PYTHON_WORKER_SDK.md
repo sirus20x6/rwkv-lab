@@ -18,7 +18,7 @@ descriptor. It contains only:
 It contains no model path, dataset path, optimizer setting, learning-rate
 setting, shell fragment, environment override, or secret. After the worker
 opens `WorkerControl`, TrainVM returns a content-addressed
-`trainvm.worker-invocation/v1` document in `WorkerWelcome`. That immutable
+`trainvm.worker-invocation/v2` document in `WorkerWelcome`. That immutable
 invocation contains the resolved inputs, controls, artifact declarations, and
 training-component composition selected by the authority.
 
@@ -42,9 +42,41 @@ implementation as separate layers.
 - replay-aware worker/controller sequence checks;
 - typed heartbeats and scalar metrics;
 - complete artifact-manifest publication;
+- immutable compile/warmup requests and fenced execution-phase receipts;
 - typed pause, resume, checkpoint, cancel, and control commands;
 - explicit control acknowledgement at adapter-selected safe points;
 - one canonical terminal result and durable receipt.
+
+`rwkv_lab.trainvm_worker.execution_phases` owns the worker side of compile and warmup. It verifies
+that every protobuf request exactly matches the sealed invocation and request digest. The shared
+runtime captures a caller-supplied complete training-state identity before and after the phase,
+counts warmup steps through an explicit completion callback, publishes partial progress and a
+diagnostic on failure, and refuses a successful receipt unless disposable execution restored the
+same state. The identity must cover model, optimizer, RNG, scaler, data cursor, schedule segment,
+and effective controls; adapters cannot substitute a model-weights-only checksum. Repeating a
+phase after a lost connection creates another independently fenced receipt, so recovery never has
+to guess whether an unacknowledged phase ran.
+
+`WorkerExecutionPhases` is the one-shot adapter coordinator. It fails the operation if any declared
+phase is omitted or receipted twice. The scratch-RWKV adapter is the first production consumer: its
+compile phase triggers Torch's lazy compiler with a disposable forward/backward, and its warmup
+phase executes exactly the requested number of disposable workloads. Before and after identities
+come from `torch_trajectory_state`, which hashes every model, gradient, buffer, and optimizer-state
+tensor in bounded chunks plus optimizer groups, all Torch/CUDA/Python/NumPy RNG state, and the data
+cursor. It deliberately hashes tensor contents because `Tensor.data` writes can evade version
+counters.
+
+All three MageFlow training adapters use the same coordinator through the family bridge in
+`trainvm_adapters.mageflow_phases`. The invocation's compile declaration owns both regional
+transformer and VAE compilation, a deterministic real training batch triggers lazy compilation,
+and warmup repeats that disposable forward/backward exactly as declared. The terminal/TREAD route
+also exercises its configured REPA, immiscible-flow, loss-weighting, direction-loss, and loop
+objectives and fingerprints auxiliary modules alongside the transformer. The bridge preserves every
+Python/Torch/CUDA RNG stream, clears gradients, fingerprints the complete model/optimizer plus
+schedule/control/data-cursor identity, and reports a changed trajectory as a failed phase rather
+than relying on the controller to reject a false success. When a frozen-encoder cache is selected,
+the chosen phase batch must already have complete text and VAE-moment coverage; compile/warmup never
+hide cache population as a disposable side effect.
 
 Before dispatch, `rwkv_lab.trainvm_worker.runtime_policy` independently parses the resource policy
 from the sealed invocation. It owns only non-root runtime controls: narrowing/rechecking process CPU
@@ -113,10 +145,10 @@ mutating effective state, and reports pause/restart controls as replacement-work
 runner constructs this service from the sealed invocation rather than giving a trainer the session.
 Scratch RWKV consumes all four safe-point hooks, persists the effective control snapshot in its
 terminal checkpoint, verifies it on resume, and honestly rejects live mutation because its v1
-catalog is restart-only. Both MageFlow training adapters additionally lower their authority-selected
+catalog is restart-only. All MageFlow training adapters additionally lower their authority-selected
 initial controls before construction and atomically apply learning rate, evaluation cadence, and
 caption dropout at their declared boundaries. Learning-rate rebasing is owned by the schedule
-component and preserves schedule phase plus appearance/terminal expert, backbone, and REPA group
+component and preserve schedule phase plus full-backbone or appearance/terminal expert, backbone, and REPA group
 ratios; checkpoints bind and verify the
 effective revision and values, while the static training-contract identity excludes only the named
 mutable fields. Cached conditioning rejects a zero-to-positive caption-dropout transition when no
@@ -148,8 +180,11 @@ fixed; the normal native test target builds it twice and requires byte equality.
 sealed interpreter with `-I`, installs the zipapp at fd 3 through its separately bound code-argument
 slot, clears the environment, and appends exactly `--trainvm-bootstrap-fd=4`; the runner rejects
 every other argument. Its dispatch table contains exact `(adapter, version, operation, contract)`
-tuples for the MageFlow appearance expert, MageFlow terminal expert, Qwen AO3 continuation, and
-scratch RWKV pretraining. An experiment cannot select an import string, script, argv, environment
+tuples for MageFlow full-backbone plus appearance and terminal experts, Qwen AO3 continuation, eight canonical
+MLA-family variants, scratch RWKV pretraining, and restart-only RWKV post-training. The latter
+publishes adapter, reward-head, terminal result, and metric files through the generic immutable-tree
+artifact boundary rather than presenting them as a resumable checkpoint. An experiment cannot
+select an import string, script, argv, environment
 override, or entry-point path.
 
 `trainvm inspect-rwkv-lab-deployment` lowers each adapter's exact zipapp,
@@ -195,6 +230,20 @@ but does not turn a mutable filesystem path into immutable storage. Immutable
 controller-published resume checkpoints use their existing per-object manifest verifier and are not
 double-classified as static workspace inputs.
 
+For experiment templates with several roots, keep the unhashed path list in a closed
+`trainvm.input-content-root-set/v1` document and produce the runnable snapshot without hand-editing:
+
+```sh
+trainvm lock-input-content experiment.json input-roots.json > experiment.locked.json
+trainvm validate experiment.locked.json
+```
+
+The native command decodes the root-set through the reflected schema, rejects unknown fields,
+duplicates and overlaps, measures every root with the same Merkle implementation, sorts the
+identities, replaces `workspace.input_content_roots`, and recompiles the complete experiment before
+emitting JSON. It never launches a worker or writes either source document. A later worker still
+remeasures every identity, so drift between authoring and dispatch fails closed.
+
 The fixed runner returns an already-completed replay without executing tensor work, publishes a
 durably receipted terminal result on success, freezes any declared checkpoint before that terminal
 result, and converts trainer exceptions to a bounded
@@ -205,6 +254,16 @@ per-adapter claims rather than inferences from the shared runtime. Top-level pat
 declared content-root trees are recursively bound. A manifest that references payloads outside its
 declared root set remains invalid; remote/object-store references still require a typed immutable
 artifact provider rather than pathname authority.
+
+Downstream Python operations consume controller-selected non-checkpoint artifacts through
+`resolve_input_artifact()`, never by opening the descriptor URI directly. The resolver requires the
+exact artifact descriptor shape, local canonical manifest URI, declared kind and schema, workspace
+confinement, manifest fingerprint, producer and parent lineage, canonical tree digest, and every
+payload object hash. `read_input_artifact_file()` rechecks a selected object's stable file identity
+and digest at the point of use, while `load_input_artifact_json()` additionally requires canonical,
+finite JSON. The scalar-metric decision adapter is the first production consumer of this boundary:
+it compares two independently verified result artifacts and publishes a new immutable receipt whose
+parents are exactly those candidate artifact IDs.
 
 Install the optional runtime dependencies with:
 

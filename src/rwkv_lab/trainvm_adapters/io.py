@@ -15,6 +15,7 @@ from .content_authority import (
 MAXIMUM_INLINE_CONFIG_BYTES = 40 * 1024
 MAXIMUM_MANIFEST_LINE_BYTES = 4 * 1024 * 1024
 MAXIMUM_MANIFEST_ROWS = 10_000_000
+MAXIMUM_NODE_ID_BYTES = 128
 
 
 class AdapterInputError(ValueError):
@@ -176,6 +177,24 @@ class WorkspacePathAuthority:
                 "trainer output directory disagrees with worker workspace authority"
             )
         return resolved
+
+    def node_run_directory(self, node_id: object) -> Path:
+        """Derive an isolated, retry-stable trainer directory from node authority."""
+        if (
+            not isinstance(node_id, str)
+            or not node_id.isascii()
+            or not 0 < len(node_id.encode("utf-8")) <= MAXIMUM_NODE_ID_BYTES
+            or not node_id[0].isalnum()
+            or any(
+                not (character.isalnum() or character in "._-")
+                for character in node_id
+            )
+        ):
+            raise AdapterInputError("worker node ID cannot name a run directory")
+        return self.write_directory(
+            str(self.run_directory / "nodes" / node_id),
+            label="node trainer output directory",
+        )
 
     def verify_jsonl_file_references(
         self,

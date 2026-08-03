@@ -4048,7 +4048,14 @@ std::vector<SequencedEvent> Journal::sequenced_events(
   constexpr std::size_t kMaximumFilters = 64U;
   if (input.limit == 0U || input.limit > kMaximumPageSize ||
       input.run_ids.size() > kMaximumFilters ||
-      input.event_types.size() > kMaximumFilters) {
+      input.event_types.size() > kMaximumFilters ||
+      (input.through_journal_sequence != 0U &&
+       input.after_journal_sequence >= input.through_journal_sequence) ||
+      (input.newest_first && input.through_journal_sequence == 0U) ||
+      (input.newest_per_metric_series &&
+       (input.newest_first || input.through_journal_sequence == 0U ||
+        input.run_ids.size() != 1U || input.event_types.size() != 1U ||
+        !input.event_types.contains("metric.sampled")))) {
     throw std::invalid_argument("event scan query exceeds its bounds");
   }
   const auto invalid = [](const std::string& value) {
@@ -4058,12 +4065,32 @@ std::vector<SequencedEvent> Journal::sequenced_events(
       std::ranges::any_of(input.event_types, invalid)) {
     throw std::invalid_argument("event scan filter is malformed");
   }
-  std::string sql = R"sql(
-    SELECT journal_sequence, event_id, run_id, run_revision, plan_revision,
-           node_id, attempt_id, worker_sequence, event_type, event_version,
-           wall_time_ns, monotonic_time_ns, optimizer_step, payload_json
-    FROM events WHERE journal_sequence>?
+  constexpr std::string_view columns = R"sql(
+    journal_sequence, event_id, run_id, run_revision, plan_revision,
+    node_id, attempt_id, worker_sequence, event_type, event_version,
+    wall_time_ns, monotonic_time_ns, optimizer_step, payload_json
   )sql";
+  std::string sql;
+  if (input.newest_per_metric_series) {
+    sql = "WITH ranked_metric_series AS (SELECT ";
+    sql += columns;
+    sql += R"sql(,
+      ROW_NUMBER() OVER (
+        PARTITION BY run_id, node_id, attempt_id,
+                     json_extract(payload_json, '$.name'),
+                     json_extract(payload_json, '$.labels')
+        ORDER BY journal_sequence DESC
+      ) AS metric_series_rank
+      FROM events WHERE journal_sequence>?
+    )sql";
+  } else {
+    sql = "SELECT ";
+    sql += columns;
+    sql += " FROM events WHERE journal_sequence>?";
+  }
+  if (input.through_journal_sequence != 0U) {
+    sql += " AND journal_sequence<=?";
+  }
   const auto append_filter = [&sql](std::string_view column,
                                     std::size_t count) {
     if (count == 0U) return;
@@ -4078,12 +4105,26 @@ std::vector<SequencedEvent> Journal::sequenced_events(
   };
   append_filter("run_id", input.run_ids.size());
   append_filter("event_type", input.event_types.size());
-  sql += " ORDER BY journal_sequence LIMIT ?";
+  if (input.newest_per_metric_series) {
+    sql += ") SELECT ";
+    sql += columns;
+    sql += " FROM ranked_metric_series WHERE metric_series_rank=1"
+           " ORDER BY journal_sequence LIMIT ?";
+  } else {
+    sql += input.newest_first
+               ? " ORDER BY journal_sequence DESC LIMIT ?"
+               : " ORDER BY journal_sequence LIMIT ?";
+  }
   Statement query(database_, sql);
   int parameter = 1;
   bind_integer(query.get(), parameter++,
                checked_integer(input.after_journal_sequence,
                                "event scan sequence"));
+  if (input.through_journal_sequence != 0U) {
+    bind_integer(query.get(), parameter++,
+                 checked_integer(input.through_journal_sequence,
+                                 "event scan upper sequence"));
+  }
   for (const std::string& run_id : input.run_ids) {
     bind_text(query.get(), parameter++, run_id);
   }
@@ -7235,6 +7276,91 @@ std::optional<WorkerInvocationSpec> Journal::worker_invocation(
         "durable worker invocation disagrees with its event envelope");
   }
   return invocation;
+}
+
+bool Journal::publish_external_profiler_artifact(const Event& event) {
+  constexpr std::array<std::string_view, 13U> fields{
+      "artifact_id", "logical_name", "kind", "schema", "uri",
+      "size_bytes", "fingerprint_algorithm", "fingerprint", "complete",
+      "producer_node_id", "producer_attempt_id", "parent_artifact_ids",
+      "published_at_ns"};
+  const std::string artifact_id =
+      event.payload.value("artifact_id", std::string{});
+  const std::string dispatch_id = event.run_id + ":dispatch:" +
+                                  event.node_id + ":" + event.attempt_id;
+  const std::string launch_id = event.run_id + ":worker-launch:" +
+                                event.node_id + ":" + event.attempt_id;
+  const auto dispatch = this->dispatch(dispatch_id);
+  const auto invocation = worker_invocation(dispatch_id);
+  const auto launch = launch_binding(launch_id);
+  const auto run_projection = projection(event.run_id);
+  const auto valid_digest = [](std::string_view value) {
+    return value.size() == 71U && value.starts_with("sha256:") &&
+           std::ranges::all_of(value.substr(7U), [](char character) {
+             return (character >= '0' && character <= '9') ||
+                    (character >= 'a' && character <= 'f');
+           });
+  };
+  if (!event.payload.is_object() || event.payload.size() != fields.size() ||
+      std::ranges::any_of(fields, [&](std::string_view field) {
+        return !event.payload.contains(std::string(field));
+      }) ||
+      event.event_type != "artifact.published" || event.event_version != 1U ||
+      event.worker_sequence != 0U || event.monotonic_time_ns != 0U ||
+      event.optimizer_step || artifact_id.size() != 74U ||
+      !artifact_id.starts_with("gpu-trace-") ||
+      !std::ranges::all_of(std::string_view(artifact_id).substr(10U),
+                           [](char character) {
+                             return (character >= '0' && character <= '9') ||
+                                    (character >= 'a' && character <= 'f');
+                           }) ||
+      event.event_id != dispatch_id + ":artifact:" + sha256_hex(artifact_id) ||
+      event.payload.value("logical_name", std::string{}).empty() ||
+      event.payload.value("kind", std::string{}) != "opaque" ||
+      event.payload.value("schema", std::string{}) !=
+          "trainvm.gpu-trace.v1" ||
+      event.payload.value("fingerprint_algorithm", std::string{}) !=
+          "adapter" ||
+      !valid_digest(event.payload.value("fingerprint", std::string{})) ||
+      !event.payload.value("complete", false) ||
+      event.payload.value("size_bytes", std::uint64_t{}) == 0U ||
+      event.payload.value("producer_node_id", std::string{}) != event.node_id ||
+      event.payload.value("producer_attempt_id", std::string{}) !=
+          event.attempt_id ||
+      !event.payload.at("parent_artifact_ids").is_array() ||
+      !event.payload.at("parent_artifact_ids").empty() ||
+      event.payload.value("published_at_ns", std::int64_t{-1}) !=
+          event.wall_time_ns ||
+      !dispatch || dispatch->status != DispatchStatus::completed ||
+      !dispatch->result_event_id || !invocation || !launch ||
+      !launch->identity.profiler ||
+      !run_projection || event.run_revision != run_projection->run_revision ||
+      invocation->plan_revision != event.plan_revision) {
+    throw std::invalid_argument(
+        "external profiler artifact event is not canonical");
+  }
+  const auto& profiler = *launch->identity.profiler;
+  if (!profiler.capture.output_artifact ||
+      event.payload.value("logical_name", std::string{}) !=
+          *profiler.capture.output_artifact) {
+    throw std::invalid_argument(
+        "external profiler artifact disagrees with its declared output");
+  }
+  const std::string expected_uri =
+      "file://" +
+      (std::filesystem::path(profiler.raw_output_path).parent_path()
+           .parent_path() /
+       artifact_id / "manifest.json")
+          .string();
+  if (event.payload.value("uri", std::string{}) != expected_uri) {
+    throw std::invalid_argument(
+        "external profiler artifact URI escaped its launch authority");
+  }
+  const bool inserted = !this->event(event.event_id).has_value();
+  Transaction transaction(database_);
+  (void)append_uncommitted(event);
+  transaction.commit();
+  return inserted;
 }
 
 WorkerReadinessDisposition Journal::accept_worker_ready(
