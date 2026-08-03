@@ -205,24 +205,22 @@ class WorkerExecutionPhaseRuntime:
                 )
             steps_executed += 1
 
-        if not request.enabled:
-            return self._channel.execution_phase_receipt(
-                request,
-                ExecutionPhaseDisposition.SKIPPED,
-                steps_executed=0,
-                state_fingerprint_before=before,
-                state_fingerprint_after=state_fingerprint(snapshot()),
-                started_at_ns=started_at_ns,
-                completed_at_ns=time.time_ns(),
-            )
+        after: str | None = None
         try:
-            execute(steps, mark_step)
-            if steps_executed != steps:
+            if request.enabled:
+                execute(steps, mark_step)
+                if steps_executed != steps:
+                    raise WorkerExecutionPhaseError(
+                        "execution phase did not complete every requested step"
+                    )
+            after = state_fingerprint(snapshot())
+            if after != before:
                 raise WorkerExecutionPhaseError(
-                    "execution phase did not complete every requested step"
+                    "execution phase did not restore the training trajectory"
                 )
         except Exception as error:
-            after = state_fingerprint(snapshot())
+            if after is None:
+                after = state_fingerprint(snapshot())
             self._channel.execution_phase_receipt(
                 request,
                 ExecutionPhaseDisposition.FAILED,
@@ -242,12 +240,17 @@ class WorkerExecutionPhaseRuntime:
                 ),
             )
             raise
+        assert after is not None
         return self._channel.execution_phase_receipt(
             request,
-            ExecutionPhaseDisposition.COMPLETED,
+            (
+                ExecutionPhaseDisposition.COMPLETED
+                if request.enabled
+                else ExecutionPhaseDisposition.SKIPPED
+            ),
             steps_executed=steps_executed,
             state_fingerprint_before=before,
-            state_fingerprint_after=state_fingerprint(snapshot()),
+            state_fingerprint_after=after,
             started_at_ns=started_at_ns,
             completed_at_ns=time.time_ns(),
         )

@@ -406,9 +406,11 @@ startup orphan recovery are defined in
   prove state restoration, recovery-safe repeats remain separate receipts, and the generic dashboard
   renders the receipt history. Scratch RWKV now consumes the requests, triggers lazy compilation,
   counts exact disposable warmup workloads, restores RNG/gradients, and content-hashes the complete
-  model/optimizer trajectory around both phases. MageFlow, the remaining RWKV paths, transformer,
-  and vision-loop adoption plus privileged CUDA qualification remain before these phases are
-  production-qualified.
+  model/optimizer trajectory around both phases. The MageFlow appearance route now also lowers the
+  phase declaration into VAE/regional compilation and real-shaped disposable forwards/backwards,
+  with complete tensor, schedule, control, RNG, and cursor proofs. MageFlow terminal, the remaining
+  RWKV paths, transformer, and vision-loop adoption plus privileged CUDA qualification remain before
+  these phases are production-qualified.
 - Fingerprinted cache namespaces; typed CPU/I/O policy lowering and recovery attestation are
   implemented, with privileged real-host qualification remaining.
 - Declarative bounded Torch GPU profiling and dashboard trace artifacts are implemented; qualified

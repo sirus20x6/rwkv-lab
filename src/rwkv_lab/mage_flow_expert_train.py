@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
     from rwkv_lab.trainvm_worker import (
         WorkerControlRuntime,
+        WorkerExecutionPhases,
         WorkerObservability,
         WorkerStepProfiler,
     )
@@ -2003,6 +2004,7 @@ def train(
     worker_step_profiler: WorkerStepProfiler | None = None,
     worker_observability: WorkerObservability | None = None,
     worker_controls: WorkerControlRuntime | None = None,
+    worker_execution_phases: WorkerExecutionPhases | None = None,
 ) -> None:
     """Run single-GPU routed expert/shared-backbone optimization."""
     config.validate()
@@ -2047,8 +2049,6 @@ def train(
     model = pipeline.model
     model.vae.sample_posterior = config.vae_sample_posterior
     model.config.compile_vae_encoder = config.compile_vae_encoder
-    if config.compile_vae_encoder:
-        model.maybe_compile_vae_encoder()
     model.vae.eval().requires_grad_(False)
     model.txt_enc.eval().requires_grad_(False)
     transformer = model.transformer
@@ -2311,12 +2311,121 @@ def train(
         raise ValueError(
             f"checkpoint step {global_step} is not below max_steps {config.max_steps}"
         )
-    compile_report = compile_transformer_blocks(
-        transformer,
-        enabled=config.compile_transformer_blocks,
-        mode=config.compile_transformer_mode,
-        dynamic=config.compile_transformer_dynamic,
-    )
+    if worker_execution_phases is None:
+        if config.compile_vae_encoder:
+            model.maybe_compile_vae_encoder()
+        compile_report = compile_transformer_blocks(
+            transformer,
+            enabled=config.compile_transformer_blocks,
+            mode=config.compile_transformer_mode,
+            dynamic=config.compile_transformer_dynamic,
+        )
+    else:
+        from rwkv_lab.trainvm_adapters.mageflow_phases import (
+            run_mageflow_execution_phases,
+        )
+        from rwkv_lab.trainvm_worker import ExecutionPhase
+
+        compile_report = compile_transformer_blocks(
+            transformer,
+            enabled=False,
+            mode=config.compile_transformer_mode,
+            dynamic=config.compile_transformer_dynamic,
+        )
+        compile_request = worker_execution_phases.request(ExecutionPhase.COMPILE)
+        warmup_request = worker_execution_phases.request(ExecutionPhase.WARMUP)
+        needs_disposable_workload = any(
+            request is not None and request.enabled
+            for request in (compile_request, warmup_request)
+        )
+        phase_batch_rows: list[dict[str, Any]] = []
+        phase_images: list[torch.Tensor | None] = []
+        if needs_disposable_workload:
+            phase_epoch = start_epoch
+            phase_batch_start = start_batch
+            while not phase_batch_rows:
+                phase_batches = epoch_training_batches(
+                    train_rows, config, epoch=phase_epoch
+                )
+                if phase_batch_start < len(phase_batches):
+                    phase_batch_rows = [
+                        train_rows[index]
+                        for index in phase_batches[phase_batch_start]
+                    ]
+                    break
+                phase_epoch += 1
+                phase_batch_start = 0
+                if phase_epoch > start_epoch + 1:
+                    raise RuntimeError(
+                        "MageFlow execution phase could not resolve a training batch"
+                    )
+            phase_images = [
+                (
+                    None
+                    if encoder_cache is not None and encoder_cache.has_moments(row)
+                    else _load_image_tensor(row).pin_memory()
+                )
+                for row in phase_batch_rows
+            ]
+
+        def phase_extra_state() -> Mapping[str, Any]:
+            return {
+                    "contract_fingerprint": contract_fingerprint,
+                    "controls": (
+                        worker_controls.checkpoint_state()
+                        if worker_controls is not None
+                        else {}
+                    ),
+                    "data_cursor": {
+                        "batch_index": start_batch,
+                        "epoch": start_epoch,
+                        "optimizer_step": global_step,
+                    },
+                    "frozen_encoders": {
+                        "model_id": config.model_id,
+                        "model_revision": config.model_revision,
+                    },
+                    "scheduler": scheduler.state_dict(),
+                }
+
+        def phase_training_workload() -> None:
+            flow = encode_domain_batch(
+                model,
+                phase_batch_rows,
+                phase_images,
+                config,
+                device,
+            )
+            domain = str(flow["domain"])
+            with controller.route(domain):
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    prediction = _forward_transformer(transformer, flow)
+                    loss, _observed = rectified_flow_loss(
+                        prediction, flow["velocity"]
+                    )
+                    scaled_loss = loss / config.gradient_accumulation_steps
+                scaled_loss.backward()
+
+        def compile_phase() -> Mapping[str, Any]:
+            if config.compile_vae_encoder:
+                model.maybe_compile_vae_encoder()
+            return compile_transformer_blocks(
+                transformer,
+                enabled=True,
+                mode=config.compile_transformer_mode,
+                dynamic=config.compile_transformer_dynamic,
+            )
+        compile_report = run_mageflow_execution_phases(
+            worker_execution_phases,
+            trajectory_model=transformer,
+            optimizer=optimizer,
+            optimizer_step=global_step,
+            disabled_compile_report=compile_report,
+            compile_workload=compile_phase,
+            training_workload=phase_training_workload,
+            extra_state=phase_extra_state,
+            synchronize=lambda: torch.cuda.synchronize(device),
+        )
 
     _atomic_json(
         output_dir / "run_contract.json",

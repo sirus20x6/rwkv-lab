@@ -153,10 +153,11 @@ successful or skipped phase must restore the identical state fingerprint; failed
 their possibly changed state evidence and cannot masquerade as completion. Each receipt is a
 replay-safe, dashboard-visible journal observation and does not advance the workflow FSM.
 Adapters receive a one-shot coordinator and must receipt every declared phase; unsupported phase
-sets fail before dispatch. Scratch RWKV is the first adopted runtime and uses content-complete,
-bounded-memory Torch trajectory hashing around cold compile and disposable warmup. The same
-coordinator and proof boundary is family-neutral; other trainers must supply their own real
-disposable workload rather than inheriting RWKV-specific behavior.
+sets fail before dispatch. Scratch RWKV and the MageFlow appearance route are adopted runtimes and
+use content-complete, bounded-memory Torch trajectory hashing around cold compile and disposable
+warmup. MageFlow supplies a real routed image batch through a family bridge while RWKV supplies its
+own token workload. The coordinator and proof boundary remain family-neutral; other trainers must
+supply their own real disposable workload rather than inheriting either implementation.
 
 Before a run exists, the plan compiler performs:
 
