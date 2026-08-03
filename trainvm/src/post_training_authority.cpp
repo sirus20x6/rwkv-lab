@@ -11,12 +11,34 @@ LifecycleAdmissionRefusal refuse(std::string code, std::string message) {
                                    .message = std::move(message)};
 }
 
-bool arm_calls_outside_this_host(PostTrainingArmKind kind) {
+// Local to the refusal messages. Effect has no shared name function, and
+// adding one to the model surface for a diagnostic string would widen it for
+// every consumer to serve this one.
+std::string_view effect_name(Effect effect) {
+  switch (effect) {
+    case Effect::read_only:
+      return "read_only";
+    case Effect::workspace_write:
+      return "workspace_write";
+    case Effect::process:
+      return "process";
+    case Effect::resource:
+      return "resource";
+    case Effect::external:
+      return "external";
+  }
+  return "unknown";
+}
+
+// Whether this arm reaches outside the host is the registry's answer. Reading
+// it off the arm's kind instead would let a mislabelled arm decide its own
+// admission, and would miss an adapter that is declared external for a reason
+// the kind vocabulary does not name.
+bool arm_calls_outside_this_host(Effect declared_effect) {
   // An external verifier or service is not ours to replay. Even with a fixed
   // seed, the arm's result depends on a response we neither produced nor
   // recorded the inputs of.
-  return kind == PostTrainingArmKind::direct_rlvr ||
-         kind == PostTrainingArmKind::external_ltx;
+  return declared_effect == Effect::external;
 }
 
 }  // namespace
@@ -74,7 +96,7 @@ bool run_bound_is_reproducible(RunBoundKind kind) {
 }
 
 ReproducibilityClaim supportable_reproducibility_claim(
-    const PostTrainingArm& arm) {
+    const PostTrainingArm& arm, Effect declared_effect) {
   // A run with no declared end has no endpoint to reproduce.
   if (arm.bounds.empty()) return ReproducibilityClaim::none;
   const bool endpoint_repeats = std::ranges::all_of(
@@ -82,13 +104,15 @@ ReproducibilityClaim supportable_reproducibility_claim(
       [](const RunBound& bound) { return run_bound_is_reproducible(bound.kind); });
   if (!endpoint_repeats) return ReproducibilityClaim::none;
   if (!arm.seed) return ReproducibilityClaim::none;
-  if (arm_calls_outside_this_host(arm.kind) || !arm.external_mutations.empty())
+  if (arm_calls_outside_this_host(declared_effect) ||
+      !arm.external_mutations.empty())
     return ReproducibilityClaim::seeded;
   return ReproducibilityClaim::exact;
 }
 
 std::optional<LifecycleAdmissionRefusal> admit_post_training_arm(
-    const PostTrainingArm& arm, ResumeGrade resume_grade) {
+    const PostTrainingArm& arm, ResumeGrade resume_grade,
+    Effect declared_effect) {
   if (arm.arm_id.empty())
     return refuse("post-training-arm-unidentified",
                   "a post-training arm must carry an identifier");
@@ -115,13 +139,41 @@ std::optional<LifecycleAdmissionRefusal> admit_post_training_arm(
                         " must declare a magnitude");
   }
 
+  // Checked before the reproducibility label, because an arm acting outside
+  // what its adapter is admitted for is the more fundamental problem: telling
+  // the operator it mislabelled its determinism would bury that.
+  //
+  // The adapter is declared external, so something out there changes when this
+  // runs. An arm that names nothing leaves the authorization gate below with
+  // nothing to check, which is indistinguishable from having no gate.
+  if (arm_calls_outside_this_host(declared_effect) &&
+      arm.external_mutations.empty())
+    return refuse(
+        "post-training-external-effect-undeclared",
+        std::string("a ") + std::string(post_training_arm_kind_name(arm.kind)) +
+            " arm on an adapter declared external must say what it changes");
+
+  // The mirror, and the reason to read the effect off the registry rather than
+  // the arm: an adapter admitted only to write its workspace may not reach
+  // outside it, whatever the arm calls itself. Admitting this would let an arm
+  // widen its own adapter's effect by declaring a mutation.
+  if (!arm_calls_outside_this_host(declared_effect) &&
+      !arm.external_mutations.empty())
+    return refuse(
+        "post-training-external-effect-unadmitted",
+        std::string("the arm declares an external mutation, but its adapter is "
+                    "declared ") +
+            std::string(effect_name(declared_effect)) +
+            " and is not admitted to act outside this host");
+
   // The card's first clause. A wall-clock arm stops wherever the machine
   // happened to be, so no seed makes its endpoint repeat, and presenting it as
   // deterministic invites a comparison against a seeded arm that is not valid.
   // ReproducibilityClaim is declared weakest-first, so a claim stronger than
   // what the declarations support compares greater. Claiming something weaker
   // than supported is always allowed: under-claiming misleads nobody.
-  const ReproducibilityClaim supportable = supportable_reproducibility_claim(arm);
+  const ReproducibilityClaim supportable =
+      supportable_reproducibility_claim(arm, declared_effect);
   if (arm.claim > supportable) {
     return refuse(
         "post-training-claim-unsupported",
@@ -164,15 +216,6 @@ std::optional<LifecycleAdmissionRefusal> admit_post_training_arm(
           "the arm would change '" + mutation.target +
               "' outside this host without authorization");
   }
-
-  // An arm that mutates nothing outside the host but is of a kind defined by
-  // doing so has under-declared, and the authorization gate above would then
-  // have nothing to check.
-  if (arm_calls_outside_this_host(arm.kind) && arm.external_mutations.empty())
-    return refuse(
-        "post-training-external-effect-undeclared",
-        std::string("a ") + std::string(post_training_arm_kind_name(arm.kind)) +
-            " arm acts outside this host and must declare what it changes");
 
   // Resume honesty: the adapter's grade decides whether a resumed run is the
   // same trajectory. An arm may not tell operators otherwise.

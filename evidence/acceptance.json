@@ -1,8 +1,8 @@
 {
   "api_version": "trainvm.acceptance/v1",
-  "commit": "251118ed3a958c01b91bb1e1d46078f1574484dc",
+  "commit": "537271eb102a2d50fc2848251f2b490e058699b5",
   "dirty_worktree": true,
-  "generated_at": "2026-08-02T23:46:57Z",
+  "generated_at": "2026-08-03T00:07:34Z",
   "suites": [
     {"name": "native-configure", "status": "passed", "detail": "evidence/native-configure.log"},
     {"name": "native-build", "status": "passed", "detail": "evidence/native-build.log"},

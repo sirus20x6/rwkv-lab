@@ -8,6 +8,7 @@
 
 #include "trainvm/adapter_registry.hpp"
 #include "trainvm/lifecycle_admission.hpp"
+#include "trainvm/model.hpp"
 
 namespace trainvm {
 
@@ -98,17 +99,23 @@ struct PostTrainingArm final {
 // external-signal bounds do not.
 [[nodiscard]] bool run_bound_is_reproducible(RunBoundKind kind);
 
-// Returns a refusal when the arm's declarations contradict each other, and
-// nothing when they agree. Reuses the lifecycle refusal shape so the dashboard
+// Returns a refusal when the arm's declarations contradict either each other
+// or the adapter's own. Reuses the lifecycle refusal shape so the dashboard
 // renders these the same way it already renders control refusals.
+//
+// declared_effect is the adapter profile's Effect. Whether an arm reaches
+// outside this host is the registry's answer, not something inferred from the
+// arm's kind: an adapter admitted only for workspace_write may not perform
+// external mutation whatever it calls itself, and an adapter declared external
+// must say what it changes.
 [[nodiscard]] std::optional<LifecycleAdmissionRefusal> admit_post_training_arm(
-    const PostTrainingArm& arm, ResumeGrade resume_grade);
+    const PostTrainingArm& arm, ResumeGrade resume_grade, Effect declared_effect);
 
 // The strongest claim this arm's own declarations can support. Callers that
 // want a label rather than a refusal should ask for this and use it, instead
 // of proposing a claim and hoping.
 [[nodiscard]] ReproducibilityClaim supportable_reproducibility_claim(
-    const PostTrainingArm& arm);
+    const PostTrainingArm& arm, Effect declared_effect);
 
 // Checked when the run finishes. Admission proves every external mutation was
 // authorized; this proves each one was receipted, and that the run did not
