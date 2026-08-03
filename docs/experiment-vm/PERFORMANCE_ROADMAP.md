@@ -408,9 +408,10 @@ startup orphan recovery are defined in
   counts exact disposable warmup workloads, restores RNG/gradients, and content-hashes the complete
   model/optimizer trajectory around both phases. The MageFlow appearance route now also lowers the
   phase declaration into VAE/regional compilation and real-shaped disposable forwards/backwards,
-  with complete tensor, schedule, control, RNG, and cursor proofs. MageFlow terminal, the remaining
-  RWKV paths, transformer, and vision-loop adoption plus privileged CUDA qualification remain before
-  these phases are production-qualified.
+  with complete tensor, schedule, control, RNG, and cursor proofs. The terminal/TREAD route shares
+  that bridge and covers its configured REPA, immiscible-flow, weighted/directional, and loop
+  objectives. Remaining RWKV paths, transformer, and vision-loop adoption plus privileged CUDA
+  qualification remain before these phases are production-qualified.
 - Fingerprinted cache namespaces; typed CPU/I/O policy lowering and recovery attestation are
   implemented, with privileged real-host qualification remaining.
 - Declarative bounded Torch GPU profiling and dashboard trace artifacts are implemented; qualified

@@ -22,6 +22,7 @@ from rwkv_lab.trainvm_adapters.handlers import (
     _rwkv_posttraining,
     _rwkv_scratch,
     _scalar_metric_decision,
+    _terminal_expert,
     _transformer_mla,
     _vision_frozen_adapter,
     _vision_native_head,
@@ -344,6 +345,62 @@ def test_family_handler_rejects_same_path_mutation_before_trainer_call(
     with pytest.raises(AdapterInputError, match="content identity verification"):
         _appearance_expert(invocation, SimpleNamespace())
     assert called is False
+
+
+def test_terminal_handler_lowers_compile_phase_into_trainer_config(
+    tmp_path, monkeypatch
+) -> None:
+    from rwkv_lab import mage_flow_terminal_train
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    read_root.mkdir()
+    run_directory.mkdir(parents=True)
+    image = read_root / "image.png"
+    image.write_bytes(b"image")
+    manifest = read_root / "train.jsonl"
+    manifest.write_text(json.dumps({"image": str(image)}) + "\n", encoding="utf-8")
+    expert = read_root / "expert.safetensors"
+    expert.write_bytes(b"expert")
+    observed = []
+
+    def train(config, **kwargs):
+        observed.append((config, kwargs))
+
+    monkeypatch.setattr(mage_flow_terminal_train, "train", train)
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "domain": "animation",
+                "train_manifest": str(manifest),
+                "expert_checkpoint": str(expert),
+                "output_dir": str(run_directory),
+                "model_path": None,
+            }
+        },
+        workspace=_sealed_workspace(read_root, run_directory),
+    )
+    execution_phases = SimpleNamespace(
+        request=lambda phase: (
+            SimpleNamespace(enabled=True)
+            if phase is ExecutionPhase.COMPILE
+            else None
+        )
+    )
+
+    result = _terminal_expert(
+        invocation,
+        SimpleNamespace(),
+        observability=SimpleNamespace(),
+        execution_phases=execution_phases,
+    )
+    assert result == HandlerResult(
+        "worker.completed", {"reason": "training_complete"}
+    )
+    config, keyword_arguments = observed[0]
+    assert config.compile_transformer_blocks is True
+    assert config.compile_vae_encoder is True
+    assert keyword_arguments["worker_execution_phases"] is execution_phases
 
 
 def test_mageflow_manifest_cannot_reference_unsealed_payload(

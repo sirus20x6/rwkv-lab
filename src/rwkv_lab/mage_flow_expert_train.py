@@ -2340,6 +2340,7 @@ def train(
         )
         phase_batch_rows: list[dict[str, Any]] = []
         phase_images: list[torch.Tensor | None] = []
+        phase_prefetched_cache = None
         if needs_disposable_workload:
             phase_epoch = start_epoch
             phase_batch_start = start_batch
@@ -2367,6 +2368,23 @@ def train(
                 )
                 for row in phase_batch_rows
             ]
+            phase_prefetched_cache = prefetch_frozen_encoder_batch(
+                model,
+                phase_batch_rows,
+                config,
+            )
+            if phase_prefetched_cache is not None and (
+                any(
+                    value is None
+                    for value in phase_prefetched_cache.text_by_prompt.values()
+                )
+                or any(
+                    value is None for value in phase_prefetched_cache.moments
+                )
+            ):
+                raise RuntimeError(
+                    "MageFlow execution phases require complete frozen-encoder cache coverage"
+                )
 
         def phase_extra_state() -> Mapping[str, Any]:
             return {
@@ -2395,6 +2413,7 @@ def train(
                 phase_images,
                 config,
                 device,
+                prefetched_cache=phase_prefetched_cache,
             )
             domain = str(flow["domain"])
             with controller.route(domain):

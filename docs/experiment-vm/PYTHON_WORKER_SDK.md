@@ -66,13 +66,17 @@ tensor in bounded chunks plus optimizer groups, all Torch/CUDA/Python/NumPy RNG 
 cursor. It deliberately hashes tensor contents because `Tensor.data` writes can evade version
 counters.
 
-The MageFlow appearance-expert adapter now uses the same coordinator through the family bridge in
+Both MageFlow expert adapters use the same coordinator through the family bridge in
 `trainvm_adapters.mageflow_phases`. The invocation's compile declaration owns both regional
 transformer and VAE compilation, a deterministic real training batch triggers lazy compilation,
-and warmup repeats that disposable forward/backward exactly as declared. The bridge preserves every
-Python/Torch/CUDA RNG stream, clears gradients, fingerprints the complete routed transformer and
-optimizer plus schedule/control/data-cursor identity, and reports a changed trajectory as a failed
-phase rather than relying on the controller to reject a false success.
+and warmup repeats that disposable forward/backward exactly as declared. The terminal/TREAD route
+also exercises its configured REPA, immiscible-flow, loss-weighting, direction-loss, and loop
+objectives and fingerprints auxiliary modules alongside the transformer. The bridge preserves every
+Python/Torch/CUDA RNG stream, clears gradients, fingerprints the complete model/optimizer plus
+schedule/control/data-cursor identity, and reports a changed trajectory as a failed phase rather
+than relying on the controller to reject a false success. When a frozen-encoder cache is selected,
+the chosen phase batch must already have complete text and VAE-moment coverage; compile/warmup never
+hide cache population as a disposable side effect.
 
 Before dispatch, `rwkv_lab.trainvm_worker.runtime_policy` independently parses the resource policy
 from the sealed invocation. It owns only non-root runtime controls: narrowing/rechecking process CPU
