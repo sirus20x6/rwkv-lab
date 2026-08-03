@@ -371,6 +371,9 @@ int main() {
       const bool is_decision =
           operation.at("key").at("adapter") ==
           "rwkv-lab.scalar-metric-decision";
+      const bool is_mageflow =
+          operation.at("key").at("adapter").get<std::string>().starts_with(
+              "rwkv-lab.mageflow-");
       require(operation.at("authoring").at("inputs").at("config").at(
                   "type") == "object" &&
                   operation.at("authoring").at("inputs").at("config").at(
@@ -467,14 +470,24 @@ int main() {
                        : operation.contains("training_composition")),
               std::string("operation descriptor has dishonest ports: ") +
                   operation.at("key").at("adapter").get<std::string>());
+      if (is_mageflow) {
+        const auto& gallery =
+            operation.at("authoring").at("outputs").at("eval_gallery");
+        require(gallery.at("type") == "artifact" &&
+                    gallery.at("artifact_type") == "image_gallery" &&
+                    gallery.at("artifact_schema") ==
+                        "rwkv-lab.eval-gallery.v2" &&
+                    gallery.at("required") == false,
+                "MageFlow descriptor must expose its optional protocol gallery");
+      }
     }
     require(appearance.authoring &&
-                appearance.authoring->outputs.size() == 1U &&
+                appearance.authoring->outputs.size() == 2U &&
                 appearance.authoring->outputs.contains("checkpoint") &&
-                !appearance.authoring->outputs.contains("eval_gallery") &&
+                appearance.authoring->outputs.contains("eval_gallery") &&
                 !appearance.authoring->outputs.contains("log") &&
                 !appearance.authoring->outputs.contains("metrics"),
-            "real adapter descriptors must not advertise local gallery, log, or metric files as artifact outputs until handlers protocol-publish them");
+            "MageFlow must advertise only its protocol-published checkpoint and eval gallery outputs");
 
     nlohmann::json exact_source = load_mageflow_fixture();
     exact_source["spec"].erase("execution");
@@ -532,7 +545,10 @@ int main() {
                {"configuration", nlohmann::json::object()}}},
          }},
     };
-    train["publishes"] = {{"checkpoint", "checkpoint"}};
+    train["publishes"] = {
+        {"checkpoint", "checkpoint"},
+        {"eval_gallery", "eval_gallery"},
+    };
     train["transitions"] = {
         {{"on", "worker.completed"}, {"target", "release_gpu"}},
         {{"on", "operation.failed"}, {"target", "$failed"}},

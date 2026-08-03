@@ -1737,9 +1737,20 @@ def generate_eval_gallery(
         os.replace(temporary, image_path)
         items.append(
             {
+                "image_id": str(row["image_id"]),
                 "image": str(image_path),
                 "target_image": str(row["image"]),
                 "prompt": str(row["caption"]),
+                "seed": seed,
+                "sampling_attributes": {
+                    "cfg": f"{EVAL_GALLERY_CFG:g}",
+                    "domain": domain,
+                    "height": str(row["train_height"]),
+                    "route": domain,
+                    "sampler": "mage_flow_rectified_flow",
+                    "steps": str(EVAL_GALLERY_STEPS),
+                    "width": str(row["train_width"]),
+                },
                 "reference": f"held-out {domain} target",
                 "caption": (
                     f"{domain} expert · step {step} · seed {seed} · "
@@ -2892,6 +2903,20 @@ def train(
         start_batch = 0
         last_epoch, next_batch = epoch, 0
 
+    if eval_rows and not unified_evaluation_is_complete(output_dir, global_step):
+        if mutable_controls is not None:
+            worker_controls.evaluation(global_step, mutable_controls.apply)
+        run_unified_evaluation(
+            pipeline,
+            transformer,
+            controller,
+            model,
+            eval_rows,
+            config,
+            device,
+            output_dir,
+            step=global_step,
+        )
     if mutable_controls is not None:
         worker_controls.checkpoint(global_step, mutable_controls.apply)
     final_checkpoint = save_training_checkpoint(

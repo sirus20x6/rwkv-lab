@@ -1393,7 +1393,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "mageflow.full-backbone-pretrain",
-      "source_sha256": "sha256:ac426866f3d9fede2a7c54c25fd800fbb3f12238d0b381c8b8574cc8dfacf6f2",
+      "source_sha256": "sha256:15a42f95e69e1f9b7b2a47446fd78ae16acc6670b87a7e08d042304a9702b406",
       "family": "mageflow_diffusion",
       "coverage": "direct",
       "consumers": [
