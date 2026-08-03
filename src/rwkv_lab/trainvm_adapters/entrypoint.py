@@ -15,10 +15,12 @@ from rwkv_lab.trainvm_worker import (
     WorkerSession,
     WorkerStepProfiler,
     apply_worker_runtime_policy,
+    bind_eval_gallery_checkpoints,
     controls_from_invocation,
     observability_from_invocation,
     publish_artifact_requests,
     publish_checkpoint_requests,
+    publish_eval_gallery_requests,
     read_worker_bootstrap_fd,
     step_profiler_from_invocation,
 )
@@ -123,6 +125,25 @@ def run_worker(
                         **result.payload,
                         "artifact_ids": [
                             artifact.artifact_id for artifact in published_artifacts
+                        ],
+                    },
+                )
+            published_galleries = publish_eval_gallery_requests(
+                session,
+                bind_eval_gallery_checkpoints(
+                    result.eval_gallery_requests, published_checkpoints
+                ),
+                progress=lambda step: observability.optimizer_step(
+                    step, "publishing_eval_gallery"
+                ),
+            )
+            if published_galleries:
+                result = replace(
+                    result,
+                    payload={
+                        **result.payload,
+                        "eval_gallery_artifact_ids": [
+                            gallery.artifact_id for gallery in published_galleries
                         ],
                     },
                 )

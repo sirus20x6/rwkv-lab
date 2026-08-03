@@ -85,6 +85,21 @@ OperationAuthoringDeclaration checkpoint_authoring() {
   };
 }
 
+OperationAuthoringDeclaration mageflow_authoring() {
+  OperationAuthoringDeclaration authoring = checkpoint_authoring();
+  authoring.outputs.emplace(
+      "eval_gallery",
+      OperationPortDescriptor{
+          .type = OperationPortType::artifact,
+          .required = false,
+          .artifact_type = ArtifactType::image_gallery,
+          .artifact_schema = "rwkv-lab.eval-gallery.v2",
+          .description =
+              "Optional checkpoint-bound generated/original held-out gallery.",
+      });
+  return authoring;
+}
+
 OperationAuthoringDeclaration posttraining_authoring() {
   OperationAuthoringDeclaration authoring = checkpoint_authoring();
   authoring.outputs = {
@@ -418,12 +433,12 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
            {"weight_decay",
             TrainingComponentCategory::weight_decay_schedule},
       }},
-      receipted_training_lifecycle()));
+      receipted_training_lifecycle(), mageflow_authoring()));
   profiles.push_back(profile(
       key("rwkv-lab.mageflow-full-backbone",
           "rwkv_lab.mageflow_full_backbone.v1.Train"),
       code_fingerprint, mageflow_full_backbone_composition(),
-      receipted_training_lifecycle()));
+      receipted_training_lifecycle(), mageflow_authoring()));
   profiles.push_back(profile(
       key("rwkv-lab.mageflow-terminal-expert",
           "rwkv_lab.mageflow_terminal_expert.v1.Train"),
@@ -440,7 +455,7 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
            {"weight_decay",
             TrainingComponentCategory::weight_decay_schedule},
        }},
-      receipted_training_lifecycle()));
+      receipted_training_lifecycle(), mageflow_authoring()));
   profiles.push_back(profile(
       key("rwkv-lab.rwkv-posttraining",
           "rwkv_lab.rwkv_posttraining.v1.Train"),

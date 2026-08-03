@@ -5,8 +5,8 @@ import os
 import shutil
 import stat
 import tempfile
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, replace
 from itertools import islice
 from pathlib import Path
 from typing import Protocol
@@ -39,6 +39,11 @@ class _ArtifactSession(Protocol):
     def artifact(self, **values: object) -> int: ...
 
 
+class _PublishedCheckpoint(Protocol):
+    artifact_id: str
+    manifest_sha256: str
+
+
 @dataclass(frozen=True, slots=True)
 class GalleryImage:
     path: str | os.PathLike[str]
@@ -65,6 +70,21 @@ class PublishedEvalGallery:
     manifest_sha256: str
     size_bytes: int
     worker_sequence: int
+
+
+@dataclass(frozen=True, slots=True)
+class EvalGalleryPublicationRequest:
+    """A handler-owned gallery result awaiting fixed-runner publication."""
+
+    output_name: str
+    step: int
+    step_domain: str
+    evaluator_profile_digest: str
+    use_policy_digest: str
+    items: tuple[EvalGalleryItem, ...]
+    parent_artifact_ids: tuple[str, ...] = ()
+    checkpoint_manifest_digest: str | None = None
+    checkpoint_request_index: int | None = None
 
 
 def _within(path: Path, roots: tuple[Path, ...]) -> bool:
@@ -456,3 +476,84 @@ class EvalGalleryPublisher:
             size_bytes=len(manifest_bytes),
             worker_sequence=sequence,
         )
+
+
+def publish_eval_gallery_requests(
+    session: _ArtifactSession,
+    requests: Iterable[EvalGalleryPublicationRequest],
+    *,
+    progress: Callable[[int], None] | None = None,
+) -> tuple[PublishedEvalGallery, ...]:
+    """Publish completed handler results through session-owned authority."""
+
+    publishers: dict[str, EvalGalleryPublisher] = {}
+    published: list[PublishedEvalGallery] = []
+    for request in requests:
+        if request.checkpoint_request_index is not None:
+            raise EvalGalleryError(
+                "gallery checkpoint request index was not bound by the fixed runner"
+            )
+        if request.checkpoint_manifest_digest is None:
+            raise EvalGalleryError("gallery checkpoint manifest digest is missing")
+        if progress is not None:
+            progress(request.step)
+        publisher = publishers.get(request.output_name)
+        if publisher is None:
+            publisher = EvalGalleryPublisher(
+                session, output_name=request.output_name
+            )
+            publishers[request.output_name] = publisher
+        published.append(
+            publisher.publish(
+                step=request.step,
+                step_domain=request.step_domain,
+                checkpoint_manifest_digest=request.checkpoint_manifest_digest,
+                evaluator_profile_digest=request.evaluator_profile_digest,
+                use_policy_digest=request.use_policy_digest,
+                items=request.items,
+                parent_artifact_ids=request.parent_artifact_ids,
+            )
+        )
+    return tuple(published)
+
+
+def bind_eval_gallery_checkpoints(
+    requests: Iterable[EvalGalleryPublicationRequest],
+    checkpoints: tuple[_PublishedCheckpoint, ...],
+) -> tuple[EvalGalleryPublicationRequest, ...]:
+    """Resolve handler-local checkpoint references after immutable publication."""
+
+    bound: list[EvalGalleryPublicationRequest] = []
+    for request in requests:
+        index = request.checkpoint_request_index
+        if index is None:
+            if request.checkpoint_manifest_digest is None:
+                raise EvalGalleryError(
+                    "gallery request has neither a checkpoint digest nor request index"
+                )
+            bound.append(request)
+            continue
+        if request.checkpoint_manifest_digest is not None:
+            raise EvalGalleryError(
+                "gallery request cannot select both a checkpoint digest and request index"
+            )
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or index < 0
+            or index >= len(checkpoints)
+        ):
+            raise EvalGalleryError("gallery checkpoint request index is invalid")
+        checkpoint = checkpoints[index]
+        bound.append(
+            replace(
+                request,
+                checkpoint_manifest_digest=checkpoint.manifest_sha256,
+                checkpoint_request_index=None,
+                parent_artifact_ids=(
+                    *request.parent_artifact_ids,
+                    checkpoint.artifact_id,
+                ),
+            )
+        )
+    return tuple(bound)

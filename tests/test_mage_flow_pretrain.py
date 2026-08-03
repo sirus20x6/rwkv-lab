@@ -444,6 +444,12 @@ def test_generation_eval_writes_deterministic_step_zero_dashboard_artifact(tmp_p
     manifest = tmp_path / "eval.jsonl"
     rows = [
         {
+            # Every row the manifest loader produces carries an image_id (see
+            # the "image_id": identity assignment in mage_flow_pretrain), and
+            # the gallery snapshot now binds each generated sample to it. This
+            # fixture hand-builds rows rather than going through the loader, so
+            # omitting the field made it describe a row shape that cannot occur.
+            "image_id": f"held-out-{index:04d}",
             "image": str(tmp_path / f"target-{index}.png"),
             "caption": f"Held-out prompt {index}.",
             "train_width": 64 + index * 16,
