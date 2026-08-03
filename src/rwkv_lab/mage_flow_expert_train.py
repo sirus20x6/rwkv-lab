@@ -18,7 +18,7 @@ import shutil
 import signal
 import time
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1863,7 +1863,11 @@ def _drop_vae_decoder(model) -> None:
         vae.decoder = None
 
 
-def cache_frozen_encoders(config: MageFlowExpertTrainConfig) -> dict[str, Any]:
+def cache_frozen_encoders(
+    config: MageFlowExpertTrainConfig,
+    *,
+    worker_safe_point: Callable[[int], object] | None = None,
+) -> dict[str, Any]:
     """Materialize reusable Qwen states and VAE posterior moments."""
     config.validate()
     if config.encoder_cache_mode != "read_write" or not config.encoder_cache_dir:
@@ -1938,6 +1942,8 @@ def cache_frozen_encoders(config: MageFlowExpertTrainConfig) -> dict[str, Any]:
             )
             cache.save_text(" ", template, drop_idx, txt_flat[: lens[0]])
         for index, (row, prompt) in enumerate(zip(rows, prompts, strict=True), 1):
+            if worker_safe_point is not None:
+                worker_safe_point(index)
             has_text = cache.has_text(prompt, template, drop_idx)
             has_moments = cache.has_moments(row)
             if has_text and has_moments:

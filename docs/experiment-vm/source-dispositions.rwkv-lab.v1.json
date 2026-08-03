@@ -10,7 +10,7 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:34993ceda01afedb37467663f3828be108541c8ec3980147b5729bf269f17a0a",
+  "source_tree_digest": "sha256:677a0f8cc6f1eec0dd2ce9c682052ee1a53b457ea3e69ed13c569ed5b569cc99",
   "entries": [
     {
       "source_path": "src/rwkv_lab/__init__.py",
@@ -1348,7 +1348,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "mageflow.routed-expert-train",
-      "source_sha256": "sha256:86b929c206da895713fed82dc61ae9ae65e3105e37cfaf7ce62d9454dff4d3e7",
+      "source_sha256": "sha256:ba6bb5d28575df1685c34135ffec8c6357ff22a19be640a618f9b7733f4aa54e",
       "family": "mageflow_diffusion",
       "coverage": "direct",
       "consumers": [

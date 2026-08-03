@@ -18,6 +18,7 @@ import tempfile
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Protocol
 from urllib.parse import unquote, urlsplit
 
@@ -69,6 +70,23 @@ _STATE_COMPONENTS = frozenset(
     }
 )
 _FICLONE = 0x40049409
+_ARTIFACT_FIELDS = frozenset(
+    {
+        "artifact_id",
+        "logical_name",
+        "kind",
+        "schema",
+        "uri",
+        "size_bytes",
+        "fingerprint_algorithm",
+        "fingerprint",
+        "complete",
+        "producer_node_id",
+        "producer_attempt_id",
+        "parent_artifact_ids",
+        "published_at_ns",
+    }
+)
 
 
 class CheckpointPublicationError(RuntimeError):
@@ -624,6 +642,139 @@ def resolve_resume_checkpoint(invocation: object) -> ResolvedResumeCheckpoint | 
     )
 
 
+def resolve_input_checkpoint(
+    invocation: object,
+    input_name: str,
+    *,
+    required_schema: str | None = None,
+) -> ResolvedResumeCheckpoint:
+    """Verify a checkpoint artifact selected as an ordinary node input.
+
+    The immutable snapshot verifier remains the same one used for resume.  This
+    bridge only obtains the manifest's optimizer step through a confined,
+    bounded pre-read, then supplies a synthetic consumer identity so the resume
+    verifier can enforce producer lineage without requiring the producer and
+    consumer to be the same workflow node.
+    """
+
+    inputs = getattr(invocation, "inputs", None)
+    workspace = getattr(invocation, "workspace", None)
+    run_id = getattr(invocation, "run_id", None)
+    if (
+        not isinstance(inputs, Mapping)
+        or not isinstance(workspace, Mapping)
+        or not is_bounded_text(run_id, 1024)
+    ):
+        raise CheckpointPublicationError(
+            "checkpoint input invocation authority is invalid"
+        )
+    checkpoint = inputs.get(input_name)
+    if not isinstance(checkpoint, Mapping):
+        raise CheckpointPublicationError("checkpoint input descriptor is missing")
+    try:
+        exact_fields(checkpoint, _ARTIFACT_FIELDS)
+    except CanonicalJsonError as error:
+        raise CheckpointPublicationError(
+            "checkpoint input descriptor fields are inexact"
+        ) from error
+    schema = checkpoint.get("schema")
+    parents = checkpoint.get("parent_artifact_ids")
+    valid_parents = (
+        isinstance(parents, (tuple, list))
+        and len(parents) == len(set(parents))
+        and all(is_bounded_text(parent, 1024) for parent in parents)
+    )
+    if (
+        not is_bounded_text(checkpoint.get("artifact_id"), 1024)
+        or not is_bounded_text(checkpoint.get("logical_name"), 1024)
+        or checkpoint.get("kind") != "checkpoint"
+        or not is_bounded_text(schema, 512)
+        or (required_schema is not None and schema != required_schema)
+        or not is_uint64(checkpoint.get("size_bytes"))
+        or checkpoint.get("fingerprint_algorithm") != "manifest_sha256"
+        or not is_digest(checkpoint.get("fingerprint"))
+        or checkpoint.get("complete") is not True
+        or not is_bounded_text(checkpoint.get("producer_node_id"), 1024)
+        or not is_bounded_text(checkpoint.get("producer_attempt_id"), 1024)
+        or not valid_parents
+        or not is_uint64(checkpoint.get("published_at_ns"))
+    ):
+        raise CheckpointPublicationError("checkpoint input descriptor is invalid")
+    uri = checkpoint.get("uri")
+    if not isinstance(uri, str):
+        raise CheckpointPublicationError("checkpoint input URI is invalid")
+    parsed = urlsplit(uri)
+    if (
+        parsed.scheme != "file"
+        or parsed.netloc
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.startswith("/")
+    ):
+        raise CheckpointPublicationError(
+            "checkpoint input must use a local absolute file URI"
+        )
+    manifest_path = Path(unquote(parsed.path, errors="strict"))
+    if (
+        not manifest_path.is_absolute()
+        or manifest_path != Path(os.path.normpath(manifest_path))
+        or manifest_path.is_symlink()
+    ):
+        raise CheckpointPublicationError(
+            "checkpoint input manifest path is noncanonical"
+        )
+    read_roots = workspace.get("allowed_read_roots")
+    write_roots = workspace.get("allowed_write_roots")
+    if not isinstance(read_roots, (tuple, list)) or not isinstance(
+        write_roots, (tuple, list)
+    ):
+        raise CheckpointPublicationError(
+            "checkpoint input workspace roots are invalid"
+        )
+    roots = _roots(tuple(read_roots) + tuple(write_roots), "checkpoint input roots")
+    try:
+        manifest_path = manifest_path.resolve(strict=True)
+    except OSError as error:
+        raise CheckpointPublicationError(
+            "checkpoint input manifest is unavailable"
+        ) from error
+    if not _within(manifest_path, roots):
+        raise CheckpointPublicationError(
+            "checkpoint input manifest escaped workspace authority"
+        )
+    raw = _read_stable_regular_file(
+        manifest_path, MAXIMUM_CHECKPOINT_MANIFEST_BYTES
+    )
+    try:
+        preview = canonical_loads(
+            raw, maximum_bytes=MAXIMUM_CHECKPOINT_MANIFEST_BYTES
+        )
+    except CanonicalJsonError as error:
+        raise CheckpointPublicationError(
+            "checkpoint input manifest is not canonical"
+        ) from error
+    optimizer_step = preview.get("optimizer_step")
+    if not is_uint64(optimizer_step):
+        raise CheckpointPublicationError(
+            "checkpoint input optimizer step is invalid"
+        )
+    producer_attempt = str(checkpoint.get("producer_attempt_id"))
+    consumer_attempt = "checkpoint-input-consumer"
+    if consumer_attempt == producer_attempt:
+        consumer_attempt += "-next"
+    bridge = SimpleNamespace(
+        resume={"checkpoint": checkpoint, "optimizer_step": optimizer_step},
+        workspace=workspace,
+        run_id=run_id,
+        node_id=checkpoint.get("producer_node_id"),
+        attempt_id=consumer_attempt,
+    )
+    resolved = resolve_resume_checkpoint(bridge)
+    if resolved is None:  # pragma: no cover - bridge always supplies resume
+        raise CheckpointPublicationError("checkpoint input resolution disappeared")
+    return resolved
+
+
 class CheckpointPublisher:
     """Freeze completed trainer state and publish one immutable checkpoint."""
 
@@ -906,5 +1057,6 @@ __all__ = [
     "PublishedCheckpoint",
     "ResolvedResumeCheckpoint",
     "publish_checkpoint_requests",
+    "resolve_input_checkpoint",
     "resolve_resume_checkpoint",
 ]

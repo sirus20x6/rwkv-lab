@@ -57,6 +57,12 @@ OperationLifecycleCapabilities restart_only_training_lifecycle() {
   };
 }
 
+OperationLifecycleCapabilities restart_only_operation_lifecycle() {
+  OperationLifecycleCapabilities lifecycle = restart_only_training_lifecycle();
+  lifecycle.profile = false;
+  return lifecycle;
+}
+
 OperationAuthoringDeclaration checkpoint_authoring() {
   return {
       .inputs = {
@@ -80,6 +86,105 @@ OperationAuthoringDeclaration checkpoint_authoring() {
                .artifact_schema = std::nullopt,
                .description =
                    "Optional authority-published trainer checkpoint.",
+           }},
+      },
+  };
+}
+
+OperationAuthoringDeclaration mageflow_cache_plan_authoring() {
+  return {
+      .inputs = {
+          {"config",
+           OperationPortDescriptor{
+               .type = OperationPortType::object,
+               .required = true,
+               .artifact_type = std::nullopt,
+               .artifact_schema = std::nullopt,
+               .description =
+                   "Bounded terminal-trainer configuration and exact future "
+                   "optimizer-step span.",
+           }},
+          {"checkpoint",
+           OperationPortDescriptor{
+               .type = OperationPortType::artifact,
+               .required = true,
+               .artifact_type = ArtifactType::checkpoint,
+               .artifact_schema = std::nullopt,
+               .description =
+                   "Immutable MageFlow checkpoint that fixes the cache span.",
+           }},
+      },
+      .outputs = {
+          {"plan",
+           OperationPortDescriptor{
+               .type = OperationPortType::artifact,
+               .required = true,
+               .artifact_type = ArtifactType::report,
+               .artifact_schema = "rwkv-lab.mageflow-cache-plan.v1",
+               .description =
+                   "Immutable example coverage and cache-build configuration.",
+           }},
+      },
+  };
+}
+
+OperationAuthoringDeclaration mageflow_terminal_authoring() {
+  OperationAuthoringDeclaration authoring = checkpoint_authoring();
+  authoring.inputs.emplace(
+      "checkpoint",
+      OperationPortDescriptor{
+          .type = OperationPortType::artifact,
+          .required = false,
+          .artifact_type = ArtifactType::checkpoint,
+          .artifact_schema = std::nullopt,
+          .description =
+              "Optional immutable compatible checkpoint selected as an "
+              "explicit cross-node continuation input.",
+      });
+  authoring.inputs.emplace(
+      "cache",
+      OperationPortDescriptor{
+          .type = OperationPortType::artifact,
+          .required = false,
+          .artifact_type = ArtifactType::dataset,
+          .artifact_schema = "rwkv-lab.encoder-cache.v1",
+          .description =
+              "Optional immutable encoder cache bound to the selected resume "
+              "checkpoint and its exact future-example coverage.",
+      });
+  return authoring;
+}
+
+OperationAuthoringDeclaration mageflow_cache_build_authoring() {
+  return {
+      .inputs = {
+          {"plan",
+           OperationPortDescriptor{
+               .type = OperationPortType::artifact,
+               .required = true,
+               .artifact_type = ArtifactType::report,
+               .artifact_schema = "rwkv-lab.mageflow-cache-plan.v1",
+               .description = "Verified immutable encoder-cache plan.",
+           }},
+          {"checkpoint",
+           OperationPortDescriptor{
+               .type = OperationPortType::artifact,
+               .required = true,
+               .artifact_type = ArtifactType::checkpoint,
+               .artifact_schema = std::nullopt,
+               .description =
+                   "The exact checkpoint named by the cache plan lineage.",
+           }},
+      },
+      .outputs = {
+          {"cache",
+           OperationPortDescriptor{
+               .type = OperationPortType::artifact,
+               .required = true,
+               .artifact_type = ArtifactType::dataset,
+               .artifact_schema = "rwkv-lab.encoder-cache.v1",
+               .description =
+                   "Immutable frozen text-encoder and VAE tensor cache.",
            }},
       },
   };
@@ -440,7 +545,40 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
            {"weight_decay",
             TrainingComponentCategory::weight_decay_schedule},
        }},
-      receipted_training_lifecycle()));
+      receipted_training_lifecycle(), mageflow_terminal_authoring()));
+  profiles.push_back({
+      .key = key("rwkv-lab.mageflow-cache-plan",
+                 "rwkv_lab.mageflow_cache_plan.v1.Prepare", "prepare"),
+      .effect = Effect::workspace_write,
+      .idempotency = Idempotency::replay_safe,
+      .code_fingerprint = code_fingerprint,
+      .required_capabilities = {"worker.controls", "worker.metrics"},
+      .lifecycle = {
+          .stateful = false,
+          .graceful_stop = false,
+          .checkpoint_now = false,
+          .pause_keep_resources = false,
+          .pause_release_resources = false,
+          .compile = false,
+          .warmup = false,
+          .qualify = false,
+          .profile = false,
+          .resume_grade = ResumeGrade::none,
+      },
+      .training_composition = std::nullopt,
+      .authoring = mageflow_cache_plan_authoring(),
+  });
+  profiles.push_back({
+      .key = key("rwkv-lab.mageflow-cache-build",
+                 "rwkv_lab.mageflow_cache_build.v1.Build", "build"),
+      .effect = Effect::process,
+      .idempotency = Idempotency::receipt_required,
+      .code_fingerprint = code_fingerprint,
+      .required_capabilities = {"worker.controls", "worker.metrics"},
+      .lifecycle = restart_only_operation_lifecycle(),
+      .training_composition = std::nullopt,
+      .authoring = mageflow_cache_build_authoring(),
+  });
   profiles.push_back(profile(
       key("rwkv-lab.rwkv-posttraining",
           "rwkv_lab.rwkv_posttraining.v1.Train"),
@@ -635,6 +773,16 @@ rwkv_lab_worker_runtime_requirements() {
             "grpcio", "huggingface-hub", "mage-flow", "numpy", "pillow",
             "protobuf", "safetensors", "torch", "transformers"})},
       {"rwkv-lab.mageflow-terminal-expert",
+       canonical_distributions(
+           {"accelerate", "deepspeed", "diffusers", "einops", "flash-attn",
+            "grpcio", "huggingface-hub", "mage-flow", "numpy", "pillow",
+            "protobuf", "safetensors", "torch", "transformers"})},
+      {"rwkv-lab.mageflow-cache-plan",
+       canonical_distributions(
+           {"accelerate", "deepspeed", "diffusers", "einops", "flash-attn",
+            "grpcio", "huggingface-hub", "mage-flow", "numpy", "pillow",
+            "protobuf", "safetensors", "torch", "transformers"})},
+      {"rwkv-lab.mageflow-cache-build",
        canonical_distributions(
            {"accelerate", "deepspeed", "diffusers", "einops", "flash-attn",
             "grpcio", "huggingface-hub", "mage-flow", "numpy", "pillow",
