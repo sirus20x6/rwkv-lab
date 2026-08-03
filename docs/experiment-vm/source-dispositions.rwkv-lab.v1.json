@@ -10,7 +10,7 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:ea707c5033adfd1a1febb60db8fd868eff1958f4610343647fea571c139a22ba",
+  "source_tree_digest": "sha256:fce1697b7d305f7287b88e8fdccb219519f7f939d39b62ea98365559a435607c",
   "entries": [
     {
       "source_path": "src/rwkv_lab/__init__.py",
@@ -1373,7 +1373,7 @@
       ],
       "resume_relevance": "consumer_owned",
       "compatibility_workflow_id": null,
-      "source_sha256": "sha256:b378a96a27f4e7ad86530560ca940b5037b29c1b0f486940e9c0387598dc9c04",
+      "source_sha256": "sha256:dd5ec830baf8ca03260b47f05f330e8688c8d89b0ac725f8b86f5140082965d1",
       "family": "mageflow_diffusion",
       "coverage": "transitive",
       "consumers": [
@@ -1422,7 +1422,7 @@
       ],
       "resume_relevance": "consumer_owned",
       "compatibility_workflow_id": null,
-      "source_sha256": "sha256:07e0e616d65d7d030810971b9d88dc4f9be2c5b9cdbd337522e7c5ff4ca48fc2",
+      "source_sha256": "sha256:4a6a1087131c3e738523a011870bec248c2b4db4d33d241f16e2c84b691c30db",
       "family": "mageflow_diffusion",
       "coverage": "transitive",
       "consumers": [
@@ -1474,7 +1474,7 @@
       ],
       "resume_relevance": "consumer_owned",
       "compatibility_workflow_id": null,
-      "source_sha256": "sha256:77f5895a732f6ea89d38518d23ec056e60e1e0b46689aa880ba02a77c5419c78",
+      "source_sha256": "sha256:77647ea80bb3b7df5a2cd6cbba2bab4c28a03b0e299734b75442062edc1b8f82",
       "family": "mageflow_diffusion",
       "coverage": "transitive",
       "consumers": [
@@ -1872,7 +1872,7 @@
       ],
       "resume_relevance": "restart_only",
       "compatibility_workflow_id": "posttraining.rwkv-adapter",
-      "source_sha256": "sha256:02eb9619762c1cdff410b2ddebd0be1952017f8fef84b2269e6315019f3f0cc4",
+      "source_sha256": "sha256:8809c5648a5a354264b5657cdc14223b667fe2a098f1e9d46ec8424accdbfdcc",
       "family": "rwkv_posttraining",
       "coverage": "direct",
       "compatibility_workflow_ids": [
@@ -1984,7 +1984,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "transformer.qwen-ao3-cpt",
-      "source_sha256": "sha256:1634391d122887bd775c49b95e6a3ba708e88e47644e795092b5b237c054098d",
+      "source_sha256": "sha256:443efdedd607923b4d7145520ad8e7a11311b5f423d24b482e5568d4ffb3f61a",
       "family": "transformer",
       "coverage": "direct",
       "consumers": [
@@ -2391,7 +2391,7 @@
       ],
       "resume_relevance": "consumer_owned",
       "compatibility_workflow_id": null,
-      "source_sha256": "sha256:d6b44a1d8d82ed79a979a79fb8bc68732b41815ea80549b4b135b4208dd6eb3b",
+      "source_sha256": "sha256:5495898843ad9783d27210b6c4335cd6eeae7870c641328be7904990b0078290",
       "family": "rwkv",
       "coverage": "transitive",
       "consumers": [
@@ -2442,7 +2442,7 @@
       ],
       "resume_relevance": "terminal_checkpoint",
       "compatibility_workflow_id": "rwkv.scratch-pretrain",
-      "source_sha256": "sha256:af3ed21bdd0e3dfe07746529c47651c269247d00a29304f4529f4a6a81d8d097",
+      "source_sha256": "sha256:2deff18e549a75932176878d4531e6e0a7dd85e6c914644c44dece47ac6751c9",
       "family": "rwkv",
       "coverage": "direct",
       "consumers": [
@@ -2813,7 +2813,7 @@
       ],
       "resume_relevance": "consumer_owned",
       "compatibility_workflow_id": null,
-      "source_sha256": "sha256:3c1592227fdf316f3edcdca5117be76b6845aa86b65c3439311079d2edfe7a2e",
+      "source_sha256": "sha256:e93677a0895eaada5b6ecb6f661793e82c9d33f6091cc304cd42f14c84e1be39",
       "family": "rwkv",
       "coverage": "transitive",
       "consumers": [
