@@ -57,6 +57,15 @@ and effective controls; adapters cannot substitute a model-weights-only checksum
 phase after a lost connection creates another independently fenced receipt, so recovery never has
 to guess whether an unacknowledged phase ran.
 
+`WorkerExecutionPhases` is the one-shot adapter coordinator. It fails the operation if any declared
+phase is omitted or receipted twice. The scratch-RWKV adapter is the first production consumer: its
+compile phase triggers Torch's lazy compiler with a disposable forward/backward, and its warmup
+phase executes exactly the requested number of disposable workloads. Before and after identities
+come from `torch_trajectory_state`, which hashes every model, gradient, buffer, and optimizer-state
+tensor in bounded chunks plus optimizer groups, all Torch/CUDA/Python/NumPy RNG state, and the data
+cursor. It deliberately hashes tensor contents because `Tensor.data` writes can evade version
+counters.
+
 Before dispatch, `rwkv_lab.trainvm_worker.runtime_policy` independently parses the resource policy
 from the sealed invocation. It owns only non-root runtime controls: narrowing/rechecking process CPU
 affinity, tensor-library/OpenMP thread counts, the preprocessing-worker hint, and effective nice

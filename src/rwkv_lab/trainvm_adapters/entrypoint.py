@@ -8,6 +8,7 @@ from rwkv_lab.trainvm_worker import (
     WorkerBootstrap,
     WorkerCancellationRequested,
     WorkerControlRuntime,
+    WorkerExecutionPhases,
     WorkerInvocation,
     WorkerObservability,
     WorkerResourcesReleasedPause,
@@ -38,6 +39,7 @@ InvocationExecutor = Callable[
         WorkerStepProfiler,
         WorkerObservability,
         WorkerControlRuntime,
+        WorkerExecutionPhases,
     ],
     HandlerResult,
 ]
@@ -77,13 +79,18 @@ def run_worker(
                     session, session.invocation
                 )
                 controls = controls_from_invocation(session, session.invocation)
+                execution_phases = WorkerExecutionPhases(
+                    session, session.execution_phase_requests
+                )
                 observability.optimizer_step(0, "initializing")
                 result = executor(
                     session.invocation,
                     step_profiler,
                     observability,
                     controls,
+                    execution_phases,
                 )
+                execution_phases.require_complete()
             published_checkpoints = publish_checkpoint_requests(
                 session,
                 result.checkpoint_requests,

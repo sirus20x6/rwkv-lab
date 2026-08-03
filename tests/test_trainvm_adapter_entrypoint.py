@@ -37,7 +37,10 @@ from rwkv_lab.trainvm_adapters.io import (
     require_run_directory,
 )
 from rwkv_lab.trainvm_worker import (
+    ExecutionPhase,
+    ExecutionPhaseRequest,
     WorkerCancellationRequested,
+    WorkerExecutionPhases,
     WorkerResourcesReleasedPause,
 )
 
@@ -58,6 +61,7 @@ class FakeSession:
         )
         self.finished: list[tuple[str, object, int | None]] = []
         self.heartbeats: list[tuple[int, str]] = []
+        self.execution_phase_requests = ()
         self.closed = False
 
     def __enter__(self) -> Self:
@@ -454,6 +458,7 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
     profiler = SimpleNamespace()
     observability = SimpleNamespace()
     controls = SimpleNamespace()
+    execution_phases = SimpleNamespace()
 
     result = _rwkv_scratch(
         invocation,
@@ -461,6 +466,7 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
         step_profiler=profiler,
         observability=observability,
         controls=controls,
+        execution_phases=execution_phases,
     )
     arguments, keyword_arguments = observed[0]
     assert arguments[arguments.index("--data") + 1] == str(corpus.resolve())
@@ -473,6 +479,7 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
         "worker_step_profiler": profiler,
         "worker_observability": observability,
         "worker_controls": controls,
+        "worker_execution_phases": execution_phases,
     }
     assert result.optimizer_step == 120
     assert len(result.checkpoint_requests) == 1
@@ -1439,6 +1446,41 @@ def test_dispatch_table_is_closed_and_training_composition_is_required() -> None
         execute_invocation(supported)
 
 
+def test_nonadopted_adapter_receipts_enabled_phase_failure_before_dispatch() -> None:
+    receipts = []
+    channel = SimpleNamespace(
+        execution_phase_receipt=lambda request, disposition, **values: (
+            receipts.append((request, disposition, values)) or 1
+        )
+    )
+    phases = WorkerExecutionPhases(
+        channel,
+        (
+            ExecutionPhaseRequest(
+                phase=ExecutionPhase.COMPILE,
+                enabled=True,
+                steps=None,
+                request_digest="sha256:" + "1" * 64,
+            ),
+        ),
+    )
+    invocation = SimpleNamespace(
+        adapter={
+            "adapter": "rwkv-lab.qwen-ao3",
+            "version": "1.0.0",
+            "operation": "train",
+            "contract": "rwkv_lab.qwen_ao3.v1.Train",
+        },
+        invocation_digest="sha256:" + "2" * 64,
+        training=SimpleNamespace(),
+    )
+
+    with pytest.raises(AdapterDispatchError, match="enabled compile"):
+        execute_invocation(invocation, execution_phases=phases)
+    assert len(receipts) == 1
+    assert receipts[0][1].value == "failed"
+
+
 def test_runner_reports_success_with_optimizer_step() -> None:
     bootstrap = SimpleNamespace(run_id="run-1")
     sessions: list[FakeSession] = []
@@ -1456,7 +1498,7 @@ def test_runner_reports_success_with_optimizer_step() -> None:
             else pytest.fail("wrong descriptor")
         ),
         session_factory=factory,
-        executor=lambda invocation, _profiler, _observability, _controls: HandlerResult(
+        executor=lambda invocation, _profiler, _observability, _controls, _phases: HandlerResult(
             "worker.completed", {"reason": "training_complete"}, 41
         ),
     )
@@ -1495,7 +1537,7 @@ def test_runner_publishes_handler_checkpoints_before_terminal_event(
     status = run_worker(
         bootstrap_reader=lambda _descriptor: bootstrap,
         session_factory=lambda _bootstrap: session,
-        executor=lambda _invocation, _profiler, _observability, _controls: (
+        executor=lambda _invocation, _profiler, _observability, _controls, _phases: (
             HandlerResult(
                 "worker.completed",
                 {"reason": "training_complete"},
@@ -1540,7 +1582,7 @@ def test_runner_publishes_handler_artifacts_before_terminal_event(
     status = run_worker(
         bootstrap_reader=lambda _descriptor: bootstrap,
         session_factory=lambda _bootstrap: session,
-        executor=lambda _invocation, _profiler, _observability, _controls: (
+        executor=lambda _invocation, _profiler, _observability, _controls, _phases: (
             HandlerResult(
                 "worker.completed",
                 {"reason": "training_complete"},
@@ -1572,6 +1614,7 @@ def test_runner_reports_sanitized_failure_and_skips_completed_replay() -> None:
         _profiler: object,
         _observability: object,
         _controls: object,
+        _phases: object,
     ) -> HandlerResult:
         raise RuntimeError("secret dataset path")
 
@@ -1597,7 +1640,7 @@ def test_runner_reports_sanitized_failure_and_skips_completed_replay() -> None:
         run_worker(
             bootstrap_reader=lambda _descriptor: bootstrap,
             session_factory=lambda _bootstrap: completed,
-            executor=lambda _invocation, _profiler, _observability, _controls: (
+            executor=lambda _invocation, _profiler, _observability, _controls, _phases: (
                 pytest.fail("replayed completed work")
             ),
         )

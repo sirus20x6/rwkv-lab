@@ -404,8 +404,11 @@ startup orphan recovery are defined in
   declarations into digest-bound Welcome requests and accepts only fenced receipts with exact step,
   timing, diagnostic, and before/after trajectory-state evidence. Successful or skipped phases must
   prove state restoration, recovery-safe repeats remain separate receipts, and the generic dashboard
-  renders the receipt history. Real MageFlow, RWKV, transformer, and vision loop adoption plus the
-  disposable-warmup trajectory fixtures remain before these phases are production-qualified.
+  renders the receipt history. Scratch RWKV now consumes the requests, triggers lazy compilation,
+  counts exact disposable warmup workloads, restores RNG/gradients, and content-hashes the complete
+  model/optimizer trajectory around both phases. MageFlow, the remaining RWKV paths, transformer,
+  and vision-loop adoption plus privileged CUDA qualification remain before these phases are
+  production-qualified.
 - Fingerprinted cache namespaces; typed CPU/I/O policy lowering and recovery attestation are
   implemented, with privileged real-host qualification remaining.
 - Declarative bounded Torch GPU profiling and dashboard trace artifacts are implemented; qualified

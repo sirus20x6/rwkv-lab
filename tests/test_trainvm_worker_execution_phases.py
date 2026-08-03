@@ -10,6 +10,7 @@ from rwkv_lab.trainvm_worker import (
     ExecutionPhaseDisposition,
     WorkerExecutionPhaseError,
     WorkerExecutionPhaseRuntime,
+    WorkerExecutionPhases,
     decode_execution_phase_requests,
     load_worker_invocation,
     state_fingerprint,
@@ -141,3 +142,36 @@ def test_runtime_rejects_an_underexecuted_completed_phase() -> None:
             execute=lambda _steps, _mark_step: None,
         )
     assert channel.calls[0][1] is ExecutionPhaseDisposition.FAILED
+
+
+def test_phase_coordinator_is_one_shot_and_requires_every_receipt() -> None:
+    invocation, values = _fixture()
+    requests = decode_execution_phase_requests(values, invocation)
+    channel = _Channel()
+    phases = WorkerExecutionPhases(channel, requests)
+    state = {"state": "unchanged"}
+
+    phases.run(
+        ExecutionPhase.COMPILE,
+        snapshot=lambda: state,
+        execute=lambda _steps, _mark: None,
+    )
+    with pytest.raises(WorkerExecutionPhaseError, match="omitted.*warmup"):
+        phases.require_complete()
+    with pytest.raises(WorkerExecutionPhaseError, match="already receipted"):
+        phases.run(
+            ExecutionPhase.COMPILE,
+            snapshot=lambda: state,
+            execute=lambda _steps, _mark: None,
+        )
+
+    phases.run(
+        ExecutionPhase.WARMUP,
+        snapshot=lambda: state,
+        execute=lambda steps, mark: [mark() for _ in range(steps)],
+    )
+    phases.require_complete()
+    assert [call[1] for call in channel.calls] == [
+        ExecutionPhaseDisposition.COMPLETED,
+        ExecutionPhaseDisposition.COMPLETED,
+    ]
