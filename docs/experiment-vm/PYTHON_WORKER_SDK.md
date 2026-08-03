@@ -34,6 +34,39 @@ only object passed to the category-owned optimizer, LR-schedule, router, activat
 tensor-runtime factory. This keeps authority resolution, adapter topology integration, and tensor
 implementation as separate layers.
 
+### Adding a field to a shared envelope
+
+The exact-field checks on these envelopes are deliberate: an unrecognised key
+inside a digest-bound object is drift, and refusing it is the point. That makes
+adding a field to one side a contract change, and there are two correct ways to
+make it.
+
+1. **Bump the envelope's `api_version`** and let the reader select its field set
+   by version. The worker invocation does this for `resume`, which
+   `adapter_invocation.cpp` attaches only for non-legacy documents and
+   `invocation.py` expects only for the matching version.
+2. **Teach the reader in the same change** — add the field to its known-optional
+   set, carry it onto the decoded object rather than dropping it, and add a test
+   that fails when the two sides disagree.
+   `tests/test_trainvm_resolved_composition_parity.py` is the reference: it reads
+   `composition_body()` out of the registry source and fails naming any key the
+   Python side does not know.
+
+Relaxing a check to ignore unknown keys is not one of them. It fixes the symptom
+and re-arms the trap for the next field.
+
+This is written down because it was got wrong. The native side added `topologies`
+to the resolved-composition envelope and the Python worker, which compared the
+key set exactly, refused every composition carrying it — so an experiment
+selecting a research topology compiled, resolved, reached the worker and died
+there. It stayed broken across several merges with CI green, then a second field
+was added the same way before anyone noticed.
+
+Nothing caught it because every test on each side used a fixture built by that
+same side: the native tests asserted on emitted JSON, the Python tests on
+hand-written envelopes. **A boundary is only tested by something that crosses
+it.** A fixture the reader wrote agrees with the reader by construction.
+
 ## Session API
 
 `rwkv_lab.trainvm_worker.WorkerSession` provides:
