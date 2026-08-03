@@ -5,6 +5,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from rwkv_lab.training_optimizers import FP32MasterAdamW
 from rwkv_lab.trainvm_worker import state_fingerprint, torch_trajectory_state
 
 
@@ -51,5 +52,48 @@ def test_torch_trajectory_identity_covers_optimizer_and_rng_state() -> None:
     optimizer.zero_grad(set_to_none=True)
     after = state_fingerprint(
         torch_trajectory_state(model, optimizer, optimizer_step=1)
+    )
+    assert after != before
+
+
+def test_torch_trajectory_identity_covers_multiple_optimizer_modules() -> None:
+    backbone = torch.nn.Linear(2, 2)
+    auxiliary = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.AdamW(
+        [*backbone.parameters(), *auxiliary.parameters()], lr=1.0e-3
+    )
+    before = state_fingerprint(
+        torch_trajectory_state(
+            {"backbone": backbone, "auxiliary": auxiliary},
+            optimizer,
+            optimizer_step=0,
+        )
+    )
+    auxiliary.bias.data.add_(1)
+    after = state_fingerprint(
+        torch_trajectory_state(
+            {"backbone": backbone, "auxiliary": auxiliary},
+            optimizer,
+            optimizer_step=0,
+        )
+    )
+    assert after != before
+
+
+def test_torch_trajectory_identity_covers_independent_fp32_masters() -> None:
+    model = torch.nn.Linear(2, 2).to(dtype=torch.bfloat16)
+    optimizer = FP32MasterAdamW(model.parameters(), lr=1.0e-3)
+    before = state_fingerprint(
+        torch_trajectory_state(model, optimizer, optimizer_step=0)
+    )
+    independent_masters = [
+        master
+        for _model, master, independent in optimizer._model_master_pairs
+        if independent
+    ]
+    assert independent_masters
+    independent_masters[0].data.add_(1)
+    after = state_fingerprint(
+        torch_trajectory_state(model, optimizer, optimizer_step=0)
     )
     assert after != before

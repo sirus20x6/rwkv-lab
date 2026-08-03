@@ -105,8 +105,71 @@ def torch_trajectory_state(
     if isinstance(optimizer_step, bool) or not isinstance(optimizer_step, int):
         raise TorchTrajectoryStateError("optimizer step is invalid")
 
-    named_parameters = dict(model.named_parameters())
+    models = dict(model) if isinstance(model, Mapping) else {"model": model}
+    if not models or any(
+        not isinstance(name, str) or not name or "." in name
+        for name in models
+    ):
+        raise TorchTrajectoryStateError("trajectory model set is invalid")
+    named_parameters: dict[str, Any] = {}
+    named_buffers: dict[str, Any] = {}
+    training_modes: dict[str, bool] = {}
+    seen_parameters: set[int] = set()
+    seen_buffers: set[int] = set()
+    for owner, module in models.items():
+        if not hasattr(module, "named_parameters") or not hasattr(
+            module, "named_buffers"
+        ):
+            raise TorchTrajectoryStateError(
+                "trajectory model does not expose Torch module state"
+            )
+        training_modes[owner] = bool(module.training)
+        for name, value in module.named_parameters():
+            qualified = f"{owner}.{name}"
+            if id(value) in seen_parameters:
+                continue
+            seen_parameters.add(id(value))
+            named_parameters[qualified] = value
+        for name, value in module.named_buffers():
+            qualified = f"{owner}.{name}"
+            if id(value) in seen_buffers:
+                continue
+            seen_buffers.add(id(value))
+            named_buffers[qualified] = value
     parameter_names = {id(value): name for name, value in named_parameters.items()}
+    optimizer_parameters: dict[str, Any] = {}
+    master_pairs = getattr(optimizer, "_model_master_pairs", ())
+    for pair in master_pairs:
+        if not isinstance(pair, tuple) or len(pair) != 3:
+            raise TorchTrajectoryStateError(
+                "optimizer exposes an invalid model/master parameter pair"
+            )
+        model_parameter, master_parameter, independent = pair
+        model_name = parameter_names.get(id(model_parameter))
+        if model_name is None:
+            raise TorchTrajectoryStateError(
+                "optimizer master pair refers outside the declared model"
+            )
+        if not independent:
+            if master_parameter is not model_parameter:
+                raise TorchTrajectoryStateError(
+                    "shared optimizer master pair has inconsistent identity"
+                )
+            continue
+        master_name = f"{model_name}.__fp32_master"
+        if id(master_parameter) in parameter_names:
+            raise TorchTrajectoryStateError(
+                "optimizer master parameter identity is duplicated"
+            )
+        parameter_names[id(master_parameter)] = master_name
+        optimizer_parameters[master_name] = {
+            **_tensor_identity(master_parameter),
+            "gradient": (
+                None
+                if master_parameter.grad is None
+                else _tensor_identity(master_parameter.grad)
+            ),
+        }
     model_state = {
         "parameters": {
             name: {
@@ -119,9 +182,9 @@ def torch_trajectory_state(
             for name, value in named_parameters.items()
         },
         "buffers": {
-            name: _tensor_identity(value) for name, value in model.named_buffers()
+            name: _tensor_identity(value) for name, value in named_buffers.items()
         },
-        "training": bool(model.training),
+        "training": training_modes,
     }
 
     groups: list[dict[str, Any]] = []
@@ -171,7 +234,11 @@ def torch_trajectory_state(
         "schema": "trainvm.torch-trajectory-state/v1",
         "optimizer_step": optimizer_step,
         "model": model_state,
-        "optimizer": {"groups": groups, "state": optimizer_state},
+        "optimizer": {
+            "groups": groups,
+            "parameters": optimizer_parameters,
+            "state": optimizer_state,
+        },
         "rng": rng_state,
         "extra": _json_state(dict(extra or {})),
     }
