@@ -20,6 +20,7 @@ from rwkv_lab.trainvm_adapters.handlers import (
     _appearance_expert,
     _mageflow_full_backbone,
     _rlvr,
+    _rwkv_optimizer_finetune,
     _rwkv_posttraining,
     _rwkv_scratch,
     _scalar_metric_decision,
@@ -618,6 +619,78 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
     request = result.checkpoint_requests[0]
     assert request.source_directory == run_directory / "checkpoint-final"
     assert request.resume_grade == "terminal_checkpoint"
+
+
+def test_rwkv_optimizer_finetune_handler_seals_inputs_and_publishes_checkpoint(
+    tmp_path, monkeypatch
+) -> None:
+    from rwkv_lab import rwkv_optimizer_finetune
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    read_root.mkdir()
+    run_directory.parent.mkdir()
+    model = read_root / "model.pth"
+    tokens = read_root / "tokens.bin"
+    model.write_bytes(b"model")
+    tokens.write_bytes(b"\x01\x00" * 4096)
+    observed = []
+
+    def train(config, **kwargs):
+        observed.append((config, kwargs))
+        checkpoint = run_directory / "checkpoint-00000012"
+        checkpoint.mkdir(parents=True)
+        (checkpoint / "trainer_state.pt").write_bytes(b"state")
+        (run_directory / "complete.json").write_text(
+            json.dumps(
+                {
+                    "schema": rwkv_optimizer_finetune.RUN_SCHEMA,
+                    "state": "complete",
+                    "step": 12,
+                    "checkpoint": str(checkpoint),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(rwkv_optimizer_finetune, "train", train)
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "model_path": str(model),
+                "data_path": str(tokens),
+                "output_dir": str(run_directory),
+                "max_steps": 12,
+            }
+        },
+        workspace=_sealed_workspace(read_root, run_directory),
+        publishes={"checkpoint": {}},
+    )
+    components = SimpleNamespace()
+    profiler = SimpleNamespace()
+    observability = SimpleNamespace()
+    controls = SimpleNamespace()
+
+    result = _rwkv_optimizer_finetune(
+        invocation,
+        components,
+        step_profiler=profiler,
+        observability=observability,
+        controls=controls,
+    )
+    config, keyword_arguments = observed[0]
+    assert config.model_path == str(model.resolve())
+    assert config.data_path == str(tokens.resolve())
+    assert config.output_dir == str(run_directory.resolve())
+    assert keyword_arguments == {
+        "worker_components": components,
+        "worker_step_profiler": profiler,
+        "worker_observability": observability,
+        "worker_controls": controls,
+    }
+    assert result.optimizer_step == 12
+    assert result.checkpoint_requests[0].resume_grade == "compatible"
+    assert "parameter_routing" in result.checkpoint_requests[0].state_components
 
 
 def test_rwkv_posttraining_handler_seals_inputs_and_publishes_adapter_bundle(
@@ -1502,6 +1575,12 @@ def test_dispatch_table_is_closed_and_training_composition_is_required() -> None
             "1.0.0",
             "decide",
             "rwkv_lab.scalar_metric_decision.v1.Decide",
+        ),
+        (
+            "rwkv-lab.rwkv-optimizer-finetune",
+            "1.0.0",
+            "train",
+            "rwkv_lab.rwkv_optimizer_finetune.v1.Train",
         ),
         (
             "rwkv-lab.rwkv-posttraining",

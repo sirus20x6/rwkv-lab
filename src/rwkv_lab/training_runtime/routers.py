@@ -18,6 +18,9 @@ from .resolved import resolved_component_parts
 
 
 class ParameterRouterImplementation(str, Enum):
+    RWKV_MATRIX_OPTIMIZER_V1 = (
+        "rwkv_lab.parameter_router.rwkv_matrix_optimizer.v1"
+    )
     MAGEFLOW_FULL_BACKBONE_V1 = (
         "rwkv_lab.parameter_router.mageflow_full_backbone.v1"
     )
@@ -75,6 +78,28 @@ class FullBackboneRoutingConfiguration:
 
 
 @dataclass(frozen=True, slots=True)
+class RWKVMatrixOptimizerRoutingConfiguration:
+    fallback_multiplier: float = 0.1
+
+    def __post_init__(self) -> None:
+        _validate_positive_multiplier(
+            self.fallback_multiplier, "fallback_multiplier"
+        )
+        if self.fallback_multiplier > 1000:
+            raise ValueError("fallback_multiplier exceeds its declared bound")
+
+    @classmethod
+    def from_resolved(
+        cls, configuration: Mapping[str, Any]
+    ) -> RWKVMatrixOptimizerRoutingConfiguration:
+        if set(configuration) != {"fallback_multiplier"}:
+            raise ValueError(
+                "resolved RWKV matrix routing configuration has missing or unknown fields"
+            )
+        return cls(**configuration)
+
+
+@dataclass(frozen=True, slots=True)
 class TerminalExpertRoutingConfiguration:
     shared_backbone_multiplier: float = 0.5
     repa_projection_multiplier: float = 1.0
@@ -110,6 +135,7 @@ def build_registered_parameter_routing(
     configuration: (
         AppearanceExpertRoutingConfiguration
         | FullBackboneRoutingConfiguration
+        | RWKVMatrixOptimizerRoutingConfiguration
         | TerminalExpertRoutingConfiguration
     ),
 ) -> ParameterRoutingResult:
@@ -117,7 +143,24 @@ def build_registered_parameter_routing(
 
     named = list(named_parameters)
     all_parameter_ids = frozenset(id(parameter) for _, parameter in named)
-    if implementation is ParameterRouterImplementation.MAGEFLOW_FULL_BACKBONE_V1:
+    if implementation is ParameterRouterImplementation.RWKV_MATRIX_OPTIMIZER_V1:
+        if not isinstance(configuration, RWKVMatrixOptimizerRoutingConfiguration):
+            raise TypeError(
+                "RWKV matrix router requires its typed routing configuration"
+            )
+        if set(role_parameter_ids) != {"muon"}:
+            raise ValueError("RWKV matrix router requires exactly the muon ownership role")
+        muon_ids = role_parameter_ids["muon"]
+        routes = (
+            ParameterRoute("muon", 1.0, muon_ids, required=True),
+            ParameterRoute(
+                "adam_fallback",
+                configuration.fallback_multiplier,
+                all_parameter_ids - muon_ids,
+                required=True,
+            ),
+        )
+    elif implementation is ParameterRouterImplementation.MAGEFLOW_FULL_BACKBONE_V1:
         if not isinstance(configuration, FullBackboneRoutingConfiguration):
             raise TypeError(
                 "full-backbone router requires full-backbone routing configuration"
@@ -194,9 +237,14 @@ def parameter_routing_from_resolved_component(
     typed_configuration: (
         AppearanceExpertRoutingConfiguration
         | FullBackboneRoutingConfiguration
+        | RWKVMatrixOptimizerRoutingConfiguration
         | TerminalExpertRoutingConfiguration
     )
-    if selected is ParameterRouterImplementation.MAGEFLOW_FULL_BACKBONE_V1:
+    if selected is ParameterRouterImplementation.RWKV_MATRIX_OPTIMIZER_V1:
+        typed_configuration = RWKVMatrixOptimizerRoutingConfiguration.from_resolved(
+            configuration
+        )
+    elif selected is ParameterRouterImplementation.MAGEFLOW_FULL_BACKBONE_V1:
         typed_configuration = FullBackboneRoutingConfiguration.from_resolved(
             configuration
         )

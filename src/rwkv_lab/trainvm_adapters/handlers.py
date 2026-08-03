@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from rwkv_lab.rwkv_optimizer_finetune import RWKVOptimizerFinetuneConfig
 from rwkv_lab.trainvm_worker import (
     ArtifactPublicationRequest,
     CheckpointPublicationRequest,
@@ -765,6 +766,118 @@ def _rwkv_scratch(
         {"reason": "training_complete"},
         optimizer_step=step,
         checkpoint_requests=requests,
+    )
+
+
+def _rwkv_optimizer_finetune(
+    invocation: WorkerInvocation,
+    components: WorkerTrainingComponents,
+    step_profiler: WorkerStepProfiler | None = None,
+    observability: WorkerObservability | None = None,
+    controls: WorkerControlRuntime | None = None,
+    execution_phases: WorkerExecutionPhases | None = None,
+) -> HandlerResult:
+    """Run a content-bound pretrained RWKV optimizer experiment."""
+
+    del execution_phases
+    paths = WorkspacePathAuthority.from_workspace(
+        invocation.workspace, require_content=True
+    )
+    raw_config = read_inline_config(invocation.inputs)
+    model_path = paths.read_path(
+        _raw_config_path(raw_config, "model_path", required=True) or "",
+        label="model_path",
+        kind="file",
+    )
+    data_path = paths.read_path(
+        _raw_config_path(raw_config, "data_path", required=True) or "",
+        label="data_path",
+        kind="file",
+    )
+    output_value = _raw_config_path(raw_config, "output_dir", required=True) or ""
+    run_directory = paths.exact_run_directory(output_value)
+    content_identity = [
+        {
+            "path": identity.path,
+            "kind": identity.kind,
+            "file_count": identity.file_count,
+            "total_bytes": identity.total_bytes,
+            "tree_sha256": identity.tree_sha256,
+        }
+        for identity in sorted(paths.input_content_roots, key=lambda value: value.path)
+    ]
+    input_identity_digest = "sha256:" + hashlib.sha256(
+        json.dumps(
+            content_identity,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    resume_payload = _resume_payload(
+        invocation,
+        paths,
+        required_state=frozenset(
+            {
+                "component_composition",
+                "control_revision",
+                "data_cursor",
+                "input_content_identity",
+                "learning_rate_schedule",
+                "model",
+                "optimizer",
+                "parameter_routing",
+                "rng_accelerator",
+                "rng_numpy",
+                "rng_python",
+                "rng_torch",
+            }
+        ),
+    )
+    config_values = dict(raw_config)
+    config_values.update(
+        {
+            "model_path": str(model_path),
+            "data_path": str(data_path),
+            "output_dir": str(run_directory),
+            "input_identity_digest": input_identity_digest,
+            "resume_from": str(resume_payload) if resume_payload else None,
+        }
+    )
+    config = RWKVOptimizerFinetuneConfig(**config_values)
+    from rwkv_lab.rwkv_optimizer_finetune import train
+
+    train(
+        config,
+        worker_components=components,
+        worker_step_profiler=step_profiler or NullStepProfiler(),
+        worker_observability=observability,
+        worker_controls=controls,
+    )
+    request, step, status = completed_checkpoint_request(
+        invocation,
+        run_directory,
+        document_names=("complete.json", "interrupted.json"),
+        step_fields=("step",),
+        state_components=(
+            "component_composition",
+            "control_revision",
+            "data_cursor",
+            "input_content_identity",
+            "learning_rate_schedule",
+            "model",
+            "optimizer",
+            "parameter_routing",
+            "rng_accelerator",
+            "rng_numpy",
+            "rng_python",
+            "rng_torch",
+        ),
+    )
+    return HandlerResult(
+        "worker.completed",
+        {"reason": completion_reason(status), "status": status},
+        optimizer_step=step,
+        checkpoint_requests=((request,) if request is not None else ()),
     )
 
 
@@ -2315,6 +2428,12 @@ _HANDLERS: Mapping[AdapterKey, Handler] = {
         "decide",
         "rwkv_lab.scalar_metric_decision.v1.Decide",
     ): _scalar_metric_decision,
+    (
+        "rwkv-lab.rwkv-optimizer-finetune",
+        "1.0.0",
+        "train",
+        "rwkv_lab.rwkv_optimizer_finetune.v1.Train",
+    ): _rwkv_optimizer_finetune,
     (
         "rwkv-lab.rwkv-posttraining",
         "1.0.0",

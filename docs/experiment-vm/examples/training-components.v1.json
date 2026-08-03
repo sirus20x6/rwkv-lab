@@ -157,6 +157,23 @@
     },
     {
       "key": {
+        "category": "parameter_router",
+        "name": "rwkv_matrix_optimizer",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.parameter_router.rwkv_matrix_optimizer.v1",
+      "model_families": ["rwkv"],
+      "required_capabilities": ["parameter_router.rwkv_matrix_optimizer.v1"],
+      "configuration": [
+        {"name": "fallback_multiplier", "type": "number", "required": false, "default": 0.1, "minimum": 1e-12, "maximum": 1000.0, "unit": "ratio"}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
         "category": "objective",
         "name": "linear_head_cross_entropy",
         "version": "1.0.0"
@@ -312,6 +329,65 @@
         {"name": "cursor", "type": "integer", "required": true}
       ],
       "step_domain": "optimizer_step",
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "optimizer",
+        "name": "spectral_muon_no_decay",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.optimizer.spectral_muon_no_decay.v1",
+      "model_families": ["rwkv"],
+      "required_capabilities": ["optimizer.spectral_muon_no_decay.v1"],
+      "configuration": [
+        {"name": "learning_rate", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
+        {"name": "momentum", "type": "number", "required": false, "default": 0.95, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "nesterov", "type": "boolean", "required": false, "default": false},
+        {"name": "ns_steps", "type": "integer", "required": false, "default": 5, "minimum": 1, "maximum": 64, "unit": "count"},
+        {"name": "cubic", "type": "boolean", "required": false, "default": false},
+        {"name": "spectral_power", "type": "number", "required": false, "default": 0.0, "minimum": 0.0, "maximum": 1.0, "unit": "ratio"},
+        {"name": "power_method", "type": "enumeration", "required": false, "default": "eigh", "values": ["eigh", "svd"]},
+        {"name": "second_moment", "type": "boolean", "required": false, "default": false},
+        {"name": "sm_beta2", "type": "number", "required": false, "default": 0.99, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "sm_eps", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"},
+        {"name": "equilibrate", "type": "enumeration", "required": false, "default": "none", "values": ["C", "R", "RC", "none"]},
+        {"name": "plus_norm", "type": "enumeration", "required": false, "default": "none", "values": ["col", "none", "row"]},
+        {"name": "row_uniform", "type": "boolean", "required": false, "default": false},
+        {"name": "mona", "type": "boolean", "required": false, "default": false},
+        {"name": "mona_beta", "type": "number", "required": false, "default": 0.9, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "mona_alpha", "type": "number", "required": false, "default": 0.1, "minimum": -10.0, "maximum": 10.0, "unit": "ratio"},
+        {"name": "scale", "type": "number", "required": false, "default": 0.4, "minimum": 1e-12, "maximum": 100.0, "unit": "ratio"},
+        {"name": "ddc_strength", "type": "number", "required": false, "default": 0.0, "minimum": 0.0, "maximum": 1.0, "unit": "ratio"},
+        {"name": "ddc_mode", "type": "enumeration", "required": false, "default": "both", "values": ["both", "col", "row"]},
+        {"name": "rsav", "type": "boolean", "required": false, "default": false},
+        {"name": "rsav_c", "type": "number", "required": false, "default": 1.0, "minimum": 1e-12, "maximum": 1e12},
+        {"name": "rsav_cap", "type": "number", "required": false, "default": 0.2, "minimum": 0.0, "maximum": 1.0, "unit": "ratio"},
+        {"name": "rsav_relax", "type": "number", "required": false, "default": 0.0, "minimum": 0.0, "maximum": 1.0, "unit": "ratio"},
+        {"name": "tile_size", "type": "integer", "required": false, "default": 0, "minimum": 0, "maximum": 65536, "unit": "count"},
+        {"name": "da_muon", "type": "boolean", "required": false, "default": false},
+        {"name": "da_eta_max", "type": "number", "required": false, "default": 0.01, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
+        {"name": "da_r0", "type": "number", "required": false, "default": 1e-3, "minimum": 1e-12, "maximum": 1e12},
+        {"name": "aro", "type": "boolean", "required": false, "default": false},
+        {"name": "aro_sink_iters", "type": "integer", "required": false, "default": 5, "minimum": 1, "maximum": 64, "unit": "count"},
+        {"name": "aro_compile", "type": "boolean", "required": false, "default": false},
+        {"name": "batched", "type": "boolean", "required": false, "default": false},
+        {"name": "compile_ns", "type": "boolean", "required": false, "default": false},
+        {"name": "row_update_floor", "type": "number", "required": false, "default": 0.0, "minimum": 0.0, "maximum": 100.0, "unit": "ratio"},
+        {"name": "radial_brake", "type": "number", "required": false, "default": 0.0, "minimum": 0.0, "maximum": 1.0, "unit": "ratio"},
+        {"name": "radius_pin", "type": "boolean", "required": false, "default": false},
+        {"name": "cautious_weight_decay", "type": "boolean", "required": false, "default": false},
+        {"name": "adam_update_interval", "type": "integer", "required": false, "default": 1, "minimum": 1, "maximum": 65536, "unit": "optimizer_step"},
+        {"name": "adam_beta1", "type": "number", "required": false, "default": 0.9, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "adam_beta2", "type": "number", "required": false, "default": 0.95, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "adam_eps", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"}
+      ],
+      "state": [
+        {"name": "parameter_state_manifest", "type": "string", "required": true},
+        {"name": "global_optimizer_state", "type": "string", "required": true}
+      ],
       "state_grade": "exact",
       "reference_implementation": true
     },
