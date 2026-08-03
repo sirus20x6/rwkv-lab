@@ -242,6 +242,16 @@ OperationAuthoringDeclaration rwkv_optimizer_finetune_authoring() {
       "rwkv-lab.rwkv-optimizer-finetune-checkpoint.v1";
   checkpoint.description =
       "Required compatible pretrained RWKV optimizer-experiment checkpoint.";
+  authoring.outputs.emplace(
+      "result",
+      OperationPortDescriptor{
+          .type = OperationPortType::artifact,
+          .required = true,
+          .artifact_type = ArtifactType::report,
+          .artifact_schema = "rwkv-lab.scalar-metric-result.v1",
+          .description =
+              "Required immutable final evaluation-loss scalar result.",
+      });
   return authoring;
 }
 

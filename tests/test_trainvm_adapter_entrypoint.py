@@ -530,7 +530,6 @@ def test_appearance_handler_returns_declared_immutable_checkpoint_request(
             ),
             encoding="utf-8",
         )
-
     monkeypatch.setattr(mage_flow_expert_train, "train", train)
     invocation = SimpleNamespace(
         inputs={
@@ -628,6 +627,7 @@ def test_rwkv_optimizer_finetune_handler_seals_inputs_and_publishes_checkpoint(
 
     read_root = tmp_path / "read"
     run_directory = tmp_path / "write" / "run"
+    node_run_directory = run_directory / "nodes" / "optimizer-arm"
     read_root.mkdir()
     run_directory.parent.mkdir()
     model = read_root / "model.pth"
@@ -638,10 +638,10 @@ def test_rwkv_optimizer_finetune_handler_seals_inputs_and_publishes_checkpoint(
 
     def train(config, **kwargs):
         observed.append((config, kwargs))
-        checkpoint = run_directory / "checkpoint-00000012"
+        checkpoint = node_run_directory / "checkpoint-00000012"
         checkpoint.mkdir(parents=True)
         (checkpoint / "trainer_state.pt").write_bytes(b"state")
-        (run_directory / "complete.json").write_text(
+        (node_run_directory / "complete.json").write_text(
             json.dumps(
                 {
                     "schema": rwkv_optimizer_finetune.RUN_SCHEMA,
@@ -652,6 +652,13 @@ def test_rwkv_optimizer_finetune_handler_seals_inputs_and_publishes_checkpoint(
             ),
             encoding="utf-8",
         )
+        return {
+            "schema": rwkv_optimizer_finetune.RUN_SCHEMA,
+            "state": "complete",
+            "step": 12,
+            "checkpoint": str(checkpoint),
+            "eval_loss": 2.5,
+        }
 
     monkeypatch.setattr(rwkv_optimizer_finetune, "train", train)
     invocation = SimpleNamespace(
@@ -659,12 +666,13 @@ def test_rwkv_optimizer_finetune_handler_seals_inputs_and_publishes_checkpoint(
             "config": {
                 "model_path": str(model),
                 "data_path": str(tokens),
-                "output_dir": str(run_directory),
                 "max_steps": 12,
+                "subject": "spectral_muon",
             }
         },
         workspace=_sealed_workspace(read_root, run_directory),
-        publishes={"checkpoint": {}},
+        publishes={"checkpoint": {}, "result": {}},
+        node_id="optimizer-arm",
     )
     components = SimpleNamespace()
     profiler = SimpleNamespace()
@@ -681,7 +689,7 @@ def test_rwkv_optimizer_finetune_handler_seals_inputs_and_publishes_checkpoint(
     config, keyword_arguments = observed[0]
     assert config.model_path == str(model.resolve())
     assert config.data_path == str(tokens.resolve())
-    assert config.output_dir == str(run_directory.resolve())
+    assert config.output_dir == str(node_run_directory.resolve())
     assert keyword_arguments == {
         "worker_components": components,
         "worker_step_profiler": profiler,
@@ -691,6 +699,18 @@ def test_rwkv_optimizer_finetune_handler_seals_inputs_and_publishes_checkpoint(
     assert result.optimizer_step == 12
     assert result.checkpoint_requests[0].resume_grade == "compatible"
     assert "parameter_routing" in result.checkpoint_requests[0].state_components
+    assert result.artifact_requests[0].output_name == "result"
+    result_document = json.loads(
+        (result.artifact_requests[0].source_directory / "result.json").read_text()
+    )
+    assert result_document == {
+        "api_version": "rwkv-lab.scalar-metric-result/v1",
+        "direction": "minimize",
+        "metric": "eval.loss",
+        "optimizer_step": 12,
+        "subject": "spectral_muon",
+        "value": 2.5,
+    }
 
 
 def test_rwkv_posttraining_handler_seals_inputs_and_publishes_adapter_bundle(

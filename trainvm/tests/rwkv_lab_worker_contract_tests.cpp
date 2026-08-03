@@ -59,6 +59,18 @@ nlohmann::json load_vision_representation_ab_fixture() {
   return source;
 }
 
+nlohmann::json load_rwkv_optimizer_ab_fixture() {
+  const auto path = std::filesystem::path(TRAINVM_SOURCE_ROOT) /
+                    "docs/experiment-vm/examples/rwkv-optimizer-ab.json";
+  std::ifstream input(path);
+  if (!input) {
+    throw std::runtime_error("could not open RWKV optimizer A/B fixture");
+  }
+  nlohmann::json source;
+  input >> source;
+  return source;
+}
+
 }  // namespace
 
 int main() {
@@ -464,6 +476,12 @@ int main() {
                                       .at("checkpoint")
                                       .at("artifact_schema") ==
                                   "rwkv-lab.rwkv-optimizer-finetune-checkpoint.v1") &&
+                             (!is_optimizer_finetune ||
+                              operation.at("authoring")
+                                      .at("outputs")
+                                      .at("result")
+                                      .at("artifact_schema") ==
+                                  "rwkv-lab.scalar-metric-result.v1") &&
                              (!is_vision_native ||
                               operation.at("authoring")
                                       .at("outputs")
@@ -683,6 +701,24 @@ int main() {
     }
     require(vision_ab_plan_accepted,
             "declarative vision representation A/B fixture must validate against the production worker registry");
+    const trainvm::CompileResult optimizer_ab_plan =
+        trainvm::compile_document(load_rwkv_optimizer_ab_fixture());
+    require(optimizer_ab_plan.valid(),
+            "declarative RWKV optimizer A/B fixture must compile");
+    bool optimizer_ab_plan_accepted = optimizer_ab_plan.valid();
+    if (optimizer_ab_plan.valid()) {
+      try {
+        trainvm::AdapterRegistry::load_file(
+            std::filesystem::absolute(registry_path))
+            .validate_plan(*optimizer_ab_plan.plan);
+      } catch (const std::exception& error) {
+        std::cerr << "RWKV optimizer A/B registry rejection: " << error.what()
+                  << '\n';
+        optimizer_ab_plan_accepted = false;
+      }
+    }
+    require(optimizer_ab_plan_accepted,
+            "declarative RWKV optimizer A/B fixture must validate against the production worker registry");
     std::filesystem::remove(registry_path);
 
     nlohmann::json posttraining_source = exact_source;

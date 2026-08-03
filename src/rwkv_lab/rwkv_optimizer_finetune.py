@@ -39,6 +39,7 @@ class RWKVOptimizerFinetuneConfig:
     output_dir: str
     max_steps: int
     input_identity_digest: str
+    subject: str
     resume_from: str | None = None
     sequence_length: int = 1024
     batch_size: int = 8
@@ -72,6 +73,17 @@ class RWKVOptimizerFinetuneConfig:
             raise ValueError("seed must be a nonnegative integer")
         if self.dtype != "bf16":
             raise ValueError("RWKV optimizer finetuning is qualified only for bf16")
+        if (
+            not isinstance(self.subject, str)
+            or not self.subject.isascii()
+            or not 0 < len(self.subject) <= 128
+            or not self.subject[0].isalnum()
+            or any(
+                not (character.isalnum() or character in "._-")
+                for character in self.subject
+            )
+        ):
+            raise ValueError("subject must be a bounded ASCII identifier")
         if (
             len(self.input_identity_digest) != 71
             or not self.input_identity_digest.startswith("sha256:")
@@ -252,7 +264,7 @@ def train(
     worker_step_profiler: WorkerStepProfiler | None = None,
     worker_observability: WorkerObservability | None = None,
     worker_controls: WorkerControlRuntime | None = None,
-) -> None:
+) -> Mapping[str, Any]:
     config.validate()
     device = torch.device("cuda")
     torch.manual_seed(config.seed)
@@ -374,6 +386,7 @@ def train(
         },
     )
     last_checkpoint = None
+    final_validation_loss = None
     while step < config.max_steps and not stopped["value"]:
         if worker_controls is not None:
             worker_controls.microbatch(step + 1, reject_live_controls)
@@ -442,6 +455,7 @@ def train(
             if worker_controls is not None:
                 worker_controls.evaluation(step, reject_live_controls)
             validation_loss = evaluate()
+            final_validation_loss = validation_loss
             with log_path.open("a", encoding="utf-8") as handle:
                 handle.write(
                     json.dumps(
@@ -531,17 +545,23 @@ def train(
             else None
         ),
     )
+    if not stopped["value"] and final_validation_loss is None:
+        final_validation_loss = evaluate()
+    terminal: dict[str, Any] = {
+        "schema": RUN_SCHEMA,
+        "state": "interrupted" if stopped["value"] else "complete",
+        "step": step,
+        "tokens_seen": tokens_seen,
+        "checkpoint": str(last_checkpoint),
+        "updated_at": _utc_now(),
+    }
+    if final_validation_loss is not None:
+        terminal["eval_loss"] = float(final_validation_loss)
     _atomic_json(
         output_dir / ("interrupted.json" if stopped["value"] else "complete.json"),
-        {
-            "schema": RUN_SCHEMA,
-            "state": "interrupted" if stopped["value"] else "complete",
-            "step": step,
-            "tokens_seen": tokens_seen,
-            "checkpoint": str(last_checkpoint),
-            "updated_at": _utc_now(),
-        },
+        terminal,
     )
+    return terminal
 
 
 __all__ = ["RUN_SCHEMA", "RWKVOptimizerFinetuneConfig", "train"]
