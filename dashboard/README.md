@@ -1,7 +1,14 @@
-# trainboard — RWKV-Lab training dashboard v2.0
+# trainboard — declarative TrainVM dashboard
 
-GPU-accelerated, real-time training dashboard for the RWKV-Lab conversion project.
+Real-time, model-family-neutral training control and observability for MageFlow, RWKV,
+transformer, vision/multimodal, distillation, and post-training experiments.
 **Stack:** Go + SQLite + Datastar + Pixi.js. Successor to `../dashboard/` (FastAPI + Chart.js).
+
+The proposed next control-plane architecture is documented in
+[`docs/experiment-vm/ARCHITECTURE.md`](../docs/experiment-vm/ARCHITECTURE.md). It keeps this Go UI
+while moving declarative plan validation, process ownership, recovery, live controls, and the event
+journal into a typed compiled TrainVM runtime. The native implementation and build instructions live
+in [`trainvm/`](../trainvm/README.md).
 
 ## Run
 
@@ -12,6 +19,51 @@ go -C /thearray/git/moe-mla/dashboard run ./cmd/trainboard
 
 Reads `/thearray/git/moe-mla/runs/`. Ingests all `train.jsonl` logs + system telemetry into a local
 SQLite DB (`trainboard.db`). GPU-light — safe to run alongside live training.
+The dashboard uses one lazy gRPC client for `<repo>/trainvm.sock` (or `-trainvm-socket PATH`) for
+bounded run projections, query-bound pagination, resumable timeline replay, typed control views,
+descriptors, submissions, revision-checked control patches, and revision-fenced lifecycle commands.
+The host-global `/api/trainvm/host-authority` view is projected from TrainVM's
+`GetHostAuthorityStatus` RPC, which performs a fresh bounded read over hostd's pinned v3 status
+transport. It reports exact coordinator/startup state, ledger chain and occupancy digests, complete
+fence/process counts, fresh inventory/topology degradation evidence, lease-renewal coordinator
+health, terminal cgroup/context cleanup receipts, and a bounded receipt-derived row prefix with
+explicit truncation. The UI does not infer launch health, leases, policy installation, cleanup, or
+recovery from PID discovery or `/proc`.
+Checkpoint-now, retained-resource pause, checkpoint-first GPU-releasing pause, exact resume, and
+graceful cancel are posted to `/api/trainvm/runs/{run}/actions`; the independently supervised native
+authority remains the only process that opens or mutates its journal; an unavailable authority is
+reported as unavailable instead of serving an unsynchronized database snapshot. `-trainvm-db PATH`
+is retained only as an explicit read-only compatibility fallback for offline legacy journals and is
+never selected automatically. The HTTP surface remains `/api/trainvm/runs`,
+`/api/trainvm/runs/{run}`, and
+`/api/trainvm/runs/{run}/timeline?after=SEQUENCE&limit=COUNT`. The generic
+`/observability?after=SEQUENCE&limit=COUNT` sibling captures one immutable run prefix, cold-loads a
+bounded newest-first telemetry tail, and then advances heartbeats, declared metric series, artifacts,
+and checkpoint lineage through one cursor with explicit caught-up/replay state. Verified local
+artifact files are downloadable only through content-fingerprinted, publication-sequence-anchored,
+allowed-root URLs, so lookup remains bounded even after millions of journal events; malformed
+checkpoint manifests are quarantined in the tree instead of hiding later valid history. The `/plan` sibling returns
+the authority-verified immutable compiled plan; the browser derives its layered workflow graph,
+cycles, terminal transitions, visited nodes, and current attempt from that document without
+experiment-family switches.
+A short readiness probe disables mutations while the authority is unavailable.
+Mutation requests are intentionally restricted to loopback HTTP hosts to prevent DNS-rebinding
+access to the local command authority.
+The dashboard also serves the checked-in schema and example through `/api/trainvm/schema` and
+`/api/trainvm/example`. Drafts posted to `/api/trainvm/compile` are capped at 2 MiB and passed on
+stdin to the fixed native `trainvm compile` command for reflected decoding, semantic validation,
+canonicalization, and plan hashing; that preview endpoint cannot launch a run. Valid drafts may be
+frozen and posted to `/api/trainvm/experiments`, where the native authority independently recompiles
+them and creates an idempotent queued run. Ambiguous browser failures retain the exact serialized
+request and key in session storage for an exact retry; the dashboard never writes the journal.
+The authoring UI obtains exact native operation and training-component catalogs from
+`/api/trainvm/operations` and `/api/trainvm/training-components`. It renders lifecycle, typed ports,
+closed model-family slots, and component configuration directly from those descriptors. Adding a
+compatible registered adapter therefore requires no Go route or JavaScript family branch. The Go
+bridge bounds, canonicalizes, hashes, and semantically validates both descriptor envelopes before
+the browser can use them; native compilation remains the final plan authority.
+Ambiguous live-control or lifecycle-command outcomes likewise retain the exact in-memory serialized
+body and idempotency key, block competing mutations, and expose only an exact retry until resolved.
 The one-second shared snapshot reads conversion quality from ingestion-time rollups plus one batched
 codec query; it does not fan out KPI/count queries per layer. Run-sidecar and campaign/dataset discovery
 are cached, so multiple panels and browser tabs do not repeatedly walk the 1TB-scale `runs/` tree.

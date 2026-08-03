@@ -82,8 +82,8 @@ func TestReadRLVRCampaigns(t *testing.T) {
 	s.handleRLVR(recorder, request)
 	if body := recorder.Body.String(); !strings.Contains(body, "comparison") ||
 		!strings.Contains(body, "gspo") || !strings.Contains(body, "recursive improvement lineage") ||
-		!strings.Contains(body, "data-bind-rlvrsft") || !strings.Contains(body, "data-bind-rlvrbootstrap") ||
-		!strings.Contains(body, "data-bind-rlvrrefckpt") {
+		!strings.Contains(body, "RLVR execution retired") ||
+		strings.Contains(body, "/api/rlvr/launch") || strings.Contains(body, "data-bind-rlvr") {
 		t.Fatalf("campaign missing from rendered panel: %s", body)
 	}
 }

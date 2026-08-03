@@ -23,7 +23,6 @@ type tickSnap struct {
 
 	sysGPUs, sysHost, sysProc string
 	runList, alerts, conv     string
-	queue, launchHist         string
 	versions                  map[string]int64
 }
 
@@ -60,23 +59,19 @@ func (s *Server) refreshTick() {
 	}
 
 	ts := &tickSnap{
-		ts:         now,
-		summaries:  summaries,
-		procByRun:  procByRun,
-		bestByRun:  bestByRun,
-		sysGPUs:    renderSysGPUs(snap.GPUs),
-		sysHost:    renderSysHost(snap.Host),
-		sysProc:    renderSysProc(snap.Procs),
-		runList:    renderRunList(summaries, procByRun, now),
-		conv:       renderConvBoard(s.scanBoard(summaries, snap.Procs)),
-		launchHist: renderLaunchHistory(s.db.RecentLaunchArgs(12)),
-		versions:   make(map[string]int64, len(summaries)),
+		ts:        now,
+		summaries: summaries,
+		procByRun: procByRun,
+		bestByRun: bestByRun,
+		sysGPUs:   renderSysGPUs(snap.GPUs),
+		sysHost:   renderSysHost(snap.Host),
+		sysProc:   renderSysProc(snap.Procs),
+		runList:   renderRunList(summaries, procByRun, now),
+		conv:      renderConvBoard(s.scanBoard(summaries, snap.Procs)),
+		versions:  make(map[string]int64, len(summaries)),
 	}
 	if active, err := s.db.ActiveAlerts(20); err == nil {
-		ts.alerts = renderAlerts(active, s.autoStopOn())
-	}
-	if q, err := s.db.ActiveQueue(); err == nil {
-		ts.queue = renderQueue(q, s.queueAuto.Load(), len(snap.Procs) == 0)
+		ts.alerts = renderAlerts(active)
 	}
 	for _, su := range summaries {
 		// A step number is not a data revision: eval/checkpoint records are often

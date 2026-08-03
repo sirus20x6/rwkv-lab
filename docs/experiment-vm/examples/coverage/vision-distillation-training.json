@@ -1,0 +1,153 @@
+{
+  "api_version": "trainvm.rwkv-lab/v1alpha1",
+  "kind": "Experiment",
+  "metadata": {
+    "name": "coverage-vision-distillation-training",
+    "description": "Compiler coverage for teacher-cache construction, validation, compressor training, and gallery evaluation.",
+    "labels": {"family": "vision-distillation", "fixture": "compiler-coverage"}
+  },
+  "spec": {
+    "workspace": {
+      "root": "/thearray/git/moe-mla",
+      "run_directory": "/thearray/git/moe-mla/runs/trainvm-coverage/vision-distillation-training",
+      "concurrency_key": "coverage-vision-distillation",
+      "allowed_read_roots": ["/thearray/git/moe-mla"],
+      "allowed_write_roots": ["/thearray/git/moe-mla/runs/trainvm-coverage/vision-distillation-training"]
+    },
+    "resources": {
+      "accelerators": {"vendor": "nvidia", "count": 1, "minimum_memory_gib": 48, "exclusive": true},
+      "minimum_host_memory_gib": 64,
+      "cpu_threads": 16,
+      "lease_timeout_seconds": 30,
+      "cpu_io_policy": {"cpu_weight": 100, "io_weight": 100, "omp_threads": 8, "preprocessing_workers": 8, "nice": 0}
+    },
+    "parameters": {
+      "image_manifest_path": {"type": "path", "value": "/thearray/git/moe-mla/fixtures/vision/train.jsonl"},
+      "teacher_set": {"type": "string", "value": "moonvit-radio-siglip2"},
+      "optimizer_steps": {"type": "integer", "value": 750}
+    },
+    "artifacts": {
+      "teacher_cache": {"type": "dataset", "schema": "coverage.vision-teacher-cache.v1", "immutability": "mutable_until_publish", "fingerprint": "manifest_sha256"},
+      "cache_validation": {"type": "report", "schema": "coverage.vision-cache-validation.v1", "immutability": "immutable", "fingerprint": "sha256"},
+      "compressor_checkpoint": {"type": "checkpoint", "schema": "coverage.vision-compressor-compatible.v1", "immutability": "immutable", "fingerprint": "manifest_sha256"},
+      "eval_gallery": {"type": "image_gallery", "schema": "rwkv-lab.eval-gallery.v2", "immutability": "mutable_until_publish", "fingerprint": "manifest_sha256", "required": false},
+      "training_metrics": {"type": "metrics", "schema": "coverage.vision-training-metrics.v1", "immutability": "append_only", "fingerprint": "sha256"}
+    },
+    "components": {
+      "core": {
+        "adapter": "trainvm.core",
+        "version": "1.0.0",
+        "runtime": "builtin",
+        "operations": {
+          "acquire_resources": {"contract": "trainvm.v1.AcquireResources"},
+          "release_resources": {"contract": "trainvm.v1.ReleaseResources"}
+        }
+      },
+      "vision_distillation": {
+        "adapter": "coverage.vision-distillation",
+        "version": "1.0.0-coverage",
+        "runtime": "python_worker",
+        "operations": {
+          "build_teacher_cache": {"contract": "coverage.vision_distillation.v1.BuildTeacherCache"},
+          "validate_teacher_cache": {"contract": "coverage.vision_distillation.v1.ValidateTeacherCache"},
+          "train_compressor": {"contract": "coverage.vision_distillation.v1.TrainCompressorCompatible"}
+        }
+      }
+    },
+    "workflow": {
+      "entrypoint": "acquire_resources",
+      "nodes": {
+        "acquire_resources": {
+          "invoke": {"component": "core", "operation": "acquire_resources", "inputs": {
+            "concurrency_key": {"literal": "coverage-vision-distillation"}
+          }},
+          "idempotency": "receipt_required",
+          "effect": "resource",
+          "transitions": [
+            {"on": "resource.acquired", "target": "build_cache"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        },
+        "build_cache": {
+          "invoke": {"component": "vision_distillation", "operation": "build_teacher_cache", "inputs": {
+            "manifest": {"parameter": "image_manifest_path"},
+            "teachers": {"parameter": "teacher_set"},
+            "run_directory": {"context": "run_directory"}
+          }},
+          "publishes": {"cache": "teacher_cache"},
+          "idempotency": "receipt_required",
+          "effect": "process",
+          "timeout_seconds": 43200,
+          "transitions": [
+            {"on": "operation.completed", "target": "validate_cache"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        },
+        "validate_cache": {
+          "invoke": {"component": "vision_distillation", "operation": "validate_teacher_cache", "inputs": {
+            "cache": {"artifact": "teacher_cache"},
+            "manifest": {"parameter": "image_manifest_path"}
+          }},
+          "publishes": {"report": "cache_validation"},
+          "idempotency": "replay_safe",
+          "effect": "read_only",
+          "timeout_seconds": 3600,
+          "transitions": [
+            {"on": "artifact.validated", "target": "train_compressor"},
+            {"on": "artifact.invalid", "target": "$failed"}
+          ]
+        },
+        "train_compressor": {
+          "invoke": {"component": "vision_distillation", "operation": "train_compressor", "inputs": {
+            "cache": {"artifact": "teacher_cache"},
+            "validation": {"artifact": "cache_validation"},
+            "steps": {"parameter": "optimizer_steps"},
+            "run_directory": {"context": "run_directory"}
+          }},
+          "publishes": {"checkpoint": "compressor_checkpoint", "gallery": "eval_gallery", "metrics": "training_metrics"},
+          "idempotency": "receipt_required",
+          "effect": "process",
+          "timeout_seconds": 86400,
+          "transitions": [
+            {"on": "worker.completed", "target": "release_resources"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        },
+        "release_resources": {
+          "invoke": {"component": "core", "operation": "release_resources", "inputs": {
+            "concurrency_key": {"literal": "coverage-vision-distillation"}
+          }},
+          "idempotency": "replay_safe",
+          "effect": "resource",
+          "transitions": [
+            {"on": "resource.released", "target": "$completed"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        }
+      }
+    },
+    "controls": {"catalog": {
+      "eval_every": {
+        "type": "integer", "default": 100, "minimum": 1, "maximum": 10000,
+        "apply": "next_optimizer_step", "mutable_after_start": true,
+        "targets": ["vision_distillation.train_compressor.eval_every"], "unit": "optimizer_step"
+      }
+    }},
+    "observability": {
+      "heartbeat_seconds": 5,
+      "metrics": [
+        {"name": "train.distillation_loss", "type": "gauge", "unit": "dimensionless", "step_domain": "optimizer_step", "aggregation": "weighted_mean"},
+        {"name": "train.images_per_second", "type": "gauge", "unit": "image/second", "step_domain": "optimizer_step", "aggregation": "mean"}
+      ],
+      "retain_raw_metrics_days": 30,
+      "eval_gallery_artifact": "eval_gallery"
+    },
+    "recovery": {
+      "exact_resume": false,
+      "checkpoint_artifact": "compressor_checkpoint",
+      "reconcile": "fail_closed",
+      "orphan_policy": "leave_and_block",
+      "graceful_stop_seconds": 300
+    }
+  }
+}

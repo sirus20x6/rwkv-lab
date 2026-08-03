@@ -1,0 +1,97 @@
+diff --git a/mage_flow/models/mage_flow.py b/mage_flow/models/mage_flow.py
+index 69dabe3..bb7ea17 100644
+--- a/mage_flow/models/mage_flow.py
++++ b/mage_flow/models/mage_flow.py
+@@ -60,6 +60,12 @@ class MageFlow(nn.Module):
+         super().__init__()
+         self.params = params
+         self.checkpoint = params.checkpoint
++        # Training frontends may narrow activation checkpointing to the blocks
++        # that actually own trainable parameters and/or provide a selective
++        # checkpoint context.  ``None`` preserves the released all-block
++        # behavior, so inference and existing training configs are unchanged.
++        self.checkpoint_block_indices: frozenset[int] | None = None
++        self.checkpoint_context_fn = None
+         self.in_channels = params.in_channels
+         self.out_channels = params.out_channels
+         self.inner_dim = params.hidden_size  # num_attention_heads * attention_head_dim
+@@ -120,7 +126,19 @@ class MageFlow(nn.Module):
+         attention_kwargs = attention_kwargs or {}
+ 
+         for _index_block, block in enumerate(self.transformer_blocks):
+-            if self.training and self.checkpoint:
++            checkpoint_indices = self.checkpoint_block_indices
++            should_checkpoint = (
++                self.training
++                and self.checkpoint
++                and (
++                    checkpoint_indices is None
++                    or _index_block in checkpoint_indices
++                )
++            )
++            if should_checkpoint:
++                checkpoint_kwargs: dict[str, Any] = {"use_reentrant": False}
++                if self.checkpoint_context_fn is not None:
++                    checkpoint_kwargs["context_fn"] = self.checkpoint_context_fn
+                 txt, img = torch.utils.checkpoint.checkpoint(
+                     block,
+                     img,  # hidden_states
+@@ -129,7 +147,7 @@ class MageFlow(nn.Module):
+                     ms_pe,  # image_rotary_emb
+                     txt_cu_seqlens,  # txt_cu_lens
+                     img_cu_seqlens,  # img_cu_lens
+-                    use_reentrant=False,
++                    **checkpoint_kwargs,
+                 )
+ 
+             else:
+diff --git a/mage_flow/pipeline.py b/mage_flow/pipeline.py
+index 3e5aaba..32c3807 100644
+--- a/mage_flow/pipeline.py
++++ b/mage_flow/pipeline.py
+@@ -649,7 +649,13 @@ class MageFlowPipeline:
+         self.device = device
+ 
+     @classmethod
+-    def from_pretrained(cls, repo_dir: str, device: str = "cuda"):
++    def from_pretrained(
++        cls,
++        repo_dir: str,
++        device: str = "cuda",
++        *,
++        attn_type: str = "flash2",
++    ):
+         """Load a Mage-Flow diffusers-style repo (``model_index.json`` +
+         ``transformer/`` ``vae/`` ``scheduler/`` ``text_encoder/``).
+ 
+@@ -657,7 +663,7 @@ class MageFlowPipeline:
+         (e.g. ``"microsoft/Mage-Flow-4B"``), which is downloaded and cached
+         automatically on first use.
+         """
+-        return cls(load_from_repo(repo_dir, device), device)
++        return cls(load_from_repo(repo_dir, device, attn_type=attn_type), device)
+ 
+     def generate(self, prompts, **kw) -> list[Image.Image]:
+         """Packed multi-resolution t2i. ``prompts`` is a list (or a single
+@@ -710,7 +716,12 @@ def _resolve_repo_dir(repo_dir: str) -> str:
+     return snapshot_download(repo_id=repo_dir)
+ 
+ 
+-def load_from_repo(repo_dir: str, device: str = "cuda") -> MageFlowModel:
++def load_from_repo(
++    repo_dir: str,
++    device: str = "cuda",
++    *,
++    attn_type: str = "flash2",
++) -> MageFlowModel:
+     """Load a Mage-Flow diffusers-style repo (model_index.json + transformer/
+     vae/ scheduler/). Transformer weights come from the bf16 safetensors;
+     VAE + text encoder are built from the sources recorded in model_index.json.
+@@ -745,6 +756,7 @@ def load_from_repo(repo_dir: str, device: str = "cuda") -> MageFlowModel:
+         txt_max_length=tcfg.get("txt_max_length", 2048),
+         packing=tcfg.get("packing", True),
+         static_shift=tcfg.get("static_shift", 6.0),
++        attn_type=attn_type,
+     )
+     model = MageFlowModel(cfg)
+     sd = load_file(_safe_subpath(repo_dir, "transformer", "diffusion_pytorch_model.safetensors"),

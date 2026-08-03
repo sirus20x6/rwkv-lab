@@ -12,7 +12,6 @@ Usage:
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -23,11 +22,7 @@ from .load_converted import load_converted_model
 from .engram_integration import install_engram, offload_engram_embedding
 from .safe_torch import safe_torch_load
 
-_ENGRAM_PATH = Path("/thearray/git/engram/python")
-if str(_ENGRAM_PATH) not in sys.path:
-    sys.path.insert(0, str(_ENGRAM_PATH))
-
-from engram_ext.engram_module import EngramConfig  # noqa: E402
+from engram_ext.engram_module import EngramConfig
 
 
 def _read_patch(patch_path: Path) -> dict[str, torch.Tensor]:

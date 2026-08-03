@@ -17,6 +17,7 @@ dependencies = [
     "safetensors>=0.4",
     "einops>=0.8",
     "numpy>=1.26",
+    "PyYAML>=6",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +38,8 @@ full = [
     "pillow>=10",
     "imagehash>=4.3",
     "requests>=2.31",
+    "zstandard>=0.23",
+    "peft>=0.18.1",
 ]
 vision = [
     "datasets>=2.20",  # includes PyArrow for embedded-image Parquet corpora
@@ -49,6 +52,14 @@ test = [
     "pytest>=8",
     "pytest-xdist>=3.6",
 ]
+# The TrainVM control plane is optional for standalone algorithm imports, but
+# every authority-launched trainer installs this extra. Generated protobuf
+# bindings are checked in so workers never need protoc at runtime.
+trainvm-worker = [
+    "grpcio>=1.82",
+    "pillow>=10",
+    "protobuf>=6.33,<7",
+]
 # NVIDIA's Operator API is optional: ordinary CUDA and CPU installs retain the
 # cuBLAS/Triton fallback. Native adoption additionally requires an SM120 kernel
 # in the installed registry and a parity/latency qualification receipt.
@@ -58,6 +69,15 @@ sm120 = [
 
 [project.urls]
 Repository = "https://github.com/sirus20x6/rwkv-lab"
+
+[project.scripts]
+ltx23-lora = "rwkv_lab.ltx23_lora:main"
+mage-flow-pretrain = "rwkv_lab.mage_flow_pretrain:main"
+mage-flow-expert-train = "rwkv_lab.mage_flow_expert_train:main"
+ao3-cpt-prepare = "rwkv_lab.ao3_cpt_data:main"
+ao3-cpt-tokens = "rwkv_lab.ao3_cpt_tokens:main"
+qwen-ao3-cpt = "rwkv_lab.qwen_ao3_cpt:main"
+trainvm-worker = "rwkv_lab.trainvm_adapters.entrypoint:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -72,4 +92,6 @@ rwkv_lab = ["assets/*.txt"]
 testpaths = ["tests"]
 markers = [
     "gpu: uses a CUDA device and must run in the serialized GPU phase",
+    "fla: needs the real flash-linear-attention package installed, not a fake",
+    "slow: spawns benchmark subprocesses; runs in CI but not in a tight loop",
 ]

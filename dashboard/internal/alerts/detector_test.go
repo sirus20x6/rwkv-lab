@@ -1,6 +1,7 @@
 package alerts
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -184,6 +185,16 @@ func TestStallAlertFiresWithoutIngestedEvidence(t *testing.T) {
 	if kinds := alertKinds(t, database); kinds["stall"] != 1 {
 		t.Fatalf("stall alert missing for evidence-less hung process: %v", kinds)
 	}
+	logAge = 1
+	detector.checkStall(proc, 1)
+	if kinds := alertKinds(t, database); kinds["stall"] != 0 {
+		t.Fatalf("recovered stall remained in live banner: %v", kinds)
+	}
+	var historical int
+	if err := database.QueryRow(`SELECT count(*) FROM alerts WHERE run_name='vision' AND kind='stall'`).
+		Scan(&historical); err != nil || historical != 1 {
+		t.Fatalf("resolved stall audit row missing: count=%d err=%v", historical, err)
+	}
 }
 
 func TestMonitoringSuspendedAlertIsOneShotAndClears(t *testing.T) {
@@ -211,5 +222,121 @@ func TestMonitoringSuspendedAlertIsOneShotAndClears(t *testing.T) {
 	detector.noteMonitoringGate(proc, "train stats query failed: disk I/O error")
 	if kinds := alertKinds(t, database); kinds["monitoring_suspended"] != 2 {
 		t.Fatalf("re-entry after recovery did not re-alert: %v", kinds)
+	}
+}
+
+func TestCriticalAlertsAndSteeringDiagnosticsAreObservationOnly(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "trainboard.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	runID, err := database.EnsureRun("vision", t.TempDir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAlertRows(t, database, runID, nil, []db.EvalRow{
+		{Step: 1, PPL: alertMetric(1), TS: 1},
+		{Step: 2, PPL: alertMetric(1), TS: 2},
+		{Step: 3, PPL: alertMetric(2), TS: 3, Extra: `{"loop_max_rw":0,"loop_lr_mult":2,"loop_live":1}`},
+	})
+	detector := &Detector{
+		db: database, runsDir: t.TempDir(), lastRaised: map[string]float64{},
+	}
+	proc := sysmon.Proc{RunName: "vision", PID: int32(os.Getpid())}
+	if !detector.raise(proc, "codec_collapse", "critical", 900, "critical observation") {
+		t.Fatal("critical observation was not recorded")
+	}
+	detector.scanRun(proc, runID, db.TrainStats{
+		N: 10, LastStep: 900, LastLoss: 1, OldestLoss: 2,
+	}, nil, nil)
+
+	kinds := alertKinds(t, database)
+	if kinds["codec_collapse"] != 1 || kinds["auto_stop"] != 0 ||
+		kinds["loop_stall"] != 1 || kinds["anti_grokking_collapse"] != 1 {
+		t.Fatalf("unexpected observation-only alerts: %v", kinds)
+	}
+	controls, err := database.GetControls("vision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(controls) != 0 {
+		t.Fatalf("alert detector wrote legacy trainer controls: %+v", controls)
+	}
+}
+
+func TestMemoryPathDeadRequiresPersistentValidRecallEvidence(t *testing.T) {
+	mostlyLive := make([]float64, 20)
+	for i := range mostlyLive {
+		mostlyLive[i] = 5e-3
+	}
+	mostlyLive[0] = 0
+	if got := classifyMemoryPath(mostlyLive).verdict; got != memoryPathAlive {
+		t.Fatalf("one zero-injection batch gave verdict %d", got)
+	}
+	dead := make([]float64, 20)
+	dead[len(dead)-1] = 1e-2
+	if got := classifyMemoryPath(dead).verdict; got != memoryPathDead {
+		t.Fatalf("persistent near-zero injection gave verdict %d", got)
+	}
+}
+
+func TestMemoryPathThinEvidenceIsUnknownRatherThanHealthy(t *testing.T) {
+	// A run with no such path at all stays silent.
+	if got := classifyMemoryPath(nil).verdict; got != memoryPathAbsent {
+		t.Fatalf("run without the path gave verdict %d", got)
+	}
+	// Fewer injection rows than the evidence floor is UNKNOWN, not healthy:
+	// injection stats ride a coarse --log-grokking-metrics cadence, so a
+	// 50-train-row window can legitimately hold only a handful.
+	thin := make([]float64, memDeadMinSamples-1)
+	evidence := classifyMemoryPath(thin)
+	if evidence.verdict != memoryPathUnknown {
+		t.Fatalf("thin window gave verdict %d", evidence.verdict)
+	}
+	if evidence.rows != memDeadMinSamples-1 || evidence.finite != memDeadMinSamples-1 {
+		t.Fatalf("thin window evidence counts = %+v", evidence)
+	}
+}
+
+func TestMemoryPathNaNDilutionDoesNotRaiseDead(t *testing.T) {
+	// injection_rms returns a/b, so NaN is reachable. 45 NaNs beside 10 zeros
+	// must not be read as "persistently ~0 on 10/50 rows".
+	diluted := make([]float64, 50)
+	for i := range diluted {
+		diluted[i] = math.NaN()
+	}
+	for i := 0; i < 10; i++ {
+		diluted[i] = 0
+	}
+	evidence := classifyMemoryPath(diluted)
+	if evidence.verdict != memoryPathUnknown {
+		t.Fatalf("NaN-diluted window gave verdict %d (%+v)", evidence.verdict, evidence)
+	}
+	if evidence.finite != 10 || evidence.dead != 10 || evidence.rows != 50 {
+		t.Fatalf("NaN-diluted evidence counts = %+v", evidence)
+	}
+	// The same ten zeros with no NaN padding remain a real dead-path finding.
+	if got := classifyMemoryPath(diluted[:10]).verdict; got != memoryPathDead {
+		t.Fatalf("undiluted near-zero window gave verdict %d", got)
+	}
+}
+
+func TestCodecCollapseUsesRobustWindowNotOneBatch(t *testing.T) {
+	if _, ok := robustCodecRel([]float64{0.9, 0.9}); ok {
+		t.Fatal("codec collapse judged a window thinner than its evidence floor")
+	}
+	// One atypical batch above the threshold must not carry the window.
+	if median, ok := robustCodecRel([]float64{0.9, 0.1, 0.11, 0.12, 0.1}); !ok || median > codecRelWarn {
+		t.Fatalf("single spike drove the codec median: %v ok=%v", median, ok)
+	}
+	// A genuinely collapsed codec still fires.
+	if median, ok := robustCodecRel([]float64{0.62, 0.58, 0.61, 0.6}); !ok || median <= codecRelWarn {
+		t.Fatalf("persistent codec collapse was not detected: %v ok=%v", median, ok)
+	}
+	// Non-finite rows are dropped, not counted toward the evidence floor.
+	if _, ok := robustCodecRel([]float64{math.NaN(), math.Inf(1), 0.6}); ok {
+		t.Fatal("non-finite codec rows satisfied the evidence floor")
 	}
 }

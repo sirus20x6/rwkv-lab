@@ -1,6 +1,6 @@
 // Package server wires the HTTP surface for trainboard: the static front-end
 // shell, the Datastar SSE stream, the Pixi series endpoints, and the
-// confirm-gated control actions. This file holds the router + lifecycle; the
+// native TrainVM control plane. This file holds the router + lifecycle; the
 // per-area handlers live in handlers.go, stream.go, and control.go.
 package server
 
@@ -16,19 +16,23 @@ import (
 	"trainboard/internal/alerts"
 	"trainboard/internal/db"
 	"trainboard/internal/sysmon"
+	trainvmstore "trainboard/internal/trainvm"
 )
 
 // Config is the immutable wiring for a Server.
 type Config struct {
-	Addr     string           // e.g. "127.0.0.1:9124"
-	RunsDir  string           // /thearray/git/moe-mla/runs
-	RepoRoot string           // /thearray/git/moe-mla
-	Static   fs.FS            // front-end assets (web.Static())
-	DB       *db.DB           // datastore
-	Sampler  *sysmon.Sampler  // live telemetry
-	Detector *alerts.Detector // divergence/health detector
-	LibDir   string           // converted_layers_lib path (conversion board)
-	NLayers  int              // base-model layer count (0 = autodetect/default)
+	Addr      string                  // e.g. "127.0.0.1:9124"
+	RunsDir   string                  // /thearray/git/moe-mla/runs
+	RepoRoot  string                  // /thearray/git/moe-mla
+	Static    fs.FS                   // front-end assets (web.Static())
+	DB        *db.DB                  // datastore
+	Sampler   *sysmon.Sampler         // live telemetry
+	Detector  *alerts.Detector        // divergence/health detector
+	TrainVM   trainvmstore.ReadModel  // read-only native control-plane projection
+	Authoring *trainvmstore.Authoring // schema/example/native semantic preview
+	Commander trainvmstore.Commander  // mutations through native gRPC authority only
+	LibDir    string                  // converted_layers_lib path (conversion board)
+	NLayers   int                     // base-model layer count (0 = autodetect/default)
 	// ImageRoots confines eval-sample image serving: an artifact-listed image
 	// path must resolve (symlinks included) inside one of these directories.
 	// Empty falls back to {RunsDir, RepoRoot}.
@@ -38,11 +42,14 @@ type Config struct {
 // Server owns the HTTP handler, the datastore, the live telemetry sampler, and
 // the (single-user, localhost) selected-run state.
 type Server struct {
-	cfg      Config
-	mux      *http.ServeMux
-	db       *db.DB
-	sampler  *sysmon.Sampler
-	detector *alerts.Detector
+	cfg       Config
+	mux       *http.ServeMux
+	db        *db.DB
+	sampler   *sysmon.Sampler
+	detector  *alerts.Detector
+	trainvm   trainvmstore.ReadModel
+	authoring *trainvmstore.Authoring
+	commander trainvmstore.Commander
 
 	mu sync.RWMutex
 	// Per-viewer selection: each browser tab sends a stable tabId signal, so one
@@ -51,10 +58,14 @@ type Server struct {
 	selected map[string]string
 	seen     map[string]time.Time
 
-	queueAuto atomic.Bool // opt-in: auto-start next queued run when GPU free (off by default)
-
 	discoveryMu sync.Mutex
 	discovery   map[string]discoveryEntry // short-lived filesystem discovery cache
+
+	// eval_samples listings, cached per run against the directory mtime so the
+	// 2s gallery retry loop cannot turn into a ReadDir per request over a
+	// directory that grows one file per eval step (eval_samples.go).
+	evalIndexMu sync.Mutex
+	evalIndex   map[string]*evalSampleIndex
 
 	// tick is the shared per-second snapshot every stream connection renders.
 	// Computed once by refreshLoop (tickcache.go) so N tabs cost one query suite.
@@ -69,9 +80,13 @@ const tabTTL = 10 * time.Minute
 func New(cfg Config) *Server {
 	s := &Server{
 		cfg: cfg, mux: http.NewServeMux(), db: cfg.DB, sampler: cfg.Sampler, detector: cfg.Detector,
+		trainvm:   cfg.TrainVM,
+		authoring: cfg.Authoring,
+		commander: cfg.Commander,
 		selected:  map[string]string{},
 		seen:      map[string]time.Time{},
 		discovery: map[string]discoveryEntry{},
+		evalIndex: map[string]*evalSampleIndex{},
 	}
 	s.routes()
 	return s
@@ -137,7 +152,13 @@ func (s *Server) gcTabsLocked() {
 func (s *Server) routes() {
 	// Static assets under /static/. http.FileServerFS serves the embedded FS.
 	fileServer := http.FileServerFS(s.cfg.Static)
-	s.mux.Handle("GET /static/", http.StripPrefix("/static/", fileServer))
+	staticHandler := http.StripPrefix("/static/", fileServer)
+	s.mux.Handle("GET /static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The dashboard is a live control surface, not a versioned web app. Keep
+		// old tabs from mixing a cached JS client with a newly restarted server.
+		w.Header().Set("Cache-Control", "no-store")
+		staticHandler.ServeHTTP(w, r)
+	}))
 
 	// App shell.
 	s.mux.HandleFunc("GET /{$}", s.handleIndex)
@@ -152,48 +173,65 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/stream", s.handleStream)
 	// Select a run for the detail panel (one-shot SSE).
 	s.mux.HandleFunc("GET /api/run/{name}", s.handleRunSelect)
+	// Lightweight authoritative selected-run refresh. The browser polls this in
+	// addition to SSE so a suspended/reconnected stream cannot leave headline
+	// eval metrics stale while charts continue updating.
+	s.mux.HandleFunc("GET /api/runs/{name}/live", s.handleRunLive)
 	// Columnar metric series for the Pixi charts.
 	s.mux.HandleFunc("GET /api/series/{run}", s.handleSeries)
 	// Timeline markers (checkpoints/alerts/controls/actions) for chart overlays.
 	s.mux.HandleFunc("GET /api/timeline/{run}", s.handleTimeline)
+	s.mux.HandleFunc("GET /api/trainvm/runs", s.handleTrainVMRuns)
+	s.mux.HandleFunc("GET /api/trainvm/host-authority", s.handleTrainVMHostAuthority)
+	s.mux.HandleFunc("GET /api/trainvm/runs/{run}", s.handleTrainVMRun)
+	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/plan", s.handleTrainVMCompiledPlan)
+	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/timeline", s.handleTrainVMTimeline)
+	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/metrics", s.handleTrainVMMetrics)
+	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/artifacts", s.handleTrainVMArtifacts)
+	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/artifacts/{artifact}/content", s.handleTrainVMArtifactContent)
+	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/observability", s.handleTrainVMObservability)
+	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/checkpoints", s.handleTrainVMCheckpoints)
+	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/galleries", s.handleTrainVMGalleries)
+	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/galleries/{artifact}", s.handleTrainVMGallery)
+	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/galleries/{artifact}/items/{index}/{role}", s.handleTrainVMGalleryImage)
+	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/profiles", s.handleTrainVMProfiles)
+	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/profiles/{artifact}", s.handleTrainVMProfile)
+	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/profiles/{artifact}/trace", s.handleTrainVMProfileTrace)
+	s.mux.HandleFunc("GET /api/trainvm/schema", s.handleTrainVMSchema)
+	s.mux.HandleFunc("GET /api/trainvm/example", s.handleTrainVMExample)
+	s.mux.HandleFunc("GET /api/trainvm/operations", s.handleTrainVMOperations)
+	s.mux.HandleFunc("GET /api/trainvm/training-components", s.handleTrainVMTrainingComponents)
+	s.mux.HandleFunc("POST /api/trainvm/compile", s.handleTrainVMCompile)
+	s.mux.HandleFunc("POST /api/trainvm/experiments", s.handleTrainVMSubmit)
+	s.mux.HandleFunc("POST /api/trainvm/runs/{run}/diff", s.handleTrainVMPlanDiff)
+	s.mux.HandleFunc("POST /api/trainvm/runs/{run}/controls", s.handleTrainVMControls)
+	s.mux.HandleFunc("POST /api/trainvm/runs/{run}/actions", s.handleTrainVMRunAction)
+	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/controls", s.handleTrainVMControlView)
 	// Metric catalog (known cols + extra_json keys) for the dynamic metric picker.
 	s.mux.HandleFunc("GET /api/metrics/{run}", s.handleMetrics)
 	// Qualitative image/reference/generated-caption snapshot for an eval point.
+	s.mux.HandleFunc("GET /api/runs/{name}/eval-samples", s.handleEvalSampleIndex)
+	s.mux.HandleFunc("GET /api/runs/{name}/eval-samples/latest", s.handleLatestEvalSamples)
 	s.mux.HandleFunc("GET /api/runs/{name}/eval-samples/{step}", s.handleEvalSamples)
 	s.mux.HandleFunc("GET /api/runs/{name}/eval-samples/{step}/image/{index}", s.handleEvalSampleImage)
+	s.mux.HandleFunc("GET /api/runs/{name}/eval-samples/{step}/target-image/{index}", s.handleEvalSampleTargetImage)
 
-	// Control actions (confirm-gated client-side, validated + audited here).
-	s.mux.HandleFunc("POST /api/runs/{name}/stop", s.handleStop)
-	s.mux.HandleFunc("POST /api/runs/{name}/checkpoint", s.handleCheckpoint)
+	// Legacy run metadata remains editable. Training lifecycle and live-control
+	// mutations are intentionally available only through the native TrainVM API.
 	s.mux.HandleFunc("POST /api/runs/{name}/notes", s.handleNotes)
 	s.mux.HandleFunc("POST /api/runs/{name}/tags", s.handleTags)
-	s.mux.HandleFunc("POST /api/runs/{name}/control", s.handleSetControl)
-	s.mux.HandleFunc("POST /api/runs/{name}/sample", s.handleSample)
 	s.mux.HandleFunc("GET /api/runs/{name}/architecture", s.handleArchitecture)
-	s.mux.HandleFunc("POST /api/launch", s.handleLaunch)
 	s.mux.HandleFunc("POST /api/alerts/ack", s.handleAckAlert)
-	s.mux.HandleFunc("POST /api/autostop", s.handleAutoStop)
-	s.mux.HandleFunc("POST /api/convboard/accept", s.handleAcceptLayer)
 	s.mux.HandleFunc("GET /api/leaderboard", s.handleLeaderboard)
 	s.mux.HandleFunc("GET /api/experiments", s.handleExperiments)
-	s.mux.HandleFunc("POST /api/experiments/run", s.handleRunConfig)
-	s.mux.HandleFunc("POST /api/experiments/launch", s.handleLaunchExperiment)
 	s.mux.HandleFunc("GET /api/rlvr", s.handleRLVR)
-	s.mux.HandleFunc("POST /api/rlvr/launch", s.handleLaunchRLVR)
 	s.mux.HandleFunc("GET /api/posttraining", s.handlePosttraining)
+	// Read-only dataset validation remains available. It does not create runs,
+	// mutate datasets, or exercise trainer process authority.
 	s.mux.HandleFunc("POST /api/posttraining/inspect", s.handleInspectPosttraining)
-	s.mux.HandleFunc("POST /api/posttraining/version", s.handleVersionPosttraining)
-	s.mux.HandleFunc("POST /api/posttraining/campaign", s.handleLaunchPosttrainingCampaign)
-	s.mux.HandleFunc("POST /api/posttraining/compare", s.handleComparePosttraining)
-	s.mux.HandleFunc("POST /api/posttraining/feedback", s.handlePosttrainingFeedback)
 	s.mux.HandleFunc("GET /api/qualification", s.handleQualification)
-	s.mux.HandleFunc("POST /api/qualification/run", s.handleRunQualification)
 	s.mux.HandleFunc("GET /api/research-capabilities", s.handleResearchCapabilities)
 	s.mux.HandleFunc("GET /api/diff", s.handleDiff)
-	s.mux.HandleFunc("POST /api/queue/enqueue", s.handleEnqueue)
-	s.mux.HandleFunc("POST /api/queue/start-next", s.handleStartNext)
-	s.mux.HandleFunc("POST /api/queue/cancel", s.handleCancelQueue)
-	s.mux.HandleFunc("POST /api/queue/auto", s.handleQueueAuto)
 
 	// NOTE: /api/runs/{run}/architecture and /api/system/history are phase 4b.
 }
@@ -208,6 +246,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(data)
 }
 
@@ -221,8 +260,7 @@ func (s *Server) Run(ctx context.Context) error {
 		Handler:           s.mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	go s.queueManager(ctx) // reconcile running items + opt-in auto-start
-	go s.refreshLoop(ctx)  // shared once-per-second tick snapshot for all streams
+	go s.refreshLoop(ctx) // shared once-per-second tick snapshot for all streams
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

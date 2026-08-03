@@ -147,19 +147,11 @@ func (ig *Ingester) ingestFile(name, runDir, jsonl string) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		// Commit the new file generation even when it is currently empty or
-		// contains only a partial first line. Otherwise the old nonzero cursor
-		// survives the early return below and causes a full reset every poll.
+		// Reset the cursor in memory. When complete replacement lines exist, the
+		// old rows are reset in the same transaction that inserts all replacement
+		// rows below. This is essential: publishing an empty reset first lets a
+		// browser accept an empty generation and permanently lose chart history.
 		cur = db.Cursor{Size: size, Mtime: mtime, FileID: fileID}
-		// Publish the reset immediately, including when the replacement log is
-		// empty or currently ends in a partial line. Otherwise open browsers can
-		// retain abandoned future points until another complete event is written.
-		// Cursor + revision are one commit so a crash cannot acknowledge this file
-		// generation without also waking already-open browsers.
-		if err := ig.db.ResetRunEventsAndPublish(
-			runID, mtime, jsonl, cur); err != nil {
-			return 0, err
-		}
 	}
 	// Transparently seed fingerprints for cursors created by older schemas.
 	if cur.Offset > 0 && (cur.TailHash == "" || cur.FileID == "") {
@@ -173,6 +165,13 @@ func (ig *Ingester) ingestFile(name, runDir, jsonl string) (int, error) {
 		}
 	}
 	if cur.Offset == size {
+		if rewritten {
+			// An empty replacement has no event batch with which to combine the
+			// reset, so publish the empty generation directly.
+			if err := ig.db.ResetRunEventsAndPublish(runID, mtime, jsonl, cur); err != nil {
+				return 0, err
+			}
+		}
 		return 0, nil // nothing new
 	}
 	if _, err := f.Seek(cur.Offset, io.SeekStart); err != nil {
@@ -186,6 +185,13 @@ func (ig *Ingester) ingestFile(name, runDir, jsonl string) (int, error) {
 	// mid-append) waits for the next scan.
 	lastNL := bytes.LastIndexByte(chunk, '\n')
 	if lastNL < 0 {
+		if rewritten {
+			// Remember a replacement containing only a partial first line so the
+			// old generation is not displayed and reset on every polling cycle.
+			if err := ig.db.ResetRunEventsAndPublish(runID, mtime, jsonl, cur); err != nil {
+				return 0, err
+			}
+		}
 		return 0, nil // no complete line yet
 	}
 	complete := chunk[:lastNL+1]
@@ -197,7 +203,12 @@ func (ig *Ingester) ingestFile(name, runDir, jsonl string) (int, error) {
 		}
 	}
 
-	batch, err := ig.db.Begin()
+	var batch *db.IngestBatch
+	if rewritten {
+		batch, err = ig.db.BeginReplacement(runID)
+	} else {
+		batch, err = ig.db.Begin()
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -221,16 +232,13 @@ func (ig *Ingester) ingestFile(name, runDir, jsonl string) (int, error) {
 		}
 		n++
 	}
-	if err := batch.Commit(); err != nil {
-		return 0, err
-	}
-
 	newOffset := cur.Offset + int64(lastNL+1)
 	tailHash, err := tailHashAt(f, newOffset)
 	if err != nil {
+		batch.Rollback()
 		return 0, err
 	}
-	if err := ig.db.PublishCursor(runID, mtime, jsonl, db.Cursor{
+	if err := batch.CommitAndPublish(runID, mtime, jsonl, db.Cursor{
 		Offset: newOffset, Size: size, Mtime: mtime, TailHash: tailHash,
 		FileID: fileID,
 	}); err != nil {

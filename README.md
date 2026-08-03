@@ -25,7 +25,7 @@ and resume state so that a promising graph is evidence—not just a screenshot.
 
 | Track | What is implemented | Maturity |
 |---|---|---|
-| **Multimodal RWKV** | Frozen MoonViT and RWKV backbones; trainable visual bridge/resampler; optional SigLIP2 + DINOv2 + SAM fusion; grounding losses; recurrent loops; NextLat; Engram; qualitative eval artifacts | Active experiment pipeline |
+| **Multimodal RWKV** | Existing MoonViT adapter pipeline plus a raw-pixel 1.222B spatial Vision-RWKV student trained from frozen MoonViT + SigLIP2 + DINOv2 + SAM compressor targets; grounding losses; recurrent loops; NextLat; Engram; qualitative eval artifacts | Active experiment pipeline |
 | **Cross-architecture conversion** | Exact Gated DeltaNet → RWKV-7 remap plus isolated attention-layer distillation, assembly, and consolidation | GDN remap validated; attention conversion experimental |
 | **RWKV training research** | Recurrent depth, latent prediction, lexical and online memory, Muon-family optimizers, mixed-context training, and typed post-training | Reference implementations and A/B tooling |
 | **Training systems** | Exact-resume checkpoints, immutable receipts, watchdogs, kernel qualification, and a Go/SQLite/Pixi dashboard | Operational research infrastructure |
@@ -223,6 +223,24 @@ the accepted training manifest.
 - [`fetch_i1_sources.py`](scripts/fetch_i1_sources.py) and
   [`repair_midjourney_i1_alignment.py`](scripts/repair_midjourney_i1_alignment.py)
   acquire and validate i1 source/caption alignment.
+- [`build_captioning_first_mix.py`](scripts/build_captioning_first_mix.py)
+  remixes locally available i1 images for pixel-grounded captioning rather
+  than text-to-image conditioning. It selects consensus-supported caption
+  variants, uses ImageNet's full-image target, removes aesthetic/rendering
+  metadata, materializes 100,000 unique caption/OCR images, and holds out every
+  source. Another 10,000 images carry compact, genuine instance-mask and
+  normalized-box targets: 5,000 COCO category tasks plus 5,000
+  concept-conditioned LVIS tasks spanning roughly 1,200 names, including
+  LVIS-verified negative concepts. Both sources have image-disjoint held-out
+  splits.
+  [`fetch_coco_sam.sh`](scripts/fetch_coco_sam.sh) resumably acquires and CRC
+  checks the official COCO 2017 train images, COCO annotations, and LVIS v1
+  training annotations.
+  [`run_radio1d_captioning_first.sh`](scripts/run_radio1d_captioning_first.sh)
+  warm-starts the complete RADIO adapter stack from the preceding run's
+  evidence-backed best checkpoint. C-RADIOv4 remains the sole image encoder:
+  its already-distilled SAM 3 representation is trained through the COCO/LVIS
+  mask tasks rather than redundantly running a second SAM encoder.
 - [`vision_cache.py`](src/rwkv_lab/vision_cache.py),
   [`vision_fusion_cache.py`](src/rwkv_lab/vision_fusion_cache.py), and
   [`vision_sam_dense_cache.py`](src/rwkv_lab/vision_sam_dense_cache.py) use
@@ -257,6 +275,7 @@ evidence boundary.
 | **Memory / retrieval** | Engram lexical bank · ROSA suffix-automaton (+ golden reference) · Fast-weight Product-Key Memory · L³ large-lookup · WriteSAE state autoencoder | [`engram_lmb`](src/rwkv_lab/engram_lmb.py) · [`rosa_sam`](src/rwkv_lab/rosa_sam.py) · [`fwpkm`](src/rwkv_lab/fwpkm.py) · [`l3_lookup`](src/rwkv_lab/l3_lookup.py) · [`write_sae`](src/rwkv_lab/write_sae.py) |
 | **Scale & online adaptation (P0)** | u-μP · Titans/MIRAS/ATLAS/Nested memory · offline sleep and guarded adapter consolidation · GSPO/Dr.GRPO/DAPO RLVR · bounded Reasoning Cache | [`u_mup`](src/rwkv_lab/u_mup.py) · [`online_memory`](src/rwkv_lab/online_memory.py) · [`adapter_consolidation`](src/rwkv_lab/adapter_consolidation.py) · [`reasoning_cache`](src/rwkv_lab/reasoning_cache.py) |
 | **Post-training platform** | typed SFT/preference/feedback/PRM/RLVR · named LoRA/NF4 QLoRA · initial-state and per-token state-offset adapters · routed state bank · paired confirmation · safe exports | [`posttrain_data`](src/rwkv_lab/posttrain_data.py) · [`adapters`](src/rwkv_lab/adapters.py) · [`state_tuning`](src/rwkv_lab/state_tuning.py) · [`state_bank`](src/rwkv_lab/state_bank.py) |
+| **Generative video** | official LTX-2.3 text-to-video LoRA · joint synchronized audio-video or video-only adaptation · low-VRAM and multi-GPU launch · config/provenance receipts | [`ltx23_lora`](src/rwkv_lab/ltx23_lora.py) |
 | **Training systems (P1)** | RegMix/MDE · NVFP4 · Decoupled DiLoCo · stable triangular delta-rule inversion oracle/qualification | [`data_mixture`](src/rwkv_lab/data_mixture.py) · [`nvfp4`](src/rwkv_lab/nvfp4.py) · [`diloco`](src/rwkv_lab/diloco.py) · [`triangular_delta`](src/rwkv_lab/triangular_delta.py) |
 | **Representation, decoding, serving & tracing (P2)** | BLT · byte-aware/SuperBPE experiments · decoder matrix · typed policies · EAGLE-3 · paged state forks · B³D-RWKV · HiLS · recurrent attribution | [`byte_patches`](src/rwkv_lab/byte_patches.py) · [`tokenizer_experiments`](src/rwkv_lab/tokenizer_experiments.py) · [`decoding_eval`](src/rwkv_lab/decoding_eval.py) · [`decoding_policy`](src/rwkv_lab/decoding_policy.py) · [`recurrent_serving`](src/rwkv_lab/recurrent_serving.py) |
 | **Optimizers & dynamics** | Muon (+ MuonClip) · 12 spectral-Muon levers (Muonᵖ, Aurora, MONA, DDC, RSAV, Hierarchical, Distance-Aware, ARO…) · PC-Layer preconditioning · layerwise-LR · grokking probes | [`spectral_muon`](src/rwkv_lab/spectral_muon.py) · [`muon_helpers`](src/rwkv_lab/muon_helpers.py) · [`pc_layer`](src/rwkv_lab/pc_layer.py) |
@@ -787,6 +806,66 @@ outcome/process reward heads, and batched recurrent preference scoring. A candid
 when output and gradient parity pass and median timing improves; activation offload uses PyTorch's
 [`save_on_cpu`](https://docs.pytorch.org/docs/stable/autograd.html#torch.autograd.graph.save_on_cpu).
 
+### LTX-2.3 video LoRA training
+
+[`ltx23_lora.py`](src/rwkv_lab/ltx23_lora.py) adds a reproducible front end for
+[Lightricks' official LTX-2.3 trainer](https://github.com/Lightricks/LTX-2/tree/main/packages/ltx-trainer).
+It intentionally uses the current LTX-2 monorepo rather than the obsolete LTX-Video 2B/13B trainer.
+The integration creates an official structured YAML, preprocesses and caches video/audio latents plus
+Gemma text embeddings, launches single- or multi-GPU LoRA training, and records the external Git
+revision, trainer version, complete commands, and config hash in a receipt. Model code and weights
+remain governed by the upstream repository and
+[LTX-2 license](https://github.com/Lightricks/LTX-2/blob/main/LICENSE).
+
+Clone and install the official trainer, then download the trainable 2.3 dev checkpoint and Gemma
+encoder as described by its model card:
+
+```bash
+git clone https://github.com/Lightricks/LTX-2 /opt/LTX-2
+cd /opt/LTX-2 && uv sync
+
+hf download Lightricks/LTX-2.3 ltx-2.3-22b-dev.safetensors \
+  --local-dir /models/ltx-2.3
+hf download google/gemma-3-12b-it-qat-q4_0-unquantized \
+  --local-dir /models/gemma-3-12b
+```
+
+The metadata input is JSON, JSONL, or CSV with at least `video` and `caption` columns:
+
+```json
+{"video":"videos/clip-001.mp4","caption":"A detailed chronological description of the scene and its audio."}
+```
+
+Inspect the generated config and exact commands without doing expensive work:
+
+```bash
+python -m rwkv_lab.ltx23_lora plan \
+  --ltx-root /opt/LTX-2 \
+  --model-path /models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
+  --text-encoder-path /models/gemma-3-12b \
+  --dataset data/videos.jsonl --work-dir runs/ltx23-style
+```
+
+Preprocess and train in one command:
+
+```bash
+python -m rwkv_lab.ltx23_lora run \
+  --ltx-root /opt/LTX-2 \
+  --model-path /models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
+  --text-encoder-path /models/gemma-3-12b \
+  --dataset data/videos.jsonl --work-dir runs/ltx23-style \
+  --resolution-bucket 960x544x49 \
+  --rank 32 --steps 2000 --learning-rate 1e-4 \
+  --lora-trigger MYSTYLE
+```
+
+By default this jointly trains synchronized video and audio attention. `--no-audio` produces a
+video-only LoRA and skips audio latent extraction. `--include-ffn` also targets the video/audio FFNs;
+otherwise the official attention-only target set is used. `--low-vram` selects rank 16, 8-bit AdamW,
+INT8 Quanto, and an 8-bit text encoder. Add `--processes N` for Accelerate multi-GPU training.
+`prepare` and `train` can be run separately, and `--resume PATH` loads an existing LoRA checkpoint.
+Spatial dimensions must be divisible by 32 and frame counts must satisfy `frames % 8 == 1`.
+
 ### Production kernel qualification
 
 [`production_kernels.py`](src/rwkv_lab/production_kernels.py) applies the same parity-before-speed
@@ -885,8 +964,9 @@ adapter, overwrite a parent, or publish a model.
 ### FSDP2 checkpoints and safe exports
 
 From-scratch pretraining has an opt-in [PyTorch FSDP2](https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html)
-path with bottom-up RWKV block sharding, collective gradient clipping, per-block activation
-checkpointing, optional CPU offload, and [Distributed Checkpoint](https://docs.pytorch.org/tutorials/recipes/distributed_checkpoint_recipe.html)
+path with bottom-up RWKV block sharding, adjacent-block forward/backward prefetch, collective
+gradient clipping, accumulation-aware gradient synchronization, per-block activation checkpointing,
+optional CPU offload, and [Distributed Checkpoint](https://docs.pytorch.org/tutorials/recipes/distributed_checkpoint_recipe.html)
 model/optimizer/per-rank RNG state. Resuming at the same world size is exact; model and optimizer
 state can be resharded by DCP when the world size changes.
 
@@ -1007,6 +1087,7 @@ reproducibility machinery, not third-party artifacts.
 | [`posttrain_data.py`](src/rwkv_lab/posttrain_data.py) / [`posttrain_train.py`](src/rwkv_lab/posttrain_train.py) | Typed tool-aware post-training JSONL, streamed content-addressed token caches, qualified reset-mask recurrent multipacking, and executable native-RWKV SFT/DPO/KTO/ORPO/SimPO/ORM/PRM training. |
 | [`adapters.py`](src/rwkv_lab/adapters.py) / [`quantization.py`](src/rwkv_lab/quantization.py) / [`preference.py`](src/rwkv_lab/preference.py) | Named RWKV-aware LoRA lifecycle, portable packed-NF4 QLoRA qualification, and reference-tested preference/outcome/process-reward losses. |
 | [`posttrain_campaign.py`](src/rwkv_lab/posttrain_campaign.py) / [`adapter_recursive.py`](src/rwkv_lab/adapter_recursive.py) / [`posttrain_kernels.py`](src/rwkv_lab/posttrain_kernels.py) / [`production_kernels.py`](src/rwkv_lab/production_kernels.py) | Equal-token paired/confirmation campaigns and receipts; adapter-first immutable recursive parents; parity-before-speed training and serving kernel qualification. |
+| [`ltx23_lora.py`](src/rwkv_lab/ltx23_lora.py) | Reproducible plan/preprocess/train orchestration for official LTX-2.3 video or joint audio-video LoRAs, including low-VRAM and multi-GPU profiles. |
 | [`distributed.py`](src/rwkv_lab/distributed.py) / [`export_bundle.py`](src/rwkv_lab/export_bundle.py) | FSDP2 + DCP exact-resume state and verified safetensors export packages with lineage/promotion receipts. |
 
 ### Looped recurrence (recurrent depth)
@@ -1130,6 +1211,9 @@ to use each lever—is [`TRAINING_LEVERS.md`](TRAINING_LEVERS.md). Headline leve
 | `--sm-da-muon` | Distance-Aware adaptive radius | [2605.18999](https://arxiv.org/abs/2605.18999) |
 | `--sm-aro` | ARO-Sinkhorn (replaces orthogonalization) | [2602.09006](https://arxiv.org/abs/2602.09006) |
 | `--sm-aro-compile 1` | parity-tested compiled ARO tensor subgraph; foreach Adam fallback stays exact-resumable | [2602.09006](https://arxiv.org/abs/2602.09006) |
+| `--sm-batched 1` / `--sm-compile-ns 1` | batch same-shaped full-matrix Newton–Schulz updates; optionally compile the static CUDA graph | [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) |
+| `--sm-row-update-floor F` · `--sm-radial-brake B` · `--sm-radius-pin 1` · `--sm-cautious-wd 1` | per-output-row update floor, outward radial damping, finite-step radius correction, and sign-agreeing weight decay | [modded-nanogpt Track 3](https://github.com/KellerJordan/modded-nanogpt/tree/master/records/track_3_optimization) |
+| `--muon-adam-interval N` | average fallback-Adam gradients and update embedding/head/norm parameters every N Muon steps | [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) |
 | `--sm-ddc-strength` | Dead-Direction Conditioner | [2606.29176](https://arxiv.org/abs/2606.29176) |
 
 **Distillation & grokking**
@@ -1147,6 +1231,14 @@ to use each lever—is [`TRAINING_LEVERS.md`](TRAINING_LEVERS.md). Headline leve
 | `--engram` (+`--engram-sites/-drow/-rows/-boundary-id`) | Engram lexical memory bank as a native lever (token-SAM recall, gated injection, copy head) | [DeepSeek Engram](https://github.com/deepseek-ai/Engram) |
 | `--deepembed` · `--de-mode hidden` · `--de-shift` · `--de-emb-res` | DeepEmbed per-token FFN gates — v1 output gate, BlinkDL-exact bilinear hidden gate, separate gate token-shift, emb-residual fold | [BlinkDL RWKV-LM](https://github.com/BlinkDL/RWKV-LM) (rwkv_v7a) |
 | `--ctx-buckets meta.json` | mixed context-length training over packed 512…32k buckets, reciprocal batch (B = budget/T), pad-masked loss, per-bucket val | — |
+| `--ctx-curriculum 0:256,0.33:512,0.67:1024` | staged short→full context training with reciprocal batch scaling and a constant token budget | [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) |
+| `--compile-prewarm` (+ `--compile-fullgraph`) | compile every curriculum shape before training starts; optionally require one static full graph (fails closed when a backend graph-breaks) | [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) |
+| `--cpu-prefetch` / `--fsdp-prefetch-depth N` | exact-resume-safe pinned CPU batch lookahead / explicit adjacent-block FSDP2 collective overlap | [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) |
+| `--fused-channelmix` / `--cached-fp8-up` | custom-autograd Linear→ReLU²→Linear training block; optional once-per-step FP8 W1 with BF16 backward | [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) |
+| `--fp8-head` | include the vocabulary projection in TorchAO rowwise FP8 while retaining fused CE | [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) |
+| `--fsdp-sparse-embeddings` | keep token/DeepEmbed/Engram tables replicated and average only locally touched gradient rows | [modded-nanogpt sparse comms](https://github.com/KellerJordan/modded-nanogpt/tree/master/records/track_1_short/2026-02-06_SparseBigramGradient) |
+| `--tail-ema-start F` · `--tail-ema-horizon N` · `--tail-ema-blend L` | late EMA excluding embeddings, partially blended only for evaluation | [modded-nanogpt Track 3](https://github.com/KellerJordan/modded-nanogpt/tree/master/records/track_3_optimization) |
+| `--tie-head-until F` / `--lmtp-cooldown-fraction F` | tie embedding/head early then split with cloned optimizer moments; linearly remove LMTP compute in the tail | [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) |
 | `--grad-accum N` / `--ema d` / `--fp8` / `--optimizer adamw8bit` | large-batch simulation · fp32 EMA shadow weights · torchao fp8 GEMMs · bitsandbytes 8-bit moments | — |
 | `--u-mup-base-width W` (+ `--u-mup-base-depth L`) | u-μP initialization and AdamW LR groups for width/depth scale transfer | [u-μP](https://arxiv.org/abs/2407.17465) |
 | `--online-memory 1` (+ `--online-memory-mode`, `--online-memory-kernel`) | in-forward associative memory; Titans, MIRAS, ATLAS, and learned nested-controller modes; parity-gated compiled scan | [Titans](https://arxiv.org/abs/2501.00663) · [MIRAS](https://arxiv.org/abs/2504.13173) · [ATLAS](https://arxiv.org/abs/2505.23735) · [Nested Learning](https://arxiv.org/abs/2512.24695) |
@@ -1161,7 +1253,7 @@ to use each lever—is [`TRAINING_LEVERS.md`](TRAINING_LEVERS.md). Headline leve
 | Area | Evidence boundary |
 |---|---|
 | Multimodal MoonViT → RWKV training | Implemented with exact resume, explicit train/eval separation, qualitative artifacts, cache receipts, and CPU-tested contracts; caption quality and large-scale convergence remain experimental |
-| Multi-teacher vision compressor/student | Architecture and cache contracts designed; the first teacher shard is an experiment input, not evidence that the proposed deployable student has been trained |
+| Multi-teacher vision compressor/student | The 54M canonical teacher compressor is frozen; the raw-pixel 1.222B spatial RWKV student, exact-resume trainer, teacher reconstruction losses, and frozen-caption-RWKV loss are implemented and in active training. Convergence and caption quality remain experimental |
 | GDN → RWKV-7 conversion (24 layers) | Validated exact remap: cosine 0.999995 and +0.013% full-model perplexity change |
 | Full-attention → RWKV conversion (8 layers) | Active distillation work; the RADLADS proof of concept and two-stage logit-KL path do not yet constitute an end-to-end converted release |
 | From-scratch lever validation | Lab-scale wins include seed-chain **−9.2% PPL**, Engram **15×** induction accuracy across four seeds, and DeepEmbed `de_shift` **−2%** replicated across corpora ([results](#validated-lever-results-from-scratch-lab)) |

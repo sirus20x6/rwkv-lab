@@ -7,6 +7,10 @@ implementations and precision behavior.
 """
 from __future__ import annotations
 
+import importlib.util
+import sys
+from pathlib import Path
+
 import torch
 import torch.nn.functional as F
 
@@ -14,8 +18,34 @@ try:  # Optional: CUDA-stack specific, so it is intentionally not a package dep.
     from flash_attn.ops.triton.cross_entropy import cross_entropy_loss as _flash_ce
     HAS_FUSED_CE = True
 except Exception:  # pragma: no cover - depends on the local CUDA stack
-    _flash_ce = None
-    HAS_FUSED_CE = False
+    # The Triton CE is pure Python/Triton, but importing its package normally
+    # executes flash_attn.__init__ first and therefore loads flash_attn_2_cuda.
+    # After a PyTorch upgrade that optional binary may have a stale C++ ABI even
+    # though the independent Triton kernel remains fully usable. Load only the
+    # CE source in a neutral module so training does not lose the fused path.
+    try:
+        package = importlib.util.find_spec("flash_attn")
+        roots = list(package.submodule_search_locations or []) if package else []
+        source = Path(roots[0]) / "ops/triton/cross_entropy.py"
+        specification = importlib.util.spec_from_file_location(
+            "_rwkv_flash_attn_triton_cross_entropy", source)
+        if specification is None or specification.loader is None:
+            raise ImportError("cannot locate flash-attn Triton CE")
+        module = importlib.util.module_from_spec(specification)
+        sys.modules[specification.name] = module
+        try:
+            specification.loader.exec_module(module)
+        except BaseException:
+            # A partially executed module must not stay importable: a later
+            # `import` would silently receive the broken half-initialized object
+            # instead of retrying (or failing) the load.
+            sys.modules.pop(specification.name, None)
+            raise
+        _flash_ce = module.cross_entropy_loss
+        HAS_FUSED_CE = True
+    except Exception:
+        _flash_ce = None
+        HAS_FUSED_CE = False
 
 
 def masked_token_mean(
@@ -104,7 +134,9 @@ def lmhead_cross_entropy(
     effective_ignore = -100 if ignore_index is None else ignore_index
 
     if fused and HAS_FUSED_CE and flat_h.is_cuda:
-        logits = F.linear(flat_h.to(weight.dtype), weight, bias)
+        # Calling the module (instead of bypassing it with F.linear) preserves
+        # TorchAO Float8Linear's quantized vocabulary GEMM when --fp8-head is on.
+        logits = lm_head(flat_h.to(weight.dtype))
         losses, _ = _flash_ce(logits, flat_labels, inplace_backward=True)
         mask = flat_labels != effective_ignore
         return (losses.float() * mask).sum() / mask.sum().clamp_min(1)
@@ -112,7 +144,7 @@ def lmhead_cross_entropy(
     total = hidden.new_zeros((), dtype=torch.float32)
     for start in range(0, flat_h.shape[0], chunk):
         end = min(start + chunk, flat_h.shape[0])
-        logits = F.linear(flat_h[start:end].to(weight.dtype), weight, bias)
+        logits = lm_head(flat_h[start:end].to(weight.dtype))
         total = total + F.cross_entropy(
             logits.float(), flat_labels[start:end], reduction="sum",
             ignore_index=effective_ignore,

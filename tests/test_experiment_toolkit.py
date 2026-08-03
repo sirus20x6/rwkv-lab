@@ -1,11 +1,14 @@
-import tempfile
 import json
+import math
+import tempfile
 
 import numpy as np
+import pytest
 import torch
 
 from rwkv_lab import registry
-from rwkv_lab.experiment import _block_source, _seeded_batch, factorial_configs
+from rwkv_lab.experiment import (_block_source, _seeded_batch, factorial_configs,
+                                 train_eval)
 from rwkv_lab.experiment_analysis import (alpha_spending, holm_adjust, paired_stats,
                                           pareto_front, sequential_holm)
 from rwkv_lab.synthetic_tasks import make_task
@@ -160,3 +163,27 @@ def test_conversion_layers_and_seeds_are_paired_campaign_units(tmp_path, monkeyp
     assert con.execute("select count(*) from comparisons where campaign_id=?", (cid,)).fetchone()[0] == 1
     assert con.execute("select count(*) from artifacts where campaign_id=?", (cid,)).fetchone()[0] == 12
     con.close()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+@pytest.mark.parametrize("schedule", ["cosine", "constant", "powercool"])
+def test_train_eval_accepts_the_auto_warmup_default(schedule):
+    """--warmup 0 means "auto", not "divide by zero".
+
+    Every schedule must derive its warmup from the resolved `warm` value. A
+    regression here divided by the raw argument and crashed on the first
+    optimizer step of every run that used the documented default.
+    """
+    run = train_eval(make_task("copy:16"), d_model=32, n_layers=2, head_size=16,
+                     lever="baseline", seed=0, device="cuda", steps=3, batch=2,
+                     lr=1e-3, warmup=0, lr_schedule=schedule, profile=False)
+    assert math.isfinite(run["loss"])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_powercool_tolerates_a_warmup_longer_than_the_budget():
+    """A degenerate warmup clamps instead of raising after the model is built."""
+    run = train_eval(make_task("copy:16"), d_model=32, n_layers=2, head_size=16,
+                     lever="baseline", seed=0, device="cuda", steps=3, batch=2,
+                     lr=1e-3, warmup=10_000, lr_schedule="powercool", profile=False)
+    assert math.isfinite(run["loss"])

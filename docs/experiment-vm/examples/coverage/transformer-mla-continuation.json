@@ -1,0 +1,151 @@
+{
+  "api_version": "trainvm.rwkv-lab/v1alpha1",
+  "kind": "Experiment",
+  "metadata": {
+    "name": "coverage-transformer-mla-continuation",
+    "description": "Compiler coverage for provenance sealing and compatible-grade transformer MLA continuation.",
+    "labels": {"family": "transformer-mla", "fixture": "compiler-coverage"}
+  },
+  "spec": {
+    "workspace": {
+      "root": "/thearray/git/moe-mla",
+      "run_directory": "/thearray/git/moe-mla/runs/trainvm-coverage/transformer-mla-continuation",
+      "concurrency_key": "coverage-transformer-mla",
+      "allowed_read_roots": ["/thearray/git/moe-mla"],
+      "allowed_write_roots": ["/thearray/git/moe-mla/runs/trainvm-coverage/transformer-mla-continuation"]
+    },
+    "resources": {
+      "accelerators": {"vendor": "nvidia", "count": 1, "minimum_memory_gib": 40, "exclusive": true},
+      "minimum_host_memory_gib": 64,
+      "cpu_threads": 12,
+      "lease_timeout_seconds": 30,
+      "cpu_io_policy": {"cpu_weight": 100, "io_weight": 100, "omp_threads": 8, "preprocessing_workers": 4, "nice": 0}
+    },
+    "parameters": {
+      "parent_checkpoint_path": {"type": "path", "value": "/thearray/git/moe-mla/fixtures/checkpoints/transformer-parent"},
+      "training_manifest_path": {"type": "path", "value": "/thearray/git/moe-mla/fixtures/corpora/mla-continuation.jsonl"},
+      "optimizer_steps": {"type": "integer", "value": 500}
+    },
+    "artifacts": {
+      "parent_checkpoint": {"type": "checkpoint", "schema": "coverage.transformer-parent.v1", "immutability": "immutable", "fingerprint": "manifest_sha256"},
+      "training_dataset": {"type": "dataset", "schema": "coverage.transformer-corpus.v1", "immutability": "immutable", "fingerprint": "manifest_sha256"},
+      "continuation_checkpoint": {"type": "checkpoint", "schema": "coverage.mla-compatible-checkpoint.v1", "immutability": "immutable", "fingerprint": "manifest_sha256"},
+      "evaluation_report": {"type": "report", "schema": "coverage.mla-evaluation.v1", "immutability": "immutable", "fingerprint": "sha256"}
+    },
+    "components": {
+      "core": {
+        "adapter": "trainvm.core",
+        "version": "1.0.0",
+        "runtime": "builtin",
+        "operations": {
+          "acquire_resources": {"contract": "trainvm.v1.AcquireResources"},
+          "release_resources": {"contract": "trainvm.v1.ReleaseResources"}
+        }
+      },
+      "mla_continuation": {
+        "adapter": "coverage.transformer-mla",
+        "version": "1.0.0-coverage",
+        "runtime": "python_worker",
+        "operations": {
+          "seal_inputs": {"contract": "coverage.transformer_mla.v1.SealContinuationInputs"},
+          "continue_training": {"contract": "coverage.transformer_mla.v1.ContinueCompatible"},
+          "evaluate": {"contract": "coverage.transformer_mla.v1.EvaluateCheckpoint"}
+        }
+      }
+    },
+    "workflow": {
+      "entrypoint": "acquire_resources",
+      "nodes": {
+        "acquire_resources": {
+          "invoke": {"component": "core", "operation": "acquire_resources", "inputs": {
+            "concurrency_key": {"literal": "coverage-transformer-mla"}
+          }},
+          "idempotency": "receipt_required",
+          "effect": "resource",
+          "transitions": [
+            {"on": "resource.acquired", "target": "seal_inputs"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        },
+        "seal_inputs": {
+          "invoke": {"component": "mla_continuation", "operation": "seal_inputs", "inputs": {
+            "parent": {"parameter": "parent_checkpoint_path"},
+            "dataset": {"parameter": "training_manifest_path"},
+            "run_directory": {"context": "run_directory"}
+          }},
+          "publishes": {"parent": "parent_checkpoint", "dataset": "training_dataset"},
+          "idempotency": "replay_safe",
+          "effect": "read_only",
+          "timeout_seconds": 600,
+          "transitions": [
+            {"on": "operation.completed", "target": "continue_training"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        },
+        "continue_training": {
+          "invoke": {"component": "mla_continuation", "operation": "continue_training", "inputs": {
+            "parent": {"artifact": "parent_checkpoint"},
+            "dataset": {"artifact": "training_dataset"},
+            "steps": {"parameter": "optimizer_steps"},
+            "run_directory": {"context": "run_directory"}
+          }},
+          "publishes": {"checkpoint": "continuation_checkpoint"},
+          "idempotency": "receipt_required",
+          "effect": "process",
+          "timeout_seconds": 86400,
+          "transitions": [
+            {"on": "worker.completed", "target": "evaluate"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        },
+        "evaluate": {
+          "invoke": {"component": "mla_continuation", "operation": "evaluate", "inputs": {
+            "checkpoint": {"artifact": "continuation_checkpoint"},
+            "dataset": {"artifact": "training_dataset"}
+          }},
+          "publishes": {"report": "evaluation_report"},
+          "idempotency": "replay_safe",
+          "effect": "process",
+          "timeout_seconds": 3600,
+          "transitions": [
+            {"on": "operation.completed", "target": "release_resources"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        },
+        "release_resources": {
+          "invoke": {"component": "core", "operation": "release_resources", "inputs": {
+            "concurrency_key": {"literal": "coverage-transformer-mla"}
+          }},
+          "idempotency": "replay_safe",
+          "effect": "resource",
+          "transitions": [
+            {"on": "resource.released", "target": "$completed"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        }
+      }
+    },
+    "controls": {"catalog": {
+      "auxiliary_loss_weight": {
+        "type": "number", "default": 0.1, "minimum": 0, "maximum": 1,
+        "apply": "restart", "mutable_after_start": false,
+        "targets": ["mla_continuation.continue_training.auxiliary_loss_weight"], "unit": "ratio"
+      }
+    }},
+    "observability": {
+      "heartbeat_seconds": 10,
+      "metrics": [
+        {"name": "train.loss", "type": "gauge", "unit": "dimensionless", "step_domain": "optimizer_step", "aggregation": "weighted_mean"},
+        {"name": "eval.perplexity", "type": "gauge", "unit": "dimensionless", "step_domain": "optimizer_step", "aggregation": "min"}
+      ],
+      "retain_raw_metrics_days": 30
+    },
+    "recovery": {
+      "exact_resume": false,
+      "checkpoint_artifact": "continuation_checkpoint",
+      "reconcile": "restart_from_checkpoint",
+      "orphan_policy": "leave_and_block",
+      "graceful_stop_seconds": 180
+    }
+  }
+}

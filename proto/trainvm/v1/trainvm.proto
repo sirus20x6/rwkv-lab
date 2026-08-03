@@ -1,0 +1,806 @@
+syntax = "proto3";
+
+package trainvm.v1;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "trainboard/gen/trainvm/v1;trainvmv1";
+
+// The protocol is deliberately independent of the human-authored experiment
+// document. TrainVM validates that document and returns a canonical plan hash.
+
+enum DesiredState {
+  DESIRED_STATE_UNSPECIFIED = 0;
+  DESIRED_STATE_QUEUED = 1;
+  DESIRED_STATE_RUNNING = 2;
+  DESIRED_STATE_PAUSED = 3;
+  DESIRED_STATE_CANCELLED = 4;
+  DESIRED_STATE_COMPLETED = 5;
+}
+
+enum ObservedState {
+  OBSERVED_STATE_UNSPECIFIED = 0;
+  OBSERVED_STATE_DRAFT = 1;
+  OBSERVED_STATE_VALIDATED = 2;
+  OBSERVED_STATE_QUEUED = 3;
+  OBSERVED_STATE_ACQUIRING = 4;
+  OBSERVED_STATE_RUNNING = 5;
+  OBSERVED_STATE_PAUSING = 6;
+  OBSERVED_STATE_PAUSED = 7;
+  OBSERVED_STATE_RECOVERING = 8;
+  OBSERVED_STATE_COMPLETING = 9;
+  OBSERVED_STATE_COMPLETED = 10;
+  OBSERVED_STATE_CANCELLING = 11;
+  OBSERVED_STATE_CANCELLED = 12;
+  OBSERVED_STATE_FAILING = 13;
+  OBSERVED_STATE_FAILED = 14;
+  OBSERVED_STATE_BLOCKED = 15;
+}
+
+enum ApplyPoint {
+  APPLY_POINT_UNSPECIFIED = 0;
+  APPLY_POINT_IMMEDIATE = 1;
+  APPLY_POINT_NEXT_MICROBATCH = 2;
+  APPLY_POINT_NEXT_OPTIMIZER_STEP = 3;
+  APPLY_POINT_NEXT_EVAL = 4;
+  APPLY_POINT_NEXT_CHECKPOINT = 5;
+  APPLY_POINT_RESTART = 6;
+}
+
+enum ArtifactKind {
+  ARTIFACT_KIND_UNSPECIFIED = 0;
+  ARTIFACT_KIND_PATH = 1;
+  ARTIFACT_KIND_CHECKPOINT = 2;
+  ARTIFACT_KIND_DATASET = 3;
+  ARTIFACT_KIND_IMAGE_GALLERY = 4;
+  ARTIFACT_KIND_METRICS = 5;
+  ARTIFACT_KIND_REPORT = 6;
+  ARTIFACT_KIND_OPAQUE = 7;
+}
+
+message Diagnostic {
+  enum Severity {
+    SEVERITY_UNSPECIFIED = 0;
+    SEVERITY_INFO = 1;
+    SEVERITY_WARNING = 2;
+    SEVERITY_ERROR = 3;
+  }
+
+  Severity severity = 1;
+  string code = 2;
+  string document_path = 3;
+  string message = 4;
+  string help = 5;
+}
+
+message ScalarValue {
+  oneof value {
+    double number_value = 1;
+    sint64 integer_value = 2;
+    bool boolean_value = 3;
+    string string_value = 4;
+  }
+}
+
+message RunIdentity {
+  string run_id = 1;
+  uint64 revision = 2;
+  string plan_hash = 3;
+}
+
+message RunSummary {
+  RunIdentity identity = 1;
+  string experiment_name = 2;
+  DesiredState desired_state = 3;
+  ObservedState observed_state = 4;
+  string current_node_id = 5;
+  string current_attempt_id = 6;
+  uint64 optimizer_step = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+  google.protobuf.Timestamp last_heartbeat_at = 10;
+  string wait_reason = 11;
+  string failure_summary = 12;
+  uint64 effective_control_revision = 13 [deprecated = true];
+  uint64 latest_requested_control_revision = 14;
+  uint64 latest_effective_control_revision = 15;
+  uint64 last_event_sequence = 16;
+  // Immutable fork provenance, replayed from the run.created submission. A
+  // forked run keeps its parent's exact identity so a comparison view never
+  // has to infer lineage from names, timestamps, or ordering. All three are
+  // set together or not at all; an unforked run leaves them empty.
+  string forked_from_run_id = 17;
+  uint64 forked_from_run_revision = 18;
+  string forked_from_plan_hash = 19;
+}
+
+enum ControlType {
+  CONTROL_TYPE_UNSPECIFIED = 0;
+  CONTROL_TYPE_NUMBER = 1;
+  CONTROL_TYPE_INTEGER = 2;
+  CONTROL_TYPE_BOOLEAN = 3;
+  CONTROL_TYPE_STRING = 4;
+  CONTROL_TYPE_ENUMERATION = 5;
+}
+
+message SubmitExperimentRequest {
+  string source_document = 1;
+  string source_format = 2; // json or yaml
+  bool create_run = 3;
+  string idempotency_key = 4;
+  string expected_journal_id = 5;
+  string author = 6;
+  string reason = 7;
+  string expected_plan_hash = 8; // required for create_run; fences preview/compiler skew
+  string expected_adapter_lock_digest = 9; // required for create_run; fences registry skew
+  string expected_training_component_lock_digest = 10; // required only when preview selects training components
+  string forked_from_run_id = 11; // optional; all fork fields are required together for create_run
+  uint64 expected_parent_run_revision = 12;
+  string expected_parent_plan_hash = 13;
+}
+
+message SubmitExperimentResponse {
+  string canonical_document = 1;
+  string canonical_plan = 2;
+  string plan_hash = 3;
+  repeated Diagnostic diagnostics = 4;
+  RunIdentity run = 5; // absent when create_run is false or validation fails
+  string adapter_lock_digest = 6;
+  string canonical_adapter_lock = 7;
+  string training_component_lock_digest = 8;
+  string canonical_training_component_lock = 9;
+}
+
+message PlanDiffRequest {
+  string run_id = 1;
+  uint64 expected_revision = 2;
+  string proposed_source_document = 3;
+  string source_format = 4;
+  string expected_journal_id = 5;
+  string expected_current_plan_hash = 6;
+  string expected_proposed_plan_hash = 7;
+}
+
+message PlanDiffResponse {
+  bool adoptable_in_place = 1;
+  string semantic_diff = 2;
+  string proposed_plan_hash = 3;
+  repeated Diagnostic diagnostics = 4;
+}
+
+message PauseCommand {
+  bool checkpoint_first = 1;
+  bool release_resources = 2;
+}
+
+message ResumeCommand {}
+
+message CheckpointCommand {
+  string reason = 1;
+}
+
+message CancelCommand {
+  string reason = 1;
+  google.protobuf.Duration graceful_timeout = 2;
+}
+
+message ControlAssignment {
+  string key = 1;
+  ScalarValue value = 2;
+}
+
+message ControlPatchCommand {
+  uint64 expected_control_revision = 1;
+  repeated ControlAssignment assignments = 2;
+  uint64 control_revision = 3;
+  ApplyPoint apply_point = 4;
+  bool requires_pause = 5;
+}
+
+message AdoptPlanRevisionCommand {
+  string proposed_source_document = 1;
+  string source_format = 2;
+  string expected_plan_hash = 3;
+}
+
+message RunCommandRequest {
+  string run_id = 1;
+  uint64 expected_run_revision = 2;
+  string idempotency_key = 3;
+  string author = 4;
+  string reason = 5;
+  string expected_journal_id = 6;
+  string expected_plan_hash = 7;
+  oneof command {
+    PauseCommand pause = 10;
+    ResumeCommand resume = 11;
+    CheckpointCommand checkpoint = 12;
+    CancelCommand cancel = 13;
+    ControlPatchCommand controls = 14;
+    AdoptPlanRevisionCommand adopt_plan = 15;
+  }
+}
+
+message ControlCommandResult {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_REQUESTED = 1;
+    STATUS_APPLIED = 2;
+    STATUS_REJECTED = 3;
+    STATUS_RESTART_REQUIRED = 4;
+  }
+
+  string command_id = 1;
+  uint64 control_revision = 2;
+  ApplyPoint apply_point = 3;
+  bool requires_pause = 4;
+  Status status = 5;
+  repeated ControlAssignment assignments = 6;
+}
+
+message CheckpointCommandResult {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_REQUESTED = 1;
+    STATUS_APPLIED = 2;
+    STATUS_REJECTED = 3;
+  }
+
+  string command_id = 1;
+  uint64 controller_sequence = 2;
+  Status status = 3;
+  string reason = 4;
+  uint64 optimizer_step = 5;
+  string artifact_id = 6;
+}
+
+message LifecycleCommandResult {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_PAUSE = 1;
+    KIND_RESUME = 2;
+    KIND_CANCEL = 3;
+  }
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_REQUESTED = 1;
+    STATUS_APPLIED = 2;
+    STATUS_REJECTED = 3;
+  }
+
+  string command_id = 1;
+  uint64 controller_sequence = 2;
+  Kind kind = 3;
+  Status status = 4;
+  bool checkpoint_first = 5;
+  bool release_resources = 6;
+  uint64 optimizer_step = 7;
+  string artifact_id = 8;
+  string reason = 9;
+  google.protobuf.Duration graceful_timeout = 10;
+}
+
+message RunCommandResponse {
+  enum Disposition {
+    DISPOSITION_UNSPECIFIED = 0;
+    DISPOSITION_ACCEPTED = 1;
+    DISPOSITION_ALREADY_APPLIED = 2;
+    DISPOSITION_REJECTED = 3;
+    DISPOSITION_CONFLICT = 4;
+  }
+
+  Disposition disposition = 1;
+  RunSummary run = 2;
+  uint64 command_sequence = 3;
+  repeated Diagnostic diagnostics = 4;
+  ControlCommandResult control = 5;
+  CheckpointCommandResult checkpoint = 6;
+  LifecycleCommandResult lifecycle = 7;
+}
+
+message ArtifactManifest {
+  string artifact_id = 1;
+  string logical_name = 2;
+  ArtifactKind kind = 3;
+  string schema = 4;
+  string uri = 5;
+  uint64 size_bytes = 6;
+  string fingerprint_algorithm = 7;
+  string fingerprint = 8;
+  bool complete = 9;
+  string producer_node_id = 10;
+  string producer_attempt_id = 11;
+  repeated string parent_artifact_ids = 12;
+  google.protobuf.Timestamp published_at = 13;
+  // Monotonic within the accepted run/node/attempt worker session. The
+  // controller durably acknowledges this sequence only after the manifest is
+  // committed to the journal.
+  uint64 worker_sequence = 14;
+}
+
+message EventEnvelope {
+  uint64 journal_sequence = 1;
+  string event_id = 2;
+  string run_id = 3;
+  uint64 plan_revision = 4;
+  string node_id = 5;
+  string attempt_id = 6;
+  uint64 worker_sequence = 7;
+  string event_type = 8;
+  uint32 event_version = 9;
+  google.protobuf.Timestamp wall_time = 10;
+  uint64 monotonic_time_ns = 11;
+  optional uint64 optimizer_step = 12;
+  google.protobuf.Any payload = 13;
+  uint64 run_revision = 14;
+  // Worker ingress uses this bounded canonical JSON object until every adapter
+  // event has a registered protobuf payload type. Inbound Any payloads are
+  // rejected by the authority in this protocol revision.
+  bytes canonical_json_payload = 15;
+}
+
+message MetricSample {
+  string name = 1;
+  ScalarValue value = 2;
+  string unit = 3;
+  string step_domain = 4;
+  uint64 step = 5;
+  double sample_weight = 6;
+  map<string, string> labels = 7;
+  google.protobuf.Timestamp observed_at = 8;
+  // Monotonic within the accepted run/node/attempt worker session.
+  uint64 worker_sequence = 9;
+}
+
+message WorkerHello {
+  string run_id = 1;
+  string node_id = 2;
+  string attempt_id = 3;
+  string launch_nonce = 4;
+  string adapter = 5;
+  string adapter_version = 6;
+  string code_fingerprint = 7;
+  repeated string capabilities = 8;
+  uint64 last_acked_controller_sequence = 9;
+  string concurrency_key = 10;
+  string lease_id = 11;
+  uint64 fencing_token = 12;
+}
+
+message WorkerHeartbeat {
+  uint64 worker_sequence = 1;
+  uint64 optimizer_step = 2;
+  string phase = 3;
+  google.protobuf.Timestamp observed_at = 4;
+}
+
+// One immutable execution phase selected by the authority from the compiled
+// experiment and the exact worker invocation.  The request digest binds the
+// declaration and invocation identity; workers must echo it in the receipt.
+message WorkerExecutionPhaseRequest {
+  enum Phase {
+    PHASE_UNSPECIFIED = 0;
+    PHASE_COMPILE = 1;
+    PHASE_WARMUP = 2;
+  }
+
+  Phase phase = 1;
+  bool enabled = 2;
+  optional uint64 steps = 3;
+  string request_digest = 4;
+}
+
+// Durable evidence that a worker executed (or deliberately skipped) one
+// authority-requested compile/warmup phase.  State fingerprints cover model,
+// optimizer, RNG, scaler, data cursor, schedule and effective controls so a
+// disposable warmup cannot silently advance the training trajectory.
+message WorkerExecutionPhaseReceipt {
+  enum Disposition {
+    DISPOSITION_UNSPECIFIED = 0;
+    DISPOSITION_COMPLETED = 1;
+    DISPOSITION_SKIPPED = 2;
+    DISPOSITION_FAILED = 3;
+  }
+
+  WorkerExecutionPhaseRequest.Phase phase = 1;
+  Disposition disposition = 2;
+  string request_digest = 3;
+  uint64 steps_executed = 4;
+  string state_fingerprint_before = 5;
+  string state_fingerprint_after = 6;
+  repeated Diagnostic diagnostics = 7;
+  string concurrency_key = 8;
+  string lease_id = 9;
+  uint64 fencing_token = 10;
+  uint64 worker_sequence = 11;
+  google.protobuf.Timestamp started_at = 12;
+  google.protobuf.Timestamp completed_at = 13;
+}
+
+message ControlPatchAcknowledgement {
+  enum Disposition {
+    DISPOSITION_UNSPECIFIED = 0;
+    DISPOSITION_APPLIED = 1;
+    DISPOSITION_REJECTED = 2;
+    DISPOSITION_RESTART_REQUIRED = 3;
+  }
+
+  uint64 control_revision = 1;
+  Disposition disposition = 2;
+  ApplyPoint apply_point = 3;
+  uint64 effective_step = 4;
+  repeated ControlAssignment effective_values = 5;
+  repeated Diagnostic diagnostics = 6;
+  string command_id = 7;
+  string concurrency_key = 8;
+  string lease_id = 9;
+  uint64 fencing_token = 10;
+  uint64 worker_sequence = 11;
+  google.protobuf.Timestamp acknowledged_at = 12;
+}
+
+message CheckpointAcknowledgement {
+  enum Disposition {
+    DISPOSITION_UNSPECIFIED = 0;
+    DISPOSITION_APPLIED = 1;
+    DISPOSITION_REJECTED = 2;
+  }
+
+  string command_id = 1;
+  Disposition disposition = 2;
+  uint64 optimizer_step = 3;
+  string artifact_id = 4;
+  repeated Diagnostic diagnostics = 5;
+  string concurrency_key = 6;
+  string lease_id = 7;
+  uint64 fencing_token = 8;
+  uint64 worker_sequence = 9;
+  google.protobuf.Timestamp acknowledged_at = 10;
+}
+
+message LifecycleAcknowledgement {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_PAUSE = 1;
+    KIND_RESUME = 2;
+    KIND_CANCEL = 3;
+  }
+  enum Disposition {
+    DISPOSITION_UNSPECIFIED = 0;
+    DISPOSITION_APPLIED = 1;
+    DISPOSITION_REJECTED = 2;
+  }
+
+  string command_id = 1;
+  Kind kind = 2;
+  Disposition disposition = 3;
+  uint64 optimizer_step = 4;
+  string artifact_id = 5;
+  repeated Diagnostic diagnostics = 6;
+  string concurrency_key = 7;
+  string lease_id = 8;
+  uint64 fencing_token = 9;
+  uint64 worker_sequence = 10;
+  google.protobuf.Timestamp acknowledged_at = 11;
+}
+
+message WorkerToController {
+  oneof message {
+    WorkerHello hello = 1;
+    WorkerHeartbeat heartbeat = 2;
+    EventEnvelope event = 3;
+    MetricSample metric = 4;
+    ArtifactManifest artifact = 5;
+    ControlPatchAcknowledgement control_ack = 6;
+    CheckpointAcknowledgement checkpoint_ack = 7;
+    LifecycleAcknowledgement lifecycle_ack = 8;
+    WorkerExecutionPhaseReceipt phase_receipt = 9;
+  }
+}
+
+message WorkerCommand {
+  uint64 controller_sequence = 1;
+  string command_id = 2;
+  oneof command {
+    PauseCommand pause = 10;
+    ResumeCommand resume = 11;
+    CheckpointCommand checkpoint = 12;
+    CancelCommand cancel = 13;
+    ControlPatchCommand controls = 14;
+  }
+}
+
+message WorkerWelcome {
+  enum Disposition {
+    DISPOSITION_UNSPECIFIED = 0;
+    DISPOSITION_ACCEPTED = 1;
+    DISPOSITION_REPLAYED = 2;
+    DISPOSITION_ALREADY_COMPLETED = 3;
+  }
+
+  Disposition disposition = 1;
+  string journal_id = 2;
+  string plan_hash = 3;
+  uint64 plan_revision = 4;
+  string run_id = 5;
+  uint64 run_revision = 6;
+  string node_id = 7;
+  string attempt_id = 8;
+  string launch_nonce = 9;
+  string concurrency_key = 10;
+  string lease_id = 11;
+  uint64 fencing_token = 12;
+  string dispatch_id = 13;
+  string component = 14;
+  string operation = 15;
+  uint64 acknowledged_worker_sequence = 16;
+  bytes canonical_invocation_json = 17;
+  string invocation_digest = 18;
+  repeated WorkerExecutionPhaseRequest execution_phase_requests = 19;
+}
+
+message WorkerReceipt {
+  string event_id = 1;
+  uint64 acknowledged_worker_sequence = 2;
+  string run_id = 3;
+  uint64 committed_run_revision = 4;
+  ObservedState observed_state = 5;
+  string next_node_id = 6;
+  string next_attempt_id = 7;
+}
+
+message ControllerToWorker {
+  oneof message {
+    WorkerCommand command = 1;
+    uint64 acknowledge_worker_sequence = 2;
+    WorkerWelcome welcome = 3;
+    WorkerReceipt receipt = 4;
+  }
+}
+
+message GetRunRequest {
+  string run_id = 1;
+}
+
+// The immutable compiled plan behind a run. Dashboards use this authority read
+// to render the workflow FSM without opening the journal or inferring a graph
+// from event/log filenames.
+message GetCompiledPlanRequest {
+  string run_id = 1;
+}
+
+message GetCompiledPlanResponse {
+  string journal_id = 1;
+  RunIdentity run = 2;
+  string canonical_plan_json = 3;
+}
+
+message ListRunsRequest {
+  repeated ObservedState observed_states = 1;
+  map<string, string> labels = 2;
+  uint32 limit = 3;
+  string page_token = 4;
+}
+
+message ListRunsResponse {
+  repeated RunSummary runs = 1;
+  string next_page_token = 2;
+  string journal_id = 3;
+}
+
+message WatchEventsRequest {
+  repeated string run_ids = 1;
+  uint64 after_journal_sequence = 2;
+  repeated string event_types = 3;
+  // A bounded replay closes successfully after this many events, or after the
+  // current durable prefix is exhausted. Zero keeps the live stream open.
+  uint32 replay_limit = 4;
+  // Optional inclusive upper fence for a stable historical snapshot. It is
+  // valid only for bounded replay and must be greater than the after cursor.
+  uint64 through_journal_sequence = 5;
+  // Return the newest matching events first. This is valid only for a bounded,
+  // upper-fenced replay and lets observers cold-load a fixed-size tail window.
+  bool newest_first = 6;
+  // Return only the newest event for each distinct metric series. A series is
+  // identified by run, node, attempt, metric name, and its complete label map.
+  // This is valid only for an upper-fenced bounded replay filtered to exactly
+  // metric.sampled; it prevents high-rate metrics from starving sparse series
+  // during a dashboard cold load.
+  bool newest_per_metric_series = 7;
+}
+
+message GetControlViewRequest {
+  string run_id = 1;
+}
+
+message ControlDescriptor {
+  ControlType type = 1;
+  ScalarValue default_value = 2;
+  optional double minimum = 3;
+  optional double maximum = 4;
+  repeated ScalarValue values = 5;
+  ApplyPoint apply_point = 6;
+  bool mutable_after_start = 7;
+  bool requires_pause = 8;
+  string description = 9;
+  string unit = 10;
+}
+
+message ControlCommandView {
+  string command_id = 1;
+  uint64 control_revision = 2;
+  ApplyPoint apply_point = 3;
+  repeated ControlAssignment assignments = 4;
+  string author = 5;
+  string reason = 6;
+  ControlCommandResult.Status status = 7;
+  optional uint64 effective_step = 8;
+  repeated ControlAssignment effective_values = 9;
+  repeated Diagnostic diagnostics = 10;
+}
+
+message GetControlViewResponse {
+  map<string, ControlDescriptor> catalog = 1;
+  repeated ControlAssignment effective_values = 2;
+  uint64 latest_requested_revision = 3;
+  uint64 latest_effective_revision = 4;
+  repeated ControlCommandView commands = 5;
+}
+
+message DescriptorRequest {
+  string adapter = 1;
+  string version = 2;
+}
+
+message DescriptorResponse {
+  // Versioned JSON Schema remains the canonical editor/operation descriptor.
+  string schema_json = 1;
+  string schema_hash = 2;
+}
+
+enum HostdLifecycle {
+  HOSTD_LIFECYCLE_UNSPECIFIED = 0;
+  HOSTD_LIFECYCLE_SEALED = 1;
+  HOSTD_LIFECYCLE_STARTUP_AUDITING = 2;
+  HOSTD_LIFECYCLE_STARTUP_BLOCKED = 3;
+  HOSTD_LIFECYCLE_ADMITTING = 4;
+  HOSTD_LIFECYCLE_POISONED = 5;
+}
+
+enum HostdStartupPhase {
+  HOSTD_STARTUP_PHASE_UNSPECIFIED = 0;
+  HOSTD_STARTUP_PHASE_RECONCILING = 1;
+  HOSTD_STARTUP_PHASE_AUDITING = 2;
+  HOSTD_STARTUP_PHASE_ADMITTING = 3;
+  HOSTD_STARTUP_PHASE_EXHAUSTED = 4;
+  HOSTD_STARTUP_PHASE_FAILED = 5;
+}
+
+enum HostdProcessPhase {
+  HOSTD_PROCESS_PHASE_UNSPECIFIED = 0;
+  HOSTD_PROCESS_PHASE_LAUNCH_INTENT = 1;
+  HOSTD_PROCESS_PHASE_SPAWNED = 2;
+  HOSTD_PROCESS_PHASE_TERMINAL_PENDING_RELEASE = 3;
+}
+
+enum HostResourceKind {
+  HOST_RESOURCE_KIND_UNSPECIFIED = 0;
+  HOST_RESOURCE_KIND_ACCELERATOR = 1;
+  HOST_RESOURCE_KIND_ACCELERATOR_PARTITION = 2;
+  HOST_RESOURCE_KIND_HOST_MUTEX = 3;
+}
+
+enum HostAcceleratorVendor {
+  HOST_ACCELERATOR_VENDOR_UNSPECIFIED = 0;
+  HOST_ACCELERATOR_VENDOR_NVIDIA = 1;
+  HOST_ACCELERATOR_VENDOR_AMD = 2;
+  HOST_ACCELERATOR_VENDOR_INTEL = 3;
+  HOST_ACCELERATOR_VENDOR_OTHER = 4;
+}
+
+message HostdCoordinatorAuthorityStatus {
+  string api_version = 1;
+  HostdLifecycle lifecycle = 2;
+  string host_id = 3;
+  string boot_id = 4;
+  string broker_epoch = 5;
+  string inventory_digest = 6;
+  uint64 live_sessions = 7;
+  uint64 admission_sessions = 8;
+  uint64 stale_admission_sessions = 9;
+  uint64 release_only_sessions = 10;
+  bool admission_counts_are_cached_evidence = 11;
+  string startup_audit_receipt_digest = 12;
+  bool startup_audit_passed = 13;
+  string poison_reason = 14;
+}
+
+message HostResourceFenceStatus {
+  HostResourceKind kind = 1;
+  HostAcceleratorVendor vendor = 2;
+  string stable_id = 3;
+  string parent_id = 4;
+  uint64 generation = 5;
+  string inventory_digest = 6;
+  string topology_digest = 7;
+}
+
+message HostdProcessAuthorityStatus {
+  string allocation_id = 1;
+  string journal_id = 2;
+  string run_id = 3;
+  string logical_lease_id = 4;
+  uint64 logical_fencing_token = 5;
+  string launch_id = 6;
+  HostdProcessPhase phase = 7;
+  string cgroup_path = 8;
+  optional int64 host_pid = 9;
+  optional uint64 process_starttime_ticks = 10;
+  bool device_policy_intended = 11;
+  bool device_policy_installed = 12;
+  string device_policy_digest = 13;
+  string device_policy_installation_digest = 14;
+  bool process_policy_intended = 15;
+  bool process_policy_installed = 16;
+  string process_policy_digest = 17;
+  string process_policy_installation_digest = 18;
+  optional bool cgroup_empty = 19;
+  optional bool accelerator_contexts_empty = 20;
+  string context_audit_digest = 21;
+  string terminal_receipt_digest = 22;
+}
+
+message GetHostAuthorityStatusRequest {}
+
+message GetHostAuthorityStatusResponse {
+  string api_version = 1;
+  HostdCoordinatorAuthorityStatus coordinator = 2;
+  HostdStartupPhase startup_phase = 3;
+  uint64 startup_recovery_steps = 4;
+  uint64 remaining_unclosed_process_records = 5;
+  uint64 remaining_terminal_release_records = 6;
+  bool ledger_verified = 7;
+  string ledger_verification_reason = 8;
+  uint64 ledger_sequence = 9;
+  string ledger_chain_hash = 10;
+  uint64 ledger_record_count = 11;
+  uint64 occupancy_ledger_sequence = 12;
+  string occupancy_digest = 13;
+  uint64 active_fence_count = 14;
+  repeated HostResourceFenceStatus active_fences = 15;
+  bool active_fences_truncated = 16;
+  uint64 active_process_count = 17;
+  repeated HostdProcessAuthorityStatus active_processes = 18;
+  bool active_processes_truncated = 19;
+  bool process_launch_enabled = 20;
+  bool mutation_enabled = 21;
+  string mutation_disabled_reason = 22;
+  uint64 lease_renewal_tracked_count = 23;
+  bool lease_renewal_poisoned = 24;
+  string lease_renewal_failure = 25;
+  bool resource_inventory_observed = 26;
+  string current_inventory_digest = 27;
+  string current_inventory_receipt_digest = 28;
+  uint64 degraded_resource_count = 29;
+  string resource_degradation_reason = 30;
+  uint64 resource_inventory_observation_age_ns = 31;
+}
+
+service TrainVM {
+  rpc SubmitExperiment(SubmitExperimentRequest) returns (SubmitExperimentResponse);
+  rpc DiffPlan(PlanDiffRequest) returns (PlanDiffResponse);
+  rpc CommandRun(RunCommandRequest) returns (RunCommandResponse);
+  rpc GetRun(GetRunRequest) returns (RunSummary);
+  rpc GetCompiledPlan(GetCompiledPlanRequest) returns (GetCompiledPlanResponse);
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+  rpc WatchEvents(WatchEventsRequest) returns (stream EventEnvelope);
+  rpc GetControlView(GetControlViewRequest) returns (GetControlViewResponse);
+  rpc GetDescriptor(DescriptorRequest) returns (DescriptorResponse);
+  rpc GetHostAuthorityStatus(GetHostAuthorityStatusRequest) returns (GetHostAuthorityStatusResponse);
+}
+
+service WorkerControl {
+  rpc Connect(stream WorkerToController) returns (stream ControllerToWorker);
+}

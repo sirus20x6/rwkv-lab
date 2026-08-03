@@ -20,6 +20,16 @@ func TestRunHeaderShowsLiveDatabaseBestWithoutArtifact(t *testing.T) {
 	}
 }
 
+func TestRunHeaderShowsLatestStepSeparatelyFromEventCount(t *testing.T) {
+	step := int64(500)
+	html := renderRunHeader(db.RunSummary{
+		Name: "vision", LatestStep: &step, NTrain: 493,
+	}, nil, BestInfo{}, 0)
+	if !strings.Contains(html, "step 500 · 493 train rows") {
+		t.Fatalf("header conflates latest step with event count: %s", html)
+	}
+}
+
 func TestRunHeaderShowsDurableCheckpointThatPrecedesItsEvalLog(t *testing.T) {
 	oldPPL, oldStep := 7.642, int64(3500)
 	html := renderRunHeader(db.RunSummary{
@@ -150,4 +160,82 @@ func conversionPPLForSummary(t *testing.T, summary db.RunSummary) *float64 {
 		t.Fatalf("conversion scan returned %d layers", len(layers))
 	}
 	return layers[0].PPL
+}
+
+// TestKPIStripRendersEveryQueriedMetric guards finding 3: this renderer replaces
+// the whole #run-kpis node on every live/SSE patch, so any KPI the initial
+// Datastar paint shows must be reproduced here or it visibly vanishes seconds
+// after load. It also pins that queried-and-serialized metrics are actually
+// rendered rather than left as dead plumbing.
+func TestKPIStripRendersEveryQueriedMetric(t *testing.T) {
+	exampleCoverage, tokenCoverage := 0.82, 0.455
+	iou, giou, dice := 0.375, 0.21, 0.64
+	shuffled, delta := 12.5, 0.875
+	html := renderKPIs(db.RunKPIs{
+		OCRShuffledPPL:                 &shuffled,
+		OCRConditioningNLL:             &delta,
+		OCRConditioningExampleCoverage: &exampleCoverage,
+		OCRConditioningTokenCoverage:   &tokenCoverage,
+		StructuredBoxIoU:               &iou,
+		StructuredBoxGIoU:              &giou,
+		StructuredMaskDice:             &dice,
+	})
+	for _, want := range []string{
+		"shuffle 12.500 · ΔNLL 0.875 · coverage ex 82% · tok 46%",
+		"coord TF — · IoU 0.375 · GIoU 0.210 · Dice 0.640",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("KPI strip is missing %q: %s", want, html)
+		}
+	}
+	// Absent metrics stay em-dashed rather than rendering a confident 0.
+	empty := renderKPIs(db.RunKPIs{})
+	if !strings.Contains(empty, "coverage ex — · tok —") ||
+		!strings.Contains(empty, "IoU — · GIoU — · Dice —") {
+		t.Fatalf("absent KPIs did not render as em-dashes: %s", empty)
+	}
+}
+
+// TestKPIStripAgreesWithTheDatastarShell is the drift guard for the two
+// renderers of #run-kpis: web/static/index.html paints it once on load and
+// renderKPIs replaces it on every patch, so their label sequences must match.
+func TestKPIStripAgreesWithTheDatastarShell(t *testing.T) {
+	shell, err := os.ReadFile(filepath.Join("..", "..", "web", "static", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markup := string(shell)
+	html := renderKPIs(db.RunKPIs{})
+	for _, label := range []string{
+		"shuffle ", " · ΔNLL ", " · coverage ex ", " · tok ",
+		"coord TF ", " · IoU ", " · GIoU ", " · Dice ",
+	} {
+		if !strings.Contains(html, label) {
+			t.Fatalf("renderKPIs lost the %q KPI label: %s", label, html)
+		}
+		if !strings.Contains(markup, label) {
+			t.Fatalf("index.html lost the %q KPI label rendered by renderKPIs", label)
+		}
+	}
+	// The retired key must not reappear in either renderer under its old name.
+	if strings.Contains(markup, "$kpi.structured_box_iou==") {
+		t.Fatal("index.html still reads the retired structured_box_iou key")
+	}
+}
+
+// TestRetiredBoxIoUKeyRendersAsAnExplicitLegacySeries pins the cross-repo
+// decision: rows written before the structured_box_iou -> _instance rename hold
+// a differently-weighted quantity, so they render labelled instead of passing
+// as the current metric.
+func TestRetiredBoxIoUKeyRendersAsAnExplicitLegacySeries(t *testing.T) {
+	legacy := 0.42
+	html := renderKPIs(db.RunKPIs{StructuredBoxIoULegacy: &legacy})
+	if !strings.Contains(html, "IoU 0.420 (legacy)") {
+		t.Fatalf("legacy box IoU was not labelled: %s", html)
+	}
+	current := 0.5
+	html = renderKPIs(db.RunKPIs{StructuredBoxIoU: &current, StructuredBoxIoULegacy: &legacy})
+	if !strings.Contains(html, "IoU 0.500 ·") || strings.Contains(html, "legacy") {
+		t.Fatalf("current metric did not win over the legacy key: %s", html)
+	}
 }

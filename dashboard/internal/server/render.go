@@ -54,7 +54,7 @@ func fmtAge(sec *float64) string {
 	s := *sec
 	switch {
 	case s < 1:
-		return "now"
+		return "0s"
 	case s < 60:
 		return fmt.Sprintf("%.0fs", s)
 	case s < 3600:
@@ -198,6 +198,127 @@ func applyEvalContractKPIs(k *db.RunKPIs, best BestInfo) {
 	k.BestPPL, k.BestPPLStep = &ppl, &step
 }
 
+// renderKPIs renders the selected run's headline metrics as authoritative
+// server-side HTML.  These values used to exist only as a nested Datastar
+// signal.  A long-lived stream could keep receiving element patches while a
+// missed/deferred nested-signal patch left the visible PPL and best-PPL stale
+// until the user switched runs.  Giving the strip a stable element id lets the
+// stream (and the independent lightweight live endpoint) morph it directly.
+func renderKPIs(k db.RunKPIs) string {
+	intValue := func(v *int64) string {
+		if v == nil {
+			return "—"
+		}
+		return fmt.Sprintf("%d", *v)
+	}
+	floatValue := func(v *float64, decimals int) string {
+		if v == nil {
+			return "—"
+		}
+		return fmt.Sprintf("%.*f", decimals, *v)
+	}
+	// Fractions the trainer reports in 0..1 read better as whole percents, and
+	// index.html's Datastar expressions render them the same way. This strip is
+	// replaced wholesale by every live/SSE patch, so anything the initial
+	// Datastar paint shows must be reproduced here or it vanishes seconds later.
+	percentValue := func(v *float64) string {
+		if v == nil {
+			return "—"
+		}
+		return fmt.Sprintf("%.0f%%", *v*100)
+	}
+	// structured_box_iou was RETIRED in favour of structured_box_iou_instance;
+	// pre-rename rows held a differently-weighted quantity, so they render
+	// explicitly labelled instead of masquerading as the current metric.
+	boxIoU := floatValue(k.StructuredBoxIoU, 3)
+	if k.StructuredBoxIoU == nil && k.StructuredBoxIoULegacy != nil {
+		boxIoU = fmt.Sprintf("%.3f (legacy)", *k.StructuredBoxIoULegacy)
+	}
+	bestLoss := ""
+	if k.BestLoss != nil {
+		bestLoss = fmt.Sprintf("best %.3f", *k.BestLoss)
+		if k.BestLossStep != nil {
+			bestLoss += fmt.Sprintf(" @ %d", *k.BestLossStep)
+		}
+	}
+	evalDelta, evalClass := "", ""
+	if k.PPL != nil && k.BestPPL != nil {
+		if *k.PPL <= *k.BestPPL {
+			evalDelta, evalClass = "★ best", "good"
+		} else {
+			delta := *k.PPL - *k.BestPPL
+			if *k.BestPPL != 0 && delta / *k.BestPPL > 0.005 {
+				evalDelta, evalClass = fmt.Sprintf("▲ +%.3f vs best", delta), "warn"
+			} else {
+				evalDelta = fmt.Sprintf("+%.3f vs best", delta)
+			}
+		}
+	}
+	bestPPLStep := ""
+	if k.BestPPLStep != nil {
+		bestPPLStep = fmt.Sprintf("@ step %d", *k.BestPPLStep)
+	}
+	top1, bestTop1 := "—", "—"
+	if k.Top1 != nil {
+		top1 = fmt.Sprintf("%.1f%%", *k.Top1*100)
+	}
+	if k.BestTop1 != nil {
+		bestTop1 = fmt.Sprintf("%.1f%%", *k.BestTop1*100)
+	}
+	top1Delta, top1Class := "", ""
+	if k.Top1 != nil && k.BestTop1 != nil {
+		if *k.Top1 >= *k.BestTop1 {
+			top1Delta, top1Class = "★ best", "good"
+		} else {
+			deltaPP := (*k.Top1 - *k.BestTop1) * 100
+			if -deltaPP > 0.5 {
+				top1Delta, top1Class = fmt.Sprintf("▼ %.2f pp vs best", deltaPP), "warn"
+			} else {
+				top1Delta = fmt.Sprintf("%.2f pp vs best", deltaPP)
+			}
+		}
+	}
+	bestTop1Step := ""
+	if k.BestTop1Step != nil {
+		bestTop1Step = fmt.Sprintf("@ step %d", *k.BestTop1Step)
+	}
+	toks, lr, gnorm := "—", "—", ""
+	if k.Toks != nil {
+		toks = fmt.Sprintf("%.0f", *k.Toks)
+	}
+	if k.LR != nil {
+		lr = fmt.Sprintf("%.1e", *k.LR)
+	}
+	if k.Gnorm != nil {
+		gnorm = fmt.Sprintf("gnorm %.2f", *k.Gnorm)
+	}
+
+	return fmt.Sprintf(`<div class="kpis" id="run-kpis">`+
+		`<div class="kpi"><div class="kpi-label">step</div><div class="kpi-val">%s</div></div>`+
+		`<div class="kpi"><div class="kpi-label">train loss</div><div class="kpi-val">%s</div><div class="kpi-sub">%s</div></div>`+
+		`<div class="kpi"><div class="kpi-label">eval ppl</div><div class="kpi-val">%s</div><div class="kpi-sub %s">%s</div></div>`+
+		`<div class="kpi"><div class="kpi-label">caption ppl</div><div class="kpi-val">%s</div></div>`+
+		`<div class="kpi"><div class="kpi-label">OCR ppl</div><div class="kpi-val">%s</div><div class="kpi-sub">shuffle %s · ΔNLL %s · coverage ex %s · tok %s</div></div>`+
+		`<div class="kpi"><div class="kpi-label">structured text ppl</div><div class="kpi-val">%s</div><div class="kpi-sub">coord TF %s · IoU %s · GIoU %s · Dice %s</div></div>`+
+		`<div class="kpi"><div class="kpi-label">best ppl</div><div class="kpi-val good">%s</div><div class="kpi-sub good">%s</div></div>`+
+		`<div class="kpi"><div class="kpi-label">top-1</div><div class="kpi-val">%s</div><div class="kpi-sub %s">%s</div></div>`+
+		`<div class="kpi"><div class="kpi-label">best top-1</div><div class="kpi-val good">%s</div><div class="kpi-sub good">%s</div></div>`+
+		`<div class="kpi"><div class="kpi-label">tok/s</div><div class="kpi-val">%s</div></div>`+
+		`<div class="kpi"><div class="kpi-label">lr</div><div class="kpi-val">%s</div><div class="kpi-sub">%s</div></div></div>`,
+		intValue(k.Step), floatValue(k.Loss, 3), esc(bestLoss),
+		floatValue(k.PPL, 3), evalClass, esc(evalDelta),
+		floatValue(k.CaptionPPL, 3), floatValue(k.OCRPPL, 3),
+		floatValue(k.OCRShuffledPPL, 3), floatValue(k.OCRConditioningNLL, 3),
+		percentValue(k.OCRConditioningExampleCoverage),
+		percentValue(k.OCRConditioningTokenCoverage),
+		floatValue(k.StructuredPPL, 3), floatValue(k.StructuredCoordPPL, 3),
+		esc(boxIoU), floatValue(k.StructuredBoxGIoU, 3),
+		floatValue(k.StructuredMaskDice, 3),
+		floatValue(k.BestPPL, 3), esc(bestPPLStep),
+		top1, top1Class, esc(top1Delta), bestTop1, esc(bestTop1Step),
+		toks, lr, esc(gnorm))
+}
+
 func renderRunList(summaries []db.RunSummary, procByRun map[string]sysmon.Proc, nowTs float64) string {
 	// Most-recently-updated first.
 	sort.SliceStable(summaries, func(i, j int) bool {
@@ -304,13 +425,17 @@ func renderRunHeader(s db.RunSummary, proc *sysmon.Proc, best BestInfo, nowTs fl
 		bestStr = fmt.Sprintf(` · <span class="best">★ best eval ppl %.3f%s%s</span>`,
 			*s.BestPPL, step, restartable)
 	}
+	latestStep := "—"
+	if s.LatestStep != nil {
+		latestStep = fmt.Sprintf("%d", *s.LatestStep)
+	}
 	return fmt.Sprintf(
 		`<div id="run-header"><div class="run-title-row">`+
 			`<span class="dot %s"></span><span class="run-title-main">%s</span>`+
 			`<span class="status-pill %s">%s</span>%s</div>`+
-			`<div class="sub">%d train · %d eval · %d ckpt · updated %s ago%s</div>%s</div>`,
+			`<div class="sub">step %s · %d train rows · %d eval · %d ckpt · updated %s ago%s</div>%s</div>`,
 		state, esc(s.Name), state, label, pidStr,
-		s.NTrain, s.NEval, s.NCkpt, fmtAge(&age), bestStr, progress)
+		latestStep, s.NTrain, s.NEval, s.NCkpt, fmtAge(&age), bestStr, progress)
 }
 
 // jsName escapes a run name for embedding inside a single-quoted JS string in a
@@ -330,19 +455,12 @@ func urlName(s string) string {
 // nz returns true for a finite, present pointer.
 func nz(p *float64) bool { return p != nil && !math.IsNaN(*p) && !math.IsInf(*p, 0) }
 
-// renderAlerts paints the global alerts banner (critical + warn) with an
-// auto-stop toggle and a dismiss-all. Empty when there's nothing active.
-func renderAlerts(active []db.Alert, autoStop bool) string {
+// renderAlerts paints the detector's read-only findings. Acknowledgement only
+// edits dashboard metadata; trainer lifecycle remains on the TrainVM boundary.
+func renderAlerts(active []db.Alert) string {
 	var b strings.Builder
 	b.WriteString(`<div id="alerts-banner" class="alerts-banner">`)
-	autoCls, autoLabel, autoTo := "", "auto-stop: off", "1"
-	if autoStop {
-		autoCls, autoLabel, autoTo = "on", "auto-stop: ON", "0"
-	}
-	// Toggle is always present so the user can arm auto-stop proactively.
-	fmt.Fprintf(&b,
-		`<div class="alerts-bar"><button class="autostop %s" data-on:click="@post('/api/autostop?on=%s')">%s</button>`,
-		autoCls, autoTo, autoLabel)
+	b.WriteString(`<div class="alerts-bar"><span class="muted">health findings · read only</span>`)
 	if len(active) > 0 {
 		b.WriteString(`<button class="btn dismiss" data-on:click="@post('/api/alerts/ack')">dismiss all</button>`)
 	}

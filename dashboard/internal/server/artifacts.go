@@ -1,9 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"html"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -175,32 +177,115 @@ type LoopRWSplit struct {
 }
 
 type LoopRWLayer struct {
-	Layer int          `json:"layer"`
-	MaxRW float64      `json:"max_rw"`
-	RW    []float64    `json:"rw"`
-	Split *LoopRWSplit `json:"split,omitempty"`
+	Layer         int          `json:"layer"`
+	Label         string       `json:"label,omitempty"`
+	MaxRW         float64      `json:"max_rw"`
+	RW            []float64    `json:"rw"`
+	ExpectedLoops float64      `json:"expected_loops,omitempty"`
+	Split         *LoopRWSplit `json:"split,omitempty"`
 }
 
 type LoopRW struct {
-	Step      int64         `json:"step"`
-	LoopCount int           `json:"loop_count"`
-	NLayers   int           `json:"n_layers"`
-	NPinned   int           `json:"n_pinned"`
-	MeanMaxRW float64       `json:"mean_max_rw"`
-	GateMode  string        `json:"gate_mode"`
-	Layers    []LoopRWLayer `json:"layers"`
+	Step                    int64         `json:"step"`
+	LoopCount               int           `json:"loop_count"`
+	NLayers                 int           `json:"n_layers"`
+	NPinned                 int           `json:"n_pinned"`
+	MeanMaxRW               float64       `json:"mean_max_rw"`
+	GateMode                string        `json:"gate_mode"`
+	ModelFamily             string        `json:"model_family,omitempty"`
+	AggregateOnly           bool          `json:"aggregate_only,omitempty"`
+	MeanGateRMS             float64       `json:"mean_gate_rms,omitempty"`
+	MeanExpectedLoops       float64       `json:"mean_expected_loops,omitempty"`
+	ExecutedRefinementCalls int           `json:"executed_refinement_calls,omitempty"`
+	MaximumRefinementCalls  int           `json:"maximum_refinement_calls,omitempty"`
+	FactorCount             int           `json:"factor_count,omitempty"`
+	ExecutedFactorCalls     int           `json:"executed_refinement_factor_calls,omitempty"`
+	MaximumFactorCalls      int           `json:"maximum_refinement_factor_calls,omitempty"`
+	TreadActiveFraction     float64       `json:"tread_active_fraction,omitempty"`
+	ResidentDomain          string        `json:"resident_domain,omitempty"`
+	Layers                  []LoopRWLayer `json:"layers"`
 }
 
 func readLoopRW(runDir string) (LoopRW, bool) {
 	data, err := os.ReadFile(filepath.Join(runDir, "loop_rw.json"))
 	if err != nil {
-		return LoopRW{}, false
+		return readMageFlowLoopFromTrainLog(runDir)
 	}
 	var lr LoopRW
-	if json.Unmarshal(data, &lr) != nil || len(lr.Layers) == 0 {
-		return LoopRW{}, false
+	if json.Unmarshal(data, &lr) != nil ||
+		(len(lr.Layers) == 0 && !lr.AggregateOnly) {
+		return readMageFlowLoopFromTrainLog(runDir)
 	}
 	return lr, true
+}
+
+func readMageFlowLoopFromTrainLog(runDir string) (LoopRW, bool) {
+	file, err := os.Open(filepath.Join(runDir, "train.jsonl"))
+	if err != nil {
+		return LoopRW{}, false
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || info.Size() == 0 {
+		return LoopRW{}, false
+	}
+	const tailBytes int64 = 2 << 20
+	start := max(int64(0), info.Size()-tailBytes)
+	if _, err := file.Seek(start, 0); err != nil {
+		return LoopRW{}, false
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return LoopRW{}, false
+	}
+	lines := bytes.Split(data, []byte{'\n'})
+	for index := len(lines) - 1; index >= 0; index-- {
+		var row struct {
+			Kind                    string  `json:"kind"`
+			Step                    int64   `json:"step"`
+			Domain                  string  `json:"domain"`
+			MeanGateRMS             float64 `json:"loop/mean_gate_rms"`
+			MeanExpectedLoops       float64 `json:"loop/mean_expected_loops"`
+			MaximumLoops            int     `json:"loop/maximum_loops_per_block"`
+			ExecutedRefinementCalls int     `json:"loop/executed_refinement_block_calls"`
+			MaximumRefinementCalls  int     `json:"loop/maximum_refinement_block_calls"`
+			FactorCount             int     `json:"loop/factor_count"`
+			ExecutedFactorCalls     int     `json:"loop/executed_refinement_factor_calls"`
+			MaximumFactorCalls      int     `json:"loop/maximum_refinement_factor_calls"`
+			TotalImageTokens        int     `json:"loop/total_image_tokens"`
+			ActiveImageTokens       int     `json:"loop/active_tread_image_tokens"`
+			BackboneBlocks          int     `json:"loop/original_backbone_blocks_executed"`
+			ExpertBlocks            int     `json:"loop/expert_blocks_executed"`
+		}
+		if json.Unmarshal(lines[index], &row) != nil || row.Kind != "train" ||
+			row.MaximumLoops <= 1 || row.MaximumRefinementCalls <= 0 {
+			continue
+		}
+		activeFraction := 1.0
+		if row.TotalImageTokens > 0 {
+			activeFraction = float64(row.ActiveImageTokens) /
+				float64(row.TotalImageTokens)
+		}
+		gateMode := "factored-head-channel"
+		if row.FactorCount > 0 {
+			gateMode = "executable-factored-head-channel"
+		}
+		return LoopRW{
+			Step: row.Step, LoopCount: row.MaximumLoops,
+			NLayers:  row.BackboneBlocks + row.ExpertBlocks,
+			GateMode: gateMode, ModelFamily: "mageflow",
+			AggregateOnly: true, MeanGateRMS: row.MeanGateRMS,
+			MeanExpectedLoops:       row.MeanExpectedLoops,
+			ExecutedRefinementCalls: row.ExecutedRefinementCalls,
+			MaximumRefinementCalls:  row.MaximumRefinementCalls,
+			FactorCount:             row.FactorCount,
+			ExecutedFactorCalls:     row.ExecutedFactorCalls,
+			MaximumFactorCalls:      row.MaximumFactorCalls,
+			TreadActiveFraction:     activeFraction,
+			ResidentDomain:          row.Domain,
+		}, true
+	}
+	return LoopRW{}, false
 }
 
 // renderLoopRW paints the LoopedRWKV residual-weight panel: one bar per converted
@@ -212,9 +297,41 @@ func renderLoopRW(lr LoopRW) string {
 	if mode == "" {
 		mode = "scalar"
 	}
-	b.WriteString(`<div id="looprw-panel" class="panel"><div class="panel-title">loop usage · effective gate per layer ` +
-		fmt.Sprintf(`<span class="sub">step %d · mean layer max %.3f · %d/%d pinned · %d passes · %s</span></div>`,
-			lr.Step, lr.MeanMaxRW, lr.NPinned, lr.NLayers, lr.LoopCount, html.EscapeString(mode)))
+	if lr.ModelFamily == "mageflow" {
+		factorSummary := ""
+		if lr.MaximumFactorCalls > 0 {
+			factorSummary = fmt.Sprintf(" · factors %d/%d",
+				lr.ExecutedFactorCalls, lr.MaximumFactorCalls)
+		}
+		b.WriteString(`<div id="looprw-panel" class="panel"><div class="panel-title">loop utilization · MageFlow learned depth ` +
+			fmt.Sprintf(`<span class="sub">step %d · resident %s · expected %.2f/%d passes · refinements %d/%d%s · TREAD active %.0f%% · %s</span></div>`,
+				lr.Step, html.EscapeString(lr.ResidentDomain),
+				lr.MeanExpectedLoops, lr.LoopCount,
+				lr.ExecutedRefinementCalls, lr.MaximumRefinementCalls,
+				factorSummary,
+				100*lr.TreadActiveFraction, html.EscapeString(mode)))
+		if lr.AggregateOnly {
+			b.WriteString(`<div class="looprw-bars">`)
+			renderLoopAggregateRow(&b, "gate RMS", lr.MeanGateRMS, 0.25)
+			renderLoopAggregateRow(
+				&b, "depth", lr.MeanExpectedLoops, float64(lr.LoopCount))
+			renderLoopAggregateRow(
+				&b, "refine", float64(lr.ExecutedRefinementCalls),
+				float64(lr.MaximumRefinementCalls))
+			if lr.MaximumFactorCalls > 0 {
+				renderLoopAggregateRow(
+					&b, "factors", float64(lr.ExecutedFactorCalls),
+					float64(lr.MaximumFactorCalls))
+			}
+			renderLoopAggregateRow(&b, "TREAD", lr.TreadActiveFraction, 1)
+			b.WriteString(`</div></div>`)
+			return b.String()
+		}
+	} else {
+		b.WriteString(`<div id="looprw-panel" class="panel"><div class="panel-title">loop usage · effective gate per layer ` +
+			fmt.Sprintf(`<span class="sub">step %d · mean layer max %.3f · %d/%d pinned · %d passes · %s</span></div>`,
+				lr.Step, lr.MeanMaxRW, lr.NPinned, lr.NLayers, lr.LoopCount, html.EscapeString(mode)))
+	}
 	rows := append([]LoopRWLayer{}, lr.Layers...)
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Layer < rows[j].Layer })
 	b.WriteString(`<div class="looprw-bars">`)
@@ -232,17 +349,43 @@ func renderLoopRW(lr LoopRW) string {
 		for i, v := range r.RW {
 			passes[i] = fmt.Sprintf("%.3f", v)
 		}
+		label := r.Label
+		if label == "" {
+			label = fmt.Sprintf("L%d", r.Layer)
+		}
+		value := fmt.Sprintf("%.4f", r.MaxRW)
+		if r.ExpectedLoops > 0 {
+			value += fmt.Sprintf(" · %.2fx", r.ExpectedLoops)
+		}
 		fmt.Fprintf(&b,
-			`<div class="looprw-row" title="rw=[%s]"><span class="lrw-l">L%d</span>`+
+			`<div class="looprw-row" title="rw=[%s]"><span class="lrw-l">%s</span>`+
 				`<span class="lrw-track"><i class="%s" style="width:%.1f%%"></i></span>`+
-				`<span class="lrw-v">%.4f</span></div>`,
-			html.EscapeString(strings.Join(passes, ", ")), r.Layer, cls, pct, r.MaxRW)
+				`<span class="lrw-v">%s</span></div>`,
+			html.EscapeString(strings.Join(passes, ", ")),
+			html.EscapeString(label), cls, pct, html.EscapeString(value))
 		if r.Split != nil {
 			renderLoopRWSplit(&b, r.Split)
 		}
 	}
 	b.WriteString(`</div></div>`)
 	return b.String()
+}
+
+func renderLoopAggregateRow(
+	b *strings.Builder, label string, value, maximum float64,
+) {
+	percent := 0.0
+	if maximum > 0 {
+		percent = 100 * value / maximum
+	}
+	percent = min(100, max(0, percent))
+	fmt.Fprintf(
+		b,
+		`<div class="looprw-row"><span class="lrw-l wide">%s</span>`+
+			`<span class="lrw-track"><i class="lo" style="width:%.1f%%"></i></span>`+
+			`<span class="lrw-v">%.4f</span></div>`,
+		html.EscapeString(label), percent, value,
+	)
 }
 
 func renderLoopRWSplit(b *strings.Builder, sp *LoopRWSplit) {
@@ -252,31 +395,36 @@ func renderLoopRWSplit(b *strings.Builder, sp *LoopRWSplit) {
 	fmt.Fprintf(b, `<div class="looprw-split"><div class="lrw-split-meta">heads %d x %d ch · channel buckets %d</div>`,
 		sp.Heads, sp.ChPerHead, sp.ChannelBuckets)
 	for i := range sp.HeadAbs {
-		renderLoopRWHeat(b, fmt.Sprintf("p%d H", i+1), sp.HeadAbs[i])
+		renderLoopRWSummary(b, fmt.Sprintf("p%d heads", i+1), sp.HeadAbs[i])
 		if i < len(sp.ChannelAbs) {
-			renderLoopRWHeat(b, fmt.Sprintf("p%d C", i+1), sp.ChannelAbs[i])
+			renderLoopRWSummary(b, fmt.Sprintf("p%d channels", i+1), sp.ChannelAbs[i])
 		}
 	}
 	b.WriteString(`</div>`)
 }
 
-func renderLoopRWHeat(b *strings.Builder, label string, vals []float64) {
+func renderLoopRWSummary(b *strings.Builder, label string, vals []float64) {
 	if len(vals) == 0 {
 		return
 	}
-	fmt.Fprintf(b, `<div class="lrw-heat-row"><span class="lrw-heat-label">%s</span><span class="lrw-heat">`,
-		html.EscapeString(label))
+	mean, maximum, active := 0.0, 0.0, 0
 	for _, v := range vals {
-		pct := v / 0.30
-		if pct > 1 {
-			pct = 1
+		if v < 0 {
+			v = -v
 		}
-		if pct < 0 {
-			pct = 0
+		mean += v
+		if v > maximum {
+			maximum = v
 		}
-		fmt.Fprintf(b, `<i style="opacity:%.3f" title="%.4f"></i>`, 0.18+0.82*pct, v)
+		if v >= 1e-4 {
+			active++
+		}
 	}
-	b.WriteString(`</span></div>`)
+	mean /= float64(len(vals))
+	fmt.Fprintf(b,
+		`<div class="lrw-split-meta">%s · mean %.4f · max %.4f · active %.0f%%</div>`,
+		html.EscapeString(label), mean, maximum,
+		100*float64(active)/float64(len(vals)))
 }
 
 // emptyLoopRW hides the panel when a run has no loop_rw.json.

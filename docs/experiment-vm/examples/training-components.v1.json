@@ -1,0 +1,439 @@
+{
+  "api_version": "trainvm.training-components/v1",
+  "components": [
+    {
+      "key": {
+        "category": "activation",
+        "name": "squared_relu",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.activation.squared_relu.v1",
+      "model_families": ["rwkv"],
+      "required_capabilities": ["activation.squared_relu.v1"],
+      "configuration": [],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "activation",
+        "name": "silu",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.activation.silu.v1",
+      "model_families": ["rwkv"],
+      "required_capabilities": ["activation.silu.v1"],
+      "configuration": [],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "gradient_accumulation",
+        "name": "fixed",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.gradient_accumulation.fixed.v1",
+      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
+      "required_capabilities": ["gradient_accumulation.fixed.v1"],
+      "configuration": [
+        {"name": "microbatches_per_optimizer_step", "type": "integer", "required": true, "minimum": 1, "maximum": 65536, "unit": "count"}
+      ],
+      "state": [],
+      "step_domain": "microbatch",
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "curriculum",
+        "name": "context_length",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.curriculum.context_length.v1",
+      "model_families": ["rwkv"],
+      "required_capabilities": ["curriculum.context_length.v1"],
+      "configuration": [
+        {"name": "maximum_sequence_length", "type": "integer", "required": true, "minimum": 1, "maximum": 1048576, "unit": "tokens"},
+        {"name": "base_batch_size", "type": "integer", "required": true, "minimum": 1, "maximum": 1048576, "unit": "samples"},
+        {"name": "stages", "type": "string", "required": false, "default": ""}
+      ],
+      "state": [],
+      "step_domain": "optimizer_step",
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "gradient_clipping",
+        "name": "global_norm",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.gradient_clipping.global_norm.v1",
+      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
+      "required_capabilities": ["gradient_clipping.global_norm.v1"],
+      "configuration": [
+        {"name": "max_norm", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1000000000000.0, "unit": "ratio"},
+        {"name": "norm_type", "type": "number", "required": false, "default": 2.0, "minimum": 1e-12, "maximum": 1000000000000.0, "unit": "ratio"},
+        {"name": "error_if_nonfinite", "type": "boolean", "required": false, "default": false}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "normalization",
+        "name": "layer_norm",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.normalization.layer_norm.v1",
+      "model_families": ["rwkv"],
+      "required_capabilities": ["normalization.layer_norm.v1"],
+      "configuration": [
+        {"name": "epsilon", "type": "number", "required": false, "default": 1e-5, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "parameter_router",
+        "name": "mageflow_appearance_expert",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.parameter_router.mageflow_appearance_expert.v1",
+      "model_families": ["mageflow"],
+      "required_capabilities": ["parameter_router.mageflow_appearance_expert.v1"],
+      "configuration": [
+        {"name": "shared_backbone_multiplier", "type": "number", "required": false, "default": 0.5, "minimum": 1e-12, "maximum": 1000.0, "unit": "ratio"}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "parameter_router",
+        "name": "mageflow_full_backbone",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.parameter_router.mageflow_full_backbone.v1",
+      "model_families": ["mageflow"],
+      "required_capabilities": ["parameter_router.mageflow_full_backbone.v1"],
+      "configuration": [],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "parameter_router",
+        "name": "mageflow_terminal_expert",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.parameter_router.mageflow_terminal_expert.v1",
+      "model_families": ["mageflow"],
+      "required_capabilities": ["parameter_router.mageflow_terminal_expert.v1"],
+      "configuration": [
+        {"name": "shared_backbone_multiplier", "type": "number", "required": false, "default": 0.5, "minimum": 1e-12, "maximum": 1000.0, "unit": "ratio"},
+        {"name": "repa_projection_multiplier", "type": "number", "required": false, "default": 1.0, "minimum": 1e-12, "maximum": 1000.0, "unit": "ratio"}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "objective",
+        "name": "linear_head_cross_entropy",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.objective.linear_head_cross_entropy.v1",
+      "model_families": ["rwkv", "transformer"],
+      "required_capabilities": ["objective.linear_head_cross_entropy.v1"],
+      "configuration": [
+        {"name": "chunk_size", "type": "integer", "required": false, "default": 2048, "minimum": 1, "maximum": 1048576, "unit": "count"},
+        {"name": "prefer_fused", "type": "boolean", "required": false, "default": true}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "optimizer",
+        "name": "torch_adamw",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.optimizer.torch_adamw.v1",
+      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
+      "required_capabilities": ["optimizer.torch_adamw.v1"],
+      "configuration": [
+        {"name": "learning_rate", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
+        {"name": "beta1", "type": "number", "required": false, "default": 0.9, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "beta2", "type": "number", "required": false, "default": 0.999, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "epsilon", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"},
+        {"name": "weight_decay", "type": "number", "required": false, "default": 0.01, "minimum": 0.0, "maximum": 10.0, "unit": "ratio"},
+        {"name": "foreach", "type": "boolean", "required": false, "default": true},
+        {"name": "fused", "type": "boolean", "required": false, "default": false}
+      ],
+      "state": [
+        {"name": "parameter_state_manifest", "type": "string", "required": true}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "optimizer",
+        "name": "fp32_master_adamw",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.optimizer.fp32_master_adamw.v1",
+      "model_families": ["mageflow"],
+      "required_capabilities": ["optimizer.fp32_master_adamw.v1"],
+      "configuration": [
+        {"name": "learning_rate", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
+        {"name": "beta1", "type": "number", "required": false, "default": 0.9, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "beta2", "type": "number", "required": false, "default": 0.999, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "epsilon", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"},
+        {"name": "weight_decay", "type": "number", "required": false, "default": 0.01, "minimum": 0.0, "maximum": 10.0, "unit": "ratio"},
+        {"name": "foreach", "type": "boolean", "required": false, "default": true},
+        {"name": "fused", "type": "boolean", "required": false, "default": false}
+      ],
+      "state": [
+        {"name": "parameter_state_manifest", "type": "string", "required": true},
+        {"name": "fp32_master_weights_manifest", "type": "string", "required": true}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "optimizer",
+        "name": "torch_sparse_adam",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.optimizer.torch_sparse_adam.v1",
+      "model_families": ["transformer"],
+      "required_capabilities": ["optimizer.torch_sparse_adam.v1"],
+      "configuration": [
+        {"name": "learning_rate", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
+        {"name": "beta1", "type": "number", "required": false, "default": 0.9, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "beta2", "type": "number", "required": false, "default": 0.999, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "epsilon", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"}
+      ],
+      "state": [
+        {"name": "sparse_parameter_state_manifest", "type": "string", "required": true}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "optimizer",
+        "name": "fp32_master_adamw_no_decay",
+        "version": "2.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.optimizer.fp32_master_adamw_no_decay.v2",
+      "model_families": ["mageflow"],
+      "required_capabilities": ["optimizer.fp32_master_adamw_no_decay.v2"],
+      "configuration": [
+        {"name": "learning_rate", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
+        {"name": "beta1", "type": "number", "required": false, "default": 0.9, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "beta2", "type": "number", "required": false, "default": 0.999, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "epsilon", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"},
+        {"name": "foreach", "type": "boolean", "required": false, "default": true},
+        {"name": "fused", "type": "boolean", "required": false, "default": false}
+      ],
+      "state": [
+        {"name": "parameter_state_manifest", "type": "string", "required": true},
+        {"name": "fp32_master_weights_manifest", "type": "string", "required": true}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "optimizer",
+        "name": "torch_adamw_no_decay",
+        "version": "2.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.optimizer.torch_adamw_no_decay.v2",
+      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
+      "required_capabilities": ["optimizer.torch_adamw_no_decay.v2"],
+      "configuration": [
+        {"name": "learning_rate", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
+        {"name": "beta1", "type": "number", "required": false, "default": 0.9, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "beta2", "type": "number", "required": false, "default": 0.999, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "epsilon", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"},
+        {"name": "foreach", "type": "boolean", "required": false, "default": true},
+        {"name": "fused", "type": "boolean", "required": false, "default": false}
+      ],
+      "state": [
+        {"name": "parameter_state_manifest", "type": "string", "required": true}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "learning_rate_schedule",
+        "name": "linear_warmup_constant",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.schedule.linear_warmup_constant.v1",
+      "model_families": ["rwkv", "transformer"],
+      "required_capabilities": ["schedule.linear_warmup_constant.v1"],
+      "configuration": [
+        {"name": "warmup_steps", "type": "integer", "required": true, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"}
+      ],
+      "state": [
+        {"name": "cursor", "type": "integer", "required": true}
+      ],
+      "step_domain": "optimizer_step",
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "learning_rate_schedule",
+        "name": "constant",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.schedule.constant.v1",
+      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
+      "required_capabilities": ["schedule.constant.v1"],
+      "configuration": [],
+      "state": [],
+      "step_domain": "optimizer_step",
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "learning_rate_schedule",
+        "name": "linear_warmup_cosine",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.schedule.linear_warmup_cosine.v1",
+      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
+      "required_capabilities": ["schedule.linear_warmup_cosine.v1"],
+      "configuration": [
+        {"name": "warmup_steps", "type": "integer", "required": true, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"},
+        {"name": "max_steps", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000000, "unit": "optimizer_step"},
+        {"name": "minimum_ratio", "type": "number", "required": false, "default": 0.1, "minimum": 0.0, "maximum": 1.0, "unit": "ratio"}
+      ],
+      "state": [
+        {"name": "cursor", "type": "integer", "required": true}
+      ],
+      "step_domain": "optimizer_step",
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "learning_rate_schedule",
+        "name": "powercool",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.schedule.powercool.v1",
+      "model_families": ["rwkv", "transformer"],
+      "required_capabilities": ["schedule.powercool.v1"],
+      "configuration": [
+        {"name": "warmup_steps", "type": "integer", "required": true, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"},
+        {"name": "max_steps", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000000, "unit": "optimizer_step"},
+        {"name": "minimum_ratio", "type": "number", "required": false, "default": 0.0, "minimum": 0.0, "maximum": 1.0, "unit": "ratio"},
+        {"name": "cooldown_fraction", "type": "number", "required": false, "default": 0.2, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
+        {"name": "power", "type": "number", "required": false, "default": 2.0, "minimum": 1e-12, "maximum": 1000.0, "unit": "ratio"}
+      ],
+      "state": [
+        {"name": "cursor", "type": "integer", "required": true}
+      ],
+      "step_domain": "optimizer_step",
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "precision",
+        "name": "bf16_parameters_fp32_reductions",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.precision.bf16_parameters_fp32_reductions.v1",
+      "model_families": ["rwkv", "transformer", "vision"],
+      "required_capabilities": ["precision.bf16_parameters_fp32_reductions.v1"],
+      "configuration": [
+        {"name": "parameter_dtype", "type": "enumeration", "required": false, "default": "bfloat16", "values": ["bfloat16"]},
+        {"name": "compute_dtype", "type": "enumeration", "required": false, "default": "bfloat16", "values": ["bfloat16"]},
+        {"name": "reduction_dtype", "type": "enumeration", "required": false, "default": "float32", "values": ["float32"]},
+        {"name": "gradient_scaling", "type": "boolean", "required": false, "default": false}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "precision",
+        "name": "fp32_parameters_bf16_compute",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.precision.fp32_parameters_bf16_compute.v1",
+      "model_families": ["vision"],
+      "required_capabilities": ["precision.fp32_parameters_bf16_compute.v1"],
+      "configuration": [
+        {"name": "parameter_dtype", "type": "enumeration", "required": false, "default": "float32", "values": ["float32"]},
+        {"name": "compute_dtype", "type": "enumeration", "required": false, "default": "bfloat16", "values": ["bfloat16"]},
+        {"name": "reduction_dtype", "type": "enumeration", "required": false, "default": "float32", "values": ["float32"]},
+        {"name": "gradient_scaling", "type": "boolean", "required": false, "default": false}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "weight_decay_schedule",
+        "name": "constant",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.weight_decay_schedule.constant.v1",
+      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
+      "required_capabilities": ["weight_decay_schedule.constant.v1"],
+      "configuration": [
+        {"name": "weight_decay", "type": "number", "required": true, "minimum": 0.0, "maximum": 10.0, "unit": "ratio"}
+      ],
+      "state": [],
+      "step_domain": "optimizer_step",
+      "state_grade": "stateless",
+      "reference_implementation": true
+    }
+  ]
+}

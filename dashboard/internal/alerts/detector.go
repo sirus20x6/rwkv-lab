@@ -1,7 +1,7 @@
 // Package alerts watches live training runs for divergence/health problems
 // (gnorm spikes, NaN/skip storms, codec collapse, ppl regression, throughput
-// cliffs, stalls) and records them. Optionally auto-stops a run on a critical
-// alert (opt-in — never kills a run unless the user enabled it).
+// cliffs, stalls) and records them. It is strictly observational: lifecycle
+// and live-control mutations belong to TrainVM.
 package alerts
 
 import (
@@ -11,10 +11,9 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
-	"syscall"
 	"time"
 
 	"trainboard/internal/db"
@@ -36,18 +35,97 @@ const (
 	// grokking diagnostics
 	memDeadRMS         = 1e-4 // ROSA/Engram injection RMS below this = path never activated
 	memDeadMinStep     = 400  // only flag a dead path once it's had time to grok on
+	memDeadMinSamples  = 10   // require persistent evidence, not one atypical batch
+	memDeadFrac        = 0.90 // fraction of usable rows that must be near zero
+	memDeadMinFinite   = 0.50 // ≥half the reported rows must be finite to judge at all
+	codecRelMinSamples = 3    // codec_collapse is critical: never fire off one batch
 	pplCollapseRatio   = 1.15 // held-out ppl risen >15% over its own best = collapse
 	blockCollapseRatio = 1.15 // held-out block-MSE risen >15% over its own best
-	antiGrokLRCool     = 0.5  // lr_scale written on collapse (cool in place, don't kill)
+	antiGrokLRCool     = 0.5  // conservative operator recommendation on collapse
 
 	// LoopedRWKV loop-gate steering (loop_max_rw rides eval records; the trainer
-	// applies loop_lr_mult to the "rwkv_loop" param group per step).
+	// reports loop_lr_mult for a read-only health recommendation).
 	loopStallRW      = 1e-3  // max|rw| still below this = the gates never opened
 	loopStallMinStep = 800   // give warmup + momentum rebuild time before judging
 	loopReleaseRW    = 0.01  // 10x stall threshold: gates clearly moving -> relax the boost
 	loopPinRW        = 0.245 // legacy default; trainer now reports loop_pin_thr per run (scales with --loop-gate-cap)
 	loopMultCap      = 30.0  // --loop-lr-mult help's fresh-conversion ceiling
 )
+
+// memoryPathVerdict is the tri-state health of one recall path's injection
+// window. The middle state matters: injection stats are flag-gated
+// (--log-grokking-metrics) on a deliberately coarse cadence, so a run can carry
+// too few injection rows in its 50-TRAIN-ROW window to judge — a state that
+// used to be indistinguishable from "healthy" because both produced silence.
+type memoryPathVerdict int
+
+const (
+	memoryPathAbsent  memoryPathVerdict = iota // no injection rows at all: run has no such path
+	memoryPathUnknown                          // rows exist but are too few / too non-finite to judge
+	memoryPathAlive
+	memoryPathDead
+)
+
+// memoryPathEvidence carries the verdict plus the counts behind it, so an
+// insufficient-evidence alert can state exactly what it was missing.
+type memoryPathEvidence struct {
+	verdict memoryPathVerdict
+	rows    int // rows in the window that reported an injection RMS
+	finite  int // of those, rows whose value is a real number
+	dead    int // of the finite rows, rows below memDeadRMS
+}
+
+// classifyMemoryPath judges a ROSA/Engram injection window.
+//
+// Non-finite values are dropped rather than counted as dead (injection_rms
+// returns a/b, so NaN is reachable). Dropping alone is not enough: a window of
+// 45 NaNs and 10 zeros would otherwise raise "persistently ~0" on 10/50 rows.
+// So the finite rows must also be a majority of what was reported; below that
+// the window is unknown, not dead.
+func classifyMemoryPath(samples []float64) memoryPathEvidence {
+	e := memoryPathEvidence{rows: len(samples)}
+	if e.rows == 0 {
+		return e // memoryPathAbsent
+	}
+	for _, value := range samples {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			continue
+		}
+		e.finite++
+		if value < memDeadRMS {
+			e.dead++
+		}
+	}
+	if e.finite < memDeadMinSamples ||
+		float64(e.finite) < memDeadMinFinite*float64(e.rows) {
+		e.verdict = memoryPathUnknown
+		return e
+	}
+	e.verdict = memoryPathAlive
+	if float64(e.dead)/float64(e.finite) >= memDeadFrac {
+		e.verdict = memoryPathDead
+	}
+	return e
+}
+
+// robustCodecRel reduces the codec_rel window to its median. codec_collapse is
+// a CRITICAL stats-driven alert, so it must not fire off one atypical batch —
+// the same failure the memory-path
+// checks were hardened against. Reports ok=false when the window is too thin to
+// be robust; the alert then stays silent rather than trusting a single row.
+func robustCodecRel(window []float64) (float64, bool) {
+	finite := make([]float64, 0, len(window))
+	for _, value := range window {
+		if !math.IsNaN(value) && !math.IsInf(value, 0) {
+			finite = append(finite, value)
+		}
+	}
+	if len(finite) < codecRelMinSamples {
+		return 0, false
+	}
+	sort.Float64s(finite)
+	return finite[len(finite)/2], true
+}
 
 type Detector struct {
 	db       *db.DB
@@ -56,7 +134,6 @@ type Detector struct {
 	interval time.Duration
 
 	baselinePPL float64
-	autoStop    atomic.Bool
 
 	mu         sync.Mutex
 	lastRaised map[string]float64
@@ -85,9 +162,6 @@ func New(database *db.DB, sampler *sysmon.Sampler, runsDir string, interval time
 	return d
 }
 
-func (d *Detector) SetAutoStop(v bool) { d.autoStop.Store(v) }
-func (d *Detector) AutoStop() bool     { return d.autoStop.Load() }
-
 func (d *Detector) Run(ctx context.Context) {
 	t := time.NewTicker(d.interval)
 	defer t.Stop()
@@ -109,6 +183,7 @@ func (d *Detector) scan() {
 			names = append(names, p.RunName)
 		}
 	}
+	_ = d.db.ResolveInactiveStalls(names)
 	statsByRun, err := d.db.RecentTrainStatsByName(names, 50)
 	if err != nil {
 		return
@@ -154,7 +229,12 @@ func (d *Detector) checkStall(p sysmon.Proc, step int64) {
 	if p.LogAgeS != nil && *p.LogAgeS > stallSeconds {
 		d.raise(p, "stall", "warn", step,
 			fmt.Sprintf("no log update for %.0fs while process alive (possible hang)", *p.LogAgeS))
+		return
 	}
+	// Stall alerts describe a live condition, not a permanent warning. Once the
+	// same trainer resumes appending, retire its banner entry automatically; the
+	// historical event remains available in the run timeline.
+	_ = d.db.ResolveAlerts(p.RunName, "stall")
 }
 
 // noteMonitoringGate makes fail-closed monitoring failures visible. A malformed
@@ -288,25 +368,44 @@ func (d *Detector) scanRun(p sysmon.Proc, runID int64, stats db.TrainStats, late
 		d.raise(p, "throughput_drop", "warn", stats.LastStep,
 			fmt.Sprintf("throughput fell to %.0f tok/s (median %.0f)", stats.LastTokPerSec, stats.MedTokPerSec))
 	}
-	if stats.CodecRel != nil && *stats.CodecRel > codecRelWarn {
+	if median, ok := robustCodecRel(stats.CodecRelWindow); ok && median > codecRelWarn {
 		d.raise(p, "codec_collapse", "critical", stats.LastStep,
-			fmt.Sprintf("codec rel_rmse %.3f > %.2f — SMT/DMT targets likely garbage", *stats.CodecRel, codecRelWarn))
+			fmt.Sprintf("codec rel_rmse median %.3f over %d rows > %.2f — SMT/DMT targets likely garbage",
+				median, len(stats.CodecRelWindow), codecRelWarn))
 	}
 	// memory_path_dead: a ROSA/Engram recall path that never activated (injection
 	// RMS still ~0 well past warmup). Only fires when the run actually emits the
-	// field — runs without ROSA/Engram leave it nil and are skipped.
+	// field — runs without ROSA/Engram report zero rows and are skipped.
+	// memory_path_unmeasured is its explicit counterpart: rows exist, but too few
+	// to judge, which must be visible rather than silently absent.
 	if stats.LastStep > memDeadMinStep {
-		var dead []string
-		if stats.RosaInjRMS != nil && *stats.RosaInjRMS < memDeadRMS {
-			dead = append(dead, "ROSA")
-		}
-		if stats.EngramInjRMS != nil && *stats.EngramInjRMS < memDeadRMS {
-			dead = append(dead, "Engram")
+		var dead, unknown []string
+		for _, path := range []struct {
+			name   string
+			window []float64
+		}{{"ROSA", stats.RosaInjWindow}, {"Engram", stats.EngramInjWindow}} {
+			evidence := classifyMemoryPath(path.window)
+			switch evidence.verdict {
+			case memoryPathDead:
+				dead = append(dead, path.name)
+			case memoryPathUnknown:
+				unknown = append(unknown, fmt.Sprintf("%s (%d finite of %d rows)",
+					path.name, evidence.finite, evidence.rows))
+			}
 		}
 		if len(dead) > 0 {
 			d.raise(p, "memory_path_dead", "warn", stats.LastStep,
-				fmt.Sprintf("%s injection still ~0 (RMS < %.0e) at step %d — recall path hasn't grokked on",
-					strings.Join(dead, " & "), memDeadRMS, stats.LastStep))
+				fmt.Sprintf("%s injection persistently ~0 on usable rows (≥%.0f%% RMS < %.0e) at step %d — recall path hasn't grokked on",
+					strings.Join(dead, " & "), 100*memDeadFrac, memDeadRMS, stats.LastStep))
+		}
+		if len(unknown) > 0 {
+			d.raise(p, "memory_path_unmeasured", "info", stats.LastStep,
+				fmt.Sprintf("%s injection health is UNKNOWN, not healthy: need ≥%d finite rows (and ≥%.0f%% finite) in the last %d train rows — raise the --log-grokking-metrics cadence",
+					strings.Join(unknown, " & "), memDeadMinSamples, 100*memDeadMinFinite, stats.N))
+		} else {
+			// Insufficient evidence describes a live condition, like stall:
+			// once the window carries enough rows to judge, retire the banner.
+			_ = d.db.ResolveAlerts(p.RunName, "memory_path_unmeasured")
 		}
 	}
 
@@ -325,67 +424,46 @@ func (d *Detector) scanRun(p sysmon.Proc, runID int64, stats db.TrainStats, late
 			fmt.Sprintf("eval ppl %.1f is %.1fx the original baseline %.1f", *latestPPL, *latestPPL/d.baselinePPL, d.baselinePPL))
 	}
 
-	// loop-gate steering (LoopedRWKV residual_weight, surfaced as loop_max_rw on eval
-	// records). Full lifecycle: stalled ~0 well past warmup -> boost the live
-	// loop_lr_mult so the zero-init gates get off the floor; clearly moving -> release
-	// the boost back toward 1 (it exists for escape velocity, not steady state);
-	// pinned at the cap -> cool it. residual_weight is UNBOUNDED in looped_rwkv, so
-	// the boost must never be left hot longer than the escape window needs.
-	// loop_live=0 (schedulefree) means the mult is baked into the group lr — live
-	// steering is a no-op there, so write nothing rather than alert forever.
+	// Read-only loop-gate diagnostics (LoopedRWKV residual_weight, surfaced as
+	// loop_max_rw on eval records). The detector reports when an operator should
+	// consider boosting, releasing, or cooling loop_lr_mult, but never writes a
+	// trainer control. loop_live=0 means the multiplier is baked into the group
+	// LR, so a live-control recommendation would be misleading and is omitted.
 	if eerr == nil && es.N >= 1 && es.LastMaxRW != nil && (es.LastLoopLive == nil || *es.LastLoopLive != 0) {
-		// Current effective mult: an explicit control row wins (it's what the trainer
-		// polls next); else the trainer-reported value, which folds in the LAUNCH
-		// --loop-lr-mult this side can't otherwise see — a run started at 30x must not
-		// be "boosted" down to 10x, and its release/cool rules must still engage.
+		// The trainer-reported value is observational evidence only. An absent
+		// value is treated as the neutral multiplier for message qualification.
 		fallback := 1.0
 		if es.LastLoopMult != nil {
 			fallback = *es.LastLoopMult
 		}
-		cur := d.currentControl(p.RunName, "loop_lr_mult", fallback)
+		cur := fallback
 		pinThr := loopPinRW // legacy default; trainer reports the cap-scaled threshold
 		if es.LastPinThr != nil {
 			pinThr = *es.LastPinThr
 		}
 		// --loop-anneal-rw: the trainer cools the boost itself on a deterministic
-		// schedule. Round-1 gate A/B showed detector-side cooling is ingest/sampler-
-		// laggy (one arm cooled at max|rw| 0.303, the other at 2.1) — so when the
-		// trainer owns cooling, this side never writes loop_lr_mult controls for
-		// pin/release; the stall BOOST still applies (the trainer folds a control
-		// override into its anneal formula), and pin degrades to a watermark alert.
+		// schedule. Its ownership is surfaced in the diagnostic so the operator
+		// does not fight that schedule with a second controller.
 		annealed := es.LastLoopAnn != nil && *es.LastLoopAnn != 0
 		if stats.LastStep > loopStallMinStep && *es.LastMaxRW < loopStallRW {
 			next := math.Min(math.Max(cur, 1.0)*10.0, loopMultCap)
-			if next > cur {
-				if d.raise(p, "loop_stall", "warn", stats.LastStep,
-					fmt.Sprintf("loop gates still ~0 (max|rw| %.1e) at step %d — boosting loop_lr_mult %.3g→%.3g",
-						*es.LastMaxRW, stats.LastStep, cur, next)) {
-					now := float64(time.Now().UnixNano()) / 1e9
-					_ = d.db.SetControls(p.RunName, map[string]float64{"loop_lr_mult": next}, now)
-				}
-			}
+			d.raise(p, "loop_stall", "warn", stats.LastStep,
+				fmt.Sprintf("loop gates still ~0 (max|rw| %.1e) at step %d — review the schedule and consider loop_lr_mult %.3g→%.3g through TrainVM",
+					*es.LastMaxRW, stats.LastStep, cur, next))
 		} else if *es.LastMaxRW >= pinThr && annealed {
-			// watermark only: gates beyond the healthy regime, but cooling is the
-			// trainer's job. Surfaces on the dashboard without fighting the anneal.
 			d.raise(p, "loop_pinned", "warn", stats.LastStep,
 				fmt.Sprintf("loop gates beyond healthy regime (max|rw| %.3f ≥ %.3f); trainer anneal owns cooling (mult %.3g)",
 					*es.LastMaxRW, pinThr, cur))
 		} else if *es.LastMaxRW >= pinThr && cur > 1.0 {
 			next := math.Max(cur*0.5, 1.0)
-			if d.raise(p, "loop_pinned", "warn", stats.LastStep,
-				fmt.Sprintf("loop gates pinned (max|rw| %.3f ≥ %.3f) — cooling loop_lr_mult %.3g→%.3g",
-					*es.LastMaxRW, pinThr, cur, next)) {
-				now := float64(time.Now().UnixNano()) / 1e9
-				_ = d.db.SetControls(p.RunName, map[string]float64{"loop_lr_mult": next}, now)
-			}
+			d.raise(p, "loop_pinned", "warn", stats.LastStep,
+				fmt.Sprintf("loop gates pinned (max|rw| %.3f ≥ %.3f) — consider loop_lr_mult %.3g→%.3g through TrainVM",
+					*es.LastMaxRW, pinThr, cur, next))
 		} else if *es.LastMaxRW >= loopReleaseRW && !annealed && cur > 1.0 {
 			next := math.Max(cur*0.5, 1.0)
-			if d.raise(p, "loop_release", "info", stats.LastStep,
-				fmt.Sprintf("loop gates moving (max|rw| %.3f ≥ %.2g) — releasing loop_lr_mult %.3g→%.3g",
-					*es.LastMaxRW, loopReleaseRW, cur, next)) {
-				now := float64(time.Now().UnixNano()) / 1e9
-				_ = d.db.SetControls(p.RunName, map[string]float64{"loop_lr_mult": next}, now)
-			}
+			d.raise(p, "loop_release", "info", stats.LastStep,
+				fmt.Sprintf("loop gates moving (max|rw| %.3f ≥ %.2g) — consider releasing loop_lr_mult %.3g→%.3g through TrainVM",
+					*es.LastMaxRW, loopReleaseRW, cur, next))
 		}
 	}
 
@@ -402,36 +480,17 @@ func (d *Detector) scanRun(p sysmon.Proc, runID int64, stats db.TrainStats, late
 			if blockCollapse {
 				what, cur, best = "held-out block-MSE", *es.LastBlockVal, *es.MinBlockVal
 			}
-			// Recover, don't kill: warn (so auto-stop won't SIGINT) and write an
-			// in-place LR cool to the control table. The trainer's --grok-autopilot
-			// owns the structural recovery (restore-best + reg escalation).
-			if d.raise(p, "anti_grokking_collapse", "warn", stats.LastStep,
-				fmt.Sprintf("%s rose to %.4g (%.0f%% over best %.4g) while train still falling — auto-cooling lr_scale=%.2f; autopilot handles restore-best/reg",
-					what, cur, 100*(cur/best-1), best, antiGrokLRCool)) {
-				now := float64(time.Now().UnixNano()) / 1e9
-				_ = d.db.SetControls(p.RunName, map[string]float64{"lr_scale": antiGrokLRCool}, now)
-			}
+			// Surface a conservative recommendation without competing with the
+			// trainer's autopilot or TrainVM's authoritative control boundary.
+			d.raise(p, "anti_grokking_collapse", "warn", stats.LastStep,
+				fmt.Sprintf("%s rose to %.4g (%.0f%% over best %.4g) while train still falling — consider lr_scale=%.2f through TrainVM; autopilot handles restore-best/reg",
+					what, cur, 100*(cur/best-1), best, antiGrokLRCool))
 		}
 	}
 }
 
-// currentControl reads the current desired value of a live-tune key for a run
-// (the steering target the detector escalates from), defaulting when unset.
-func (d *Detector) currentControl(run, key string, def float64) float64 {
-	cs, err := d.db.GetControls(run)
-	if err != nil {
-		return def
-	}
-	for _, c := range cs {
-		if c.Key == key {
-			return c.Value
-		}
-	}
-	return def
-}
-
-// raise records an alert (subject to cooldown) and, for criticals with auto-stop
-// enabled, SIGINTs the run's process.
+// raise records an alert subject to cooldown. It never signals a process or
+// writes a trainer control.
 func (d *Detector) raise(p sysmon.Proc, kind, severity string, step int64, msg string) bool {
 	key := p.RunName + "|" + kind
 	now := float64(time.Now().UnixNano()) / 1e9
@@ -446,18 +505,6 @@ func (d *Detector) raise(p sysmon.Proc, kind, severity string, step int64, msg s
 	_, _ = d.db.InsertAlert(db.Alert{
 		Ts: now, RunName: p.RunName, Kind: kind, Severity: severity, Message: msg, Step: step,
 	})
-
-	if severity == "critical" && d.autoStop.Load() && p.PID > 0 {
-		if alive, _, _ := sysmon.VerifyTrainingPID(p.PID); alive {
-			if err := syscall.Kill(int(p.PID), syscall.SIGINT); err == nil {
-				d.db.LogAction(now, "auto_stop", p.RunName, `{"trigger":"`+kind+`"}`, "SIGINT sent (auto-stop)", int(p.PID))
-				_, _ = d.db.InsertAlert(db.Alert{
-					Ts: now, RunName: p.RunName, Kind: "auto_stop", Severity: "critical", Step: step,
-					Message: fmt.Sprintf("auto-stop: SIGINT sent to PID %d after %s", p.PID, kind),
-				})
-			}
-		}
-	}
 	return true
 }
 

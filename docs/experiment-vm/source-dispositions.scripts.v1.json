@@ -1,0 +1,2031 @@
+{
+  "api_version": "trainvm.source-dispositions/v1",
+  "authority": "compatibility_evidence_only",
+  "source_repository": "moe-mla",
+  "source_revision": "git-sha1:bae678b94a0744f4b1dfd8685dde826f4c775197",
+  "source_scope": {
+    "prefix": "scripts",
+    "recursive": false,
+    "extensions": [
+      ".py",
+      ".sh"
+    ]
+  },
+  "source_tree_digest": "sha256:9e469674309049d4d7911a09ad869f5759538a98df476f05f40587af40f1894b",
+  "entries": [
+    {
+      "source_path": "scripts/apply_qwen36_civitai_joy_recaptions.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/apply_qwen36_civitai_joy_recaptions.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:8f90a7d7071837eec31b669f12e7dd630b5624b4576fab9dc6e4a30d4eb99e27",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/assemble_selected_vision_cache.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/assemble_selected_vision_cache.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:108fb7334f3db20ed4b2ef05dc502febe89f68b44f062f84652e51b428d5a51b",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/assemble_vision_cache_overlay.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/assemble_vision_cache_overlay.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "cache.vision-overlay-assembly",
+      "source_sha256": "sha256:570abdc427e61044d6989e289235f7d5893f88eff0d0fd317862deadd10bc6f4",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "cache.vision-overlay-assembly"
+      ]
+    },
+    {
+      "source_path": "scripts/batch_recaption_civitai_joy_qwen36.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/batch_recaption_civitai_joy_qwen36.py",
+      "effects": [
+        "network",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:2e7a2642f70b3940de21d3616ce8f45f83aa6cf3b2cd277624b6c78a4ebd1575",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/benchmark_mage_flow_runtime.py",
+      "class": "test_benchmark",
+      "canonical_entry_point": "python scripts/benchmark_mage_flow_runtime.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "gpu_compute"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "profiling.mageflow-runtime",
+      "source_sha256": "sha256:5cb77fc6bb472a037a239decfb467028d0838842283d11ced991a5c919ac36da",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "profiling.mageflow-runtime"
+      ]
+    },
+    {
+      "source_path": "scripts/benchmark_qwen_prompt_hints.py",
+      "class": "test_benchmark",
+      "canonical_entry_point": "python scripts/benchmark_qwen_prompt_hints.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "gpu_compute"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "profiling.qwen-prompt-hints",
+      "source_sha256": "sha256:6a4049e5501ab5dfbcbb4ab23a48e741681114320d2f3f05f6fd6fcaba70cf05",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "profiling.qwen-prompt-hints"
+      ]
+    },
+    {
+      "source_path": "scripts/bootstrap_ao3_cpt.sh",
+      "class": "install_bootstrap",
+      "canonical_entry_point": "bash scripts/bootstrap_ao3_cpt.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "network",
+        "subprocess",
+        "install_environment"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:cf8b353ed3bc4762aa1035ca18b8a998cd5bf589ab61e48e39c6aa1f0bcce2be",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/bootstrap_mage_flow_pretrain.sh",
+      "class": "install_bootstrap",
+      "canonical_entry_point": "bash scripts/bootstrap_mage_flow_pretrain.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "network",
+        "subprocess",
+        "install_environment"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:77da3082adf11eaa69e92102f2141e9e1b32aa884d308845d124c022d5d55a1d",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/build_blinded_review_pack.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/build_blinded_review_pack.py",
+      "effects": [
+        "network",
+        "read_source",
+        "write_artifact",
+        "human_review"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:3f92c0ab6111fcefd898f4a4b4a09e733912141981260d8c57816dc57d9717b0",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/build_captioning_civitai_joy_mix.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/build_captioning_civitai_joy_mix.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:d693b2a3240914d4970991b384958a345ee2b8cd6a7980441c6b2de3e8f534f7",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/build_captioning_first_mix.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/build_captioning_first_mix.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:f94e925ba996712a314f952ad6c38344e6247a629b85e1cc2f897d37378fe971",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/build_captioning_ocr_fixed.sh",
+      "class": "wrapper_alias",
+      "canonical_entry_point": "scripts/build_doclingmatix_ocr_mix.py + scripts/build_captioning_first_mix.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:3a1ea31c11bfd3d83a6ca7a81ac553dc3e76baf1697a572bcab163caa80f873c",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/build_curated_vision_manifests.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/build_curated_vision_manifests.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:0dc8f0a3f47efb72c90e5c87c6fa26c0b545c127f214b4c1fd535af806c90cb0",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/build_doclingmatix_ocr_mix.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/build_doclingmatix_ocr_mix.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:9cff25599ed96892ec9061a7e4d093bece5a6269894e956b3867e133c36b8929",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/build_gelbooru_trainer_dataset.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/build_gelbooru_trainer_dataset.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "data.gelbooru-trainer-snapshot",
+      "source_sha256": "sha256:0319a9581cfd4073e8dfc12eba5e689f02de97fb5837ae5fd438bb55114b1375",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "data.gelbooru-trainer-snapshot"
+      ]
+    },
+    {
+      "source_path": "scripts/build_i1_civitai_mix.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/build_i1_civitai_mix.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:32c758f629ec1dd6fe4f0b37060ea2a34c1184d07bfd931619d5e993551ac120",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/build_i1_next_mix.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/build_i1_next_mix.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:efd6313c9f37198995422a376d46e9a61c762f3d4daf731f3dd3d00d836b8184",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/build_i1_quality_caption_cache.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/build_i1_quality_caption_cache.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:51eca9cceed94e05f024f2c90d7dadab788745ecee7e374652d43b2a7a502217",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/build_reddit_trainer_snapshot.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/build_reddit_trainer_snapshot.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "data.reddit-trainer-snapshot",
+      "source_sha256": "sha256:254fcdfbe48a349df31e939e588770f79360cf46cee2ddbe3f8a2bdf85628284",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "data.reddit-trainer-snapshot"
+      ]
+    },
+    {
+      "source_path": "scripts/build_unlabeled_image_manifest.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/build_unlabeled_image_manifest.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "inventory.unlabeled-images",
+      "source_sha256": "sha256:f612a03b60b8cd86b07362cd4771abffb6cf768bf0628bf800e8a5820f9d02d1",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "inventory.unlabeled-images"
+      ]
+    },
+    {
+      "source_path": "scripts/build_updated_review_pack.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/build_updated_review_pack.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "human_review"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:0fb8ed0d41f9011bae042b51b62d30030be38a20eb3bc6baf09744706ea2246f",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/build_v4h_dino_compactor.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/build_v4h_dino_compactor.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "conversion.v4h-dino-compactor",
+      "source_sha256": "sha256:f6773be427ffd02a53cd7d420ffe6baa0366d64178dab301e390aa5c94a88e67",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "conversion.v4h-dino-compactor"
+      ]
+    },
+    {
+      "source_path": "scripts/build_vision_eight_hour_mix.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/build_vision_eight_hour_mix.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:02cbc495b2478c5b2394755bdbe434a15a292d920102ff59450e0f7a3d4bef34",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/build_vision_finish_mix.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/build_vision_finish_mix.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:23b2866c6a16536167d8a57d134ef54401605fc9fc9cea331d845bb3b2bed3dc",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/build_vision_sampler_receipt.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/build_vision_sampler_receipt.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:0b4c0c48cab62fe57c6bf6f864214d0d4e9bd1c912a4b0ad12956a81cdd4ce39",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/build_vision_stage1_mix.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/build_vision_stage1_mix.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:24d02580e1dc083a9271ab25cabcba58c1c3335961a9960598169995f21f13a8",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/build_vision_teacher_shard.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/build_vision_teacher_shard.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:727e62528b2bc92d00dd0b7ee9a678b84be63e037f39153e55299c83856d3e80",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/cache_local_porn_teacher_shard.sh",
+      "class": "wrapper_alias",
+      "canonical_entry_point": "scripts/cache_vision_teacher_manifest.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:0bb5e43b22c436297ace52fe30db1968a2ef1fb8f6ba489699d73df6638890d8",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/cache_mage_flow_base.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/cache_mage_flow_base.sh",
+      "effects": [
+        "network",
+        "read_source",
+        "subprocess"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:b89612c1a233ae4d9d0db4a50b777130980407ecc356fee4985331111b75787a",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/cache_radio1d_captioning_first.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/cache_radio1d_captioning_first.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:231d4bfdebc9ca6aa628271dacec1111983be242fa0a1f80e79d54709dba400b",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/cache_radio1d_civitai_joy.sh",
+      "class": "wrapper_alias",
+      "canonical_entry_point": "scripts/cache_radio1d_features.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:c92067f046eaf05784c19dd3082366fbf3ebe85f9177fde4c22f4e64c2f9a2ff",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/cache_radio1d_features.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/cache_radio1d_features.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "cache.vision-radio1d",
+      "source_sha256": "sha256:beb9b3730dc5e54705d07f765a7588bef477cd282e57354b942032f2b7be5cee",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "cache.vision-radio1d"
+      ]
+    },
+    {
+      "source_path": "scripts/cache_v4h_all_adaptors.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/cache_v4h_all_adaptors.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "cache.vision-v4h",
+      "source_sha256": "sha256:892b0be224a63ab0eaf51674f51fe85375d9ea61b4ef5764ec646c14aef8edbe",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "cache.vision-v4h"
+      ]
+    },
+    {
+      "source_path": "scripts/cache_v4h_all_adaptors.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/cache_v4h_all_adaptors.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:6ac945fe3b6c2d312373265cee0c8fbdcfb22d0bff9567b61ffb6dad298014e3",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/cache_v4h_captioning_ocr_fixed.sh",
+      "class": "wrapper_alias",
+      "canonical_entry_point": "scripts/cache_v4h_native.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:fe795329c23d85b36e985fcd139b7df622e1808a1b6c1071d18a1439c845a5ac",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/cache_v4h_features.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/cache_v4h_features.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "cache.vision-v4h",
+      "source_sha256": "sha256:85ecf72f3038f337faeec651d7839f3d5706502858567e73003f3477ae082f90",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "cache.vision-v4h"
+      ]
+    },
+    {
+      "source_path": "scripts/cache_v4h_native.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/cache_v4h_native.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "cache.vision-v4h",
+      "source_sha256": "sha256:1bbf31c1035f589b779ec1c09476980aa22f72a6b652666ac2c01b5635be1955",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "cache.vision-v4h"
+      ]
+    },
+    {
+      "source_path": "scripts/cache_vision_teacher_manifest.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/cache_vision_teacher_manifest.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:4f24e297a8ac665ba5cfc1411d83b2835a5d45d2f5badbd527e1b8d66dd7c4f4",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/cache_vision_teacher_shard.sh",
+      "class": "wrapper_alias",
+      "canonical_entry_point": "scripts/cache_vision_teacher_manifest.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:3a16a4104bc3fc375f26f3f296e13efffc3c3ce7da9ac214aae35904dd6795c0",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/cache_vision_teacher_shard_001.sh",
+      "class": "wrapper_alias",
+      "canonical_entry_point": "scripts/cache_vision_teacher_manifest.sh",
+      "effects": [
+        "read_source",
+        "mutate_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:3f183ac1ec07e1c60f5fe19515f32f89ec237af552ec2457251d539ddfe6819f",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/caption_radio1d_directory.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/caption_radio1d_directory.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "evaluation.radio1d-batch-caption",
+      "source_sha256": "sha256:98cbc01e5bded12c3f625901293a6549ddbd18b684fdae67a862c203117ee211",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "evaluation.radio1d-batch-caption"
+      ]
+    },
+    {
+      "source_path": "scripts/classify_i1_deepghs.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/classify_i1_deepghs.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "network",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "scoring.i1-deepghs-classification",
+      "source_sha256": "sha256:aa547911e778104e63462ed94bf80efbb9c32bf0747fbc61497a9ba111ed63bd",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "scoring.i1-deepghs-classification"
+      ]
+    },
+    {
+      "source_path": "scripts/combine_vision_manifests.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/combine_vision_manifests.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:7134d69bc00f6de7e9b4eedd72806c38fe155250c042d3b840dba640f5ea4f77",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/convert_terminal_mageflow_to_tread_looped.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/convert_terminal_mageflow_to_tread_looped.py",
+      "effects": [
+        "network",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "mageflow.tread-loop-conversion",
+      "source_sha256": "sha256:330f9c5d33087081110020957af43a22be283be122e9fc4ef94b2b595255112c",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "mageflow.tread-loop-conversion"
+      ]
+    },
+    {
+      "source_path": "scripts/dedupe_cutoff_review.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/dedupe_cutoff_review.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "human_review",
+        "serve_http"
+      ],
+      "resume_relevance": "restart_only",
+      "compatibility_workflow_id": "review.dedupe-cutoff",
+      "source_sha256": "sha256:a2933c30bdbf125af0e0ffae5e77ee56264f2ddfd122483bf289d9313b3dcf7d",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "review.dedupe-cutoff"
+      ]
+    },
+    {
+      "source_path": "scripts/download_civitai_anima_balanced.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/download_civitai_anima_balanced.py",
+      "effects": [
+        "network",
+        "read_source",
+        "mutate_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "acquisition.civitai-balanced",
+      "source_sha256": "sha256:57d8c80a873a8252d7783f97699b821d79a4867964e35356bdf7cb6d50e42a19",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "acquisition.civitai-balanced"
+      ]
+    },
+    {
+      "source_path": "scripts/download_civitai_anima_dataset.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/download_civitai_anima_dataset.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "network"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "acquisition.civitai-anima",
+      "source_sha256": "sha256:cf709b2cf5c4a04dde34f5d5cc5faa03ab8bc62a0d07d5d37c412b9d6324221d",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "acquisition.civitai-anima"
+      ]
+    },
+    {
+      "source_path": "scripts/download_joy_direct_images.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/download_joy_direct_images.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "network"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:94facc5282e45fde1fbc208a50bf6a277f019f66316dff68bcaf5a73fbc58368",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/draw_pose_review_boxes.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/draw_pose_review_boxes.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "human_review"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:49d953d54847d1eef3bd3e11ab28e51cbbb702e3f85ec46b50b6e30626aca82c",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/export_frozen_vision_compressor.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/export_frozen_vision_compressor.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "export.frozen-vision-compressor",
+      "source_sha256": "sha256:0ba063bf5b8bada668d2bd0ca28c36cfe0738a434eb8c2fa37a37b13264a9e30",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "export.frozen-vision-compressor"
+      ]
+    },
+    {
+      "source_path": "scripts/factored_loop_sweep.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/factored_loop_sweep.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "restart_only",
+      "compatibility_workflow_id": "rwkv.legacy-sweep-campaigns",
+      "source_sha256": "sha256:bf67e79a0e74cb32e0f5a8623db3b12632101836647de074242c219ef77bb3fc",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "rwkv.legacy-sweep-campaigns"
+      ]
+    },
+    {
+      "source_path": "scripts/fetch_coco_sam.sh",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "bash scripts/fetch_coco_sam.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "network",
+        "subprocess"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:c14f1776fac93fa710581d2d6853660a6be0735941ca834e37511ae52cf3cdcb",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/fetch_doclingmatix.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/fetch_doclingmatix.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "network"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:2b88149cf5b1da1fa8a50ff371ff1d96da650dc21c1f0d4e963a11be79f835c2",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/fetch_i1_archives.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/fetch_i1_archives.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "network"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "acquisition.i1-direct-archives",
+      "source_sha256": "sha256:9bdfb12c6228c14dcbeb6358a984ac40044d2e2b153d7824f687fd2422f27937",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "acquisition.i1-direct-archives"
+      ]
+    },
+    {
+      "source_path": "scripts/fetch_i1_proportional_hf_subsets.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/fetch_i1_proportional_hf_subsets.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "network"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:8bca47a16cf264d42c223cc8fa08356c043baffdb1eeec424456708e025a2d0c",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/fetch_i1_proportional_web_subsets.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/fetch_i1_proportional_web_subsets.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "network"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:7d390b0f48bf2bd88648b069d0df267ad5d31eda25b79ecc49acd89deae4e6a7",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/fetch_i1_rendered_text.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/fetch_i1_rendered_text.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "network"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:9c0ebf3a2aa245a861be8b2fc78dd7e3b08c6d48c0c6c84508176a0ab31a8dcb",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/fetch_i1_sources.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/fetch_i1_sources.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "network"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:2ff3844339d30e1c6ad3e320327e2277d3ddd6dd762ec4976cb9138e8d72d10b",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/fetch_joy_ipfs_samples.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/fetch_joy_ipfs_samples.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "network"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:3faed4dba0f6fc22ac9e142bad0cb67836c89d2ea1a04322d680f126fdaf440f",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/finalize_vision_cache.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/finalize_vision_cache.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "cache.vision-finalization",
+      "source_sha256": "sha256:89bcafb063db7bc598bd95078267002f28a3e9f476ae5588323bb915f0025403",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "cache.vision-finalization"
+      ]
+    },
+    {
+      "source_path": "scripts/finish_local_porn_dedupe.sh",
+      "class": "wrapper_alias",
+      "canonical_entry_point": "scripts/build_unlabeled_image_manifest.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:5a5228531b91b419a2d13bf9250f01828bbdae3472629caff43ac5230fe4c3ce",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/finish_vision_eight_hour_cache.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/finish_vision_eight_hour_cache.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "process_control"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:55b811e3a671e20795f3cd0e6c238060d37a51d5685e0f96ae6351507f2e0e32",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/g1g_sweep.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/g1g_sweep.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "restart_only",
+      "compatibility_workflow_id": "rwkv.legacy-sweep-campaigns",
+      "source_sha256": "sha256:d8e17a0f10c88c21a7245b02c8b61141792a9357b316460838dddbeb59b18cbf",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "rwkv.legacy-sweep-campaigns"
+      ]
+    },
+    {
+      "source_path": "scripts/gate_ab.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/gate_ab.sh",
+      "effects": [
+        "subprocess",
+        "gpu_compute",
+        "write_artifact"
+      ],
+      "resume_relevance": "restart_only",
+      "compatibility_workflow_id": "conversion.gate-ab-campaign",
+      "source_sha256": "sha256:62e4584558a3806437f6c5ea8a26b7d27cd4d09c05eefee23acd71c8b583c6cf",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "conversion.gate-ab-campaign"
+      ]
+    },
+    {
+      "source_path": "scripts/gate_ab2.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/gate_ab2.sh",
+      "effects": [
+        "subprocess",
+        "gpu_compute",
+        "write_artifact"
+      ],
+      "resume_relevance": "restart_only",
+      "compatibility_workflow_id": "conversion.gate-ab2-campaign",
+      "source_sha256": "sha256:55058b98e2e650de5a14f35946dd309b5f9b8ecb22dbca1f0bb2ceab1c55febc",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "conversion.gate-ab2-campaign"
+      ]
+    },
+    {
+      "source_path": "scripts/gdn_sweep.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/gdn_sweep.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "restart_only",
+      "compatibility_workflow_id": "conversion.gdn-sweep-supervisor",
+      "source_sha256": "sha256:6d6e15f902f17274b24e06c32f9300ca41fa0ec5fffc366e33096efe43616d16",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "conversion.gdn-sweep-supervisor"
+      ]
+    },
+    {
+      "source_path": "scripts/handoff_vision_cache_at_10_percent.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/handoff_vision_cache_at_10_percent.py",
+      "effects": [
+        "read_source",
+        "mutate_source",
+        "write_artifact",
+        "subprocess",
+        "process_control",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "cache.vision-ten-percent-handoff",
+      "source_sha256": "sha256:b69b6c491d5b035eb6a6aa4018243e318cafa09c8b3618d1b5d3654deeb4f295",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "cache.vision-ten-percent-handoff"
+      ]
+    },
+    {
+      "source_path": "scripts/i1_quality_viewer.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/i1_quality_viewer.py",
+      "effects": [
+        "read_source",
+        "mutate_source",
+        "write_artifact",
+        "serve_http",
+        "human_review"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "review.i1-quality-viewer",
+      "source_sha256": "sha256:ee7224795e6aea6ba0a48317bf9060515ce2c7ae128421b6e110a01fe1874c6d",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "review.i1-quality-viewer"
+      ]
+    },
+    {
+      "source_path": "scripts/install_causal_conv1d_for_gpu.sh",
+      "class": "install_bootstrap",
+      "canonical_entry_point": "bash scripts/install_causal_conv1d_for_gpu.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "network",
+        "subprocess",
+        "install_environment"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:fb9fca23b2d108a683ba6948f2617ae5c558e27ea1f4a839d62817407c970401",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/latent_steps_sweep.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/latent_steps_sweep.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "restart_only",
+      "compatibility_workflow_id": "rwkv.legacy-sweep-campaigns",
+      "source_sha256": "sha256:ce05a759066cd58c9e6b5f3127399cb778c01f5d0ad44cc059af0f8455924643",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "rwkv.legacy-sweep-campaigns"
+      ]
+    },
+    {
+      "source_path": "scripts/latent_sweep.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/latent_sweep.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "restart_only",
+      "compatibility_workflow_id": "rwkv.legacy-sweep-campaigns",
+      "source_sha256": "sha256:60506037455d74078d1c362724a38e65004306e57da99a4ff2778efac4545880",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "rwkv.legacy-sweep-campaigns"
+      ]
+    },
+    {
+      "source_path": "scripts/loop_sweep.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/loop_sweep.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "restart_only",
+      "compatibility_workflow_id": "rwkv.legacy-sweep-campaigns",
+      "source_sha256": "sha256:bd396bf824f330090d0dde72d21a78d992eeadd40caa2ee07b1a684fa7ecd79b",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "rwkv.legacy-sweep-campaigns"
+      ]
+    },
+    {
+      "source_path": "scripts/mageflow_cache_rest_and_resume.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/mageflow_cache_rest_and_resume.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "mageflow.cache-resume-supervisor",
+      "source_sha256": "sha256:4f370e20bf2df2b198a933b20718b7308b4d11caef19753edb9b7d9d19b0d8c0",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "mageflow.cache-resume-supervisor"
+      ]
+    },
+    {
+      "source_path": "scripts/mageflow_finish_cache_and_resume.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/mageflow_finish_cache_and_resume.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "mageflow.cache-finish-resume",
+      "source_sha256": "sha256:2dced95a262c98ec8e4f2984efe43ee13ba033e069f191ce0b99d83bf157e1a7",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "mageflow.cache-finish-resume"
+      ]
+    },
+    {
+      "source_path": "scripts/materialize_exact_dedup.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/materialize_exact_dedup.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "mutate_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "dedup.materialize-exact-links",
+      "source_sha256": "sha256:b69e3936e699c83c639c9ba148df78a7b77c69762bf8d89903ac1508073e52e9",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "dedup.materialize-exact-links"
+      ]
+    },
+    {
+      "source_path": "scripts/materialize_i1_proportional_tranche.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/materialize_i1_proportional_tranche.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:741d6c76013e78b300e06855da244cc6a9032375c9623c234293dd6551cb23ee",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/materialize_midjourney_v6_continuation.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/materialize_midjourney_v6_continuation.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "network"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "data.midjourney-v6-continuation",
+      "source_sha256": "sha256:f5adc334e0557c905a47b6666f6d0b8bf5c5013e07aa6c793c9715b4d7a07315",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "data.midjourney-v6-continuation"
+      ]
+    },
+    {
+      "source_path": "scripts/materialize_midjourney_v6_expert_stage.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/materialize_midjourney_v6_expert_stage.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "network"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "data.midjourney-v6-expert-stage",
+      "source_sha256": "sha256:66f480ab4acd165adde5fcf5a6b720f1d2865bcd4ab11f29ca8e0a712a4aab2b",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "data.midjourney-v6-expert-stage"
+      ]
+    },
+    {
+      "source_path": "scripts/midjourney_alignment.py",
+      "class": "explicit_exclusion",
+      "canonical_entry_point": "library-only (explicit exclusion)",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:a133e4eb770714915959af9daf83212f6833e3e31519be2b77401f91d7057e64",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/migrate_mage_flow_terminal_experts.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/migrate_mage_flow_terminal_experts.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "network"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "mageflow.terminal-expert-migration",
+      "source_sha256": "sha256:110f3f907a4c8f4df91a6dbc1ce2d091e10ea421dc23d95f733cbb9ec895c72b",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "mageflow.terminal-expert-migration"
+      ]
+    },
+    {
+      "source_path": "scripts/overnight_teacher_student_supervisor.py",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "python scripts/overnight_teacher_student_supervisor.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "vision.teacher-student-supervisor",
+      "source_sha256": "sha256:85ead77771c506a825bd6bc57a0299847cfc198310929618e5331aecf15ea9e8",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "vision.teacher-student-supervisor"
+      ]
+    },
+    {
+      "source_path": "scripts/overnight_vision_watchdog.py",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "python scripts/overnight_vision_watchdog.py",
+      "effects": [
+        "network",
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "process_control",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "vision.continuation-watchdog",
+      "source_sha256": "sha256:5dd21d2a32f1ba416e0ea622fc33694ce2279d81d6a6e218f170191ca16888c8",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "vision.continuation-watchdog"
+      ]
+    },
+    {
+      "source_path": "scripts/prepare_ao3_cpt.py",
+      "class": "wrapper_alias",
+      "canonical_entry_point": "rwkv_lab.ao3_cpt_data:main",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "data.ao3-source-preparation",
+      "source_sha256": "sha256:8cc15fefbf6fa43781872be430c08ccc500d834b372b65b2f167d6acec9d2f8d",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "data.ao3-source-preparation"
+      ]
+    },
+    {
+      "source_path": "scripts/prepare_ao3_cpt_tokens.py",
+      "class": "wrapper_alias",
+      "canonical_entry_point": "rwkv_lab.ao3_cpt_tokens:main",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "data.ao3-tokenize",
+      "source_sha256": "sha256:445540a11dc7193b1ef2388e8bdb79ff7fd7c45a48c54999172e8e74c94dfeaf",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "data.ao3-tokenize",
+        "data.ao3-pack",
+        "data.ao3-rewrite-eos"
+      ]
+    },
+    {
+      "source_path": "scripts/prepare_mage_flow_edit_pretrain.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/prepare_mage_flow_edit_pretrain.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:464dd1f92015f83fa67737044afcc499c5fd3d6a823b9c19375f3a9292b6a8b8",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/prepare_mage_flow_expert_manifests.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/prepare_mage_flow_expert_manifests.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:22171da766deac4522aaec2e558967e877fedc7f45eefa6073931d2bfb328e1c",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/prepare_qwen_ao3_cpt.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/prepare_qwen_ao3_cpt.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "transformer.qwen-ao3-plan",
+      "source_sha256": "sha256:a961963b50013b1883af63431518989e36517afcc039ac113d3982103bd7b25c",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "transformer.qwen-ao3-plan"
+      ]
+    },
+    {
+      "source_path": "scripts/prepare_qwen_ao3_cpt_run.py",
+      "class": "wrapper_alias",
+      "canonical_entry_point": "rwkv_lab.qwen_ao3_cpt:main",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "transformer.qwen-ao3-plan",
+      "source_sha256": "sha256:fcf4f38677fe0ec2333b82639d9d469d825535eacec21bd4b96048d493c7e537",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "transformer.qwen-ao3-plan"
+      ]
+    },
+    {
+      "source_path": "scripts/prepare_vision_next_levers.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/prepare_vision_next_levers.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:857af2698787bc484d0d524d089ce8be8acfc2700b382799881ce619c3275cb5",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/prune_exact_duplicate_paths.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/prune_exact_duplicate_paths.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "mutate_source"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:cc396e0bbd2f94dfdcd64d4dc3950e1d18b693eff53cfb2647fae22e27861e10",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/recaption_midjourney_stage_with_i1.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/recaption_midjourney_stage_with_i1.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "mutate_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:f135751354fda55648f1dfed25b6382e1cb6e59711189c52ea7185db15be8b02",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/rel_sweep.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/rel_sweep.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "restart_only",
+      "compatibility_workflow_id": "conversion.rel-sweep-supervisor",
+      "source_sha256": "sha256:af6e664f11f7be3d0f73efd6da4cdc5bbadf31f89ed70a87318036c43702fa80",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "conversion.rel-sweep-supervisor"
+      ]
+    },
+    {
+      "source_path": "scripts/remove_source_from_review_pack.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/remove_source_from_review_pack.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "human_review",
+        "mutate_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:4f61925d31015963b17a6ffb625843326ef5b94b084c0cfaba8d9b52009e087e",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/repair_coco_sam_prompts.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/repair_coco_sam_prompts.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "mutate_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:779dea2bdde1ee8db0b90d848dcd4824e937905d22eb6b4663a8bed4063dbfba",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/repair_midjourney_i1_alignment.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/repair_midjourney_i1_alignment.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "mutate_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:292cdcc9999a3cf90799fc5c0b665d0ad111d61589a867b8ceb2cdde3371220e",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/resume_captioning_first_fixed.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/resume_captioning_first_fixed.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:cd756df3f43380cde16f598426f92e0998baa010c0f94f8ecb9af72f04d8047a",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/reuse_radio1d_cache.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/reuse_radio1d_cache.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:ef8123b851d0324d2a2cb21003ada8068fb6da45bc8aec81cc4eb7abbbf3c391",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/review_quality_pack.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/review_quality_pack.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "human_review"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:d5e192d3ede7dfccad13d4ed0caef2e834b0a72fa86f3acf53c419f62d1c5d55",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/run_i1_proportional_acquisition.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/run_i1_proportional_acquisition.sh",
+      "effects": [
+        "network",
+        "read_source",
+        "write_artifact",
+        "subprocess"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:b2bad2b97d0e155d0ad8388c9885194545cca98847ce6c221eb41132c31aefec",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/run_radio1d_captioning_first.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/run_radio1d_captioning_first.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "vision.radio1d-launch-profiles",
+      "source_sha256": "sha256:3318bed60789baadd8de7d91c58a35606c746ac3319301f6d27fa556642c333c",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "vision.radio1d-launch-profiles"
+      ]
+    },
+    {
+      "source_path": "scripts/run_radio1d_civitai_joy_continuation.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/run_radio1d_civitai_joy_continuation.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "vision.radio1d-launch-profiles",
+      "source_sha256": "sha256:f5036d48f6ab1190b7c06046d1bf8186b992d9bd59b0bb1af98249f00ca05184",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "vision.radio1d-launch-profiles"
+      ]
+    },
+    {
+      "source_path": "scripts/run_radio1d_eight_hour_grounded.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/run_radio1d_eight_hour_grounded.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "vision.radio1d-launch-profiles",
+      "source_sha256": "sha256:235074f2ee5141a61b82b84475c7b1fe345717f1ca423e1b98008dedb40f2d51",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "vision.radio1d-launch-profiles"
+      ]
+    },
+    {
+      "source_path": "scripts/run_v4h_all_adaptors_7b.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/run_v4h_all_adaptors_7b.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "vision.v4h-launch-profiles",
+      "source_sha256": "sha256:9d22ce23c91dc78f94f98b50463ea72da9505c03c75bd5a372491852c751008b",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "vision.v4h-launch-profiles"
+      ]
+    },
+    {
+      "source_path": "scripts/run_v4h_captioning_first.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/run_v4h_captioning_first.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "vision.v4h-launch-profiles",
+      "source_sha256": "sha256:d11b24b46f7545de24c8850c1d4b36bcf340a798f00dd94313f628551ec4773d",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "vision.v4h-launch-profiles"
+      ]
+    },
+    {
+      "source_path": "scripts/run_v4h_captioning_ocr_fixed.sh",
+      "class": "wrapper_alias",
+      "canonical_entry_point": "scripts/run_v4h_captioning_first.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "vision.v4h-launch-profiles",
+      "source_sha256": "sha256:4243c3f6d58dba7740a288b33905147f2cc33d3a317682ff68be38dde613c67a",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "vision.v4h-launch-profiles"
+      ]
+    },
+    {
+      "source_path": "scripts/run_vision_eight_hour.sh",
+      "class": "wrapper_alias",
+      "canonical_entry_point": "scripts/run_vision_finish_grounded.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "vision.moonvit-continuation-launch-profiles",
+      "source_sha256": "sha256:15e4f61be1901de107e1416109d48a575a7c70d03a71aa68a3ddf6e781dd675c",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "vision.moonvit-continuation-launch-profiles"
+      ]
+    },
+    {
+      "source_path": "scripts/run_vision_eight_hour_grounded.sh",
+      "class": "wrapper_alias",
+      "canonical_entry_point": "scripts/run_vision_finish_grounded.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "vision.moonvit-continuation-launch-profiles",
+      "source_sha256": "sha256:44157382623a52aca61110d8e424cf2191bbeb01708aed114c52daac11141f18",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "vision.moonvit-continuation-launch-profiles"
+      ]
+    },
+    {
+      "source_path": "scripts/run_vision_finish_grounded.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/run_vision_finish_grounded.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "vision.moonvit-continuation-launch-profiles",
+      "source_sha256": "sha256:236cc8d05f1536008a0c70e085ca6ca4a6530c9cec7c13bedcea1fa8bc6cf9ec",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "vision.moonvit-continuation-launch-profiles"
+      ]
+    },
+    {
+      "source_path": "scripts/run_vision_i1_next.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/run_vision_i1_next.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "vision.moonvit-continuation-launch-profiles",
+      "source_sha256": "sha256:77120222c8afa392dc508205a70c0e17926bad655a92411b5a44399033bf4281",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "vision.moonvit-continuation-launch-profiles"
+      ]
+    },
+    {
+      "source_path": "scripts/run_vision_native_arm2.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/run_vision_native_arm2.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "vision.native-head-launch-profile",
+      "source_sha256": "sha256:6471e838fced2f421e9e1a2f875ac1e29388c2411a84694614693cabd674ef3f",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "vision.native-head-launch-profile"
+      ]
+    },
+    {
+      "source_path": "scripts/run_vision_next_levers.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/run_vision_next_levers.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "vision.moonvit-continuation-launch-profiles",
+      "source_sha256": "sha256:884a6ef69512392fe8297150bc9c334c19a9184efa68c7e51bd48cb8b54880d2",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "vision.moonvit-continuation-launch-profiles"
+      ]
+    },
+    {
+      "source_path": "scripts/run_vision_next_levers_256.sh",
+      "class": "wrapper_alias",
+      "canonical_entry_point": "scripts/run_vision_next_levers.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "vision.moonvit-continuation-launch-profiles",
+      "source_sha256": "sha256:4a8b51a713290e5518b8589f42f24b475f8084132b3ee9cdc1df3f7edcf94428",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "vision.moonvit-continuation-launch-profiles"
+      ]
+    },
+    {
+      "source_path": "scripts/run_vision_representation_ab.py",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "python scripts/run_vision_representation_ab.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "restart_only",
+      "compatibility_workflow_id": "vision.representation-ab",
+      "source_sha256": "sha256:c6f2561bd4604287b32b087bdfb84ded78307d9d315c0c515a472eefae45bbfe",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "vision.representation-ab"
+      ]
+    },
+    {
+      "source_path": "scripts/run_vision_representation_ab_arm.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/run_vision_representation_ab_arm.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "restart_only",
+      "compatibility_workflow_id": "vision.representation-ab",
+      "source_sha256": "sha256:c6dbf570a2ede4d15ed6e0c6b2974a83eaf8ea135c5ddcb9a184c9f260b603f7",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "vision.representation-ab"
+      ]
+    },
+    {
+      "source_path": "scripts/run_vision_rwkv_student.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/run_vision_rwkv_student.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "vision.raw-pixel-student-launch-profile",
+      "source_sha256": "sha256:5762a88477c229289617bfc84540b9f4d13e385ed29855b8d58b12135ea5245e",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "vision.raw-pixel-student-launch-profile"
+      ]
+    },
+    {
+      "source_path": "scripts/run_vision_teacher_compressor.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/run_vision_teacher_compressor.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "exact_candidate",
+      "compatibility_workflow_id": "vision.teacher-compressor-launch-profile",
+      "source_sha256": "sha256:e94e79c853116cc6a87c08333c4022930caa3cb626965ecec8388eaa5b982cfc",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "vision.teacher-compressor-launch-profile"
+      ]
+    },
+    {
+      "source_path": "scripts/scan_midjourney_v6_caption_routes.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/scan_midjourney_v6_caption_routes.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "data.midjourney-v6-caption-routing",
+      "source_sha256": "sha256:1b5a27c113d96fb5ed38f76fcc81356504a991efacc3e3cdad7d99d53521d0ab",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "data.midjourney-v6-caption-routing"
+      ]
+    },
+    {
+      "source_path": "scripts/score_i1_anime_aesthetic.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/score_i1_anime_aesthetic.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "network",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "scoring.i1-anime-aesthetic",
+      "source_sha256": "sha256:238bffcc8813088110371e2f4cfad7b763ca59a4e95fd7252982a503fa3162d3",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "scoring.i1-anime-aesthetic"
+      ]
+    },
+    {
+      "source_path": "scripts/strip_i1_classification_metadata.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/strip_i1_classification_metadata.py",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "mutate_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:3a2d801f18ec131ed46c668750bfc404a1519ffbf15d67b0c84a5a79b2575019",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/supervisor_night.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/supervisor_night.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "transformer.engram-staged-supervisor",
+      "source_sha256": "sha256:8a2a99acb06de61a94dad30997542ce28f68b8159b4552ccac251532a96fc0fd",
+      "language": "shell",
+      "compatibility_workflow_ids": [
+        "transformer.engram-staged-supervisor"
+      ]
+    },
+    {
+      "source_path": "scripts/test_parallel.sh",
+      "class": "test_benchmark",
+      "canonical_entry_point": "bash scripts/test_parallel.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:ed6c3c94d36e71138a5e95e0d0cdeef2258eaee4d66f400ff0f3f283441eead3",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/tokenize_ztok.sh",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "bash scripts/tokenize_ztok.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:af1e331bb7169fc420bc93655450a37ad5930cf22c53783e2bd62c43ac389ac8",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/unblind_quality_review_pack.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/unblind_quality_review_pack.py",
+      "effects": [
+        "read_source",
+        "mutate_source",
+        "write_artifact",
+        "human_review"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:dfd663ea89f9eee568dd561093307fb66b8fe29ee5aeb8cb6b6754e7adfb2326",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/verify_captioning_first_cache.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/verify_captioning_first_cache.py",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:d6a5718a9545310e24521c63c81012a75560de25a68c4cbdc9276c320ba622cf",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/verify_v4h_all_adaptors_cache.py",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python scripts/verify_v4h_all_adaptors_cache.py",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:6a3d1ed89138749152c99702b247dbe16979f15967fa52ed835829e15856c4be",
+      "language": "python"
+    },
+    {
+      "source_path": "scripts/vision_run_evidence.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/vision_run_evidence.py",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "qualification.vision-run-evidence",
+      "source_sha256": "sha256:cd908727aa3f1e22746fd9502b4dfa0e8d9bbe406227fbbacd921e3a300d025a",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "qualification.vision-run-evidence"
+      ]
+    },
+    {
+      "source_path": "scripts/warm_captioning_first_cache.sh",
+      "class": "supervisor_orchestrator",
+      "canonical_entry_point": "bash scripts/warm_captioning_first_cache.sh",
+      "effects": [
+        "read_source",
+        "write_artifact",
+        "subprocess",
+        "gpu_compute"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:85a9a53930e50404f9aeed14ede42bf1be58216e8011da52dd20e42d25fda62f",
+      "language": "shell"
+    },
+    {
+      "source_path": "scripts/write_vision_loop_telemetry.py",
+      "class": "executable_operation",
+      "canonical_entry_point": "python scripts/write_vision_loop_telemetry.py",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "profiling.vision-loop-telemetry",
+      "source_sha256": "sha256:d19b0e5f83678ff50145a1b452053018366e637fedf6d059d943d35dbb39f0d0",
+      "language": "python",
+      "compatibility_workflow_ids": [
+        "profiling.vision-loop-telemetry"
+      ]
+    }
+  ]
+}

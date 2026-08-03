@@ -30,9 +30,12 @@ func TestQualificationReceiptDiscoveryAndPanel(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	s.handleQualification(recorder, httptest.NewRequest("GET", "/api/qualification", nil))
 	body := recorder.Body.String()
-	for _, expected := range []string{"qualDevice", "qualMegakernelMode", "qualMegakernelArtifact", "qualBaseline", "GPU µs/top", "baseline passed", "1.50x", "test GPU"} {
+	for _, expected := range []string{"qualification execution retired", "read-only", "GPU µs/top", "baseline passed", "1.50x", "test GPU"} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("missing %q in panel: %s", expected, body)
 		}
+	}
+	if strings.Contains(body, "/api/qualification/run") || strings.Contains(body, "data-bind-qual") {
+		t.Fatalf("qualification mutation controls remain in panel: %s", body)
 	}
 }

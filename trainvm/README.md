@@ -1,0 +1,579 @@
+# TrainVM native control plane
+
+Legacy migration coverage is tracked by the strict, evidence-only
+[source disposition catalogs](../docs/experiment-vm/SOURCE_DISPOSITIONS.md).
+
+This directory contains the first executable slice of the declarative experiment runtime described
+in [`docs/experiment-vm/ARCHITECTURE.md`](../docs/experiment-vm/ARCHITECTURE.md).
+
+Implemented now:
+
+- GCC C++26 reflection-based strict JSON decoding and canonical encoding;
+- native bounded experiment analysis: paired bootstrap/sign-flip statistics, Holm and sequential
+  alpha-spending decisions, Pareto selection, and a strictly read-only typed SQLite snapshot of
+  both normalized campaigns and legacy aggregate results;
+- reflected enum parsing and schema-name introspection;
+- semantic graph, reference, artifact-availability, cycle, control, and recovery validation;
+- stable canonical plan hashing with SHA-256;
+- generated Protobuf/gRPC C++ protocol types;
+- an append-only SQLite/WAL event journal with idempotent event IDs;
+- atomic multi-event transactions for a causing event and its derived VM transition;
+- monotonic run, plan, and worker sequence checks;
+- a SHA-256 journal hash chain;
+- deterministic run-projection replay that refuses a corrupted journal;
+- a deterministic process-free FSM reducer with structured predicates, terminal states, bounded
+  visits, monotonic loop progress, and stale-attempt rejection;
+- a durable controller that atomically commits each worker cause, derived transition, and next-node
+  or terminal observation, then reconstructs and verifies execution state after restart;
+- a scripted fake worker adapter used for restart/resume, retry-idempotency, plan-mismatch, and
+  transaction-rollback tests;
+- durable exclusive resource leases with explicit expiry, owner-checked renewal/release, and
+  monotonic fencing tokens that invalidate stale controllers after takeover;
+- durable per-attempt dispatch intents and completion receipts, with idempotent worker re-execution
+  and atomic receipt/cause/FSM commits closing the controller-crash ambiguity window;
+- reflected live-control validation with atomic multi-value patches, declared safe-point selection,
+  pause requirements, optimistic run/control revisions, idempotent command keys, and durable
+  applied/rejected/restart-required acknowledgements;
+- content-addressed compiled-plan persistence, verified plan recovery, and fail-closed schema
+  migration policy;
+- a native gRPC command authority over a permission-restricted Unix socket, with an exclusive
+  journal-owner lock, typed control results, serialized optimistic updates, and fenced worker acks;
+- strict in-memory JSON/YAML experiment submission, canonical recompilation by the authority,
+  journal-bound idempotency identities, atomic queued run creation, explicit parent-fenced revision
+  forks with durable lineage, and deterministic queued-run recovery without launching work;
+- native dashboard read APIs for bounded run summaries, hash-verified immutable compiled plans,
+  state/label-filtered cursor pagination, journal/current/proposed-plan-fenced semantic diffs, typed
+  control catalog/effective/history snapshots, and resumable filtered event streaming or bounded
+  replay from durable journal sequence numbers; page tokens are bound to the exact journal and query
+  rather than trusted as client-provided SQL cursors, and the production Go dashboard now consumes
+  these RPCs instead of opening the journal;
+- a launch-disabled, non-GPU live-stack acceptance test that starts the real C++ Unix-socket daemon,
+  drives compile/submit/read/diff/fork through the Go HTTP dashboard, shuts the daemon down, and
+  verifies the resulting native journal chain; this test also keeps hostd-free read/submission mode
+  executable while withholding worker process authority;
+- separate typed Go telemetry projections for `metric.sampled` and `artifact.published` events,
+  backed by event-type-filtered durable cursors and a composite journal index; the native dashboard
+  panel renders these incrementally without folding metric or artifact semantics into the generic
+  commander transport;
+- a process-free queue reconciliation boundary that atomically acquires a fenced workspace lease,
+  completes the declarative builtin resource-admission node, and advances to the real worker node
+  while remaining unassigned and observed-acquiring;
+- durable worker launch tickets binding node/attempt, nonce, adapter version, trusted code
+  fingerprint, required capabilities, and workspace fence; exact WorkerHello acceptance atomically
+  journals readiness, observed-running, and node entry; every managed transition into another
+  external node returns to unassigned observed-acquiring and requires a distinct launch/hello;
+- live-fence validation in the same transaction as worker-backed dispatch preparation and result
+  completion, so an expired, released, or superseded worker cannot mutate the FSM;
+- a bounded `WorkerControl.Connect` stream that requires `WorkerHello` first, persists readiness
+  and dispatch before `WorkerWelcome`, durably ingests replay-safe heartbeats, scalar metrics,
+  artifact manifests, digest-bound compile/warmup receipts, and ordered control acknowledgements
+  without advancing the FSM, delivers
+  pending live-control patches by controller sequence, and persists the terminal transition and
+  receipt before acknowledging it; duplicate live streams are rejected and lost acknowledgements
+  or receipts replay exactly; metric names, units, and step domains must match the sealed
+  observability declaration, non-optimizer domains cannot mutate optimizer progress, and bounded
+  event replay supports an upper-fenced newest-first tail for scale-independent observers;
+- a matching Python worker SDK with sealed bootstrap and immutable invocation decoders, checked-in
+  protobuf bindings, strict bidirectional stream sequencing, typed telemetry/artifact/control and
+  disposable execution-phase APIs,
+  adapter-owned safe-point polling, and cross-runtime canonical JSON golden digests; see
+  [`PYTHON_WORKER_SDK.md`](../docs/experiment-vm/PYTHON_WORKER_SDK.md);
+- typed `trainvm.core` artifact-validation and resource-release execution that cannot enter through
+  generic worker/simulation hooks, with atomic builtin result, transition, dispatch receipt, and
+  immutable lease-release evidence;
+- an authority-owned exact adapter registry that binds adapter/version/runtime/operation/contract,
+  effect, idempotency, trusted code fingerprint, required worker capabilities, and a reflected
+  operation lifecycle/resume grade before mutation;
+- an independent, authority-owned training-component registry for optimizers, parameter routing,
+  learning-rate and weight-decay schedules, activations, normalization, objectives, precision,
+  clipping, accumulation, curricula, and metric reducers; exact keys, reflected scalar contracts,
+  model-family compatibility, checkpoint-state grades, explicit schedule step domains, and worker
+  capabilities are resolved into a content-addressed per-node composition and submission lock;
+- a reflected compatibility-workflow catalog and executable validation gate spanning RWKV,
+  transformer/MLA, vision, MageFlow/diffusion, conversion/distillation, post-training, RLVR,
+  external trainers, data/cache, and evaluation/profile/export, bound to the exact reviewed source
+  bytes while structurally granting no adapter or host execution authority;
+- a restart-safe launch-authorization reconciler that resumes partial resource admission, converges
+  concurrent/repeated steps on one fenced launch intent, and fails closed on registry drift;
+- a separate immutable host-launch registry and deterministic `worker.launch_bound` receipt that
+  bind the exact active operation to a host/boot, versioned public argv, verified source evidence,
+  sealed executable/code bytes opened beneath trusted Linux `openat2` dirfds, and the capabilities
+  provided by those exact bytes; this resolver proves required capabilities are a subset of the
+  independently declared provided set, is process-free, and structurally excludes dynamic
+  credentials;
+- a strongly typed authority-time sampler that separates display-only wall time from Linux
+  `CLOCK_BOOTTIME`, latches one boot UUID, and fails closed on boot-time regression;
+- typed host inventory, probe/context evidence, topology policies, occupancy snapshots, stable
+  accelerator/partition/mutex identities, deterministic bundle selection, and parent/partition
+  conflict closure; inventory is never treated as proof that a resource is free;
+- an authority-bound SQLite host ledger with immutable typed hash-chain evidence, exact projection
+  closure, persistent per-resource generations, atomic all-or-none grant/release CAS, durable busy
+  and exact replay outcomes, stale-inventory revocation, and prior-boot blocking; its retained
+  filesystem authority pins the database/lock inode, protects SQLite auxiliary names, and reports a
+  filesystem boundary only—not the broader host enforcement grade;
+- shared strict host-saga codecs for sealed release requests and grant/busy/release results, so
+  journal replay and the future mutating hostd transport consume one canonical shape and reject
+  unknown fields, forged digests, or status/payload contradictions;
+- journal schema v7 boot-scoped lease authority across acquisition, renewal, release, readiness,
+  dispatch, control acknowledgement, and host binding; renewal atomically advances mutable expiry
+  and appends an immutable exact-input receipt, while v4 wall-clock rows migrate as quarantined
+  `legacy-wall/v1` evidence and can never satisfy active authority;
+- exact journal-schema and metadata attestation with transactional v4 migration, plus a
+  descriptor-resolved authority namespace that rejects unsafe SQLite aliases and permanently
+  poisons a live Journal if its directory, database, or lock identity moves;
+- model-family-neutral, operation-scoped declarations for compile, disposable warmup,
+  qualification, bounded accelerator tracing, and CPU/I/O placement, with no arbitrary command or
+  environment channel;
+- a bounded, versioned filesystem `AF_UNIX` `SOCK_SEQPACKET` status transport with canonical JSON,
+  SHA-256 payload framing, exact correlation, `SO_PEERCRED` plus per-packet `SCM_CREDENTIALS`,
+  deadline-bounded I/O, descriptor-delegation rejection, protected endpoint identity, and truthful
+  sealed/auditing/admitting/poisoned lifecycle reporting;
+- additive host-ledger v2 startup-audit evidence with exact v1 migration, canonical bounded reports,
+  configured-policy admission, historical inventory/occupancy reconstruction, predecessor-chain
+  proof, atomic report/projection/receipt commit, strict replay closure, and post-commit re-read;
+- a concrete configured hostd startup auditor that samples the authority clock around exact pinned
+  ledger head/occupancy evidence, binds host/boot/broker/process identity, reads an integrity-checked
+  bounded recovery view joining active grants to intent-only or unclosed spawn receipts, and blocks
+  startup on any retained resource fence until durable process adoption can account for it rather
+  than treating an old allocation as free;
+- a read-only Linux process-recovery probe that opens the durable spawn PID with `pidfd_open`,
+  double-samples proc starttime and unified cgroup membership around executable hashing, pins the
+  recorded cgroup-v2 inode, and returns separate exact-live, already-gone, identity-mismatch, or
+  observation-failed dispositions without signalling the process; the startup auditor runs this
+  probe for every unclosed spawn, freezes a one-shot recovery set, retains exact pidfds for explicit
+  one-time adoption, and records bounded disposition counts in its blocking evidence;
+- an additive host-ledger v3 admission epoch that atomically finalizes an exact current audit and
+  occupancy, keeps policy-enabled grants sealed beforehand, binds every later request to the active
+  epoch, preserves release-only cleanup while startup is blocked, and exposes a read-only exact
+  outcome reconciler that can recover an immutable grant or busy receipt across broker epochs
+  without admitting missing work or mutating occupancy/generations;
+- an additive host-ledger v4 process-authority chain that leaves the v1 resource evidence
+  byte-for-byte unchanged, commits an exact active-grant/cgroup/executable launch intent before any
+  child may exist, binds a stopped child's boot/PID/starttime/cgroup/executable identity to that
+  intent, and provides atomic rollback plus exact post-commit lost-reply replay for both boundaries;
+- an additive host-ledger v5 terminal-process receipt that requires exact pidfd wait identity,
+  twice-empty allocation-cgroup evidence, and a complete host-side accelerator-context audit;
+  spawned allocations are structurally unreleasable until this receipt exists, while v4 histories
+  migrate additively only when they contain no unsafe released/nonterminal process;
+- a conservative inventory-backed Linux process-context auditor that re-captures trusted host/NVML
+  evidence, binds it to the durable grant and spawn identities, and accepts only absent compute and
+  graphics contexts on every granted NVIDIA accelerator; identity drift, unsupported vendors,
+  missing resources, and partial/unknown evidence remain incomplete and block release;
+- an additive host-ledger v6 recovery-terminal receipt for a restarted daemon that cannot claim
+  parent-only wait status; exact pidfd-terminal, PID-absent, and identity-superseded observations
+  have a separate typed request/receipt and immutable projection, remain mutually exclusive with v5
+  child exits, and require the same empty cgroup and accelerator-context closure before release; an
+  exact terminal-pending-release view and idempotent recovery step resume cgroup removal and bundle
+  release, clean abandoned intent-only cgroups in the same allocation pass, and group sibling
+  launches so one closed process cannot hide an unclosed spawned one;
+- a bounded pre-audit restart reconciler with an explicit `leave_and_block` versus
+  `terminate_and_reconcile` policy; the latter transfers each exact pidfd into the daemon supervisor
+  once, delivers SIGKILL only through that handle, retries pending terminal observation without
+  duplicating authority, commits v6 evidence, then re-runs idempotent cgroup/bundle cleanup;
+  independently enabled conclusive-nonlive reconciliation closes PID-absent or identity-superseded
+  records only after the exact durable cgroup is empty or absent and a complete accelerator-context
+  audit is empty, while incomplete observations continue to block admission;
+- a wake-driven hostd startup controller that performs at most one recovery pass per advance,
+  enforces a configured step bound, refuses to consume the one-shot admission audit while any
+  unclosed process or terminal-release record remains, and latches recovery/audit failure rather
+  than silently retrying a partially consumed startup boundary;
+- a process-free, single-use journal-fence challenge verifier binding socket peer process instance,
+  host/boot/broker, pinned-journal claims, controller generation, logical fence, nonce, and bounded
+  boottime lifetime, with per-peer quotas and no bearer-capability interpretation of decoded data;
+- a fresh journal-backed logical-fence evidence source for host grants; it resolves the exact
+  attributed run/concurrency/lease/token only through an already retained journal boundary, binds
+  host/boot and journal inode authority into its evidence, and rejects expired, released, stale, or
+  mismatched leases instead of trusting the mutation claim;
+- a dynamic read-only journal challenge attestor for the daemon that accepts any exact current
+  per-concurrency controller generation in the retained dashboard journal, checks supersession both
+  before and after the live-lease snapshot, and never registers or advances controller authority;
+- a canonical hostd mutation-envelope contract that binds one open journal/controller claim to the
+  issued single-use challenge, echoed response, exactly attributed grant/reconcile/release/process
+  payload, sealed command digest, and operation-compatible reply, now dispatched over a bounded
+  one-command `SOCK_SEQPACKET` session with exact correlation and per-packet credentials; process
+  prepare alone may carry an exact role-ordered sealed executable, optional code, and opened working
+  directory through `SCM_RIGHTS`, while every other packet still rejects descriptor delegation;
+- per-concurrency-scope durable hostd controller heads, generations, event identities, and retained
+  controller IDs, so takeover invalidates only the affected logical resource scope while aliased,
+  rolled-back, or legacy-global controller metadata fails closed;
+- Linux production challenge primitives using `getrandom`, boot-bound `CLOCK_BOOTTIME`, strict
+  mount/PID/cgroup/time namespace identity, `SO_PEERCRED` plus `SO_PEERPIDFD`, and pinned-proc process
+  identity, together with a read-only pinned-Journal attestor rooted in hash-chained controller,
+  acquisition, renewal, release, and current-fence authority events;
+- a strict Linux service-role authority that pins procfs, cgroup-v2, and every configured service
+  cgroup, then double-samples unified membership and proc starttime while binding exact UID/GID,
+  service identity, and grant/release role without accepting any request-provided role;
+- strict Linux process-launch primitives that pin a protected cgroup-v2 root, deterministically
+  create or reopen one empty allocation cgroup, validate immutable launch descriptors, and use
+  `clone3(CLONE_INTO_CGROUP|CLONE_PIDFD)` with a private pre-exec gate; PID starttime and unified
+  membership are double-attested before the v4 spawn receipt, while every error closes the gate and
+  kills/reaps only through the pidfd; a hostd-owned supervisor retains that stopped identity across
+  request connections, replays exact prepare/commit/finalize commands, releases the pre-exec gate
+  once, and keeps the launch until terminal v5 evidence is durable; recovery primitives reopen only
+  the exact durable cgroup inode, transfer a pinned pidfd once, signal only through that pidfd, and
+  produce v6 terminal evidence without falling back to a numeric PID;
+- a read-only Linux NVIDIA inventory collector that pins procfs/sysfs/devfs roots, dynamically loads
+  and grades NVML evidence, double-samples bounded device/MIG/display/context state, retains process
+  instance observations, proves device-node mappings, and makes incomplete, torn, stale, or
+  insufficiently trusted evidence ineligible;
+- a canonical, explicitly untrusted compiler/JIT namespace-claim format covering
+  adapter/code/executable fingerprints, compute compatibility and optional placement, host ABI,
+  driver/runtime closure, compiler configuration, and compile inputs; plus a separate authority
+  builder that binds those fields to active registries, sealed invocation/launch identity, host
+  inventory/resource fences, bounded runtime/compile evidence, and the exact run/attempt/lease
+  fence; a separate cache-artifact authority with journal-backed live-lease checks, trusted
+  qualification-evidence seam, and a descriptor-rooted Linux immutable store that hashes, fsyncs,
+  atomically promotes, and re-verifies content-addressed cache trees without following symlinks or
+  accepting writable/undeclared content; separate descriptor-rooted production readers accept
+  runtime closure and qualification evidence only as canonical immutable authority-owned receipts,
+  and qualification is reread before adoption. The corresponding publisher uses fsynced private
+  temporary files and no-replace atomic promotion, permitting only byte-identical replay. Cache
+  reuse remains disabled until a sealed worker evidence transport feeds that publisher and the
+  service graph integrates namespace derivation, publication/adoption, and worker launch;
+- `validate`, `plan`, `simulate`, journal inspection/replay, and strict hostd-client configuration
+  inspection CLI commands.
+
+The launch-authorization reconciler first persists a fenced `worker.launch_requested` protocol
+intent; the host resolver then persists a deterministic, non-secret descriptor binding while
+retaining the sealed files. The guarded host daemon exposes exact-replay prepare, commit, and
+finalize process commands backed by the stopped-child cgroup/pidfd supervisor. The TrainVM service
+can now opt into the typed hostd resource/process clients with
+`--hostd-client <hostd-client.json>`. Startup securely reads a declarative pinned socket identity,
+queries that exact endpoint for its runtime broker epoch, verifies its host/boot identity against
+the retained journal authority, and then constructs journal-derived mutation claims. The default
+without that flag remains launch-disabled. Production launch preparation requires an exact, live
+durable host grant and binds its request identity, receipt digest, and physical fences into the
+worker ticket and resolved launch identity; process-free unit fixtures can opt into a visibly
+test-only legacy mode.
+
+The filesystem `SOCK_SEQPACKET` boundary has separate status and mutation protocol handlers behind
+a single listener router. The router peeks only the fixed wire prefix and hands the unread accepted
+connection to exactly one handler, preventing competing accept loops from stealing each other's
+traffic. The mutation
+exchange now binds the accepted socket process instance to a single-use journal challenge, obtains
+service access only from an injected host-owned identity authority, samples grant/release time only
+on the server, dispatches request/reconcile/release through `HostGrantCoordinator`, and disconnects
+the scoped coordinator session on every exit path. Duplicate requests and read-only recovery return
+the exact persisted result; stale fences and cross-scope payloads fail before ledger mutation.
+Deterministic transport checkpoints cover challenge delivery, command receipt, verification,
+coordinator connection, durable dispatch, and reply delivery; pre-dispatch interruption leaves no
+outcome, while a post-commit lost reply converges to the exact replay and remains releasable.
+The strict service-cgroup authority and namespace/socket-pidfd primitives are assembled by the
+foreground daemon. Startup recovery and audit complete before it exposes mutation transport;
+automatic terminal process/resource reconciliation and exact restart adoption use durable ledger
+evidence. A launch-capable daemon additionally requires root authority, explicitly non-root worker
+credentials, default-deny device BPF, and attested CPU/I/O controls. Privileged real-host crash
+qualification remains a deployment gate; unit and cooperative transport evidence is not presented
+as that qualification. The transport and stopped-launcher layers
+now carry and attest sealed Python code and per-attempt bootstrap descriptors, install them at the
+fixed exec-surviving fd 3/fd 4 ABI, and bind both into durable launch evidence without exposing
+dynamic values through argv or the environment. Host-launch v4 also binds the exact public argv
+slot replaced by fd 3, so Python profiles retain `-I` before the zipapp instead of accidentally
+replacing their isolation flag.
+MIG evidence is collected and attributed per instance, but grants remain disabled: the generic
+conflict selector intentionally blocks a child while its full-device parent is nonselectable, until
+a partition-aware enforcement policy proves that scheduling relationship end to end.
+
+MageFlow is only the first recovery fixture. The runtime is not a MageFlow-specific launcher: RWKV,
+transformer, vision/multimodal, conversion, distillation, post-training, RLVR, external-trainer, and
+qualification workflows use the same lifecycle and evidence protocols through distinct registered
+adapter operations. The coverage and optimization inventories live in
+[`WORKFLOW_COVERAGE.md`](../docs/experiment-vm/WORKFLOW_COVERAGE.md) and
+[`PERFORMANCE_ROADMAP.md`](../docs/experiment-vm/PERFORMANCE_ROADMAP.md).
+
+The v7 renewal authority includes a tickable coordinator bounded to 256 exact targets that samples
+authority time separately for each target and permanently stops on clock or receipt failure.
+Renewal receipts bind acquisition identity, prior and new expiry, the equal boot/wall timeout delta,
+and a continuous per-fence history; conflicting inserts, replacements, updates, and deletes are
+rejected. The service now owns a wake-driven, 250 ms bounded reconciliation supervisor: it scans
+nonterminal projections through stable pages after restart, advances immediate FSM work to a
+quiescent boundary, wakes on creation and worker completion, and ticks exact lease renewal behind
+the same mutation mutex. Shutdown stops scheduling before gRPC handlers drain. Per-run and global
+scan/renewal failures remain fail-closed supervisor evidence. Exact renewal replay requires the same
+expected expiry, authority-time sample, and timeout; after restart the supervisor tracks the
+journal's current active lease instead of retrying stale pre-renewal state.
+
+The journal namespace guard closes cooperating-process split authority and rejects unsafe SQLite
+side-file aliases at every SQL boundary. Stock SQLite nonetheless derives `-wal`, `-shm`,
+`-journal`, and super-journal names by string concatenation and opens them itself. Current SQLite
+does pass `O_NOFOLLOW` on those opens, so a planted symlink is refused upstream, but it performs no
+ownership, permission, or link-count check whatsoever: a same-UID process that pre-creates
+`<db>-wal` as a hardlink to a file it retains gets a live, readable view of every write-ahead frame
+the authority produces, and SQLite reports complete success while producing it. That vector is
+reproduced as an executable control in `sqlite_authority_vfs_tests`.
+
+Two layers answer this, and both apply to the event journal and the host ledger.
+
+The first is a shared filesystem authority. It requires an owner-controlled mode-0700 directory
+whose whole ancestry is unwritable outside the authority owner, resolves entries with `openat2`
+`RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS`, pins directory/database/lock inodes,
+and accepts only owned mode-0600 regular singleton (`nlink == 1`) auxiliaries. The journal database
+is created at mode 0600 before SQLite can create it at the process umask, because SQLite derives
+auxiliary modes from it. Stock SQLite 3.53.3 was measured to refuse symlinked WAL and
+rollback-journal paths without writing through them; the runtime enforces 3.53.3 as a validated-at
+(not known-minimum) floor so a downgrade fails closed rather than silently reopening that hole. The
+single-connection journal selects exclusive locking before WAL, and an executable test proves that
+no `-shm` file is created at all. The multi-connection host ledger retains ordinary WAL/SHM locking.
+
+The second is `SqliteAuthorityVfs`, a controlled VFS that takes pathname resolution out of SQLite's
+hands. Where a filesystem authority is present the VFS is the one that authority owns, so
+confinement and the deployment identity boundary are anchored to the same validated descriptor:
+
+- every open, delete, and access resolves through a directory descriptor the authority pinned once,
+  so no path component can be re-resolved between boundaries;
+- every open is preceded by an `O_NOFOLLOW` open and an identity check that requires an unaliased
+  (`st_nlink == 1`) regular file owned by the authority identity and unwritable by group or other;
+- every open is followed by an inode re-check, so a substitution racing between that validation and
+  SQLite's own open is detected before the handle is returned and no byte is read or written
+  through the impostor;
+- the wal-index is pinned across `xShmMap`, the one auxiliary the unix VFS opens outside `xOpen`;
+- names inside the authority namespace that are not declared auxiliaries of that database are
+  refused outright, and refusals are counted as machine-readable evidence.
+
+Three residuals remain and are deliberately not claimed as closed. A hostile same-UID process
+retains `ptrace` and `/proc/self/mem` access to the authority process and can corrupt it without
+touching the filesystem at all. A same-UID process that can unlink the write-ahead log also destroys
+the durability of the frames it removes. And a process sharing the authority UID can write the main
+database directly, so same-UID isolation is a deployment property, not something a VFS can
+establish: strict startup therefore rejects root, `nobody`, UID/GID mismatches, and a final
+directory other than mode 0700, attestation reports the directory owner UID/GID for operator
+verification, and the authority UID must be dedicated to the database service and never assigned to
+a workload. What the two layers do establish is that no filesystem pathname race redirects or splits
+authority state undetected, and that a refused operation fails closed and stays recoverable. The
+abstract-socket namespace fence is also network-namespace-local and is not a host resource fence.
+Deployments must still satisfy the declared trusted-directory/namespace threat model.
+
+The packaged Python worker now embeds a file-level closure for the exact interpreter identity,
+Python standard library, and the recursively closed root distributions declared for its selected
+adapter. A reflected native contract keeps MageFlow, Qwen, and RWKV requirements aligned with the
+adapter catalog; the Python materializer only consumes that contract. A stdlib-only guard hashes
+and verifies the closure before third-party imports. Host-launch v4 binds its digest independently
+of the sealed zipapp, resolved-launch replay preserves it, and cache authority rejects a runtime
+probe that reports any other closure. Static trainer data/model roots can additionally carry native
+`trainvm.input-content-root/v1` Merkle identities; the worker remeasures them before importing a
+family trainer and rejects ordinary reads outside the verified set. This is not yet a claim over
+ELF/native-library dependency resolution, CUDA/driver state, remote/object-store references, or
+payloads a dataset manifest points to outside its declared roots. Runtime cache adoption and
+production qualification remain disabled until authority-owned worker evidence transport and the
+service graph cover those remaining layers. Immutable publishers and readers preserve trusted
+evidence but do not themselves measure the running worker.
+
+## Toolchain
+
+Host launch resolution requires Linux 6.3 or newer and matching UAPI headers
+(`openat2`, `MFD_EXEC`, `MFD_NOEXEC_SEAL`, and `F_SEAL_EXEC`). Runtime security
+policy must permit `openat2` and `memfd_create`; unsupported or blocked hosts
+fail closed before a launch can be bound.
+
+TrainVM intentionally requires GCC 16 or newer. CMake rejects other compilers. It builds with
+`-std=c++26 -freflection` and uses reflection to remove handwritten field-registration code. Its
+persisted formats remain the checked-in JSON Schema and Protobuf definitions.
+
+Required native libraries:
+
+- nlohmann-json
+- SQLite 3
+- OpenSSL
+- yaml-cpp
+- Protobuf and `protoc`
+- gRPC and `grpc_cpp_plugin`
+- CMake and Ninja
+
+## Build and test
+
+```bash
+cmake -S trainvm -B trainvm/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build trainvm/build -j
+ctest --test-dir trainvm/build --output-on-failure
+```
+
+Validate and inspect the reference plan:
+
+```bash
+trainvm/build/trainvm validate \
+  docs/experiment-vm/examples/mageflow-cache-resume.json
+trainvm/build/trainvm plan \
+  docs/experiment-vm/examples/mageflow-cache-resume.json
+trainvm/build/trainvm compile < \
+  docs/experiment-vm/examples/mageflow-cache-resume.json
+trainvm/build/trainvm validate-catalog \
+  "$PWD/docs/experiment-vm/compatibility-workflows.v1.json" "$PWD"
+trainvm/build/trainvm inspect-training-components \
+  "$PWD/docs/experiment-vm/examples/training-components.v1.json"
+trainvm/build/trainvm inspect-rwkv-lab-worker \
+  sha256:<worker-code-artifact-sha256>
+trainvm/build/trainvm inspect-registry "$PWD/experiments.db" \
+  --task recall:16 --metric acc --baseline baseline --limit 20
+trainvm/build/trainvm serve --journal /tmp/trainvm.db --socket /tmp/trainvm.sock \
+  --registry /etc/trainvm/adapters.json \
+  --host-launch-registry /etc/trainvm/host-launches.json \
+  --training-component-registry \
+  "$PWD/docs/experiment-vm/examples/empty-training-components.json"
+trainvm/build/trainvm simulate \
+  docs/experiment-vm/examples/mageflow-cache-resume.json \
+  docs/experiment-vm/examples/mageflow-cache-resume.events.jsonl
+```
+
+The empty training-component registry keeps composition disabled. The checked-in
+`training-components.v1.json` contains real cross-family runtime-backed descriptors for inspection
+and adapter qualification; a production daemon should enable it only with worker profiles that
+advertise the catalog's exact capabilities.
+
+`inspect-rwkv-lab-worker` emits the directly loadable `trainvm.adapters/v2`
+document for the real MageFlow full-backbone/appearance/terminal, Qwen AO3, and scratch-RWKV
+handlers, plus the canonical `provided_capabilities` list to place in each
+matching `trainvm.host-launches/v4` profile. The caller supplies the digest of
+the already-built immutable worker code artifact; invalid digests fail closed.
+Lifecycle grades are intentionally honest: the three cadence-checkpointed
+trainers are compatibility-resumable, while scratch RWKV exposes only its
+terminal checkpoint and cannot claim a mid-run or resource-releasing pause.
+
+The reference plan currently has the golden identity
+`ac64a8117668f19c4f4f1d131b07388122207043894d85e60ead25270f28085e`. This deliberate canonical
+plan-schema migration adds typed cross-family lifecycle/profiling and CPU/I/O policy declarations
+to the reference fixture. Any further deliberate canonical
+format change must update the golden test and supply a plan-schema migration rationale.
+`compile` is the bounded dashboard authoring boundary: it reads one JSON document from stdin and
+returns either structured diagnostics or the native compiler's canonical plan and content hash.
+`serve` is the stateful mutation boundary. The dashboard connects to its Unix socket through gRPC;
+it never opens the journal writable. Startup requires bounded `trainvm.adapters/v2` and
+`trainvm.host-launches/v4` registry documents, decoded strictly and retained immutably for the
+daemon lifetime. An explicitly supplied host registry with no profiles is the launch-disabled
+configuration; missing or invalid host authority fails startup. `SubmitExperiment`
+validates every exact adapter profile before validation succeeds or a run is created, and supports
+idempotent queued
+creation; the live-control `CommandRun` variant is also implemented. The dashboard freezes ambiguous
+submissions and retries their exact body and key. The worker stream now carries durable telemetry,
+artifacts, live-control delivery/acknowledgement, and a terminal result. Before Welcome, TrainVM
+freezes a canonical, content-addressed operation invocation containing resolved public inputs,
+effective controls, authorized artifact manifests, output declarations, execution policy, and exact
+adapter identity; reconnects receive those same bytes. The Linux host authority has a stopped-child
+cgroup/pidfd launcher, durable process intent/spawn/exit receipts, and guarded daemon
+prepare/commit/finalize commands. TrainVMService now has an opt-in, serialized process-saga
+coordinator that binds sealed launch bytes and an immutable worker bootstrap, asks hostd to prepare
+a stopped child, copies the exact spawn receipt into the TrainVM hash chain, and only then authorizes
+exec commit. Terminal reconciliation now asks hostd to wait/terminate, reap, prove an empty cgroup
+and accelerator-context set, and copies the exact exit receipt before releasing the physical grant;
+the logical lease is released only on the following reconciliation boundary. Lost prepare, commit,
+exit, and physical-release replies converge by exact replay, and transport replay flags
+are excluded from durable identity. A bounded strict hostd client now delegates the resolved
+executable, optional code, working-directory, and bootstrap descriptors over the authenticated
+mutation transport and revalidates typed replies. The normal CLI remains launch-disabled by
+default; an explicit pinned hostd-client document now bootstraps the implemented journal-backed
+claim provider and both typed clients after a read-only host/boot/broker status check. The reflected
+`trainvm.hostd-daemon/v1` startup document rejects unknown or duplicate fields, unsafe authority
+paths/names, trust downgrades, incompatible service roles, and unbounded recovery, then compiles
+every ledger, inventory, cgroup, socket, session, challenge, and startup sub-policy from one source
+of truth. The foreground `trainvm-hostd` entry point now constructs the live namespace, inventory,
+journal, ledger, cgroup, recovery, audit, challenge, service-identity, and unified transport graph;
+it binds only after startup admission and can validate its closed document without touching live
+authority (`trainvm-hostd --validate-config FILE`). Resource grant/release, stopped-child launch,
+terminal reconciliation, and durable hostd adoption are wired. The mutation server receives process
+authority only when strict root/non-root credentials and durable device/CPU/I/O enforcement make
+the daemon launch-capable. Privileged crash qualification and trainer safe-point pause/resume remain
+subsequent milestones. A worker launch ticket is a protocol authorization only
+until it is paired with a trusted descriptor digest, resolved launch specification, host identity,
+and durable process receipt.
+
+Host-launch v4 closes capability attestation, code-slot placement, and bootstrap-runtime-closure
+identity over the sealed code identity. Adapter and selected training-component profiles form the
+immutable `required_capabilities` set. The exact host profile separately declares
+`provided_capabilities`; resolution fails unless `required` is a subset of `provided`. Both sets and
+the closure fingerprint are frozen in `trainvm.resolved-launch/v4`, and the sealed worker bootstrap
+contains only the provided set. A run therefore cannot make a worker appear to implement FA4, FP8,
+an optimizer, or a lifecycle protocol merely by requesting that capability, nor can a cache probe
+substitute a different Python bootstrap runtime.
+
+Host resource admission uses a separate typed client above the same bounded mutation channel.
+Portable accelerator declarations are lowered by a pure deterministic builder into one sealed
+host bundle request (vendor, count, memory floor, labels, access mode, logical lease, and plan
+identity). TrainVMService can now run the journal/hostd grant saga before creating a worker launch;
+durable busy results replay without repeated host mutation. CPU-only external workers remain
+explicitly disabled until hostd has a real typed process-slot resource rather than an invented GPU
+or mutex claim.
+
+Mutation claims are now derived from immutable journal resource-request/release IDs or durable
+launch bindings. The provider registers a cryptographically random controller identity at the next
+per-concurrency generation, reuses that exact claim within one service process, advances the
+generation after restart, and permanently rejects a superseded process. Neither a serialized host
+request nor a launch payload can choose its own run, lease, fence, or journal authority identity.
+
+Secret-marked parameters are restricted to versioned opaque references of the form
+`secret://provider/name#version`; raw secret values are rejected before canonical plan persistence.
+The host-launch registry contains only fixed `public_arguments`. Future resolved credentials will
+travel over sealed descriptors and will not enter argv, the adapter lock, launch binding, journal,
+or diagnostics.
+
+Every external profile in `trainvm.adapters/v2` contains the following closed
+authority-owned shape (values shown are illustrative, not a registered legacy
+launcher):
+
+```json
+{
+  "lifecycle": {
+    "stateful": true,
+    "graceful_stop": true,
+    "checkpoint_now": true,
+    "pause_keep_resources": true,
+    "pause_release_resources": true,
+    "compile": true,
+    "warmup": true,
+    "qualify": true,
+    "profile": true,
+    "resume_grade": "exact"
+  }
+}
+```
+
+Training operations that consume the shared component registry also declare
+an exact composition contract:
+
+```json
+{
+  "training_composition": {
+    "model_family": "mageflow",
+    "slots": {
+      "optimizer": "optimizer",
+      "parameter_router": "parameter_router",
+      "learning_rate": "learning_rate_schedule"
+    }
+  }
+}
+```
+
+The keys are adapter-owned semantic slot names and the values are closed
+`TrainingComponentCategory` values. A contracted operation requires exactly
+that model family and slot/category map. Missing, extra, renamed, or
+category-mismatched slots are rejected before resource acquisition. Profiles
+without this field reject attached training compositions, and builtin
+operations cannot declare one. Component implementation names and
+configuration remain experiment choices resolved through the separate
+authority registry.
+
+`resume_grade` is one of `none`, `restart_only`, `terminal_checkpoint`,
+`compatible`, or `exact`. Stateless profiles must use `none` and cannot declare
+checkpoint or pause controls. Stateful profiles must have `process` effect.
+`terminal_checkpoint` cannot claim a mid-run checkpoint or resource-releasing
+pause; resource-releasing pause requires checkpoint-now and a `compatible` or
+`exact` grade. A plan requesting exact recovery is rejected unless every
+reachable stateful process operation is graded `exact`, and no reachable
+process operation may be `at_most_once`. Reachable stateful operations must
+also implement graceful stop and the declared pause resource policy. Typed
+compile, warmup, qualification, and profiling phases must target an operation
+actually invoked by a reachable workflow node.
+
+The canonical plan adapter lock is `trainvm.adapter-lock/v2`. Lifecycle fields
+and any training-composition contract are part of its digest; legacy v1 locks
+are rejected rather than silently upgraded.
+
+## Journal CLI
+
+```bash
+trainvm/build/trainvm journal init /tmp/trainvm.db
+trainvm/build/trainvm journal verify /tmp/trainvm.db
+trainvm/build/trainvm journal replay /tmp/trainvm.db
+trainvm/build/trainvm journal show /tmp/trainvm.db RUN_ID
+```
+
+The CLI is diagnostic scaffolding. Runtime mutations are available only through typed controller
+operations; there is intentionally no raw event-append command on an authority journal.

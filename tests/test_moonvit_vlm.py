@@ -4,6 +4,7 @@ import stat
 import struct
 import threading
 import zipfile
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,16 +19,24 @@ from rwkv_lab.moonvit import (MoonViT, MoonViTPrefixProjector, _Block, _resize,
 from rwkv_lab.vision_cache import cache_entry_valid
 from rwkv_lab.vision_train import (EpochBatchSampler, _BoundedFeatureCache,
                                    _FEATURE_MEMORY_CACHE,
+                                   _optimizer,
                                    _acquire_run_lock,
                                    _archive_fresh_run_artifacts,
+                                   _AsyncCheckpointWriter,
+                                   _checkpoint_cpu_snapshot,
                                    _durable_replace,
                                    _final_checkpoint_required,
                                    _initialize_adapters, _load_raw_tensor_archive,
                                    _image_file_identity,
                                    _best_checkpoint_path,
                                    _budget_resume_differences,
+                                   _budget_eval_contract_differences,
                                    _fail_nonterminal_status,
                                    _invalidate_step_evaluation,
+                                   _expanded_loop_state_dict,
+                                   _load_optimizer_with_loop_growth,
+                                   _loop_count_resume_migration,
+                                   _loop_lr_resume_migration,
                                    _loop_lr_resume_difference,
                                    _loop_runtime_scale,
                                    _pending_eval_work,
@@ -41,21 +50,70 @@ from rwkv_lab.vision_train import (EpochBatchSampler, _BoundedFeatureCache,
                                    _resume_invalidates_step_evaluation,
                                    _resume_requires_best_quarantine,
                                    _resumed_last_checkpoint_step,
+                                   _ocr_conditioning_coverage,
+                                   _structured_eval_metric_name,
+                                   _set_optimizer_group_lr,
+                                   _structured_data_removal_migration,
+                                   _structured_lr_resume_migration,
                                    _trim_log,
                                    _trainer_run_artifact_paths,
                                    _promote_checkpoint,
                                    cached_features, load_examples, preload_feature_cache,
                                    image_metadata_fingerprint,
                                    filter_eval_sample_indices, prepare_examples,
+                                   build_eval_batches,
+                                   multimodal_loss,
+                                   multitask_balanced_indices,
+                                   native_visual_token_count,
+                                   qualitative_eval_due,
+                                   rotate_feature_batch,
                                    select_eval_sample_indices,
                                    split_examples, supervised_positions,
                                    write_eval_samples)
+from rwkv_lab.engram_lmb import RecallResult
 from rwkv_lab.generate import SEP, WorldVocab
 from rwkv_lab.deep_vision import DeepVisionInjector
 from rwkv_lab.fused_ce import (logits_cross_entropy, masked_token_mean,
                                weighted_logits_cross_entropy)
 from rwkv_lab.vision_grounding import ImageTextContrastiveHead, early_token_weights
 from rwkv_lab.vision_caption import checkpoint_runtime_scales
+
+
+def test_async_checkpoint_owns_immutable_cpu_snapshot(tmp_path: Path):
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.AdamW([parameter], lr=0.1)
+    parameter.grad = torch.tensor([2.0])
+    optimizer.step()
+    snapshot = _checkpoint_cpu_snapshot({
+        "parameter": parameter,
+        "optimizer": optimizer.state_dict(),
+    })
+    expected_parameter = snapshot["parameter"].clone()
+    expected_moment = snapshot["optimizer"]["state"][0]["exp_avg"].clone()
+
+    with torch.no_grad():
+        parameter.add_(100)
+    parameter.grad = torch.tensor([5.0])
+    optimizer.step()
+    torch.testing.assert_close(snapshot["parameter"], expected_parameter)
+    torch.testing.assert_close(
+        snapshot["optimizer"]["state"][0]["exp_avg"], expected_moment)
+
+    checkpoint = tmp_path / "last.pt"
+    writer = _AsyncCheckpointWriter(checkpoint)
+    writer.submit(7, snapshot)
+    assert writer.finish(wait_for_write=True) == 7
+    restored = torch.load(checkpoint, weights_only=False)
+    torch.testing.assert_close(restored["parameter"], expected_parameter)
+
+
+def test_rotate_feature_batch_rotates_native_tuple_by_row():
+    tokens = torch.tensor([[1], [2], [3]])
+    boxes = torch.tensor([[10], [20], [30]])
+    rotated = rotate_feature_batch((tokens, boxes))
+    assert rotated[0].flatten().tolist() == [2, 3, 1]
+    assert rotated[1].flatten().tolist() == [20, 30, 10]
+    assert rotate_feature_batch(["a", "b", "c"]) == ["b", "c", "a"]
 
 
 def test_projector_has_fixed_prefix_and_gradients():
@@ -109,6 +167,27 @@ def test_deep_vision_is_exact_noop_and_reinjection_backpropagates():
         assert adapter.up.weight.grad is not None
         assert adapter.up.weight.grad.abs().sum() > 0
     injector.close()
+
+
+def test_grouped_deep_vision_matches_independent_adapters():
+    torch.manual_seed(17)
+    injector = DeepVisionInjector(
+        16, [1, 3, 5], rank=4, grouped_precompute=True)
+    with torch.no_grad():
+        for adapter in injector.adapters.values():
+            adapter.up.weight.normal_(std=0.02)
+            adapter.norm.weight.normal_(mean=1.0, std=0.02)
+            adapter.norm.bias.normal_(std=0.02)
+    prefix = torch.randn(2, 7, 16)
+    expected = {
+        key: adapter(prefix)
+        for key, adapter in injector.adapters.items()
+    }
+    actual = injector._grouped_injections(prefix)
+    assert actual.keys() == expected.keys()
+    for key in expected:
+        torch.testing.assert_close(
+            actual[key], expected[key], rtol=2e-5, atol=2e-6)
 
 
 def test_grounding_objectives_weight_opening_and_use_batch_negatives():
@@ -223,6 +302,81 @@ def test_loop_runtime_scale_starts_small_and_saturates():
     assert _loop_runtime_scale(250, start_step=250, ramp_steps=1000) == 0.001
     assert _loop_runtime_scale(1249, start_step=250, ramp_steps=1000) == 1.0
     assert _loop_runtime_scale(250, start_step=250, ramp_steps=0) == 1.0
+
+
+def test_qualitative_eval_can_run_less_often_than_scalar_eval():
+    assert qualitative_eval_due(100, eval_every=100, sample_every=0)
+    assert not qualitative_eval_due(100, eval_every=100, sample_every=500)
+    assert qualitative_eval_due(500, eval_every=100, sample_every=500)
+    assert not qualitative_eval_due(0, eval_every=100, sample_every=500)
+
+
+def _eval_row(visual: int, text: int, task: str = "caption") -> dict:
+    return {"tokens": list(range(text)), "_visual_tokens": visual, "task": task}
+
+
+def _padded_cost(rows, batch) -> int:
+    return len(batch) * max(
+        rows[index]["_visual_tokens"] + len(rows[index]["tokens"])
+        for index in batch)
+
+
+def test_eval_batches_obey_exact_visual_width_and_padded_token_budget():
+    rows = [
+        _eval_row(visual, text)
+        for visual, text in (
+            (100, 10), (100, 20), (100, 30), (100, 40),
+            (200, 10), (200, 30),
+        )
+    ]
+    batches = build_eval_batches(
+        rows, list(range(len(rows))), batch_size=4, token_budget=360)
+
+    assert sorted(index for batch in batches for index in batch) == list(range(6))
+    assert all(len({rows[index]["_visual_tokens"] for index in batch}) == 1
+               for batch in batches)
+    assert all(_padded_cost(rows, batch) <= 360 for batch in batches)
+    # Packing, not just legality: six singleton batches satisfy every
+    # constraint above, so the budget has to be shown actually consumed.
+    assert sorted(len(batch) for batch in batches) == [1, 1, 2, 2]
+    for position, batch in enumerate(batches[:-1]):
+        following = batches[position + 1][0]
+        if (rows[following]["_visual_tokens"]
+                != rows[batch[0]]["_visual_tokens"]):
+            continue
+        # Every batch that could have taken the next same-shape row did.
+        assert _padded_cost(rows, [*batch, following]) > 360
+
+
+def test_eval_batches_treat_row_count_and_disabled_budget_as_limits():
+    rows = [_eval_row(100, 10) for _ in range(7)]
+    batches = build_eval_batches(
+        rows, list(range(7)), batch_size=3, token_budget=100_000)
+    # --eval-batch-size binds well before the token budget does.
+    assert [len(batch) for batch in batches] == [3, 3, 1]
+
+    unlimited = build_eval_batches(
+        rows, list(range(7)), batch_size=3, token_budget=0)
+    assert [len(batch) for batch in unlimited] == [3, 3, 1]
+    single = build_eval_batches(
+        rows, list(range(7)), batch_size=32, token_budget=0)
+    assert [len(batch) for batch in single] == [7]
+
+
+def test_eval_batches_isolate_ocr_rows_from_identical_shaped_captions():
+    # OCR runs a second shuffled-image control forward, so one OCR row inside a
+    # caption batch would double the whole batch's cost. The group key splits
+    # them even though the visual width and token length are identical.
+    rows = [_eval_row(100, 10) for _ in range(4)]
+    rows += [_eval_row(100, 10, task="ocr") for _ in range(2)]
+    batches = build_eval_batches(
+        rows, list(range(len(rows))), batch_size=8, token_budget=100_000)
+
+    assert len(batches) == 2
+    assert all(
+        len({rows[index]["task"] for index in batch}) == 1
+        for batch in batches)
+    assert sorted(len(batch) for batch in batches) == [2, 4]
 
 
 def test_nonfinite_metrics_are_rejected_before_logging_or_checkpointing():
@@ -526,6 +680,8 @@ def test_manifest_loader_requires_a_real_image_and_caption(tmp_path: Path):
     ]))
     rows = load_examples(path, root=tmp_path)
     assert len(rows) == 1 and rows[0]["image"] == image
+    with pytest.raises(ValueError, match="missing/unreadable images"):
+        load_examples(path, root=tmp_path, require_all=True)
 
 
 def test_image_metadata_fingerprint_detects_replaced_training_input(tmp_path: Path):
@@ -687,6 +843,74 @@ def test_token_budget_sampler_uses_more_short_rows_without_replacement():
     assert max(sizes) > min(sizes)
 
 
+def test_grouped_sampler_prefix_is_row_weighted_not_key_weighted():
+    lengths = [10] * 1_000
+    groups = [0] * 900 + [1] * 100
+    sampler = EpochBatchSampler(
+        range(1_000), lengths, batch_size=1, seed=17,
+        bucket_batches=32, group_keys=groups)
+    # A 10%-of-rows shape gets ~10% of the epoch, not the half a round-robin
+    # over keys would give it. The share is resolved at run granularity, so it
+    # is measured over a prefix several runs long rather than within one run.
+    for prefix_length, low, high in ((400, 20, 90), (1_000, 90, 110)):
+        prefix = sampler.order[:prefix_length]
+        minority = sum(groups[index] == 1 for index in prefix)
+        assert low <= minority <= high
+    prefix = sampler.order[:400]
+    # Every bounded run still has a single exact shape, so native tensors can
+    # be stacked without padding or a shape-dependent resize.
+    transitions = [
+        offset for offset in range(1, len(prefix))
+        if groups[prefix[offset]] != groups[prefix[offset - 1]]
+    ]
+    for start, end in zip([0] + transitions, transitions + [len(prefix)]):
+        assert len({groups[prefix[index]] for index in range(start, end)}) == 1
+
+
+def test_grouped_sampler_runs_are_long_enough_to_fill_a_budget_batch():
+    # peek_budget_batch stops at the first group-key change, so a same-shape
+    # run shorter than the requested batch silently caps every batch at the run
+    # length however much the token budget admits. This is the exact
+    # --batch 1 --max-batch 8 shape the V4H launcher runs.
+    lengths = [64] * 600
+    groups = [index % 3 for index in range(600)]
+    sampler = EpochBatchSampler(
+        range(600), lengths, batch_size=1, seed=5, bucket_batches=32,
+        group_keys=groups)
+
+    runs, current = [], 1
+    for previous, following in zip(sampler.order, sampler.order[1:]):
+        if groups[previous] == groups[following]:
+            current += 1
+        else:
+            runs.append(current)
+            current = 1
+    runs.append(current)
+    # 32 = batch_size * bucket_batches. Only each key's exhausted remainder is
+    # allowed to be shorter, so at most one short run per key exists.
+    assert max(runs) >= 32
+    assert sum(1 for run in runs if run < 32) <= len(set(groups))
+
+    for _ in range(20):
+        batch = sampler.next_budget_batch(
+            lengths, target_tokens=4096, min_items=1, max_items=8)
+        assert len(batch) == 8
+
+
+def test_grouped_sampler_preserves_repeated_minority_occurrences_in_prefix():
+    lengths = [10] * 100
+    groups = [0] * 90 + [1] * 10
+    # Balancing repeats the same dataset indices; occurrence rank must not be
+    # collapsed by an index-keyed map.
+    indices = list(range(100)) + list(range(90, 100)) * 9
+    sampler = EpochBatchSampler(
+        indices, lengths, batch_size=1, seed=23,
+        bucket_batches=32, group_keys=groups)
+    prefix = sampler.order[:100]
+    minority = sum(groups[index] == 1 for index in prefix)
+    assert 40 <= minority <= 65
+
+
 def test_token_budget_uses_true_max_when_crossing_a_bucket_boundary():
     costs = [100, 100, 10, 10, 10, 10]
     sampler = EpochBatchSampler(range(6), costs, batch_size=2, seed=1)
@@ -775,7 +999,7 @@ def test_text_limit_migration_forces_same_file_checkpoint_publication(
     assert _final_checkpoint_required(100, known_step)
 
 
-def test_allowed_base_batch_resize_forces_publication_then_becomes_exact(
+def test_allowed_base_batch_resize_republishes_without_invalidating_eval(
         tmp_path: Path):
     last = tmp_path / "last.pt"
     last.write_bytes(b"batch-8 contract")
@@ -789,9 +1013,13 @@ def test_allowed_base_batch_resize_forces_publication_then_becomes_exact(
     differences = _budget_resume_differences(saved, resized)
     assert differences == ["batch"]
     changed = _resume_contract_changed(
-        text_limit_migrated=False, budget_differences=differences)
+        text_limit_migrated=False,
+        budget_differences=_budget_eval_contract_differences(differences))
+    assert not changed
+    # The caller separately marks the changed optimizer/sampler policy for
+    # publication; it must not claim the recovered weights changed.
     known_step = _resumed_last_checkpoint_step(
-        last, last, 100, contract_changed=changed)
+        last, last, 100, contract_changed=True)
     assert known_step is None
     assert _resume_checkpoint_publication_required(last, known_step)
 
@@ -799,6 +1027,85 @@ def test_allowed_base_batch_resize_forces_publication_then_becomes_exact(
     # compares cleanly on the following auto-resume without an override flag.
     republished = {name: getattr(resized, name) for name in saved}
     assert _budget_resume_differences(republished, resized) == []
+
+
+def test_loop_lr_migration_does_not_invalidate_same_step_eval():
+    # A loop-LR migration is not an input to the contract at all: it changes
+    # the next update, never the recovered weights or their evaluation.
+    assert not _resume_contract_changed(
+        text_limit_migrated=False, budget_differences=[])
+    with pytest.raises(TypeError):
+        _resume_contract_changed(
+            text_limit_migrated=False, budget_differences=[],
+            loop_lr_migrated=True)
+
+
+def test_structured_data_removal_migration_is_exact_and_one_time():
+    saved = {
+        "data_fingerprint": "old-data",
+        "structured_update_ratio": 0.2,
+    }
+    args = SimpleNamespace(
+        allow_structured_data_removal_from="old-data",
+        data_fingerprint="caption-ocr-only",
+        structured_train_examples=0,
+        structured_eval_examples=0,
+        structured_update_ratio=0.0,
+        structured_weight=0.0,
+    )
+    assert _structured_data_removal_migration(saved, args)
+
+    for name, value in (
+            ("allow_structured_data_removal_from", "wrong"),
+            ("structured_train_examples", 1),
+            ("structured_eval_examples", 1),
+            ("structured_update_ratio", 0.1),
+            ("structured_weight", 1.0)):
+        rejected = SimpleNamespace(**vars(args))
+        setattr(rejected, name, value)
+        assert not _structured_data_removal_migration(saved, rejected)
+    already_migrated = {**saved, "data_fingerprint": "caption-ocr-only"}
+    assert not _structured_data_removal_migration(already_migrated, args)
+
+
+def test_structured_lr_migration_is_source_named_and_self_expires():
+    saved = {"structured_lr": 2e-4}
+    args = SimpleNamespace(
+        structured_lr=0.0,
+        allow_structured_lr_change_from=2e-4)
+    assert _structured_lr_resume_migration(saved, args)
+    assert not _structured_lr_resume_migration(
+        {"structured_lr": 0.0}, args)
+    assert not _structured_lr_resume_migration(
+        saved, SimpleNamespace(
+            structured_lr=0.0,
+            allow_structured_lr_change_from=1e-4))
+
+
+def test_eval_metric_names_and_ocr_control_coverage_are_unambiguous():
+    assert _structured_eval_metric_name("structured_loss") == "structured_aux_loss"
+    assert _structured_eval_metric_name("structured_box_l1") == "structured_box_l1"
+    coverage = _ocr_conditioning_coverage(
+        shuffled_examples=3, total_examples=4,
+        shuffled_tokens=60, total_tokens=100)
+    assert coverage == {
+        "ocr_image_conditioning_eval_examples": 3,
+        "ocr_image_conditioning_example_coverage": 0.75,
+        "ocr_image_conditioning_token_coverage": 0.6,
+    }
+    assert _ocr_conditioning_coverage(
+        shuffled_examples=0, total_examples=0,
+        shuffled_tokens=0, total_tokens=0) == {}
+    # The only input max(1.0, total_tokens) exists for: OCR rows were selected
+    # but every one landed in a singleton batch, so no control forward ran and
+    # no OCR token was ever counted.
+    assert _ocr_conditioning_coverage(
+        shuffled_examples=0, total_examples=4,
+        shuffled_tokens=0, total_tokens=0) == {
+            "ocr_image_conditioning_eval_examples": 0,
+            "ocr_image_conditioning_example_coverage": 0.0,
+            "ocr_image_conditioning_token_coverage": 0.0,
+        }
 
 
 def test_sampler_state_remains_valid_when_base_batch_size_changes():
@@ -826,6 +1133,47 @@ def test_committed_loop_reset_cannot_waive_another_loop_lr_change():
         SimpleNamespace(reset_loop_on_resume=True, loop_lr=1e-5))
 
 
+def test_explicit_loop_lr_migration_preserves_state_without_reset():
+    saved = {"loop_lr": 1e-5, "loop_reset_committed": True}
+    requested = SimpleNamespace(
+        reset_loop_on_resume=False, loop_lr=5e-5,
+        allow_loop_lr_change_from=1e-5)
+    assert _loop_lr_resume_migration(saved, requested)
+    assert not _loop_lr_resume_difference(saved, requested)
+
+    # The permission names its source, so it expires as soon as the migrated
+    # step is saved. A launcher that repeats the flag on every automatic
+    # restart therefore cannot waive an unrelated later drift.
+    migrated = {"loop_lr": 5e-5, "loop_reset_committed": True}
+    assert not _loop_lr_resume_migration(migrated, requested)
+    drifted = SimpleNamespace(
+        reset_loop_on_resume=False, loop_lr=9e-5,
+        allow_loop_lr_change_from=1e-5)
+    assert not _loop_lr_resume_migration(migrated, drifted)
+    assert _loop_lr_resume_difference(migrated, drifted)
+    assert not _loop_lr_resume_migration(
+        saved, SimpleNamespace(reset_loop_on_resume=False, loop_lr=5e-5,
+                               allow_loop_lr_change_from=None))
+
+    parameter = torch.nn.Parameter(torch.ones(2))
+    optimizer = torch.optim.AdamW([
+        {"params": [parameter], "name": "loop_gates", "lr": 1e-5},
+    ])
+    parameter.sum().backward()
+    optimizer.step()
+    before = {
+        name: value.clone()
+        for name, value in optimizer.state[parameter].items()
+        if torch.is_tensor(value)
+    }
+    _set_optimizer_group_lr(
+        optimizer, group_name="loop_gates", lr=5e-5)
+    assert optimizer.param_groups[0]["lr"] == 5e-5
+    for name, value in before.items():
+        torch.testing.assert_close(
+            optimizer.state[parameter][name], value, rtol=0, atol=0)
+
+
 def test_committed_loop_reset_receipt_survives_descendant_checkpoints():
     args = SimpleNamespace(reset_loop_on_resume=False)
     _preserve_loop_reset_outcome(args, committed=True)
@@ -834,6 +1182,81 @@ def test_committed_loop_reset_receipt_survives_descendant_checkpoints():
     descendant = SimpleNamespace(reset_loop_on_resume=True)
     _preserve_loop_reset_outcome(descendant, committed=True)
     assert vars(descendant)["loop_reset_committed"] is True
+
+
+def test_loop_count_resume_migration_requires_exact_explicit_source():
+    saved = {"loop_count": 1}
+    assert _loop_count_resume_migration(
+        saved, SimpleNamespace(
+            loop_count=2, allow_loop_count_increase_from=1))
+    assert not _loop_count_resume_migration(
+        saved, SimpleNamespace(
+            loop_count=2, allow_loop_count_increase_from=0))
+    assert not _loop_count_resume_migration(
+        saved, SimpleNamespace(
+            loop_count=2, allow_loop_count_increase_from=2))
+
+
+def test_engram_loop_state_growth_preserves_old_row_and_zeros_new_row():
+    class Site(torch.nn.Module):
+        def __init__(self, loops):
+            super().__init__()
+            self.loop_scale = torch.nn.Parameter(torch.zeros(loops))
+            self.weight = torch.nn.Parameter(torch.ones(3))
+
+    class Bank(torch.nn.Module):
+        def __init__(self, loops):
+            super().__init__()
+            self.sites = torch.nn.ModuleDict({"3": Site(loops)})
+
+    source = Bank(1)
+    with torch.no_grad():
+        source.sites["3"].loop_scale.fill_(0.125)
+        source.sites["3"].weight.fill_(0.75)
+    destination = Bank(2)
+    grown = _expanded_loop_state_dict(
+        destination, source.state_dict(), source_loop_count=1)
+    destination.load_state_dict(grown)
+
+    assert destination.sites["3"].loop_scale.tolist() == [0.125, 0.0]
+    assert destination.sites["3"].weight.tolist() == [0.75] * 3
+
+
+def test_optimizer_loop_growth_preserves_moments_and_zeros_new_rows():
+    old_loop = torch.nn.Parameter(torch.ones(1, 2))
+    old_engram = torch.nn.Parameter(torch.ones(1))
+    old_fixed = torch.nn.Parameter(torch.ones(3))
+    old_optimizer = torch.optim.AdamW([
+        {"params": [old_loop], "name": "loop_gates", "lr": 1e-5},
+        {"params": [old_engram, old_fixed], "name": "engram", "lr": 1e-3},
+    ])
+    (old_loop.sum() + old_engram.sum() + old_fixed.sum()).backward()
+    old_optimizer.step()
+    saved = old_optimizer.state_dict()
+
+    new_loop = torch.nn.Parameter(torch.ones(2, 2))
+    new_engram = torch.nn.Parameter(torch.ones(2))
+    new_fixed = torch.nn.Parameter(torch.ones(3))
+    new_optimizer = torch.optim.AdamW([
+        {"params": [new_loop], "name": "loop_gates", "lr": 9e-5},
+        {"params": [new_engram, new_fixed], "name": "engram", "lr": 9e-3},
+    ])
+    _load_optimizer_with_loop_growth(
+        new_optimizer, saved, source_loop_count=1)
+
+    for old_parameter, new_parameter in (
+            (old_loop, new_loop), (old_engram, new_engram)):
+        for state_name in ("exp_avg", "exp_avg_sq"):
+            old_state = old_optimizer.state[old_parameter][state_name]
+            new_state = new_optimizer.state[new_parameter][state_name]
+            torch.testing.assert_close(
+                new_state[:1], old_state, rtol=0, atol=0)
+            assert torch.count_nonzero(new_state[1:]) == 0
+    for state_name in ("exp_avg", "exp_avg_sq"):
+        torch.testing.assert_close(
+            new_optimizer.state[new_fixed][state_name],
+            old_optimizer.state[old_fixed][state_name], rtol=0, atol=0)
+    assert [group["lr"] for group in new_optimizer.param_groups] == [1e-5, 1e-3]
 
 
 def test_recovery_trims_only_uncheckpointed_log_records(tmp_path: Path):
@@ -1152,6 +1575,35 @@ def test_incompatible_pooled_feature_cache_is_regenerated(tmp_path: Path):
     assert torch.load(key, weights_only=True).shape == (5, 4, 1152)
 
 
+def test_cache_only_pooled_features_refuse_and_preserve_invalid_archive(
+        tmp_path: Path):
+    class Vision:
+        max_input_patches = 1024
+        cache_fingerprint = "sealed-cache-test"
+        cache_only = True
+        patch_embed = type(
+            "Patch", (), {"proj": type("Proj", (), {"weight": torch.empty(1)})()})()
+
+        def encode_many(self, _images):
+            raise AssertionError("cache-only training must not run MoonViT")
+
+    image = tmp_path / "x.jpg"
+    Image.new("RGB", (4, 4)).save(image)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    projector = MoonViTPrefixProjector(32, 5)
+    key = cache / feature_cache_key(
+        image, max_input_patches=1024, prefix_tokens=5,
+        vision_fingerprint="sealed-cache-test")
+    original = b"sealed input is not a torch archive"
+    key.write_bytes(original)
+
+    with pytest.raises(FileNotFoundError, match="sealed MoonViT cache"):
+        cached_features([{"image": image}], Vision(), projector, cache)
+
+    assert key.read_bytes() == original
+
+
 def test_nonfinite_pooled_feature_cache_is_regenerated(tmp_path: Path):
     class Vision:
         max_input_patches = 1024
@@ -1457,3 +1909,120 @@ def test_contrastive_head_detaches_caption_targets_itself():
     # the language model's embeddings, even if a caller forgets to detach.
     assert targets.grad is None
     assert prefix.grad is not None
+
+
+def test_multitask_balancing_rejects_impossible_targets():
+    rows = [{"image": Path(f"{index}"), "task": "caption"} for index in range(8)]
+    rows[0]["task"] = rows[1]["task"] = "ocr"
+    indices = list(range(len(rows)))
+
+    for ratios in ({"ocr": 1.0}, {"ocr": 1.5}, {"ocr": -0.2}):
+        with pytest.raises(ValueError, match=r"must be in \(0, 1\)"):
+            multitask_balanced_indices(
+                rows, indices, target_ratios=ratios, seed=0)
+    with pytest.raises(ValueError, match="sum to less than one"):
+        multitask_balanced_indices(
+            rows, indices, target_ratios={"ocr": 0.6, "caption": 0.5}, seed=0)
+    with pytest.raises(ValueError, match="cannot balance absent tasks"):
+        multitask_balanced_indices(
+            rows, indices, target_ratios={"sam_mask": 0.2}, seed=0)
+    # A zero ratio is "do not balance this task", not an error, so an absent
+    # task with no requested share never blocks a run.
+    assert multitask_balanced_indices(
+        rows, indices, target_ratios={"sam_mask": 0.0}, seed=0) == indices
+
+
+def test_multitask_balancing_terminates_near_the_sum_to_one_boundary():
+    rows = [{"image": Path(f"{index}"), "task": "caption"} for index in range(40)]
+    for index in range(2):
+        rows[index]["task"] = "ocr"
+    for index in range(2, 4):
+        rows[index]["task"] = "sam_mask"
+    indices = list(range(len(rows)))
+
+    # 0.95 is legal but drives the slot-growing fixed point far: each added
+    # minority slot enlarges the total that both shares are measured against.
+    balanced = multitask_balanced_indices(
+        rows, indices, target_ratios={"ocr": 0.45, "sam_mask": 0.5}, seed=11)
+    counts = Counter(rows[index]["task"] for index in balanced)
+    total = len(balanced)
+    assert counts["caption"] == 36
+    assert counts["ocr"] / total >= 0.45
+    assert counts["sam_mask"] / total >= 0.5
+    # The fixed point is the smallest one: dropping a single slot from either
+    # task would break its share.
+    assert (counts["ocr"] - 1) / (total - 1) < 0.45
+    assert (counts["sam_mask"] - 1) / (total - 1) < 0.5
+
+
+def test_native_visual_tokens_pair_columns_exactly_per_row():
+    # (gh * gw) // 2 is not gh * (gw // 2); a 3x5 grid is where they diverge.
+    assert native_visual_token_count(3, 4, packing="pair_columns") == 6
+    assert native_visual_token_count(3, 5, packing="cells") == 15
+    assert native_visual_token_count(1, 2, packing="pair_columns") == 1
+    with pytest.raises(ValueError, match="even grid width"):
+        native_visual_token_count(3, 5, packing="pair_columns")
+    with pytest.raises(ValueError, match="not positive"):
+        native_visual_token_count(0, 4, packing="cells")
+
+
+def test_structured_lr_zero_freezes_the_head_instead_of_inheriting_lr(
+        monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    projector = torch.nn.Linear(4, 4)
+    head = torch.nn.Linear(4, 4)
+
+    def group(structured_lr):
+        args = SimpleNamespace(
+            lr=2e-4, weight_decay=0.01, loop_lr=5e-5,
+            structured_lr=structured_lr)
+        optimizer, _ = _optimizer(
+            projector, None, None, [], args, structured_head=head)
+        return next(item for item in optimizer.param_groups
+                    if item["name"] == "structured_head")
+
+    assert group(None)["lr"] == 2e-4
+    assert group(3e-4)["lr"] == 3e-4
+    # 0 used to be read as "unset" and silently trained the head at --lr.
+    assert group(0.0)["lr"] == 0.0
+
+
+def test_engram_recall_width_must_match_the_loaded_visual_grid():
+    hidden, batch, text_tokens = 8, 2, 5
+
+    class Inner(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embeddings = torch.nn.Embedding(16, hidden)
+            self.layers = torch.nn.ModuleList()
+
+        def forward(self, **_kwargs):
+            raise AssertionError("misaligned recall must not reach the model")
+
+    rwkv = SimpleNamespace(model=Inner(), lm_head=torch.nn.Linear(hidden, 16))
+    ids = torch.zeros(batch, text_tokens, dtype=torch.long)
+    labels = torch.full_like(ids, -100)
+    mask = torch.ones_like(ids, dtype=torch.bool)
+    loaded_width = 6
+
+    def recall_for(width: int) -> RecallResult:
+        shape = (batch, text_tokens + width)
+        return RecallResult(
+            recalled=torch.zeros(shape, dtype=torch.long),
+            valid=torch.zeros(shape, dtype=torch.bool),
+            mlen=torch.zeros(shape, dtype=torch.long),
+            dist=torch.zeros(shape, dtype=torch.long))
+
+    def run(recall):
+        return multimodal_loss(
+            rwkv, lambda features: features, None, (), ids, labels, mask,
+            features=torch.zeros(batch, loaded_width, hidden),
+            engram_recall=recall)
+
+    # The manifest planned a 4-token prefix (EXIF rotation, say) while the
+    # cached grid actually loaded 6. Both the recall and the supervised
+    # positions are then offset, with no exception anywhere downstream.
+    with pytest.raises(ValueError, match="disagrees with the planned geometry"):
+        run(recall_for(4))
+    with pytest.raises(AssertionError, match="must not reach the model"):
+        run(recall_for(loaded_width))

@@ -24,6 +24,7 @@ import (
 	"trainboard/internal/ingest"
 	"trainboard/internal/server"
 	"trainboard/internal/sysmon"
+	trainvmstore "trainboard/internal/trainvm"
 	"trainboard/web"
 )
 
@@ -32,6 +33,10 @@ func main() {
 	repo := flag.String("repo", "/thearray/git/moe-mla", "moe-mla repo root")
 	runs := flag.String("runs", "", "runs dir (default <repo>/runs)")
 	dbPath := flag.String("db", "", "sqlite path (default <repo>/dashboard/trainboard.db)")
+	trainVMPath := flag.String("trainvm-db", "", "legacy read-only TrainVM journal path (explicit compatibility fallback only)")
+	trainVMBinary := flag.String("trainvm-bin", "", "TrainVM compiler binary (default <repo>/trainvm/build/trainvm)")
+	trainVMSchema := flag.String("trainvm-schema", "", "TrainVM experiment schema (default <repo>/docs/experiment-vm/experiment-v1.schema.json)")
+	trainVMSocket := flag.String("trainvm-socket", "", "TrainVM authority Unix socket (default <repo>/trainvm.sock)")
 	imageRoots := flag.String("image-roots", "/thearray",
 		"comma-separated roots eval-sample images may be served from")
 	scanOnce := flag.Bool("scan-once", false, "ingest one full pass, print counts, exit (verification)")
@@ -52,6 +57,45 @@ func main() {
 		log.Fatalf("db open: %v", err)
 	}
 	defer database.Close()
+
+	vmBinary := *trainVMBinary
+	if vmBinary == "" {
+		vmBinary = filepath.Join(*repo, "trainvm", "build", "trainvm")
+	}
+	vmSchema := *trainVMSchema
+	if vmSchema == "" {
+		vmSchema = filepath.Join(*repo, "docs", "experiment-vm", "experiment-v1.schema.json")
+	}
+	vmAuthoring := &trainvmstore.Authoring{
+		BinaryPath:  vmBinary,
+		SchemaPath:  vmSchema,
+		ExamplePath: filepath.Join(*repo, "docs", "experiment-vm", "examples", "mageflow-cache-resume.json"),
+	}
+	vmSocket := *trainVMSocket
+	if vmSocket == "" {
+		vmSocket = filepath.Join(*repo, "trainvm.sock")
+	}
+	var vmCommander *trainvmstore.GRPCCommander
+	if vmSocket != "" {
+		vmCommander, err = trainvmstore.DialCommander(vmSocket)
+		if err != nil {
+			log.Fatalf("TrainVM authority client: %v", err)
+		}
+		defer vmCommander.Close()
+		log.Printf("TrainVM command authority configured for %s", vmSocket)
+	}
+	var vmReader trainvmstore.ReadModel = vmCommander
+	if *trainVMPath != "" {
+		legacyReader, openErr := trainvmstore.Open(*trainVMPath)
+		if openErr != nil {
+			log.Fatalf("legacy TrainVM journal open: %v", openErr)
+		}
+		defer legacyReader.Close()
+		vmReader = legacyReader
+		log.Printf("legacy TrainVM read model attached explicitly to %s", *trainVMPath)
+	} else {
+		log.Printf("TrainVM read model uses the native authority at %s", vmSocket)
+	}
 
 	ig := ingest.New(database, runsDir, time.Second)
 
@@ -86,13 +130,16 @@ func main() {
 	go detector.Run(ctx)
 
 	srv := server.New(server.Config{
-		Addr:     *addr,
-		RunsDir:  runsDir,
-		RepoRoot: *repo,
-		Static:   web.Static(),
-		DB:       database,
-		Sampler:  sampler,
-		Detector: detector,
+		Addr:      *addr,
+		RunsDir:   runsDir,
+		RepoRoot:  *repo,
+		Static:    web.Static(),
+		DB:        database,
+		Sampler:   sampler,
+		Detector:  detector,
+		TrainVM:   vmReader,
+		Authoring: vmAuthoring,
+		Commander: vmCommander,
 		ImageRoots: func() []string {
 			var roots []string
 			for _, root := range strings.Split(*imageRoots, ",") {

@@ -782,7 +782,7 @@
             Math.hypot(e.clientX - downX, e.clientY - downY) < 4 &&
             window.trainboard && window.trainboard.openEvalSamples) {
           dragging = false;
-          window.trainboard.openEvalSamples(curRun, cand.step, cand.ppl);
+          window.trainboard.openEvalSamples(curRun, cand.step, cand.ppl, 0, "manual");
           return;
         }
         if (boxing) {
@@ -940,6 +940,29 @@
       ],
     },
     {
+      id: "chart-teacher-reconstruction", panel: "teacher-compressor-panel",
+      requires: { src: "train", key: "recon_sam" },
+      series: [
+        { src: "train", key: "recon_moon_8", label: "Moon L8", color: OI.sky, axis: "y", type: "line", smooth: 0.1 },
+        { src: "train", key: "recon_moon_17", label: "Moon L17", color: OI.blue, axis: "y", type: "line", smooth: 0.1 },
+        { src: "train", key: "recon_moon_26", label: "Moon L26", color: OI.purple, axis: "y", type: "line", smooth: 0.1 },
+        { src: "train", key: "recon_siglip2", label: "SigLIP2", color: OI.green, axis: "y", type: "line", smooth: 0.1 },
+        { src: "train", key: "recon_dinov2", label: "DINOv2", color: OI.orange, axis: "y", type: "line", smooth: 0.1 },
+        { src: "train", key: "recon_sam", label: "SAM", color: OI.vermillion, axis: "y", type: "line", smooth: 0.1, width: 2.4 },
+        { src: "eval", key: "recon_sam", label: "SAM eval", color: OI.vermillion, axis: "y", type: "scatter", r: 5 },
+      ],
+    },
+    {
+      id: "chart-canonical-health", panel: "canonical-health-panel",
+      requires: { src: "train", key: "latent_std" },
+      series: [
+        { src: "train", key: "variance", label: "variance penalty", color: OI.sky, axis: "y", type: "line", smooth: 0.1 },
+        { src: "train", key: "covariance", label: "covariance penalty", color: OI.orange, axis: "y", type: "line", smooth: 0.1 },
+        { src: "train", key: "diversity", label: "diversity penalty", color: OI.green, axis: "y", type: "line", smooth: 0.1 },
+        { src: "train", key: "latent_std", label: "latent std", color: OI.purple, axis: "y1", type: "line" },
+      ],
+    },
+    {
       id: "chart-conv", panel: "conv-panel",
       requires: { src: "train", key: "lm_ce" },
       series: [
@@ -1003,11 +1026,19 @@
   const TRAIN_FIELDS = ["loss", "tok_per_sec", "gnorm", "lr", "lm_ce", "block", "smt_mem", "dmt_mem",
     "rosa_inj_rms", "engram_inj_rms", "rosa_e_gap", "wnorm_rms", "stable_rank",
     "ce_loss", "grounded_ce_loss", "grounding_contrastive_loss", "grounding_retrieval_accuracy",
-    "deep_vision_inj_rms"];
+    "deep_vision_inj_rms", "recon_moon_8", "recon_moon_17", "recon_moon_26",
+    "recon_siglip2", "recon_dinov2", "recon_sam", "relation_moon_8",
+    "relation_moon_17", "relation_moon_26", "relation_siglip2", "relation_dinov2",
+    "relation_sam", "reconstruction", "relational", "variance", "covariance",
+    "diversity", "latent_std", "session_examples_per_s", "compute_s", "step_s"];
   const EVAL_FIELDS = ["loss", "ppl", "top1", "top5",
     "h1_top1", "h2_top1", "h3_top1", "h4_top1",
     "h1_top5", "h2_top5", "h3_top5", "h4_top5", "h1_ppl", "h4_ppl",
-    "block_val", "gen_gap"];
+    "block_val", "gen_gap", "recon_moon_8", "recon_moon_17", "recon_moon_26",
+    "recon_siglip2", "recon_dinov2", "recon_sam", "relation_moon_8",
+    "relation_moon_17", "relation_moon_26", "relation_siglip2", "relation_dinov2",
+    "relation_sam", "reconstruction", "relational", "variance", "covariance",
+    "diversity", "latent_std"];
 
   // ---- timeline marker helpers (shared by chart overlays + event list) ----
   function markColor(e) {
@@ -1299,15 +1330,33 @@
   }
 
   function showNewestEvalSample(run, series) {
-    if (!series || !series.step || !series.step.length || !series.cols || !series.cols.ppl) return;
+    if (!series || !series.step || !series.step.length || !series.cols) {
+      // Image-generation runs can publish their immutable base-model snapshot
+      // before the first scalar eval exists. Probe step 0 once so the gallery
+      // is visible immediately instead of waiting for the step-100 loss point.
+      if (shownEvalSampleStep < 0 &&
+          window.trainboard && window.trainboard.openEvalSamples) {
+        shownEvalSampleStep = 0;
+        window.trainboard.openEvalSamples(run, 0, NaN, 90);
+      }
+      return;
+    }
+    const pplColumn = series.cols.ppl || [];
+    const lossColumn = series.cols.loss || [];
     for (let i = series.step.length - 1; i >= 0; i--) {
-      const ppl = series.cols.ppl[i];
-      if (ppl == null || !isFinite(ppl)) continue;
+      const ppl = pplColumn[i];
+      const loss = lossColumn[i];
+      if ((ppl == null || !isFinite(ppl)) &&
+          (loss == null || !isFinite(loss))) continue;
       const step = series.step[i];
       if (step === shownEvalSampleStep) return;
       shownEvalSampleStep = step;
       if (window.trainboard && window.trainboard.openEvalSamples) {
-        window.trainboard.openEvalSamples(run, step, ppl);
+        // Diffusion runs report eval loss, not language-model perplexity.
+        // Passing NaN suppresses PPL stale checks while retaining exact-step
+        // artifact discovery and generation rendering.
+        window.trainboard.openEvalSamples(
+          run, step, ppl != null && isFinite(ppl) ? ppl : NaN);
       }
       return;
     }
@@ -1517,8 +1566,11 @@
       window.trainboard.watchActiveRun((run, version) => {
         if (!run) return;
         if (run !== curRun) loadRun(run, version);
-        else if (version < lastVersion) loadRun(run, version);
-        else appendRun(run, version);
+        // The direct no-cache poll and shared SSE can arrive out of order. An
+        // older SSE value is not a trainer rewind; rebuilding here reset and
+        // repainted the eval gallery every training step. appendRun detects
+        // real rewinds from the authoritative series generation/max-step data.
+        else if (version > lastVersion) appendRun(run, version);
       });
     }
   }

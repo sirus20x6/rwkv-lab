@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import math
 from pathlib import Path
 from typing import Sequence
 
@@ -35,6 +36,11 @@ class VisionTowerConfig:
     siglip_tokens: int = 64
     dinov2_tokens: int = 96
     sam_tokens: int = 96
+    # Crop SAM's zero-padded canvas and pool it on a 2D lattice instead of the
+    # flattened row-major sequence. Off by default only because the shipped
+    # frozen teacher compressor was trained against the uncropped features;
+    # enable it for any new cache. See `sam_cropped_tokens`.
+    sam_crop_padding: bool = False
 
     @property
     def token_budget(self) -> int:
@@ -59,16 +65,96 @@ class VisionTowerConfig:
             else:
                 parts.append((str(value), "remote"))
         parts.append(("siglip_width", int(self.siglip_width)))
+        if self.sam_crop_padding:
+            # Only extend the fingerprint when enabled, so existing caches built
+            # with the legacy geometry keep their keys.
+            parts.append(("sam_crop_padding", True))
         return hashlib.sha256(repr(parts).encode()).hexdigest()
 
 
 def pool_tokens(tokens: Tensor, count: int) -> Tensor:
-    """Average-pool ``[batch, sequence, channels]`` tokens to ``count``."""
+    """Average-pool ``[batch, sequence, channels]`` tokens to ``count``.
+
+    This pools the *flattened* row-major sequence, so each output token averages
+    a run of consecutive grid cells — a horizontal sliver, not a region. That is
+    acceptable for towers whose value is global semantics, and wrong for a tower
+    whose value is spatial structure; see :func:`pool_grid_tokens`.
+    """
     if tokens.ndim != 3:
         raise ValueError(f"expected [batch, sequence, channels], got {tuple(tokens.shape)}")
     if count < 1:
         raise ValueError("pooled token count must be positive")
     return F.adaptive_avg_pool1d(tokens.transpose(1, 2), count).transpose(1, 2)
+
+
+def factor_grid(count: int) -> tuple[int, int]:
+    """Most-square ``(rows, cols)`` with ``rows * cols == count`` (cols >= rows)."""
+    if count < 1:
+        raise ValueError("pooled token count must be positive")
+    rows = max((value for value in range(1, int(count ** 0.5) + 1)
+                if count % value == 0), default=1)
+    return rows, count // rows
+
+
+def pool_grid_tokens(grid: Tensor, count: int) -> Tensor:
+    """Average-pool a ``[batch, channels, height, width]`` map to ``count`` tokens.
+
+    Unlike :func:`pool_tokens`, each output token is a genuine rectangular region
+    of the source map, so the two spatial axes survive pooling. Output order is
+    row-major over the pooled lattice.
+    """
+    if grid.ndim != 4:
+        raise ValueError(
+            f"expected [batch, channels, height, width], got {tuple(grid.shape)}")
+    rows, cols = factor_grid(count)
+    pooled = F.adaptive_avg_pool2d(grid.float(), (rows, cols))
+    return pooled.flatten(2).transpose(1, 2).to(grid.dtype)
+
+
+def sam_live_cells(reshaped_height: int, reshaped_width: int, *,
+                   patch: int = 16, grid: int = 64) -> tuple[int, int]:
+    """Grid cells of a SAM embedding that cover real pixels rather than padding.
+
+    ``SamImageProcessor`` resizes the longest edge to 1024 and then zero-pads to
+    a 1024x1024 canvas, so a non-square image leaves a large block of the 64x64
+    embedding describing padding only. ``reshaped_input_sizes`` from the
+    processor gives the live extent on that canvas.
+    """
+    rows = max(1, min(grid, math.ceil(int(reshaped_height) / patch)))
+    cols = max(1, min(grid, math.ceil(int(reshaped_width) / patch)))
+    return rows, cols
+
+
+def _reshaped_input_sizes(inputs: object) -> Tensor | None:
+    """Read ``reshaped_input_sizes`` from a processor result of either shape."""
+    value = getattr(inputs, "reshaped_input_sizes", None)
+    if value is None:
+        try:
+            value = inputs["reshaped_input_sizes"]  # type: ignore[index]
+        except (TypeError, KeyError, IndexError):
+            return None
+    return value
+
+
+def sam_cropped_tokens(dense: Tensor, reshaped_sizes: Tensor, count: int) -> Tensor:
+    """Pool SAM embeddings over live pixels only, preserving both spatial axes.
+
+    ``dense`` is the ``[batch, 256, 64, 64]`` image-encoder output. Each image is
+    cropped to its own live extent before pooling, so no output token averages
+    padding and every token maps to a fixed fraction of the real image.
+    """
+    if dense.ndim != 4:
+        raise ValueError(
+            f"expected [batch, 256, height, width], got {tuple(dense.shape)}")
+    sizes = reshaped_sizes.detach().cpu().reshape(-1, 2).tolist()
+    if len(sizes) != dense.shape[0]:
+        raise ValueError("one reshaped input size is required per SAM image")
+    pooled = []
+    for index, (height, width) in enumerate(sizes):
+        rows, cols = sam_live_cells(height, width, grid=dense.shape[-2])
+        crop = dense[index : index + 1, :, :rows, :cols]
+        pooled.append(pool_grid_tokens(crop, count))
+    return torch.cat(pooled, dim=0)
 
 
 class FusedVisionPrefix(nn.Module):
@@ -119,8 +205,15 @@ class FusedVisionPrefix(nn.Module):
             raise RuntimeError("call load_pretrained() before encoding images")
 
     @torch.no_grad()
-    def extract_tower_tokens(self, images: Sequence[object], *, device: torch.device | str) -> tuple[Tensor, Tensor, Tensor]:
-        """Extract unprojected tokens; images are PIL images accepted by HF processors."""
+    def extract_tower_features(self, images: Sequence[object], *,
+                               device: torch.device | str
+                               ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Extract unprojected tower features plus SAM's live canvas extent.
+
+        SAM is returned as its native ``[B, 256, 64, 64]`` map so a caller can
+        crop the padded canvas before pooling; ``reshaped_input_sizes`` gives the
+        live extent per image.
+        """
         self._require_loaded()
         siglip_inputs = self.siglip_processor(images=images, return_tensors="pt").to(device)
         dino_inputs = self.dinov2_processor(images=images, return_tensors="pt").to(device)
@@ -132,10 +225,20 @@ class FusedVisionPrefix(nn.Module):
             pixel_values=siglip_inputs.pixel_values.to(siglip_dtype)).last_hidden_state
         dino = self.dinov2(
             pixel_values=dino_inputs.pixel_values.to(dino_dtype)).last_hidden_state
-        # [B, 256, H, W] -> spatial-token sequence; no prompts/mask decoder needed.
-        sam = self.sam.get_image_embeddings(
-            sam_inputs.pixel_values.to(sam_dtype)).flatten(2).transpose(1, 2)
-        return siglip, dino, sam
+        # [B, 256, H, W]; no prompts/mask decoder needed.
+        sam = self.sam.get_image_embeddings(sam_inputs.pixel_values.to(sam_dtype))
+        sizes = _reshaped_input_sizes(sam_inputs)
+        if sizes is None:
+            raise ValueError(
+                "SAM processor output is missing 'reshaped_input_sizes'; it is "
+                "required to distinguish live pixels from the padded canvas")
+        return siglip, dino, sam, sizes
+
+    @torch.no_grad()
+    def extract_tower_tokens(self, images: Sequence[object], *, device: torch.device | str) -> tuple[Tensor, Tensor, Tensor]:
+        """Extract unprojected tokens; images are PIL images accepted by HF processors."""
+        siglip, dino, sam, _ = self.extract_tower_features(images, device=device)
+        return siglip, dino, sam.flatten(2).transpose(1, 2)
 
     def forward(self, images: Sequence[object], *, device: torch.device | str | None = None) -> Tensor:
         self._require_loaded()
@@ -155,10 +258,22 @@ class FusedVisionPrefix(nn.Module):
 
 
 class AlignedFrozenVisionFeatures(nn.Module):
-    """Frozen SigLIP2/DINOv2/SAM extractor aligned to one token grid.
+    """Frozen SigLIP2/DINOv2/SAM extractor pooled to one common token count.
 
     Unlike :class:`FusedVisionPrefix`, this returns unprojected features so the
     result can be cached independently of every trainable adapter update.
+
+    "Aligned" here means a shared token *count*, not a shared spatial frame. The
+    three processors disagree about geometry and this class does not reconcile
+    them: SigLIP2 resizes to a square (squashing aspect), DINOv2 resizes the
+    short edge then center-crops 224 (discarding the edges of a non-square
+    image), and SAM resizes the long edge then pads to a square. Token ``i`` of
+    each tower therefore describes a different region of the source image, so
+    the channel-wise concatenation below is a bag of three views rather than a
+    registered feature stack. Downstream adapters have to learn around that.
+    ``VisionTowerConfig.sam_crop_padding`` fixes the SAM half of the problem;
+    reconciling SigLIP2 and DINOv2 would change towers that already train, so it
+    is deliberately left as a separate decision.
     """
 
     def __init__(self, config: VisionTowerConfig | None = None):
@@ -204,14 +319,88 @@ class AlignedFrozenVisionFeatures(nn.Module):
         if not self.loaded:
             raise RuntimeError("call load_pretrained() before extracting fusion features")
         device = device or next(self.extractor.siglip.parameters()).device
-        raw = self.extractor.extract_tower_tokens(images, device=device)
-        pooled = [pool_tokens(value, tokens) for value in raw]
+        siglip, dino, sam, sam_sizes = self.extractor.extract_tower_features(
+            images, device=device)
+        pooled = [pool_tokens(siglip, tokens), pool_tokens(dino, tokens)]
+        if self.config.sam_crop_padding:
+            pooled.append(sam_cropped_tokens(sam, sam_sizes, tokens))
+        else:
+            pooled.append(pool_tokens(sam.flatten(2).transpose(1, 2), tokens))
         output = torch.cat(pooled, dim=-1)
         if output.shape[-1] != self.width:
             raise RuntimeError(
                 f"configured fusion width {self.width} does not match tower output "
                 f"{output.shape[-1]}")
         return output
+
+
+class SamAlignedFrozenFeatures(nn.Module):
+    """Frozen SAM image-encoder features for a fixed global RADIO residual.
+
+    RADIO's tiled prefix is variable-length.  SAM is therefore pooled to one
+    fixed global span (128 tokens by default) and fused into the leading RADIO
+    tokens; detail-tile tokens remain untouched.  This keeps cache size bounded
+    and avoids pretending that independently pooled SAM tokens are aligned to
+    RADIO's per-tile sequence.
+
+    Redundancy warning: the only backend this is wired to, C-RADIOv4-1D-H, is
+    itself an agglomerative distillation of SigLIP2-g, DINOv3-7B and **SAM3**,
+    with SAM3 supplying dense structure (``use_summary: false``). Attaching SAM
+    ViT-B here therefore layers a 2023 91M-parameter encoder onto a backbone that
+    already absorbed a much stronger successor. Keep it as an ablation.
+    """
+
+    width = 256
+
+    def __init__(self, model: str | Path = "facebook/sam-vit-base", *,
+                 tokens: int = 128):
+        super().__init__()
+        if tokens < 1:
+            raise ValueError("SAM fusion token count must be positive")
+        self.model_name = str(model)
+        self.fusion_tokens = int(tokens)
+        # v2: crop the padded canvas and pool on a 2D lattice. v1 features are
+        # not comparable, so the fingerprint must reject any v1 cache entry.
+        self.cache_fingerprint = hashlib.sha256(
+            f"sam-global-v2|{self.fusion_tokens}|{sam_tower_fingerprint(model)}".encode()
+        ).hexdigest()
+        self.processor = None
+        self.sam = None
+
+    @property
+    def loaded(self) -> bool:
+        return self.processor is not None and self.sam is not None
+
+    def load_pretrained(self, *, device: torch.device | str = "cpu",
+                        dtype: torch.dtype | None = None
+                        ) -> "SamAlignedFrozenFeatures":
+        from transformers import SamModel, SamProcessor
+
+        kwargs = {"torch_dtype": dtype} if dtype is not None else {}
+        self.processor = SamProcessor.from_pretrained(self.model_name)
+        self.sam = SamModel.from_pretrained(self.model_name, **kwargs)
+        self.sam.requires_grad_(False).eval().to(device)
+        self.requires_grad_(False).eval()
+        return self
+
+    @torch.no_grad()
+    def forward(self, images: Sequence[object], *, tokens: int,
+                device: torch.device | str | None = None) -> Tensor:
+        if not self.loaded:
+            raise RuntimeError("call load_pretrained() before extracting SAM features")
+        if int(tokens) != self.fusion_tokens:
+            raise ValueError(
+                f"SAM fusion is fixed at {self.fusion_tokens} tokens, got {tokens}")
+        device = device or next(self.sam.parameters()).device
+        inputs = self.processor(images=images, return_tensors="pt").to(device)
+        dtype = next(self.sam.parameters()).dtype
+        dense = self.sam.get_image_embeddings(inputs.pixel_values.to(dtype))
+        # Crop the zero-padded canvas before pooling. Pooling the full 64x64 grid
+        # spends 25% of a 4:3 feature and 44% of a 16:9 feature describing
+        # padding, and those tokens are identical for every image of that aspect
+        # ratio — the tower contributes constants instead of structure.
+        return sam_cropped_tokens(
+            dense, inputs["reshaped_input_sizes"], self.fusion_tokens)
 
 
 class VisionFusionResidual(nn.Module):
