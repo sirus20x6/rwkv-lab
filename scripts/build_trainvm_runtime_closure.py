@@ -20,6 +20,8 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
 SCHEMA = "trainvm.python-bootstrap-runtime-closure/v2"
+DIGEST_CACHE_SCHEMA = "trainvm.runtime-closure-digest-cache/v1"
+MAXIMUM_DIGEST_CACHE_BYTES = 128 * 1024 * 1024
 DEFAULT_ROOT_DISTRIBUTIONS = (
     "grpcio",
     "pillow",
@@ -38,15 +40,31 @@ def _digest(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
-def _sha256(path: Path) -> str:
+def _descriptor_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _cache_key(metadata: os.stat_result) -> str:
+    return ":".join(str(value) for value in _descriptor_identity(metadata))
+
+
+def _hash_descriptor(descriptor: int) -> str:
     value = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1 << 20), b""):
-            value.update(block)
+    while block := os.read(descriptor, 1 << 20):
+        value.update(block)
     return "sha256:" + value.hexdigest()
 
 
-def _entry(path: Path) -> dict[str, Any]:
+def _entry(path: Path, digest_cache: dict[str, str]) -> dict[str, Any]:
     path = Path(os.path.abspath(path))
     metadata = path.lstat()
     mode = stat.S_IMODE(metadata.st_mode)
@@ -61,26 +79,51 @@ def _entry(path: Path) -> dict[str, Any]:
         raise ValueError(f"runtime closure path is group/world writable: {path}")
     if not stat.S_ISREG(metadata.st_mode):
         raise ValueError(f"runtime closure path is not regular or symlink: {path}")
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or _descriptor_identity(before) != _descriptor_identity(metadata)
+        ):
+            raise ValueError(f"runtime closure path changed before hashing: {path}")
+        key = _cache_key(before)
+        digest = digest_cache.get(key)
+        if digest is None:
+            digest = _hash_descriptor(descriptor)
+            digest_cache[key] = digest
+        after = os.fstat(descriptor)
+        if _descriptor_identity(after) != _descriptor_identity(before):
+            raise ValueError(f"runtime closure path changed while hashing: {path}")
+    finally:
+        os.close(descriptor)
     return {
         "kind": "regular",
         "mode": mode,
         "path": str(path),
-        "sha256": _sha256(path),
+        "sha256": digest,
         "size": metadata.st_size,
     }
 
 
-def _add_path(paths: dict[str, dict[str, Any]], path: Path) -> None:
+def _add_path(
+    paths: dict[str, dict[str, Any]],
+    path: Path,
+    digest_cache: dict[str, str],
+) -> None:
     path = Path(os.path.abspath(path))
     if path.is_dir():
         return
-    entry = _entry(path)
+    entry = _entry(path, digest_cache)
     previous = paths.setdefault(str(path), entry)
     if previous != entry:
         raise ValueError(f"runtime closure path changed while scanning: {path}")
     if entry["kind"] == "symlink":
         target = path.resolve(strict=True)
-        _add_path(paths, target)
+        _add_path(paths, target, digest_cache)
 
 
 def _distribution_closure(
@@ -138,11 +181,15 @@ def _stdlib_files() -> list[Path]:
     return files
 
 
-def build(root_distributions: tuple[str, ...]) -> dict[str, Any]:
+def build(
+    root_distributions: tuple[str, ...],
+    digest_cache: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    digest_cache = {} if digest_cache is None else digest_cache
     paths: dict[str, dict[str, Any]] = {}
     distributions = _distribution_closure(root_distributions)
     for path in _stdlib_files():
-        _add_path(paths, path)
+        _add_path(paths, path, digest_cache)
     identities = []
     for distribution in distributions:
         name = canonicalize_name(distribution.metadata["Name"])
@@ -153,7 +200,7 @@ def build(root_distributions: tuple[str, ...]) -> dict[str, Any]:
         for relative in files:
             path = Path(distribution.locate_file(relative))
             if path.exists() or path.is_symlink():
-                _add_path(paths, path)
+                _add_path(paths, path, digest_cache)
     body = {
         "api_version": SCHEMA,
         "distributions": identities,
@@ -191,9 +238,53 @@ def _publish(output: Path, data: bytes) -> None:
         raise
 
 
+def _load_digest_cache(path: Path | None) -> dict[str, str]:
+    if path is None or not path.exists():
+        return {}
+    metadata = path.lstat()
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) & (stat.S_IWGRP | stat.S_IWOTH)
+        or metadata.st_size > MAXIMUM_DIGEST_CACHE_BYTES
+    ):
+        raise ValueError("runtime digest cache is not an owner-only bounded regular file")
+    document = json.loads(path.read_bytes())
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"api_version", "entries"}
+        or document.get("api_version") != DIGEST_CACHE_SCHEMA
+        or not isinstance(document.get("entries"), dict)
+    ):
+        raise ValueError("runtime digest cache has an invalid schema")
+    entries = document["entries"]
+    if any(
+        not isinstance(key, str)
+        or not key
+        or not isinstance(value, str)
+        or len(value) != 71
+        or not value.startswith("sha256:")
+        or any(character not in "0123456789abcdef" for character in value[7:])
+        for key, value in entries.items()
+    ):
+        raise ValueError("runtime digest cache has an invalid entry")
+    return dict(entries)
+
+
+def _publish_digest_cache(path: Path | None, entries: dict[str, str]) -> None:
+    if path is None:
+        return
+    _publish(
+        path,
+        _canonical({"api_version": DIGEST_CACHE_SCHEMA, "entries": entries})
+        + b"\n",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--digest-cache", type=Path)
     parser.add_argument(
         "--distribution",
         action="append",
@@ -207,9 +298,11 @@ def main() -> int:
     )
     if not root_distributions or any(not name for name in root_distributions):
         raise ValueError("runtime closure roots must be nonempty distributions")
-    document = build(root_distributions)
+    digest_cache = _load_digest_cache(arguments.digest_cache)
+    document = build(root_distributions, digest_cache)
     data = _canonical(document) + b"\n"
     _publish(arguments.output, data)
+    _publish_digest_cache(arguments.digest_cache, digest_cache)
     print(
         json.dumps(
             {

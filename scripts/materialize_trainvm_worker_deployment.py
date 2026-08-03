@@ -196,6 +196,7 @@ def main() -> int:
         prefix=".trainvm-worker-build-", dir=output_directory
     ) as raw:
         temporary_directory = Path(raw)
+        digest_cache = temporary_directory / "runtime-digests.json"
         for (python_path, distributions), adapters in sorted(
             group_members.items(), key=lambda item: item[1]
         ):
@@ -217,6 +218,8 @@ def main() -> int:
                 str(closure_builder),
                 "--output",
                 str(temporary_closure),
+                "--digest-cache",
+                str(digest_cache),
             ]
             for distribution in distributions:
                 closure_command.extend(("--distribution", distribution))
