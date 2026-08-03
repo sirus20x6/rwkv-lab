@@ -301,6 +301,11 @@ public:
     return {.success = true, .value = trim_ascii(*value), .error_number = 0};
   }
 
+  [[nodiscard]] HostdLinuxHostNamespacePolicy observed_namespaces() const {
+    attest_context();
+    return observed_namespaces_;
+  }
+
   HostdLinuxPeerKernelObservation observe_process(pid_t pid) override {
     attest_context();
     HostdLinuxPeerKernelObservation result{.pid = pid};
@@ -560,6 +565,23 @@ validate_observation(const HostdLinuxSocketPeerCredentials &credentials,
 std::shared_ptr<IHostdLinuxSessionKernel>
 make_hostd_linux_session_kernel(HostdLinuxSessionKernelConfig config) {
   return std::make_shared<RealLinuxSessionKernel>(std::move(config));
+}
+
+HostdLinuxBootAuthoritySnapshot observe_hostd_linux_boot_authority() {
+  RealLinuxSessionKernel kernel({
+      .api_version = std::string(kHostdLinuxSessionAuthorityApiVersion),
+      .enforcement_grade = HostdLinuxSessionEnforcementGrade::
+          cooperative_namespace_observation,
+      .expected_host_namespaces = std::nullopt,
+  });
+  const HostdLinuxBootIdRead before = kernel.read_boot_id();
+  const HostdLinuxHostNamespacePolicy namespaces =
+      kernel.observed_namespaces();
+  const HostdLinuxBootIdRead after = kernel.read_boot_id();
+  if (!before.success || !after.success || !canonical_boot_id(before.value) ||
+      before.value != after.value)
+    reject("Linux boot authority observation was unavailable or torn");
+  return {.boot_id = before.value, .host_namespaces = namespaces};
 }
 
 struct HostdLinuxCSPRNGNonceSource::Implementation final {

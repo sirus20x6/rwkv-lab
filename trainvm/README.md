@@ -481,7 +481,14 @@ every ledger, inventory, cgroup, socket, session, challenge, and startup sub-pol
 of truth. The foreground `trainvm-hostd` entry point now constructs the live namespace, inventory,
 journal, ledger, cgroup, recovery, audit, challenge, service-identity, and unified transport graph;
 it binds only after startup admission and can validate its closed document without touching live
-authority (`trainvm-hostd --validate-config FILE`). Resource grant/release, stopped-child launch,
+authority (`trainvm-hostd --validate-config FILE`). The systemd deployment installs that document as
+a static template. `--materialize-config TEMPLATE RUNTIME` securely samples the current boot ID
+around a double-observed host namespace set and atomically publishes a runtime document after
+replacing only those boot-scoped fields. `--publish-client-config CLIENT` runs only after startup
+admission and pins the client policy to the newly bound socket inode; a controller retaining the
+previous boot's document therefore fails closed and must restart against the new document. The
+deployed controller role uses the stable `/system.slice/trainvm-controller.service` cgroup identity,
+never a reboot-variant login-session scope. Resource grant/release, stopped-child launch,
 terminal reconciliation, and durable hostd adoption are wired. The mutation server receives process
 authority only when strict root/non-root credentials and durable device/CPU/I/O enforcement make
 the daemon launch-capable. Privileged crash qualification and trainer safe-point pause/resume remain

@@ -90,6 +90,7 @@ add_library(trainvm_core
   src/host_process_saga.cpp
   src/host_startup_audit.cpp
   src/hostd.cpp
+  src/hostd_boot_provisioning.cpp
   src/hostd_client_bootstrap.cpp
   src/hostd_client_configuration.cpp
   src/hostd_daemon_configuration.cpp
@@ -698,6 +699,19 @@ target_compile_options(hostd_daemon_configuration_tests PRIVATE
 target_link_libraries(hostd_daemon_configuration_tests PRIVATE trainvm_core)
 add_test(NAME hostd_daemon_configuration_tests
   COMMAND hostd_daemon_configuration_tests
+)
+add_executable(hostd_boot_provisioning_tests
+  tests/hostd_boot_provisioning_tests.cpp
+)
+target_compile_options(hostd_boot_provisioning_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_compile_definitions(hostd_boot_provisioning_tests PRIVATE
+  TRAINVM_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+target_link_libraries(hostd_boot_provisioning_tests PRIVATE trainvm_core)
+add_test(NAME hostd_boot_provisioning_tests
+  COMMAND hostd_boot_provisioning_tests
 )
 add_executable(hostd_ledger_singleton_token_tests
   tests/hostd_ledger_singleton_token_tests.cpp

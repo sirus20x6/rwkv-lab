@@ -73,6 +73,13 @@ struct HostdLinuxHostNamespacePolicy final {
   bool operator==(const HostdLinuxHostNamespacePolicy &) const = default;
 };
 
+struct HostdLinuxBootAuthoritySnapshot final {
+  std::string boot_id;
+  HostdLinuxHostNamespacePolicy host_namespaces;
+
+  bool operator==(const HostdLinuxBootAuthoritySnapshot &) const = default;
+};
+
 enum class HostdLinuxSessionEnforcementGrade {
   // Pins and continuously reattests the current proc mount plus
   // mount/PID/cgroup/time namespace identities, but does not claim that an
@@ -114,6 +121,12 @@ struct HostdLinuxSessionKernelConfig final {
 
 [[nodiscard]] std::shared_ptr<IHostdLinuxSessionKernel>
 make_hostd_linux_session_kernel(HostdLinuxSessionKernelConfig config);
+
+// Produces one stable, read-only host boot authority snapshot from a pinned
+// procfs root. Boot identity is sampled around the already double-observed
+// namespace set; any torn read or namespace transition fails closed.
+[[nodiscard]] HostdLinuxBootAuthoritySnapshot
+observe_hostd_linux_boot_authority();
 
 class HostdLinuxCSPRNGNonceSource final
     : public IHostdSessionChallengeNonceSource {
