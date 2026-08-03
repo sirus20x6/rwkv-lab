@@ -40,6 +40,7 @@ def _publish(root: Path, name: str, value: Any) -> dict[str, str]:
 
 
 def _hostd_receipt() -> dict[str, Any]:
+    qualification_binary_digest = _digest(b"hostd-crash-qualification")
     cases = [
         {
             "crash_point": point,
@@ -55,7 +56,8 @@ def _hostd_receipt() -> dict[str, Any]:
         for index, (point, executor) in enumerate(MODULE.HOSTD_CRASH_POINTS)
     ]
     receipt = {
-        "api_version": "trainvm.hostd-crash-qualification/v1",
+        "api_version": "trainvm.hostd-crash-qualification/v2",
+        "qualification_binary_digest": qualification_binary_digest,
         "host": {"root_authority": True},
         "cases": cases,
         "findings": [],
@@ -229,12 +231,17 @@ def _bundle(root: Path) -> Path:
             root,
             "acceptance.json",
             {
-                "api_version": "trainvm.acceptance/v1",
+                "api_version": "trainvm.acceptance/v2",
                 "commit": commit,
                 "dirty_worktree": False,
                 "scope": "gpu_unit",
                 "gate_open": True,
                 "generated_at": "2026-08-02T00:00:00Z",
+                "native_binaries": {
+                    "hostd_crash_qualification": _digest(
+                        b"hostd-crash-qualification"
+                    )
+                },
                 "suites": [
                     {"name": name, "status": "passed", "detail": f"{name}.log"}
                     for name in suite_names
@@ -291,6 +298,27 @@ def test_bundle_rejects_changed_evidence_bytes(tmp_path: Path) -> None:
     bundle = _bundle(tmp_path)
     (tmp_path / "rwkv" / "metrics.json").write_text("[]\n")
     with pytest.raises(MODULE.QualificationError, match="digest mismatch"):
+        MODULE.verify_bundle(bundle)
+
+
+def test_bundle_rejects_crash_receipt_from_another_binary(
+    tmp_path: Path,
+) -> None:
+    bundle = _bundle(tmp_path)
+    manifest = json.loads(bundle.read_text())
+    crash_path = tmp_path / manifest["hostd_crash"]["path"]
+    crash = json.loads(crash_path.read_text())
+    crash["qualification_binary_digest"] = _digest(b"different-binary")
+    crash["receipt_digest"] = ""
+    crash["receipt_digest"] = _digest(_canonical(crash))
+    encoded = (json.dumps(crash, indent=2, sort_keys=True) + "\n").encode()
+    crash_path.write_bytes(encoded)
+    manifest["hostd_crash"]["sha256"] = _digest(encoded)
+    bundle.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    with pytest.raises(
+        MODULE.QualificationError,
+        match="not produced by the accepted native binary",
+    ):
         MODULE.verify_bundle(bundle)
 
 

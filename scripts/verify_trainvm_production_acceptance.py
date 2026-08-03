@@ -195,10 +195,10 @@ def _load_evidence(
     return LoadedEvidence(label, path, actual, document)
 
 
-def _verify_acceptance(value: Any, commit: str) -> None:
+def _verify_acceptance(value: Any, commit: str) -> str:
     if not isinstance(value, dict):
         raise QualificationError("developer acceptance receipt must be an object")
-    if value.get("api_version") != "trainvm.acceptance/v1":
+    if value.get("api_version") != "trainvm.acceptance/v2":
         raise QualificationError("developer acceptance receipt version is unsupported")
     if value.get("scope") != "gpu_unit" or value.get("gate_open") is not True:
         raise QualificationError(
@@ -227,13 +227,30 @@ def _verify_acceptance(value: Any, commit: str) -> None:
         raise QualificationError(
             f"developer acceptance is incomplete; missing={missing}, not_passed={failed}"
         )
+    native_binaries = value.get("native_binaries")
+    if (
+        not isinstance(native_binaries, dict)
+        or set(native_binaries) != {"hostd_crash_qualification"}
+        or not isinstance(
+            native_binaries.get("hostd_crash_qualification"), str
+        )
+        or not SHA256.fullmatch(native_binaries["hostd_crash_qualification"])
+    ):
+        raise QualificationError(
+            "developer acceptance does not bind the hostd crash qualification binary"
+        )
+    return cast(str, native_binaries["hostd_crash_qualification"])
 
 
-def _verify_hostd_crash(value: Any) -> None:
+def _verify_hostd_crash(value: Any, expected_binary_digest: str) -> None:
     if not isinstance(value, dict):
         raise QualificationError("hostd crash receipt must be an object")
-    if value.get("api_version") != "trainvm.hostd-crash-qualification/v1":
+    if value.get("api_version") != "trainvm.hostd-crash-qualification/v2":
         raise QualificationError("hostd crash receipt version is unsupported")
+    if value.get("qualification_binary_digest") != expected_binary_digest:
+        raise QualificationError(
+            "hostd crash receipt was not produced by the accepted native binary"
+        )
     cases = value.get("cases")
     if (
         value.get("gate_open") is not True
@@ -539,8 +556,12 @@ def verify_bundle(path: Path) -> dict[str, Any]:
     for key in ("acceptance", "hostd_crash", "host_authority", "journal_verification"):
         loaded.append(_load_evidence(root, manifest[key], key))
     by_label = {item.label: item for item in loaded}
-    _verify_acceptance(by_label["acceptance"].document, commit)
-    _verify_hostd_crash(by_label["hostd_crash"].document)
+    crash_binary_digest = _verify_acceptance(
+        by_label["acceptance"].document, commit
+    )
+    _verify_hostd_crash(
+        by_label["hostd_crash"].document, crash_binary_digest
+    )
     _verify_journal(by_label["journal_verification"].document)
     authority = by_label["host_authority"].document
     coordinator = authority.get("coordinator") if isinstance(authority, dict) else None

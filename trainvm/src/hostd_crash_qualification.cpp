@@ -93,6 +93,14 @@ std::string fixed_digest(char digit) {
   return "sha256:" + std::string(64U, digit);
 }
 
+bool canonical_sha256_digest(std::string_view value) {
+  return value.size() == 71U && value.starts_with("sha256:") &&
+         std::ranges::all_of(value.substr(7U), [](char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f');
+         });
+}
+
 // The startup auditor cross-checks its clock against the inventory boot
 // identity, so a disposable inventory still has to carry the live boot ID.
 const std::string& live_boot_id() {
@@ -1811,6 +1819,8 @@ void validate_hostd_crash_qualification_receipt(
     const HostdCrashQualificationReceipt& receipt) {
   require(receipt.api_version == kHostdCrashQualificationApiVersion,
           "crash qualification receipt api version is unknown");
+  require(canonical_sha256_digest(receipt.qualification_binary_digest),
+          "crash qualification receipt has no exact binary identity");
   const auto declared = declared_hostd_crash_points();
   require(receipt.cases.size() == declared.size(),
           "crash qualification receipt does not cover every declared point");
@@ -1894,6 +1904,7 @@ HostdCrashQualificationReceipt qualify_hostd_crash_recovery(
   require(!failure, "could not create the disposable qualification workspace");
 
   HostdCrashQualificationReceipt receipt;
+  receipt.qualification_binary_digest = self_executable_digest(::getpid());
   receipt.host = probe_hostd_crash_qualification_host(config);
   const std::filesystem::path cgroup_parent =
       resolve_cgroup_parent(config.cgroup_parent);

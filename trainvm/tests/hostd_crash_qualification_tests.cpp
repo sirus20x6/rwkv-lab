@@ -97,6 +97,8 @@ HostdCrashQualificationReceipt sealed(HostdCrashQualificationReceipt receipt) {
 
 HostdCrashQualificationReceipt all_unqualified_receipt() {
   HostdCrashQualificationReceipt receipt;
+  receipt.qualification_binary_digest =
+      "sha256:" + std::string(64U, 'b');
   for (const HostdCrashPoint point : declared_hostd_crash_points()) {
     receipt.cases.push_back(
         {.crash_point = point,
@@ -118,6 +120,15 @@ void receipt_validation_rejects_incomplete_or_overclaiming_evidence() {
   validate_hostd_crash_qualification_receipt(baseline);
   require(!baseline.gate_open,
           "an entirely unqualified receipt keeps the gate closed");
+
+  auto unidentified_binary = baseline;
+  unidentified_binary.qualification_binary_digest.clear();
+  require_throws(
+      [&] {
+        validate_hostd_crash_qualification_receipt(
+            sealed(unidentified_binary));
+      },
+      "a crash receipt without exact qualification binary identity must be rejected");
 
   auto missing = baseline;
   missing.cases.pop_back();

@@ -143,7 +143,8 @@ scripts/acceptance.sh --gpu           # also the GPU-marked suite
 ```
 
 It writes `evidence/acceptance.json`: a per-suite pass/fail/skip receipt
-stamped with the exact commit and whether the worktree was dirty, so a result
+stamped with the exact commit, whether the worktree was dirty, and the SHA-256
+of the built `trainvm-hostd-crash-qualification` executable, so a result
 can never be attributed to source it did not run against. Skips are recorded
 with their reason rather than omitted, because a silently missing suite is the
 failure this whole document is about. A required skip closes `gate_open` and
@@ -170,7 +171,9 @@ The gate opens only when all of the following evidence agrees on one clean
 source commit:
 
 - the complete `gpu_unit` developer acceptance matrix passed;
-- the destructive, privileged 16-point hostd crash qualification gate opened;
+- the destructive, privileged 16-point hostd crash qualification gate opened,
+  and its self-observed executable digest exactly matches the binary produced
+  by the clean developer-acceptance build;
 - the live dashboard observed an admitted, unpoisoned hostd authority with a
   verified ledger and process launch enabled;
 - native journal-chain verification passed after the runs stopped;

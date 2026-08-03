@@ -27,6 +27,7 @@ receipt="$evidence_dir/acceptance.json"
 build_dir="${TRAINVM_BUILD_DIR:-trainvm/build-acceptance}"
 
 declare -a names=() statuses=() details=()
+qualification_binary_digest=""
 
 record() {
   names+=("$1"); statuses+=("$2"); details+=("$3")
@@ -51,6 +52,11 @@ if command -v cmake >/dev/null && command -v g++ >/dev/null &&
   run_suite native-configure cmake -S trainvm -B "$build_dir" -DCMAKE_BUILD_TYPE=Debug
   run_suite native-build cmake --build "$build_dir" -j
   run_suite native-ctest ctest --test-dir "$build_dir" --output-on-failure
+  if [[ -x "$build_dir/trainvm-hostd-crash-qualification" ]]; then
+    qualification_binary_digest="sha256:$(
+      sha256sum "$build_dir/trainvm-hostd-crash-qualification" | awk '{print $1}'
+    )"
+  fi
   if [[ -x "$build_dir/trainvm" ]]; then
     run_suite compatibility-catalog "$build_dir/trainvm" validate-catalog \
       "$repo_root/docs/experiment-vm/compatibility-workflows.v1.json" "$repo_root"
@@ -116,8 +122,11 @@ for required_name in "${required[@]}"; do
   done
   [[ "$found" == "0" ]] && incomplete=1
 done
+if [[ ! "$qualification_binary_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  incomplete=1
+fi
 {
-  printf '{\n  "api_version": "trainvm.acceptance/v1",\n'
+  printf '{\n  "api_version": "trainvm.acceptance/v2",\n'
   printf '  "commit": "%s",\n  "dirty_worktree": %s,\n' "$commit" "$dirty"
   printf '  "scope": "%s",\n' "$scope"
   if [[ "$incomplete" == "0" ]]; then
@@ -126,6 +135,8 @@ done
     printf '  "gate_open": false,\n'
   fi
   printf '  "generated_at": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '  "native_binaries": {"hostd_crash_qualification": "%s"},\n' \
+    "$qualification_binary_digest"
   printf '  "suites": [\n'
   for index in "${!names[@]}"; do
     [[ "${statuses[$index]}" == "FAILED" ]] && failed=1

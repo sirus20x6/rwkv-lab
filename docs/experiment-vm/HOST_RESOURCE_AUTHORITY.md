@@ -898,7 +898,10 @@ The contract is the enumeration in `trainvm/include/trainvm/hostd_crash_qualific
 receipt that omits, reorders, or duplicates a declared point is rejected by
 `validate_hostd_crash_qualification_receipt`, as is a case that claims an invariant it did not
 observe, a gate that disagrees with its own blocking points, or a digest that does not bind the
-document. An unexecutable window is reported as `unqualified` with its reason; it is never dropped.
+document. Receipt v2 also hashes the exact running qualification executable; production acceptance
+requires that digest to match the native binary produced by its clean current-commit developer
+acceptance build, so a passing receipt from an older harness cannot be replayed. An unexecutable
+window is reported as `unqualified` with its reason; it is never dropped.
 
 Executors:
 

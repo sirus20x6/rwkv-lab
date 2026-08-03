@@ -14,7 +14,7 @@
 namespace trainvm {
 
 inline constexpr std::string_view kHostdCrashQualificationApiVersion =
-    "trainvm.hostd-crash-qualification/v1";
+    "trainvm.hostd-crash-qualification/v2";
 
 class HostdCrashQualificationError final : public std::runtime_error {
  public:
@@ -124,6 +124,10 @@ struct HostdCrashQualificationFinding final {
 
 struct HostdCrashQualificationReceipt final {
   std::string api_version{std::string(kHostdCrashQualificationApiVersion)};
+  // Digest of the exact executable bytes running this matrix. Production
+  // acceptance must match it to the native binary produced by its clean,
+  // current-commit developer acceptance build.
+  std::string qualification_binary_digest;
   HostdCrashQualificationHost host;
   std::vector<HostdCrashCaseReceipt> cases;
   std::vector<HostdCrashQualificationFinding> findings;
