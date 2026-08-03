@@ -1,0 +1,30 @@
+{
+  "api_version": "trainvm.native-ci-exclusions/v1",
+  "authority": "ci_scope_evidence_only",
+  "comment": "The native ctest job runs in a container on a GitHub hosted runner. These suites are excluded there because they fail on that runner specifically, not merely 'in a container' -- each passes in the same image on a real host, including under a 4-core cpuset with full ctest contention. This file exists so the exclusion set cannot grow silently: scripts/validate_native_ci_exclusions.py asserts the workflow's ctest -E expression names exactly these suites, so adding or removing one fails until it is declared with a reason. The declaration carries no authority over what runs; the workflow does.",
+  "workflow": ".github/workflows/tests.yml",
+  "job": "native",
+  "covered_by": "scripts/acceptance.sh on a real host",
+  "exclusions": [
+    {
+      "suite": "hostd_linux_session_authority_tests",
+      "reason": "pins the session procfs with openat2, which the hosted sandbox does not permit",
+      "needs": "real_host_kernel"
+    },
+    {
+      "suite": "host_resources_tests",
+      "reason": "asserts inventory and occupancy digests built from a real host",
+      "needs": "real_host_inventory"
+    },
+    {
+      "suite": "trainvm_dashboard_live_e2e",
+      "reason": "spawns the live stack, which needs an authority directory whose whole ancestry is unwritable by others",
+      "needs": "real_host_filesystem"
+    },
+    {
+      "suite": "rwkv_lab_worker_artifact",
+      "reason": "builds a sealed worker artifact from the real runtime closure",
+      "needs": "real_host_runtime"
+    }
+  ]
+}

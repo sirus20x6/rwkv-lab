@@ -147,6 +147,12 @@ jobs:
       - name: Benchmark fixtures match the qualification contract
         run: python scripts/validate_benchmark_matrix.py
 
+      # Runs here rather than in the native job so the pin is checked even when
+      # the native job is skipped or cannot start: a drifting exclusion set is
+      # exactly the thing a missing native run would otherwise hide.
+      - name: Native ctest exclusions are declared and pinned
+        run: python scripts/validate_native_ci_exclusions.py
+
   go:
     name: Dashboard (Go)
     runs-on: ubuntu-latest
@@ -227,6 +233,13 @@ jobs:
       # All four run in scripts/acceptance.sh on a real host, which is where
       # they are meaningful. Excluding them keeps this job a signal: a
       # permanently red job is one everybody learns to ignore.
+      #
+      # The set above is pinned by docs/experiment-vm/native-ci-exclusions.v1.json
+      # and checked by scripts/validate_native_ci_exclusions.py in the
+      # schema-golden job, so it cannot grow without a stated reason.
+      - name: State which suites this job does not run
+        run: python scripts/validate_native_ci_exclusions.py
+
       - name: Build and test
         run: |
           docker run --rm -v "$PWD":/w:ro trainvm-ci:ci bash -euo pipefail -c '
