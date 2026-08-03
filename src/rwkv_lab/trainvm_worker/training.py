@@ -16,7 +16,7 @@ from ._canonical import (
 
 RESOLVED_TRAINING_API_VERSION = "trainvm.resolved-training-composition/v1"
 MAXIMUM_COMPONENT_SLOTS = 64
-_COMPOSITION_FIELDS = frozenset(
+_COMPOSITION_REQUIRED_FIELDS = frozenset(
     {
         "api_version",
         "components",
@@ -25,6 +25,18 @@ _COMPOSITION_FIELDS = frozenset(
         "registry_digest",
     }
 )
+# Blocks the native side attaches to the same envelope when a composition
+# declares them (training_component_registry.cpp composition_body): the lowered
+# research-topology block, and the lowered post-training arm. They are absent
+# entirely when undeclared, never null.
+#
+# The envelope check stays exact rather than permissive. It must still refuse a
+# field neither side knows about — an unrecognised key in a digest-bound
+# envelope is exactly the drift this check exists to catch — so a new optional
+# block has to be added here deliberately, and the parity test in
+# tests/test_trainvm_resolved_composition_parity.py fails until it is.
+_COMPOSITION_OPTIONAL_FIELDS = frozenset({"post_training", "topologies"})
+_COMPOSITION_FIELDS = _COMPOSITION_REQUIRED_FIELDS | _COMPOSITION_OPTIONAL_FIELDS
 _COMPONENT_FIELDS = frozenset({"configuration", "descriptor", "descriptor_digest"})
 _DESCRIPTOR_REQUIRED_FIELDS = frozenset(
     {
@@ -116,6 +128,10 @@ class ResolvedTrainingComposition:
     components: Mapping[str, ResolvedTrainingComponent]
     registry_digest: str
     composition_digest: str
+    # None when the composition declares none. Both are inside
+    # composition_digest, so a change to either is a different composition.
+    topologies: Any | None = None
+    post_training: Any | None = None
 
     def require(
         self, slot: str, *, category: str | None = None
@@ -192,7 +208,11 @@ def _load_component(value: Any, model_family: str) -> ResolvedTrainingComponent:
 
 
 def load_resolved_training_composition(value: Any) -> ResolvedTrainingComposition:
-    if not isinstance(value, dict) or set(value) != _COMPOSITION_FIELDS:
+    if (
+        not isinstance(value, dict)
+        or not _COMPOSITION_REQUIRED_FIELDS.issubset(value)
+        or not set(value).issubset(_COMPOSITION_FIELDS)
+    ):
         raise TrainingCompositionError(
             "resolved training composition envelope is inexact"
         )
@@ -226,4 +246,11 @@ def load_resolved_training_composition(value: Any) -> ResolvedTrainingCompositio
         components=MappingProxyType(loaded),
         registry_digest=value["registry_digest"],
         composition_digest=value["composition_digest"],
+        # Preserved, not dropped. A worker that silently ignored a declared
+        # topology or post-training arm would be a quieter version of the bug
+        # this fixes.
+        topologies=deep_freeze(value["topologies"]) if "topologies" in value else None,
+        post_training=(
+            deep_freeze(value["post_training"]) if "post_training" in value else None
+        ),
     )
