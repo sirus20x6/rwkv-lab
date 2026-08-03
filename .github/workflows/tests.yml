@@ -209,16 +209,13 @@ jobs:
       # is unwritable by others, and CMake derives TRAINVM_E2E_AUTHORITY_DIR
       # from the binary directory.
       #
-      # 57 of 61 suites run. Four are excluded, each for a stated reason rather
-      # than because it was inconvenient -- a permanently red job teaches
-      # everyone to ignore it, which is worse than not having one:
-      #   hostd_linux_session_authority_tests  needs openat2 on the session
-      #     procfs, which a container cannot provide
-      #   host_resources_tests  asserts pinned inventory digests built from a
-      #     real host
-      #   trainvm_dashboard_live_e2e, rwkv_lab_worker_artifact  not yet
-      #     diagnosed; tracked as a follow-up rather than quietly dropped
-      # All four still run in scripts/acceptance.sh on a real host.
+      # The whole suite runs. Four suites previously failed in a container
+      # (session-authority procfs pinning, host inventory digests, the live
+      # stack E2E, and the worker artifact builder); fixes on the integration
+      # branch have since made all of them pass here, verified under a 4-core
+      # cpuset to match a hosted runner. No exclusions: if one of them is
+      # genuinely container-hostile it should say so out loud rather than be
+      # silently skipped.
       - name: Build and test
         run: |
           docker run --rm -v "$PWD":/w:ro trainvm-ci:ci bash -euo pipefail -c '
@@ -227,8 +224,7 @@ jobs:
             cmake --build b -j "$(nproc)"
             ./b/trainvm validate-catalog \
               /build/docs/experiment-vm/compatibility-workflows.v1.json /build
-            ctest --test-dir b -j 4 --output-on-failure \
-              -E "^(hostd_linux_session_authority_tests|host_resources_tests|trainvm_dashboard_live_e2e|rwkv_lab_worker_artifact)$"
+            ctest --test-dir b -j 4 --output-on-failure
           '
 
   # GPU tests share one device. The concurrency group is intentionally global
