@@ -1832,6 +1832,60 @@ void validate_authority_config(const HostdSocketAuthorityConfig &config,
         "supplied parent descriptor does not match socket path");
 }
 
+void recover_dead_socket_path(
+    const HostdSocketAuthorityConfig &config, int parent_fd,
+    const std::shared_ptr<IHostdSingletonToken> &singleton) {
+  const std::string basename = config.socket_path.filename().string();
+  const int opened = ::openat(parent_fd, basename.c_str(),
+                              O_PATH | O_CLOEXEC | O_NOFOLLOW);
+  if (opened < 0) {
+    if (errno == ENOENT)
+      return;
+    throw_errno("could not pin pre-existing hostd socket pathname");
+  }
+  FileDescriptor pinned(opened);
+  const struct stat identity = inspect_fd(pinned.get(), "stale socket path");
+  validate_socket_path(identity, config);
+
+  FileDescriptor probe(
+      ::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0));
+  if (probe.get() < 0)
+    throw_errno("could not create hostd stale-socket probe");
+  socklen_t address_length = 0U;
+  const sockaddr_un address =
+      socket_address(config.socket_path, address_length);
+  int connected = 0;
+  do {
+    connected = ::connect(probe.get(),
+                          reinterpret_cast<const sockaddr *>(&address),
+                          address_length);
+  } while (connected != 0 && errno == EINTR);
+  if (connected == 0 || errno == EISCONN || errno == EINPROGRESS ||
+      errno == EALREADY || errno == EAGAIN || errno == EWOULDBLOCK) {
+    throw HostdTransportError(
+        "hostd socket pathname is still served and cannot be recovered");
+  }
+  if (errno != ECONNREFUSED) {
+    throw HostdTransportError(
+        "hostd socket liveness is indeterminate and cannot be recovered");
+  }
+  if (!singleton || !singleton->attest_held()) {
+    throw HostdTransportError(
+        "hostd singleton authority was lost during stale-socket recovery");
+  }
+  struct stat current{};
+  if (fstatat_nointr(parent_fd, basename.c_str(), &current,
+                     AT_SYMLINK_NOFOLLOW) != 0 ||
+      current.st_dev != identity.st_dev || current.st_ino != identity.st_ino ||
+      current.st_mode != identity.st_mode || current.st_uid != identity.st_uid ||
+      current.st_gid != identity.st_gid || current.st_nlink != identity.st_nlink) {
+    throw HostdTransportError(
+        "hostd socket pathname changed during stale recovery");
+  }
+  if (::unlinkat(parent_fd, basename.c_str(), 0) != 0)
+    throw_errno("could not remove dead hostd socket pathname");
+}
+
 std::unique_ptr<HostdSocketAuthority::Implementation>
 finish_authority(HostdSocketAuthorityConfig config, int parent_fd,
                  FileDescriptor listener,
@@ -2023,13 +2077,7 @@ HostdSocketAuthority HostdSocketAuthority::self_bind(
     throw HostdTransportError(
         "self-bound hostd socket requires an already-held singleton token");
   const std::string basename = config.socket_path.filename().string();
-  struct stat existing{};
-  if (::fstatat(pinned_parent_fd, basename.c_str(), &existing,
-                AT_SYMLINK_NOFOLLOW) == 0)
-    throw HostdTransportError(
-        "hostd socket pathname already exists and is never blindly removed");
-  if (errno != ENOENT)
-    throw_errno("could not inspect hostd socket pathname before bind");
+  recover_dead_socket_path(config, pinned_parent_fd, singleton);
   FileDescriptor listener(
       ::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0));
   if (listener.get() < 0)

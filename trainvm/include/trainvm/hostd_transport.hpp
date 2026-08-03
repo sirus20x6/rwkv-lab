@@ -100,7 +100,9 @@ struct HostdSocketIdentity final {
 // self_bind is a single-threaded-startup operation: it blocks signals, changes
 // cwd to the pinned parent, binds only the canonical basename, restores cwd,
 // and re-proves the configured absolute parent. It retains a separately held
-// singleton token and never removes a pre-existing pathname.
+// singleton token. On restart it may remove only an exact policy-conforming
+// socket inode that refuses a connection while that host-global singleton is
+// held; a live, foreign, changed, or indeterminate endpoint is never removed.
 // Trusted systemd activation and descriptor-to-path attestation are future
 // work and deliberately absent. Move operations require external exclusion;
 // ordinary observations are internally synchronized.

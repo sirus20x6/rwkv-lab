@@ -93,7 +93,9 @@ fi
 # result can never be attributed to source it did not run against.
 commit="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 dirty=false
-if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+if ! git diff --quiet 2>/dev/null ||
+   ! git diff --cached --quiet 2>/dev/null ||
+   [[ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]]; then
   dirty=true
 fi
 

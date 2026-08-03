@@ -1023,6 +1023,60 @@ void authority_requires_external_singleton_and_pins_path() {
           "singleton loss remains observable through authority status");
 }
 
+void dead_socket_is_recovered_only_after_the_listener_dies() {
+  TemporaryDirectory directory;
+  const auto config = socket_config(directory, "restart.sock");
+  std::array<int, 2U> ready{-1, -1};
+  require(::pipe2(ready.data(), O_CLOEXEC) == 0,
+          "create socket-restart readiness pipe");
+  const pid_t child = ::fork();
+  require(child > 0, "fork socket-restart daemon");
+  if (child == 0) {
+    (void)::close(ready[0]);
+    try {
+      auto first = HostdSocketAuthority::self_bind(
+          config, directory.parent_fd(), std::make_shared<HeldToken>());
+      const char signal = 'R';
+      if (::write(ready[1], &signal, 1U) != 1)
+        ::_exit(91);
+      for (;;)
+        (void)::pause();
+    } catch (...) {
+      ::_exit(92);
+    }
+  }
+  (void)::close(ready[1]);
+  char signal = 0;
+  require(::read(ready[0], &signal, 1U) == 1 && signal == 'R',
+          "first daemon bound its endpoint");
+  (void)::close(ready[0]);
+  struct stat stale{};
+  require(::lstat(config.socket_path.c_str(), &stale) == 0 &&
+              S_ISSOCK(stale.st_mode),
+          "crashing daemon published a socket inode");
+  require(::kill(child, SIGKILL) == 0,
+          "destroy socket-owning daemon without cleanup");
+  int status = 0;
+  require(::waitpid(child, &status, 0) == child && WIFSIGNALED(status) &&
+              WTERMSIG(status) == SIGKILL,
+          "socket-owning daemon was destroyed by SIGKILL");
+
+  auto restarted = HostdSocketAuthority::self_bind(
+      config, directory.parent_fd(), std::make_shared<HeldToken>());
+  const auto identity = restarted.reattest();
+  require(identity.path_inode != static_cast<std::uint64_t>(stale.st_ino),
+          "restart replaced only the dead socket inode");
+
+  require_throws<HostdTransportError>(
+      [&] {
+        (void)HostdSocketAuthority::self_bind(
+            config, directory.parent_fd(), std::make_shared<HeldToken>());
+      },
+      "a second live listener is never treated as stale");
+  require(restarted.reattest() == identity,
+          "failed live replacement leaves restart authority intact");
+}
+
 void startup_faults_rollback_and_restore_process_state() {
   TemporaryDirectory directory;
   struct stat cwd_before{};
@@ -2414,6 +2468,7 @@ void mutation_transport_interruptions_preserve_durable_state() {
 int main() {
   const std::vector<std::pair<std::string_view, void (*)()>> tests{
       {"authority", authority_requires_external_singleton_and_pins_path},
+      {"socket-restart", dead_socket_is_recovered_only_after_the_listener_dies},
       {"startup-faults", startup_faults_rollback_and_restore_process_state},
       {"replacement", path_replacement_poison_and_guarded_move_cleanup},
       {"status", status_only_lifecycle_and_endpoint_identity},
