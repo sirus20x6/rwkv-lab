@@ -1,4 +1,5 @@
 #include <unistd.h>
+#include <signal.h>
 
 #include <cstdlib>
 #include <filesystem>
@@ -8,6 +9,8 @@
 #include <string_view>
 
 #include "trainvm/hostd_crash_qualification.hpp"
+#include "trainvm/hostd_linux_stopped_launcher.hpp"
+#include "trainvm/worker_bootstrap.hpp"
 
 namespace {
 
@@ -27,6 +30,36 @@ void usage() {
 
 int main(int argc, char** argv) {
   try {
+    bool qualification_worker = false;
+    bool bootstrap_descriptor_declared = false;
+    for (int index = 1; index < argc; ++index) {
+      const std::string_view argument(argv[index]);
+      qualification_worker =
+          qualification_worker || argument == "--qualification-worker";
+      bootstrap_descriptor_declared =
+          bootstrap_descriptor_declared ||
+          argument == "--trainvm-bootstrap-fd=4";
+    }
+    if (qualification_worker) {
+      if (!bootstrap_descriptor_declared)
+        throw std::runtime_error(
+            "qualification worker has no fixed bootstrap descriptor");
+      const auto bootstrap = trainvm::worker_bootstrap_from_sealed_fd(
+          trainvm::kLinuxWorkerBootstrapDescriptor);
+      if (bootstrap.adapter != "trainvm.hostd-crash-qualification" ||
+          bootstrap.capabilities !=
+              std::vector<std::string>{"qualification.hostd-crash"}) {
+        throw std::runtime_error(
+            "qualification worker bootstrap has the wrong authority");
+      }
+      const pid_t daemon = ::getppid();
+      if (daemon <= 1 || ::kill(daemon, SIGUSR1) != 0)
+        throw std::runtime_error(
+            "qualification worker could not attest exec readiness");
+      for (;;)
+        (void)::pause();
+    }
+
     trainvm::HostdCrashQualificationConfig config;
     std::filesystem::path receipt_path;
     for (int index = 1; index < argc; ++index) {

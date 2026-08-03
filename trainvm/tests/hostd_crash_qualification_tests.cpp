@@ -214,23 +214,26 @@ void destructive_matrix_gate_is_honest() {
   require(receipt.cases.size() == declared_hostd_crash_points().size(),
           "the destructive matrix covers every declared point");
   for (const HostdCrashCaseReceipt& value : receipt.cases) {
-    if (value.executor == HostdCrashExecutor::privileged_launch)
-      continue;
     if (value.status != HostdCrashCaseStatus::qualified) {
       require(value.unqualified_reason ==
-                  HostdCrashUnqualifiedReason::cgroup_delegation_unavailable,
-              "an unprivileged window failed for a reason other than missing "
-              "cgroup delegation: " + value.detail);
+                      HostdCrashUnqualifiedReason::cgroup_delegation_unavailable ||
+                  value.unqualified_reason ==
+                      HostdCrashUnqualifiedReason::privilege_unavailable,
+              "a crash window failed for a reason other than unavailable "
+              "host authority: " + value.detail);
       continue;
     }
     if (value.executor == HostdCrashExecutor::durable_ledger ||
-        value.executor == HostdCrashExecutor::real_process)
+        value.executor == HostdCrashExecutor::real_process ||
+        value.executor == HostdCrashExecutor::privileged_launch)
       require(value.crash_delivered && value.crashed_pid > 0,
               "a qualified crash window must record a real process death");
   }
-  require(!receipt.gate_open,
-          "the deployment gate stays closed while privileged windows are "
-          "unqualified");
+  require(receipt.gate_open ==
+              (receipt.host.root_authority &&
+               receipt.host.cgroup_delegation && receipt.findings.empty()),
+          "the deployment gate opens exactly when the required host authority "
+          "and every destructive invariant are present");
   std::cout << "hostd crash qualification: "
             << receipt.qualified_points << " qualified, "
             << receipt.unqualified_points << " unqualified\n";

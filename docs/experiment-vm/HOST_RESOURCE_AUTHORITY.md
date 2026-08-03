@@ -887,8 +887,11 @@ replay; startup policy must consume the durable recovery records.
 test: every case forks a real process and destroys it with `SIGKILL`, and the ledger prepare/commit
 windows are opened by a fault injector that raises `SIGKILL` from inside the live SQLite
 transaction, so nothing unwinds. It writes only beneath `--workspace` and a disposable cgroup
-subtree created under the caller's delegated scope, and it allocates a synthetic `host-mutex`
-resource rather than an accelerator, so it is safe to run beside live training. Exit status is `0`
+subtree created under the caller's delegated scope. Ordinary ledger cases allocate a synthetic
+`host-mutex`; the two policy-launch cases allocate an accelerator-shaped synthetic capability whose
+only assigned device is `/dev/null` (character device 1:3). They therefore exercise the exact
+cgroup-device BPF compiler, attachment, durable receipt, and restart reattestation without reserving
+or opening a real accelerator, so the matrix is safe to run beside live training. Exit status is `0`
 when the gate is open, `3` when any declared point is unqualified, and `1` on harness failure.
 
 The contract is the enumeration in `trainvm/include/trainvm/hostd_crash_qualification.hpp`. A
@@ -914,7 +917,14 @@ Executors:
   against a real delegated cgroup v2 subtree, including their already-absent replay.
 - `privileged_launch` — the stopped-child, device-policy, and daemon-socket restart windows. These
   require a root host authority with a distinct non-root worker identity and are reported
-  `unqualified: privilege_unavailable` on an unprivileged host.
+  `unqualified: privilege_unavailable` on an unprivileged host. The stopped-child case destroys
+  hostd after the real clone3 child and policy installation exist but inside the spawn-record
+  transaction, then proves restart sees only the durable intent. The device-policy case lets the
+  non-root sealed worker exec and attest readiness, destroys hostd, then requires the restarted
+  production supervisor to adopt the exact pidfd, reverify the exact attached BPF and CPU/I/O
+  policy, terminate through that pidfd, and converge exactly once. The socket case leaves a real
+  filesystem socket behind with `SIGKILL`, replaces it only after reacquiring the ledger singleton,
+  and proves a second live bind remains excluded.
 
 Invariants are named per case and are only claimed when observed: `no_double_launch` re-commits the
 exact surviving launch and spawn requests and requires an exact replay with no new durable record;

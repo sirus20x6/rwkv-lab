@@ -22,23 +22,33 @@
 #include <utility>
 
 #include "trainvm/authority_time.hpp"
+#include "trainvm/host_launch.hpp"
+#include "trainvm/host_launch_registry.hpp"
 #include "trainvm/host_ledger.hpp"
 #include "trainvm/host_ledger_authority.hpp"
 #include "trainvm/host_resources.hpp"
 #include "trainvm/host_startup_audit.hpp"
 #include "trainvm/hostd.hpp"
+#include "trainvm/hostd_ledger_singleton_token.hpp"
 #include "trainvm/hostd_linux_cgroup_authority.hpp"
+#include "trainvm/hostd_linux_device_kernel.hpp"
+#include "trainvm/hostd_linux_process_authority.hpp"
+#include "trainvm/hostd_linux_process_policy_kernel.hpp"
 #include "trainvm/hostd_linux_process_recovery.hpp"
+#include "trainvm/hostd_linux_stopped_launcher.hpp"
 #include "trainvm/hostd_restart_process_recovery.hpp"
 #include "trainvm/hostd_startup_auditor.hpp"
 #include "trainvm/hostd_startup_controller.hpp"
 #include "trainvm/hostd_terminal_release_recovery.hpp"
+#include "trainvm/hostd_transport.hpp"
 #include "trainvm/reflection_json.hpp"
+#include "trainvm/worker_bootstrap.hpp"
 
 namespace trainvm {
 namespace {
 
-constexpr std::string_view kQualificationHostId = "host-crash-qualification";
+constexpr std::string_view kQualificationHostId =
+    "sha256:5155414c494649434154494f4e2d484f53542d4944454e544954592d30303031";
 constexpr std::string_view kQualificationBrokerEpoch =
     "broker-crash-qualification";
 constexpr std::string_view kQualificationResource = "crash-qualification";
@@ -93,8 +103,23 @@ const std::string& live_boot_id() {
   return value;
 }
 
-// A disposable synthetic inventory. The qualification deliberately never
-// requests a real accelerator: it must be safe to run beside live training.
+HostResourceId qualification_resource_id() {
+  return {.kind = HostResourceKind::host_mutex,
+          .vendor = std::nullopt,
+          .stable_id = "host-mutex:" + std::string(kQualificationResource),
+          .parent_id = std::nullopt};
+}
+
+HostResourceId qualification_accelerator_id() {
+  return {.kind = HostResourceKind::accelerator,
+          .vendor = HostAcceleratorVendor::nvidia,
+          .stable_id = "GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          .parent_id = std::nullopt};
+}
+
+// A disposable synthetic inventory. The accelerator-shaped entry maps only
+// to /dev/null: it exercises the production device-policy compiler and kernel
+// attachment without reserving or opening a real accelerator.
 HostInventoryReceipt qualification_inventory() {
   HostKernelSnapshot snapshot{
       .api_version = std::string(kHostInventoryApiVersion),
@@ -103,14 +128,34 @@ HostInventoryReceipt qualification_inventory() {
       .broker_epoch = std::string(kQualificationBrokerEpoch),
       .begin_revision = "revision-001",
       .end_revision = "revision-001",
-      .probes = {},
+      .probes = {{.vendor = HostAcceleratorVendor::nvidia,
+                  .disposition = ProbeDisposition::complete,
+                  .context_details_complete = true,
+                  .detail = "synthetic /dev/null qualification capability"}},
       .resources = {},
   };
   snapshot.resources.push_back(ObservedHostResource{
-      .id = {.kind = HostResourceKind::host_mutex,
-             .vendor = std::nullopt,
-             .stable_id = "host-mutex:" + std::string(kQualificationResource),
-             .parent_id = std::nullopt},
+      .id = qualification_accelerator_id(),
+      .disposition = ResourceObservationDisposition::audited_eligible,
+      .compute_contexts = ResourceContextDisposition::absent,
+      .graphics_contexts = ResourceContextDisposition::absent,
+      .pci_bdf = std::nullopt,
+      .device_major = 1U,
+      .device_minor = 3U,
+      .device_nodes = {{.type = HostDeviceNodeType::character,
+                        .purpose =
+                            HostDeviceNodePurpose::assigned_accelerator,
+                        .major = 1U,
+                        .minor = 3U,
+                        .read = true,
+                        .write = true}},
+      .numa_node = 0,
+      .pcie_root_id = std::nullopt,
+      .fabric_clique_id = std::nullopt,
+      .total_memory_bytes = 1U,
+      .labels = {{"scope", "synthetic-device-policy-qualification"}}});
+  snapshot.resources.push_back(ObservedHostResource{
+      .id = qualification_resource_id(),
       .disposition = ResourceObservationDisposition::audited_eligible,
       .compute_contexts = ResourceContextDisposition::absent,
       .graphics_contexts = ResourceContextDisposition::absent,
@@ -126,13 +171,6 @@ HostInventoryReceipt qualification_inventory() {
   FakeHostKernel kernel(
       {{.snapshot = std::move(snapshot), .failure = std::nullopt}});
   return capture_host_inventory(kernel);
-}
-
-HostResourceId qualification_resource_id() {
-  return {.kind = HostResourceKind::host_mutex,
-          .vendor = std::nullopt,
-          .stable_id = "host-mutex:" + std::string(kQualificationResource),
-          .parent_id = std::nullopt};
 }
 
 HostStartupAuditPolicy qualification_audit_policy() {
@@ -167,8 +205,24 @@ ResourceBundleRequest qualification_request(std::string id) {
       .logical_fencing_token = 7,
       .count = 1U,
       .access_mode = ResourceAccessMode::mutex_exclusive,
-      .topology = TopologyPolicy::any,
-      .selector = {},
+      .topology = TopologyPolicy::exact_resources,
+      .selector = {.exact_resources = {qualification_resource_id()}},
+      .canonical_request_digest = {},
+  });
+}
+
+ResourceBundleRequest qualification_device_request(std::string id) {
+  return seal_resource_request({
+      .api_version = std::string(kHostResourceRequestApiVersion),
+      .request_id = std::move(id),
+      .journal_id = "journal-crash-qualification",
+      .run_id = "run-crash-qualification",
+      .logical_lease_id = "lease-crash-qualification",
+      .logical_fencing_token = 7,
+      .count = 1U,
+      .access_mode = ResourceAccessMode::exclusive_device,
+      .topology = TopologyPolicy::exact_resources,
+      .selector = {.exact_resources = {qualification_accelerator_id()}},
       .canonical_request_digest = {},
   });
 }
@@ -338,6 +392,152 @@ std::string self_executable_digest(std::int64_t pid) {
     result.push_back(digits[value[index] & 0x0fU]);
   }
   return result;
+}
+
+class QualificationContextAuditor final
+    : public ILinuxProcessContextAuditor {
+ public:
+  LinuxProcessContextAudit audit(
+      const ResourceBundleGrant& grant,
+      const HostProcessSpawnReceipt& spawn) override {
+    require(grant.fences.size() == 1U,
+            "qualification context audit requires exactly one fence");
+    require(std::ranges::all_of(
+                grant.fences, [](const ResourceFence& fence) {
+                  return fence.resource == qualification_resource_id() ||
+                         fence.resource == qualification_accelerator_id();
+                }),
+            "qualification context audit received non-synthetic authority");
+    require(spawn.request.launch_id.size() > 0U,
+            "qualification context audit received no process identity");
+    std::string evidence("trainvm.synthetic-context-audit/v1");
+    evidence.push_back('\0');
+    evidence += grant.receipt_digest;
+    evidence.push_back('\0');
+    evidence += spawn.receipt_digest;
+    return {
+        .complete = true,
+        .accelerator_contexts_empty = true,
+        .evidence_digest = digest_of(evidence),
+    };
+  }
+};
+
+std::filesystem::path install_qualification_worker(
+    const std::filesystem::path& workspace) {
+  const auto worker = workspace / "qualification-worker";
+  std::error_code failure;
+  std::filesystem::copy_file(
+      "/proc/self/exe", worker,
+      std::filesystem::copy_options::overwrite_existing, failure);
+  if (failure || ::chmod(worker.c_str(), 0500) != 0)
+    throw HostdCrashQualificationError(
+        "could not install the immutable qualification worker");
+  return worker;
+}
+
+struct QualificationWorkerLaunch final {
+  ResolvedLaunch resolved;
+  SealedWorkerBootstrap bootstrap;
+  LinuxProcessPolicy process_policy;
+};
+
+QualificationWorkerLaunch resolve_qualification_worker(
+    const std::filesystem::path& workspace,
+    const std::filesystem::path& worker_path,
+    const ResourceBundleGrant& grant, std::string attempt_id) {
+  const std::string executable_digest = self_executable_digest(::getpid());
+  const AdapterKey key{
+      .adapter = "trainvm.hostd-crash-qualification",
+      .version = "1.0.0",
+      .runtime = ComponentRuntime::native_worker,
+      .operation = "qualify",
+      .contract = "trainvm.hostd-crash-qualification-worker/v1",
+  };
+  const std::vector<std::string> capabilities{
+      "qualification.hostd-crash"};
+  HostLaunchRegistry registry({
+      .api_version = "trainvm.host-launches/v4",
+      .trusted_roots = {workspace.string()},
+      .profiles = {{.key = key,
+                    .code_fingerprint = executable_digest,
+                    .bootstrap_runtime_closure_fingerprint = fixed_digest('b'),
+                    .provided_capabilities = capabilities,
+                    .executable_path = worker_path.string(),
+                    .executable_fingerprint = executable_digest,
+                    .code_path = std::nullopt,
+                    .code_argument_index = 0U,
+                    .public_arguments = {"--qualification-worker"},
+                    .working_directory = workspace.string()}},
+      .profiler_executables = std::nullopt,
+  });
+  const WorkerLaunchTicket ticket{
+      .run_id = grant.run_id,
+      .node_id = "privileged-worker",
+      .attempt_id = std::move(attempt_id),
+      .launch_nonce = "hostd-crash-qualification-nonce",
+      .adapter = key.adapter,
+      .adapter_version = key.version,
+      .code_fingerprint = executable_digest,
+      .required_capabilities = capabilities,
+      .concurrency_key = "hostd-crash-qualification",
+      .lease_id = grant.logical_lease_id,
+      .fencing_token = grant.logical_fencing_token,
+      .host_grant = HostLaunchGrantClaim{
+          .request_id = grant.request_id,
+          .grant_digest = grant.receipt_digest,
+          .fences = grant.fences},
+  };
+  HostLaunchResolver resolver(
+      registry, {.host_id = grant.host_id, .boot_id = grant.boot_id});
+  ResolvedLaunch resolved = resolver.resolve(ticket, key);
+  const auto& identity = resolved.spec().identity;
+  SealedWorkerBootstrap bootstrap = create_sealed_worker_bootstrap({
+      .api_version = std::string(kWorkerBootstrapApiVersion),
+      .controller_target = "unix:/run/trainvm/qualification.sock",
+      .run_id = identity.run_id,
+      .node_id = identity.node_id,
+      .attempt_id = identity.attempt_id,
+      .launch_nonce = identity.launch_nonce,
+      .adapter = identity.adapter_key.adapter,
+      .adapter_version = identity.adapter_key.version,
+      .code_fingerprint = identity.code_fingerprint,
+      .capabilities = identity.provided_capabilities,
+      .last_acked_controller_sequence = 0U,
+      .concurrency_key = identity.concurrency_key,
+      .lease_id = identity.lease_id,
+      .fencing_token = identity.fencing_token,
+      .bootstrap_digest = {},
+  });
+  return {.resolved = std::move(resolved),
+          .bootstrap = std::move(bootstrap),
+          .process_policy = compile_linux_process_policy(std::nullopt)};
+}
+
+void block_worker_ready_signal() {
+  sigset_t signals;
+  if (::sigemptyset(&signals) != 0 || ::sigaddset(&signals, SIGUSR1) != 0 ||
+      ::sigprocmask(SIG_BLOCK, &signals, nullptr) != 0) {
+    throw HostdCrashQualificationError(
+        "could not block the qualification worker readiness signal");
+  }
+}
+
+void await_worker_ready_signal() {
+  sigset_t signals;
+  if (::sigemptyset(&signals) != 0 || ::sigaddset(&signals, SIGUSR1) != 0)
+    throw HostdCrashQualificationError(
+        "could not construct the worker readiness signal set");
+  struct timespec timeout {
+    .tv_sec = 5,
+    .tv_nsec = 0,
+  };
+  int result = -1;
+  do {
+    result = ::sigtimedwait(&signals, nullptr, &timeout);
+  } while (result < 0 && errno == EINTR);
+  require(result == SIGUSR1,
+          "qualification worker did not attest a successful exec");
 }
 
 std::uint64_t observed_starttime(std::int64_t pid) {
@@ -644,7 +844,8 @@ struct RestartObservation final {
 // by the landed wake-driven startup controller and the real coordinator
 // admission authority. Nothing here is a stand-in.
 RestartObservation observe_restart(const std::filesystem::path& ledger_path,
-                                   const LinuxCgroupAuthorityConfig& cgroups) {
+                                   const LinuxCgroupAuthorityConfig& cgroups,
+                                   const HostResourceId& resource) {
   RestartObservation observed;
   auto ledger = std::make_shared<SQLiteHostLedger>(
       ledger_authority_for(ledger_path), qualification_inventory(), nullptr,
@@ -726,7 +927,7 @@ RestartObservation observe_restart(const std::filesystem::path& ledger_path,
   observed.second_cleanup = cleanup.recover();
   observed.active_fences =
       static_cast<std::size_t>(ledger->occupancy().active_fences.size());
-  observed.generation = ledger->generation(qualification_resource_id());
+  observed.generation = ledger->generation(resource);
   observed.chain_verified = ledger->verify();
   return observed;
 }
@@ -784,7 +985,8 @@ HostdCrashCaseReceipt run_durable_case(
               std::to_string(crash.signal_number) + ", detail: " +
               crash.failure + ")");
 
-  const RestartObservation observed = observe_restart(ledger_path, cgroup_config);
+  const RestartObservation observed = observe_restart(
+      ledger_path, cgroup_config, qualification_resource_id());
   require(observed.chain_verified,
           "restart could not verify the ledger hash chain");
   require(observed.unclosed_records == expectation.unclosed_records,
@@ -1118,6 +1320,432 @@ HostdCrashCaseReceipt run_cgroup_case(
           .evidence = std::move(evidence)};
 }
 
+ResourceBundleGrant open_qualification_grant(SQLiteHostLedger& ledger,
+                                             AuthorityClock& clock,
+                                             ResourceBundleRequest request) {
+  const HostLedgerAdmissionEpoch epoch = open_admission(ledger, clock);
+  const BundleRequestResult result = ledger.request_bundle(
+      request, ledger_now(clock), epoch);
+  if (!result.grant)
+    throw HostdCrashQualificationError(
+        "privileged qualification did not acquire its synthetic resource");
+  return *result.grant;
+}
+
+void run_stopped_child_crashing_daemon(
+    const std::filesystem::path& ledger_path,
+    const LinuxCgroupAuthorityConfig& cgroup_config,
+    const std::filesystem::path& workspace,
+    const std::filesystem::path& worker_path) {
+  AuthorityClock clock;
+  SigkillFault fault(HostLedgerFaultPoint::after_process_spawn_record);
+  SQLiteHostLedger ledger(ledger_authority_for(ledger_path),
+                          qualification_inventory(), &fault,
+                          qualification_audit_policy());
+  const ResourceBundleGrant grant =
+      open_qualification_grant(
+          ledger, clock,
+          qualification_device_request("request-privileged-stopped"));
+  QualificationWorkerLaunch worker = resolve_qualification_worker(
+      workspace, worker_path, grant, "stopped-before-spawn-commit");
+  LinuxCgroupAuthority cgroups(cgroup_config);
+  LinuxCgroupDeviceKernel device_kernel;
+  LinuxDevicePolicyInstaller device_policies(device_kernel);
+  LinuxCgroupProcessPolicyKernel process_kernel;
+  LinuxProcessPolicyInstaller process_policies(process_kernel);
+  LinuxStoppedLauncherKernel launcher;
+  QualificationContextAuditor contexts;
+  LinuxProcessAuthority processes(
+      ledger, clock, cgroups, device_policies, process_policies, launcher,
+      {.uid = static_cast<uid_t>(65534U),
+       .gid = static_cast<gid_t>(65534U),
+       .no_new_privileges = true},
+      contexts);
+  Descriptor bootstrap(worker.bootstrap.duplicate_fd());
+  fault.arm();
+  (void)processes.prepare(worker.resolved, grant, bootstrap.get(),
+                          worker.bootstrap.spec().bootstrap_digest,
+                          worker.process_policy);
+  throw HostdCrashQualificationError(
+      "spawn-record crash injection returned without SIGKILL");
+}
+
+HostdCrashCaseReceipt run_privileged_stopped_child_case(
+    const HostdCrashQualificationConfig& config,
+    const std::filesystem::path& cgroup_parent) {
+  constexpr std::string_view name =
+      "case-privileged-stopped-child-before-spawn-commit";
+  const auto workspace = config.workspace / name;
+  std::filesystem::create_directories(workspace);
+  if (::chmod(workspace.c_str(), 0700) != 0)
+    throw HostdCrashQualificationError(
+        "could not protect the stopped-child workspace");
+  DisposableCgroupRoot cgroup_root(cgroup_parent, std::string(name));
+  const auto ledger_path = workspace / "host-ledger.sqlite3";
+  const auto worker_path = install_qualification_worker(workspace);
+  const auto cgroup_config = cgroup_root.authority_config();
+
+  const CrashOutcome crash = run_crashing_child([&] {
+    run_stopped_child_crashing_daemon(ledger_path, cgroup_config, workspace,
+                                      worker_path);
+  });
+  require(crash.signalled && crash.signal_number == SIGKILL,
+          "stopped-child spawn window did not SIGKILL hostd (exit status " +
+              std::to_string(crash.exit_status) + ", detail: " +
+              crash.failure + ")");
+
+  const RestartObservation observed = observe_restart(
+      ledger_path, cgroup_config, qualification_accelerator_id());
+  require(observed.chain_verified,
+          "stopped-child recovery could not verify the ledger chain");
+  require(observed.unclosed_records == 1U &&
+              observed.terminal_release_records == 0U,
+          "stopped-child recovery did not retain exactly the durable intent");
+  require(observed.launch_replay_checked &&
+              !observed.spawn_replay_checked &&
+              observed.records_before_replay == observed.records_after_replay,
+          "stopped-child recovery did not replay only the durable intent");
+  require(observed.active_fences == 0U && observed.generation == 1U,
+          "stopped-child recovery leaked or regenerated its physical grant");
+  require(observed.admitted,
+          "stopped-child recovery did not converge before admission");
+  require(observed.second_cleanup.allocations_released == 0U &&
+              observed.second_cleanup.cgroups_removed == 0U &&
+              observed.second_cleanup.intent_cgroups_removed == 0U,
+          "stopped-child recovery was not idempotent");
+
+  return {
+      .crash_point =
+          HostdCrashPoint::privileged_stopped_child_before_spawn_commit,
+      .executor = HostdCrashExecutor::privileged_launch,
+      .status = HostdCrashCaseStatus::qualified,
+      .unqualified_reason = HostdCrashUnqualifiedReason::none,
+      .crash_delivered = true,
+      .crashed_pid = crash.pid,
+      .detail =
+          "real clone3 stopped-child and policy installation completed; "
+          "SIGKILL rolled back the spawn row and restart reconciled only the "
+          "durable intent",
+      .invariants = {HostdCrashInvariant::no_double_launch,
+                     HostdCrashInvariant::no_double_release,
+                     HostdCrashInvariant::no_leaked_physical_grant,
+                     HostdCrashInvariant::monotonic_generations,
+                     HostdCrashInvariant::ledger_chain_intact,
+                     HostdCrashInvariant::recovery_is_idempotent},
+      .evidence =
+          {{"unclosed_records_before", "1"},
+           {"spawn_receipts_before", "0"},
+           {"launch_retry_replayed", "true"},
+           {"active_fences_after", "0"},
+           {"resource_generation", "1"},
+           {"admitted_after_convergence", "true"}},
+  };
+}
+
+void run_device_policy_crashing_daemon(
+    const std::filesystem::path& ledger_path,
+    const LinuxCgroupAuthorityConfig& cgroup_config,
+    const std::filesystem::path& workspace,
+    const std::filesystem::path& worker_path) {
+  block_worker_ready_signal();
+  AuthorityClock clock;
+  SQLiteHostLedger ledger(ledger_authority_for(ledger_path),
+                          qualification_inventory(), nullptr,
+                          qualification_audit_policy());
+  const ResourceBundleGrant grant =
+      open_qualification_grant(
+          ledger, clock,
+          qualification_device_request("request-privileged-device"));
+  QualificationWorkerLaunch worker = resolve_qualification_worker(
+      workspace, worker_path, grant, "device-policy-recovery");
+  LinuxCgroupAuthority cgroups(cgroup_config);
+  LinuxCgroupDeviceKernel device_kernel;
+  LinuxDevicePolicyInstaller device_policies(device_kernel);
+  LinuxCgroupProcessPolicyKernel process_kernel;
+  LinuxProcessPolicyInstaller process_policies(process_kernel);
+  LinuxStoppedLauncherKernel launcher;
+  QualificationContextAuditor contexts;
+  LinuxProcessAuthority processes(
+      ledger, clock, cgroups, device_policies, process_policies, launcher,
+      {.uid = static_cast<uid_t>(65534U),
+       .gid = static_cast<gid_t>(65534U),
+       .no_new_privileges = true},
+      contexts);
+  Descriptor bootstrap(worker.bootstrap.duplicate_fd());
+  LinuxPreparedLaunch prepared = processes.prepare(
+      worker.resolved, grant, bootstrap.get(),
+      worker.bootstrap.spec().bootstrap_digest, worker.process_policy);
+  processes.release_to_exec(prepared);
+  await_worker_ready_signal();
+  (void)::raise(SIGKILL);
+  ::_exit(97);
+}
+
+void terminate_qualification_worker_on_failure(
+    const HostProcessSpawnRequest& identity) noexcept {
+  try {
+    LinuxProcessRecoveryProbe probe;
+    LinuxProcessRecoveryResult recovered = probe.observe(identity);
+    if (recovered.disposition !=
+            LinuxProcessRecoveryDisposition::exact_live_process ||
+        !recovered.process) {
+      return;
+    }
+    (void)recovered.process->request_termination();
+    for (std::size_t attempt = 0U; attempt < 2000U; ++attempt) {
+      if (recovered.process->state() != LinuxPidfdState::live)
+        return;
+      (void)::usleep(1000U);
+    }
+  } catch (...) {
+  }
+}
+
+HostdCrashCaseReceipt run_privileged_device_policy_case(
+    const HostdCrashQualificationConfig& config,
+    const std::filesystem::path& cgroup_parent) {
+  constexpr std::string_view name =
+      "case-privileged-device-policy-recovery";
+  const auto workspace = config.workspace / name;
+  std::filesystem::create_directories(workspace);
+  if (::chmod(workspace.c_str(), 0700) != 0)
+    throw HostdCrashQualificationError(
+        "could not protect the device-policy workspace");
+  DisposableCgroupRoot cgroup_root(cgroup_parent, std::string(name));
+  const auto ledger_path = workspace / "host-ledger.sqlite3";
+  const auto worker_path = install_qualification_worker(workspace);
+  const auto cgroup_config = cgroup_root.authority_config();
+
+  const CrashOutcome crash = run_crashing_child([&] {
+    run_device_policy_crashing_daemon(ledger_path, cgroup_config, workspace,
+                                      worker_path);
+  });
+  require(crash.signalled && crash.signal_number == SIGKILL,
+          "device-policy daemon did not SIGKILL after worker exec (exit status " +
+              std::to_string(crash.exit_status) + ", detail: " +
+              crash.failure + ")");
+
+  auto ledger = std::make_shared<SQLiteHostLedger>(
+      ledger_authority_for(ledger_path), qualification_inventory(), nullptr,
+      qualification_audit_policy());
+  AuthorityClock clock;
+  SQLiteHostdTerminalReleaseAuthority records(*ledger, clock);
+  const auto before = records.unclosed_records();
+  require(before.size() == 1U && before.front().spawn &&
+              before.front().spawn->request.device_policy &&
+              before.front().spawn->request.process_policy &&
+              before.front().spawn->request.worker_credentials,
+          "device-policy crash did not preserve one fully bound spawn receipt");
+  const HostProcessSpawnRequest worker_identity = before.front().spawn->request;
+  const auto device_binding = *worker_identity.device_policy;
+  require(device_binding.program_id != 0U &&
+              device_binding.installation_digest.starts_with("sha256:"),
+          "spawn receipt did not bind the installed device program");
+
+  try {
+    LinuxCgroupAuthority cgroups(cgroup_config);
+    LinuxCgroupDeviceKernel device_kernel;
+    LinuxDevicePolicyInstaller device_policies(device_kernel);
+    LinuxCgroupProcessPolicyKernel process_kernel;
+    LinuxProcessPolicyInstaller process_policies(process_kernel);
+    LinuxStoppedLauncherKernel launcher;
+    QualificationContextAuditor contexts;
+    LinuxProcessAuthority processes(
+        *ledger, clock, cgroups, device_policies, process_policies, launcher,
+        {.uid = static_cast<uid_t>(65534U),
+         .gid = static_cast<gid_t>(65534U),
+         .no_new_privileges = true},
+        contexts);
+    HostdLinuxProcessSupervisor supervisor(processes);
+    LinuxHostdTerminalCgroupCleaner cleaner(cgroups);
+    HostdTerminalReleaseRecovery cleanup(records, cleaner);
+    HostdRestartProcessRecovery recovery(
+        records, cleanup, supervisor,
+        {.exact_live_policy =
+             HostdExactRecoveredProcessPolicy::terminate_and_reconcile,
+         .reconcile_observed_nonlive = true});
+
+    std::size_t recovery_steps = 0U;
+    std::size_t exact_live_observations = 0U;
+    std::size_t adopted = 0U;
+    std::size_t finalized = 0U;
+    bool blocked_release_observed = false;
+    bool converged = false;
+    for (; recovery_steps < 2000U; ++recovery_steps) {
+      const HostdRestartProcessRecoverySummary step = recovery.step();
+      exact_live_observations += step.observed.exact_live;
+      adopted += step.newly_adopted;
+      finalized += step.progress.finalized;
+      blocked_release_observed =
+          blocked_release_observed ||
+          step.cleanup_before.allocations_blocked_by_unclosed_process > 0U;
+      if (step.remaining_unclosed_records == 0U &&
+          step.remaining_terminal_release_records == 0U) {
+        converged = true;
+        ++recovery_steps;
+        break;
+      }
+      (void)::usleep(1000U);
+    }
+    require(converged && exact_live_observations >= 1U && adopted == 1U &&
+                finalized == 1U && blocked_release_observed,
+            "device-policy restart did not adopt, terminate, and converge the "
+            "exact live worker once");
+    const HostdRestartProcessRecoverySummary replay = recovery.step();
+    require(replay.newly_adopted == 0U && replay.nonlive_finalized == 0U &&
+                replay.progress.retained_before == 0U &&
+                replay.cleanup_before.allocations_released == 0U &&
+                replay.cleanup_after.allocations_released == 0U &&
+                replay.remaining_unclosed_records == 0U &&
+                replay.remaining_terminal_release_records == 0U,
+            "device-policy recovery mutated state after convergence");
+    require(ledger->occupancy().active_fences.empty() &&
+                ledger->generation(qualification_accelerator_id()) == 1U,
+            "device-policy recovery leaked or regenerated the host grant");
+    std::string ledger_failure;
+    require(ledger->verify(&ledger_failure),
+            "device-policy recovery could not verify the ledger chain");
+
+    return {
+        .crash_point = HostdCrashPoint::privileged_device_policy_recovery,
+        .executor = HostdCrashExecutor::privileged_launch,
+        .status = HostdCrashCaseStatus::qualified,
+        .unqualified_reason = HostdCrashUnqualifiedReason::none,
+        .crash_delivered = true,
+        .crashed_pid = crash.pid,
+        .detail =
+            "restart adopted the exact worker through a pinned pidfd, "
+            "reattested its durable cgroup-device BPF and process policy, "
+            "then terminated and released it once",
+        .invariants = {
+            HostdCrashInvariant::no_double_release,
+            HostdCrashInvariant::no_leaked_physical_grant,
+            HostdCrashInvariant::no_unauthorized_adoption,
+            HostdCrashInvariant::single_adoption_transfer,
+            HostdCrashInvariant::monotonic_generations,
+            HostdCrashInvariant::ledger_chain_intact,
+            HostdCrashInvariant::recovery_is_idempotent,
+            HostdCrashInvariant::termination_only_through_pinned_pidfd},
+        .evidence =
+            {{"worker_pid", std::to_string(worker_identity.host_pid)},
+             {"device_program_id", std::to_string(device_binding.program_id)},
+             {"device_program_tag", device_binding.program_tag},
+             {"device_installation_digest",
+              device_binding.installation_digest},
+             {"exact_live_observations",
+              std::to_string(exact_live_observations)},
+             {"adoption_transfers", std::to_string(adopted)},
+             {"terminal_finalizations", std::to_string(finalized)},
+             {"recovery_steps", std::to_string(recovery_steps)},
+             {"active_fences_after", "0"},
+             {"resource_generation", "1"}},
+    };
+  } catch (...) {
+    terminate_qualification_worker_on_failure(worker_identity);
+    throw;
+  }
+}
+
+HostdSocketAuthorityConfig qualification_socket_config(
+    const std::filesystem::path& socket_path) {
+  return {
+      .api_version = std::string(kHostdStatusTransportApiVersion),
+      .socket_path = socket_path,
+      .expected_owner_uid = ::geteuid(),
+      .expected_owner_gid = ::getegid(),
+      .expected_parent_mode = 0700U,
+      .expected_socket_mode = 0600U,
+      .listen_backlog = 8U,
+      .enforcement_grade = HostdSocketEnforcementGrade::cooperative_test,
+      .fault_injector = nullptr,
+  };
+}
+
+HostdCrashCaseReceipt run_privileged_socket_restart_case(
+    const HostdCrashQualificationConfig& config) {
+  const auto workspace =
+      config.workspace / "case-privileged-daemon-socket-restart";
+  std::filesystem::create_directories(workspace);
+  if (::chmod(workspace.c_str(), 0700) != 0)
+    throw HostdCrashQualificationError(
+        "could not protect the socket-restart workspace");
+  const auto ledger_path = workspace / "host-ledger.sqlite3";
+  const auto socket_path = workspace / "hostd.sock";
+  const auto socket_config = qualification_socket_config(socket_path);
+
+  const CrashOutcome crash = run_crashing_child([&] {
+    auto ledger_authority = ledger_authority_for(ledger_path);
+    auto singleton =
+        std::make_shared<HostdLedgerSingletonToken>(ledger_authority);
+    const int parent = ::open(workspace.c_str(),
+                              O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (parent < 0)
+      throw HostdCrashQualificationError(
+          "could not open the socket-restart parent");
+    Descriptor parent_descriptor(parent);
+    auto socket = HostdSocketAuthority::self_bind(
+        socket_config, parent_descriptor.get(), singleton);
+    (void)socket.reattest();
+    (void)::raise(SIGKILL);
+    ::_exit(97);
+  });
+  require(crash.signalled && crash.signal_number == SIGKILL,
+          "socket-owning daemon did not die by SIGKILL");
+
+  struct stat stale{};
+  require(::lstat(socket_path.c_str(), &stale) == 0 &&
+              S_ISSOCK(stale.st_mode),
+          "daemon crash did not leave its socket inode for restart recovery");
+  auto ledger_authority = ledger_authority_for(ledger_path);
+  auto singleton =
+      std::make_shared<HostdLedgerSingletonToken>(ledger_authority);
+  SQLiteHostLedger ledger(ledger_authority, qualification_inventory());
+  std::string ledger_failure;
+  require(ledger.verify(&ledger_failure),
+          "socket restart ledger verification failed");
+  const int parent = ::open(workspace.c_str(),
+                            O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  if (parent < 0)
+    throw HostdCrashQualificationError(
+        "could not reopen the socket-restart parent");
+  Descriptor parent_descriptor(parent);
+  auto restarted = HostdSocketAuthority::self_bind(
+      socket_config, parent_descriptor.get(), singleton);
+  const HostdSocketIdentity identity = restarted.reattest();
+  require(identity.path_inode != static_cast<std::uint64_t>(stale.st_ino),
+          "restart retained the dead daemon socket inode");
+  bool second_live_rejected = false;
+  try {
+    (void)HostdSocketAuthority::self_bind(
+        socket_config, parent_descriptor.get(), singleton);
+  } catch (const HostdTransportError&) {
+    second_live_rejected = true;
+  }
+  require(second_live_rejected && restarted.reattest() == identity,
+          "socket restart did not preserve singleton listener authority");
+
+  return {
+      .crash_point = HostdCrashPoint::privileged_daemon_socket_restart,
+      .executor = HostdCrashExecutor::privileged_launch,
+      .status = HostdCrashCaseStatus::qualified,
+      .unqualified_reason = HostdCrashUnqualifiedReason::none,
+      .crash_delivered = true,
+      .crashed_pid = crash.pid,
+      .detail =
+          "a SIGKILL-stale socket was replaced only after reacquiring the "
+          "durable singleton; a second live listener remained protected",
+      .invariants = {HostdCrashInvariant::no_double_launch,
+                     HostdCrashInvariant::ledger_chain_intact},
+      .evidence =
+          {{"stale_socket_inode", std::to_string(stale.st_ino)},
+           {"restarted_socket_inode", std::to_string(identity.path_inode)},
+           {"socket_owner_uid", std::to_string(identity.owner_uid)},
+           {"socket_owner_gid", std::to_string(identity.owner_gid)},
+           {"second_live_bind_rejected",
+            second_live_rejected ? "true" : "false"}},
+  };
+}
+
 }  // namespace
 
 std::vector<HostdCrashPoint> declared_hostd_crash_points() {
@@ -1280,15 +1908,10 @@ HostdCrashQualificationReceipt qualify_hostd_crash_recovery(
           "required to execute this window"));
       continue;
     }
-    if (executor == HostdCrashExecutor::privileged_launch) {
-      receipt.cases.push_back(unqualified_case(
-          point, HostdCrashUnqualifiedReason::privilege_unavailable,
-          "privileged launch executor is not implemented in this qualification "
-          "binary"));
-      continue;
-    }
     if ((executor == HostdCrashExecutor::durable_ledger ||
-         executor == HostdCrashExecutor::real_cgroup) &&
+         executor == HostdCrashExecutor::real_cgroup ||
+         (executor == HostdCrashExecutor::privileged_launch &&
+          point != HostdCrashPoint::privileged_daemon_socket_restart)) &&
         !receipt.host.cgroup_delegation) {
       receipt.cases.push_back(unqualified_case(
           point, HostdCrashUnqualifiedReason::cgroup_delegation_unavailable,
@@ -1310,6 +1933,23 @@ HostdCrashQualificationReceipt qualify_hostd_crash_recovery(
               run_cgroup_case(point, config, cgroup_parent));
           break;
         case HostdCrashExecutor::privileged_launch:
+          switch (point) {
+            case HostdCrashPoint::privileged_stopped_child_before_spawn_commit:
+              receipt.cases.push_back(run_privileged_stopped_child_case(
+                  config, cgroup_parent));
+              break;
+            case HostdCrashPoint::privileged_device_policy_recovery:
+              receipt.cases.push_back(run_privileged_device_policy_case(
+                  config, cgroup_parent));
+              break;
+            case HostdCrashPoint::privileged_daemon_socket_restart:
+              receipt.cases.push_back(
+                  run_privileged_socket_restart_case(config));
+              break;
+            default:
+              throw HostdCrashQualificationError(
+                  "crash point has no privileged launch executor");
+          }
           break;
       }
     } catch (const HostdCrashQualificationError& error) {
