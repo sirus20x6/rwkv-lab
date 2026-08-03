@@ -623,6 +623,180 @@ int main() {
         }),
         "descriptor-relative source open rejects nonregular files");
 
+  // ---------------------------------------------------------------------
+  // The classification surface. The point of this whole mechanism is that the
+  // reviewed digest moves when a source's CLASSIFICATION could have changed and
+  // stays put when only its internals did. Both halves are asserted; a gate
+  // that cannot fail is worse than none, and one that always fails gets cleared
+  // without the review it exists to force.
+  // ---------------------------------------------------------------------
+  const auto surface = [](std::string_view path, std::string_view bytes) {
+    return trainvm::CompatibilityCatalog::classification_surface_for_testing(
+        path, bytes);
+  };
+  const auto read_file = [](const fs::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(input),
+                       std::istreambuf_iterator<char>());
+  };
+
+  const std::string module_source =
+      "\"\"\"A docstring.\"\"\"\n"
+      "import argparse\n"
+      "\n"
+      "def helper(x):\n"
+      "    return x * 2  # internal arithmetic\n"
+      "\n"
+      "def main():\n"
+      "    parser = argparse.ArgumentParser()\n"
+      "    parser.add_argument('--steps')\n"
+      "    torch.save(state, path)\n"
+      "\n"
+      "if __name__ == '__main__':\n"
+      "    main()\n";
+  const auto module_surface = surface("src/example.py", module_source);
+
+  check(!module_surface.empty(),
+        "a Python module with an entrypoint has a nonempty surface");
+  check(module_surface.find("def helper") == std::string::npos &&
+            module_surface.find("A docstring") == std::string::npos,
+        "the surface excludes internals and prose");
+  check(module_surface.find("def main():") != std::string::npos &&
+            module_surface.find("add_argument") != std::string::npos,
+        "the surface includes the entrypoint and the argument surface");
+
+  // A comment, a docstring, whitespace, and a changed internal computation.
+  // None of these can alter family, operation_role, statefulness or
+  // resume_evidence, so none may move the digest.
+  std::string edited_internals = module_source;
+  edited_internals.replace(edited_internals.find("return x * 2"),
+                           std::string("return x * 2").size(),
+                           "return x * 3");
+  edited_internals += "\n# a trailing comment, added later\n";
+  check(surface("src/example.py", edited_internals) == module_surface,
+        "editing internals, comments and trailing lines leaves the surface put");
+
+  std::string renamed_entrypoint = module_source;
+  renamed_entrypoint.replace(renamed_entrypoint.find("def main():"),
+                             std::string("def main():").size(),
+                             "def run():");
+  check(surface("src/example.py", renamed_entrypoint) != module_surface,
+        "renaming the entrypoint moves the surface");
+
+  std::string added_argument = module_source;
+  added_argument.replace(added_argument.find("torch.save"),
+                         std::string("torch.save").size(),
+                         "parser.add_argument('--resume'); torch.save");
+  check(surface("src/example.py", added_argument) != module_surface,
+        "adding an argument moves the surface");
+
+  std::string nested_entrypoint = module_source;
+  nested_entrypoint.replace(nested_entrypoint.find("def main():"),
+                            std::string("def main():").size(),
+                            "    def main():");
+  check(surface("src/example.py", nested_entrypoint) != module_surface,
+        "indenting the entrypoint moves the surface: scope is classification");
+
+  // A library module genuinely has no entrypoint, so an empty surface is the
+  // honest answer -- but it must stop being empty the moment one appears, or
+  // the file would be permanently invisible to review.
+  const std::string library_source =
+      "def transform(batch):\n    return batch.mean()\n";
+  check(surface("src/library.py", library_source).empty(),
+        "a library module with no entrypoint has an empty surface");
+  check(!surface("src/library.py",
+                 library_source + "\ndef main():\n    transform(None)\n")
+             .empty(),
+        "gaining an entrypoint makes a previously empty surface fire");
+
+  // Only Python is understood. Anything else keeps its full bytes, so no
+  // language silently loses byte-level binding it used to have.
+  const std::string shell_source = "#!/bin/sh\n# a comment\nexec python -m x\n";
+  check(surface("scripts/run.sh", shell_source) == shell_source,
+        "a non-Python source falls back to its whole bytes");
+  check(surface("scripts/run.sh", shell_source + "# another comment\n") !=
+            shell_source,
+        "a non-Python source is still bound byte for byte");
+
+  // The headline property, end to end against the real catalog: an edit that
+  // cannot change classification must NOT require touching the compiled
+  // reviewed digest. Only the byte digest is re-pinned, which the generator
+  // now produces, and the catalog still loads.
+  std::string python_victim;
+  for (const auto& candidate : source_paths) {
+    if (candidate.ends_with(".py") &&
+        read_file(root / candidate).find("\ndef main(") != std::string::npos) {
+      python_victim = candidate;
+      break;
+    }
+  }
+  check(!python_victim.empty(),
+        "the catalog references a Python module with an entrypoint to mutate");
+
+  if (!python_victim.empty()) {
+    // The symlink and directory checks above leave the cloned tree with their
+    // victim replaced by a directory. Put it back, or every digest computed
+    // below fails on that file rather than on what is being tested.
+    fs::remove(cloned_victim);
+    restore_source(root / victim, cloned_victim);
+
+    const auto write_fixture = [&](const nlohmann::json& document,
+                                   std::string_view name) {
+      const fs::path path = temporary.path() / name;
+      std::ofstream output(path);
+      output << document.dump(2);
+      return path;
+    };
+
+    const fs::path victim_path = cloned_root / python_victim;
+    restore_source(root / python_victim, victim_path);
+    {
+      std::ofstream output(victim_path, std::ios::app | std::ios::binary);
+      output << "\n# an explanatory comment that changes no classification\n";
+    }
+    auto recomputed = trainvm::CompatibilityCatalog::compute_digests(
+        fixture, cloned_root);
+    nlohmann::json repinned = original;
+    repinned["source_tree_digest"] = recomputed.source_tree_digest;
+    check(recomputed.classification_surface_digest ==
+              original.at("classification_surface_digest").get<std::string>(),
+          "a comment leaves the classification surface digest untouched");
+    check(!throws_invalid_argument([&] {
+            (void)trainvm::CompatibilityCatalog::load_file(
+                write_fixture(repinned, "repinned.json"), cloned_root);
+          }),
+          "a classification-irrelevant edit needs no reviewed-digest bump");
+
+    // The converse. Renaming the entrypoint IS a classification change, so even
+    // with both digests honestly re-pinned the compiled reviewed digest must
+    // refuse it. This is what fails closed.
+    restore_source(root / python_victim, victim_path);
+    {
+      const auto text = read_file(victim_path);
+      const auto position = text.find("\ndef main(");
+      std::string mutated = text;
+      mutated.replace(position, std::string("\ndef main(").size(),
+                      "\ndef entry_point(");
+      std::ofstream output(victim_path, std::ios::trunc | std::ios::binary);
+      output << mutated;
+    }
+    recomputed = trainvm::CompatibilityCatalog::compute_digests(fixture,
+                                                                cloned_root);
+    check(recomputed.classification_surface_digest !=
+              original.at("classification_surface_digest").get<std::string>(),
+          "renaming an entrypoint moves the classification surface digest");
+    nlohmann::json honestly_repinned = original;
+    honestly_repinned["source_tree_digest"] = recomputed.source_tree_digest;
+    honestly_repinned["classification_surface_digest"] =
+        recomputed.classification_surface_digest;
+    check(throws_invalid_argument([&] {
+            (void)trainvm::CompatibilityCatalog::load_file(
+                write_fixture(honestly_repinned, "honest.json"), cloned_root);
+          }),
+          "a classification change still fails against the compiled digest");
+    restore_source(root / python_victim, victim_path);
+  }
+
   if (failures != 0) {
     std::cerr << failures << " compatibility catalog test(s) failed\n";
     return 1;

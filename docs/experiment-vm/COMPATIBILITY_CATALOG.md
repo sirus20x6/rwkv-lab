@@ -99,3 +99,47 @@ repository-root identity with Linux `openat2`, `RESOLVE_BENEATH`, `RESOLVE_NO_MA
 nonregular files, source-byte drift, ID-set drift, and contradictory role/state claims fail closed.
 The compatibility library is linked only into the CLI validator and its tests; the long-running
 service does not contain it.
+
+## The two digests
+
+The catalog pins two, and they answer different questions.
+
+`source_tree_digest` binds the **whole bytes** of every referenced source. It is the provenance
+record: it says the entries were reviewed against exactly these files. It still fails closed, so the
+record cannot go stale.
+
+`classification_surface_digest` binds only the part of each source that could change how the entry
+beside it is classified — its entrypoint declaration, its argument surface, and its checkpoint and
+resume call sites. For Python this is extracted lexically; every other language falls back to its
+full bytes, because a narrower surface has to be earned per language rather than assumed.
+
+Only the second is covered by the compiled `kReviewedCatalogDigest`. That split is the point: adding
+a comment or changing an internal computation re-pins the byte digest and nothing else, while
+renaming an entrypoint or adding an argument moves the reviewed digest and forces a re-review.
+
+Before this split, every byte demanded both. Three separate cards resolved as "re-reviewed, no
+classification change, hashes updated" — which is what a gate looks like shortly before people stop
+reading it, and is a slower failure than having no gate, because it still reads as protection.
+
+The extraction is deliberately over-broad: `checkpoint` and `resume` match more lines than strictly
+bear on `resume_evidence`. That is the safe direction. A surface that is too wide costs an occasional
+unnecessary review; one that is too narrow lets a real classification change through unnoticed.
+
+A vacuous extraction would be the dangerous failure — a file whose surface silently came back empty
+would be permanently invisible to review. Any entry recorded as `python_module` or `console_script`
+must therefore expose a nonempty surface, or validation refuses the catalog and names the entry.
+
+## Re-pinning
+
+Nothing used to compute these values, which is much of why re-pinning felt like a chore rather than
+a review. Now:
+
+```bash
+trainvm/build/trainvm print-catalog-digests \
+  "$PWD/docs/experiment-vm/compatibility-workflows.v1.json" "$PWD"
+```
+
+It computes both digests without checking them, so it still reports when they disagree, and lists
+any Python source whose classification surface came out empty. Paste `source_tree_digest` back into
+the JSON after an unrelated source edit. If `classification_surface_digest` also moved, that is the
+signal to actually re-read the entry before pinning it and bumping `kReviewedCatalogDigest`.
