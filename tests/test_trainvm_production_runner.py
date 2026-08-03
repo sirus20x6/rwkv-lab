@@ -130,6 +130,7 @@ class FakeAuthorityClient:
     def __init__(self, origin: str) -> None:
         self.origin = origin
         self.states: dict[str, str] = {}
+        self.resumed: set[str] = set()
         self.actions: list[tuple[str, str]] = []
         self.health_checked = False
 
@@ -159,6 +160,8 @@ class FakeAuthorityClient:
         assert through == 10
         run_id = path.split("/runs/", 1)[1].split("/", 1)[0]
         if path.endswith("/timeline"):
+            if run_id not in self.resumed:
+                return []
             return [
                 {
                     "sequence": 8,
@@ -202,6 +205,8 @@ class FakeAuthorityClient:
         run_id = path.split("/")[-2]
         action = value["action"]
         self.actions.append((run_id, action))
+        if action == "resume":
+            self.resumed.add(run_id)
         self.states[run_id] = "paused" if action == "pause" else "completed"
         return 202, {"disposition": "ACCEPTED", "action": action}
 
@@ -244,6 +249,32 @@ def test_runner_drives_checkpoint_release_resume_sequentially(
     assert captured["runs"] == {
         family: f"{family}-run" for family in MODULE.FAMILIES
     }
+
+
+@pytest.mark.parametrize(
+    ("initial_state", "expected_actions"),
+    [
+        ("paused", [("rwkv-run", "resume")]),
+        ("completed", []),
+    ],
+)
+def test_family_driver_reconciles_an_interrupted_controller(
+    initial_state, expected_actions
+) -> None:
+    client = FakeAuthorityClient("http://127.0.0.1:9124")
+    client.states["rwkv-run"] = initial_state
+    if initial_state == "completed":
+        client.resumed.add("rwkv-run")
+
+    MODULE._drive_family(
+        client,
+        MODULE.SubmittedRun("rwkv", "rwkv-run", "rwkv-plan"),
+        pause_step=2,
+        deadline=MODULE.time.monotonic() + 1,
+        poll_seconds=0.05,
+    )
+
+    assert client.actions == expected_actions
 
 
 def test_wait_rejects_run_that_finishes_before_pause() -> None:

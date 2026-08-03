@@ -196,7 +196,11 @@ MageFlow must additionally declare its generated/original gallery. The
 controller runs the families sequentially, waits for the selected optimizer
 step, requests a checkpoint-first resource-releasing pause, proves the hostd
 process and fence counts returned to zero, resumes, and requires optimizer and
-metric progress before terminal completion:
+metric progress before terminal completion. Deterministic submission and
+lifecycle idempotency keys let a restarted controller reattach to an existing
+running, paused, resumed, or completed qualification run; it reconciles the
+durable timeline instead of submitting another run or repeating a lifecycle
+transition:
 
 Do not hand-author those three documents for a deployment. The strict
 `production-qualification-inputs-v1.schema.json` contract names the local

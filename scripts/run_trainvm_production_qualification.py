@@ -418,6 +418,124 @@ def _prove_resume_progress(
         )
 
 
+def _latest_checkpoint_restart_step(
+    client: AuthorityClient,
+    run: SubmittedRun,
+    view: dict[str, Any],
+) -> int | None:
+    through = view.get("last_event_sequence")
+    if isinstance(through, bool) or not isinstance(through, int) or through < 1:
+        return None
+    base = "/api/trainvm/runs/" + urllib.parse.quote(run.run_id, safe="")
+    timeline = client.paged(base + "/timeline", through)
+    steps = [
+        event["optimizer_step"]
+        for event in timeline
+        if isinstance(event, dict)
+        and event.get("run_id") == run.run_id
+        and event.get("event_type") == "node.attempt_restarted"
+        and isinstance(event.get("optimizer_step"), int)
+        and not isinstance(event.get("optimizer_step"), bool)
+        and event["optimizer_step"] > 0
+        and isinstance(event.get("payload"), dict)
+        and isinstance(event["payload"].get("checkpoint_artifact_id"), str)
+        and event["payload"]["checkpoint_artifact_id"]
+    ]
+    return max(steps) if steps else None
+
+
+def _released_host_authority(client: AuthorityClient, family: str) -> None:
+    authority = client.get("/api/trainvm/host-authority")
+    if (
+        not isinstance(authority, dict)
+        or authority.get("active_process_count") != 0
+        or authority.get("active_fence_count") != 0
+    ):
+        raise QualificationRunError(
+            f"{family} resource-releasing pause left host authority active"
+        )
+
+
+def _drive_family(
+    client: AuthorityClient,
+    run: SubmittedRun,
+    pause_step: int,
+    deadline: float,
+    poll_seconds: float,
+) -> None:
+    """Reconcile one idempotently submitted run through pause/resume/completion."""
+    view = _run_view(client, run.run_id)
+    while True:
+        observed = view.get("observed_state")
+        if observed in TERMINAL_FAILURES:
+            raise QualificationRunError(
+                f"{run.family} entered {observed}: {view.get('failure_summary', '')}"
+            )
+        restart_step = _latest_checkpoint_restart_step(client, run, view)
+        if observed == "completed":
+            if restart_step is None:
+                raise QualificationRunError(
+                    f"{run.family} completed without its qualification resume cycle"
+                )
+            _prove_resume_progress(
+                client,
+                run,
+                {"optimizer_step": restart_step},
+                view,
+            )
+            return
+        if restart_step is not None:
+            completed = _wait(
+                client,
+                run,
+                lambda candidate: candidate.get("observed_state") == "completed",
+                "complete after checkpoint resume",
+                deadline,
+                poll_seconds,
+            )
+            _prove_resume_progress(
+                client,
+                run,
+                {"optimizer_step": restart_step},
+                completed,
+            )
+            return
+        optimizer_step = view.get("optimizer_step")
+        if observed == "paused":
+            if (
+                isinstance(optimizer_step, bool)
+                or not isinstance(optimizer_step, int)
+                or optimizer_step < pause_step
+            ):
+                raise QualificationRunError(
+                    f"{run.family} paused before qualification step {pause_step}"
+                )
+            _released_host_authority(client, run.family)
+            _action(client, run, view, "resume", 1)
+        elif (
+            observed == "running"
+            and isinstance(optimizer_step, int)
+            and not isinstance(optimizer_step, bool)
+            and optimizer_step >= pause_step
+        ):
+            _action(client, run, view, "pause", 1)
+        view = _wait(
+            client,
+            run,
+            lambda candidate: candidate.get("observed_state")
+            in {"paused", "completed"}
+            or (
+                candidate.get("observed_state") == "running"
+                and isinstance(candidate.get("optimizer_step"), int)
+                and not isinstance(candidate.get("optimizer_step"), bool)
+                and candidate["optimizer_step"] >= pause_step
+            ),
+            f"reach pause step {pause_step} or reconcile lifecycle progress",
+            deadline,
+            poll_seconds,
+        )
+
+
 def qualify(
     origin: str,
     documents: dict[str, str],
@@ -440,46 +558,13 @@ def qualify(
     for family in FAMILIES:
         run = _submit(client, family, documents[family], journal_id)
         deadline = time.monotonic() + timeout_seconds
-        running = _wait(
+        _drive_family(
             client,
             run,
-            lambda view, threshold=pause_steps[family]: view.get("observed_state")
-            == "running"
-            and isinstance(view.get("optimizer_step"), int)
-            and not isinstance(view.get("optimizer_step"), bool)
-            and view["optimizer_step"] >= threshold,
-            f"reach pause step {pause_steps[family]}",
+            pause_steps[family],
             deadline,
             poll_seconds,
         )
-        _action(client, run, running, "pause", 1)
-        paused = _wait(
-            client,
-            run,
-            lambda view: view.get("observed_state") == "paused",
-            "checkpoint and release resources",
-            deadline,
-            poll_seconds,
-        )
-        authority = client.get("/api/trainvm/host-authority")
-        if (
-            not isinstance(authority, dict)
-            or authority.get("active_process_count") != 0
-            or authority.get("active_fence_count") != 0
-        ):
-            raise QualificationRunError(
-                f"{family} resource-releasing pause left host authority active"
-            )
-        _action(client, run, paused, "resume", 1)
-        completed = _wait(
-            client,
-            run,
-            lambda view: view.get("observed_state") == "completed",
-            "complete after checkpoint resume",
-            deadline,
-            poll_seconds,
-        )
-        _prove_resume_progress(client, run, paused, completed)
         runs[family] = run.run_id
     return CAPTURE.live_capture(origin, runs, output)
 
