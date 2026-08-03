@@ -30,11 +30,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
+          # The test extra carries the module-scope optional dependencies
+          # (jsonschema, zstandard, duckdb, opencv-python-headless) that whole
+          # suites import, so this single line is what makes the extra coverage
+          # real rather than a directory full of skips.
           pip install -e '.[vision,test,trainvm-worker]'
-          # Optional dependencies that whole suites import at module scope.
-          # Installing them is what makes the extra coverage real rather than
-          # a directory full of skips.
-          pip install zstandard duckdb opencv-python-headless
       - name: Every test file is covered or explicitly excluded
         run: python scripts/ci_coverage_gate.py -m "not gpu"
 
@@ -63,11 +63,11 @@ jobs:
           # Vision extras cover the embedded-image corpus and deduplication
           # utilities exercised by the multimodal CPU tests; trainvm-worker
           # supplies the protobuf runtime the TrainVM worker suites import.
+          # The test extra carries the module-scope optional dependencies
+          # (jsonschema, zstandard, duckdb, opencv-python-headless) that whole
+          # suites import, so this single line is what makes the extra coverage
+          # real rather than a directory full of skips.
           pip install -e '.[vision,test,trainvm-worker]'
-          # Optional dependencies that whole suites import at module scope.
-          # Installing them is what makes the extra coverage real rather than
-          # a directory full of skips.
-          pip install zstandard duckdb opencv-python-headless
 
       # The whole non-GPU suite, not a named subset. A test that needs an
       # optional dependency skips itself; it does not get dropped from CI.
@@ -109,11 +109,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
+          # Marker selection still imports every test module during
+          # collection, so this job needs the same module-scope optional
+          # dependencies as the CPU job even though it runs only the fla-marked
+          # tests. The test extra supplies them.
           pip install -e '.[vision,test,trainvm-worker]'
-          # Marker selection still imports every test module during collection,
-          # so this job needs the same module-scope optional dependencies as the
-          # CPU job even though it runs only the fla-marked tests.
-          pip install zstandard duckdb opencv-python-headless
           # The real dependency this job exists to exercise. It is a CUDA-stack
           # package, but importing it and driving its Cache type works on CPU.
           pip install flash-linear-attention
@@ -141,7 +141,9 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install jsonschema
+      # jsonschema comes from the test extra rather than a bare install, so
+      # the version the gate validates against is declared in one place.
+      - run: pip install -e '.[test]'
       - name: Example experiment documents match the checked-in schema
         run: python scripts/validate_experiment_documents.py
       - name: Benchmark fixtures match the qualification contract

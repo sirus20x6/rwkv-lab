@@ -51,6 +51,26 @@ vision = [
 test = [
     "pytest>=8",
     "pytest-xdist>=3.6",
+    # Below: real dependencies of the suite and of the gates the suite drives.
+    # They were installed by hand in four separate workflow steps, so package
+    # metadata did not describe what running the tests actually needs and a
+    # clean checkout could not reproduce CI from any documented command.
+    #
+    # torch and flash-linear-attention stay out on purpose: they are CUDA-stack
+    # specific and provided by the environment, as the base dependencies note.
+    #
+    # >=4.0 is the first release supporting draft 2020-12, which is what
+    # docs/experiment-vm/experiment-v1.schema.json declares in its $schema.
+    # Validator behaviour is draft-specific, so this bound is the schema's, not
+    # a guess at a recent version.
+    "jsonschema>=4.0",
+    # Whole suites import these at module scope; without them those files
+    # collect as skips and the coverage they represent is imaginary.
+    "zstandard>=0.23",   # ao3_cpt_data / ao3_cpt_tokens compressed shards
+    "duckdb>=1.0",       # midjourney caption-route scan and expert-stage scripts
+    # Headless rather than plain opencv-python: the suite only decodes frames
+    # (radio_v4h), and the GUI build pulls X libraries no runner or worker has.
+    "opencv-python-headless>=4.10",
 ]
 # The TrainVM control plane is optional for standalone algorithm imports, but
 # every authority-launched trainer installs this extra. Generated protobuf
