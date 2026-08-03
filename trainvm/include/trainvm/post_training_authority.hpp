@@ -4,7 +4,10 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include "trainvm/adapter_registry.hpp"
 #include "trainvm/lifecycle_admission.hpp"
@@ -132,6 +135,33 @@ struct PostTrainingArm final {
 // they share.
 [[nodiscard]] std::optional<LifecycleAdmissionRefusal>
 validate_post_training_arm_declaration(const PostTrainingArm& arm);
+
+// Lowering the document surface into the authority's type, reported rather
+// than thrown, because the two callers need different things from a failure:
+// document compilation wants a diagnostic per offending field, and the
+// registry wants to refuse. One function so they cannot disagree about what a
+// declaration means — the earlier version of this lived inline in
+// document.cpp, and a second copy in the registry would have been free to
+// drift.
+struct PostTrainingArmLowering final {
+  PostTrainingArm arm;
+  // Each holds the name the author wrote, so a diagnostic can repeat it back
+  // instead of reporting a default the author never chose.
+  std::optional<std::string> unknown_kind;
+  std::optional<std::string> unknown_claim;
+  std::vector<std::pair<std::size_t, std::string>> unknown_bounds;
+
+  [[nodiscard]] bool complete() const {
+    return !unknown_kind && !unknown_claim && unknown_bounds.empty();
+  }
+};
+
+[[nodiscard]] PostTrainingArmLowering lower_post_training_arm(
+    const PostTrainingArmDeclaration& declared);
+
+// The arm as it travels to the worker, inside the resolved composition and so
+// inside its digest.
+[[nodiscard]] nlohmann::json post_training_arm_json(const PostTrainingArm& arm);
 
 // The strongest claim this arm's own declarations can support. Callers that
 // want a label rather than a refusal should ask for this and use it, instead

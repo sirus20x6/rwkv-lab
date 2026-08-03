@@ -140,6 +140,77 @@ ReproducibilityClaim supportable_reproducibility_claim(
   return ReproducibilityClaim::exact;
 }
 
+PostTrainingArmLowering lower_post_training_arm(
+    const PostTrainingArmDeclaration& declared) {
+  PostTrainingArmLowering lowering;
+  lowering.arm.arm_id = declared.arm_id;
+  lowering.arm.seed = declared.seed;
+  lowering.arm.verifier_identity = declared.verifier_identity;
+  lowering.arm.claims_trajectory_preserving_resume =
+      declared.claims_trajectory_preserving_resume.value_or(false);
+
+  if (const auto kind = post_training_arm_kind_from_name(declared.kind))
+    lowering.arm.kind = *kind;
+  else
+    lowering.unknown_kind = declared.kind;
+
+  if (const auto claim =
+          reproducibility_claim_from_name(declared.reproducibility_claim))
+    lowering.arm.claim = *claim;
+  else
+    lowering.unknown_claim = declared.reproducibility_claim;
+
+  for (std::size_t index = 0U; index < declared.bounds.size(); ++index) {
+    const PostTrainingBoundDeclaration& bound = declared.bounds[index];
+    if (const auto kind = run_bound_kind_from_name(bound.kind)) {
+      lowering.arm.bounds.push_back(
+          {.kind = *kind, .magnitude = bound.magnitude.value_or(0U)});
+    } else {
+      lowering.unknown_bounds.emplace_back(index, bound.kind);
+    }
+  }
+
+  for (const PostTrainingMutationDeclaration& mutation :
+       declared.external_mutations.value_or(
+           std::vector<PostTrainingMutationDeclaration>{})) {
+    lowering.arm.external_mutations.push_back({.target = mutation.target,
+                                               .effect = mutation.effect,
+                                               .authorized = mutation.authorized,
+                                               .receipt_id = std::nullopt});
+  }
+  return lowering;
+}
+
+nlohmann::json post_training_arm_json(const PostTrainingArm& arm) {
+  nlohmann::json bounds = nlohmann::json::array();
+  for (const RunBound& bound : arm.bounds) {
+    bounds.push_back({{"kind", std::string(run_bound_kind_name(bound.kind))},
+                      {"magnitude", bound.magnitude}});
+  }
+  nlohmann::json mutations = nlohmann::json::array();
+  for (const ExternalMutation& mutation : arm.external_mutations) {
+    mutations.push_back({{"target", mutation.target},
+                         {"effect", mutation.effect},
+                         {"authorized", mutation.authorized}});
+  }
+  nlohmann::json result{
+      {"api_version", "trainvm.post-training-arm/v1"},
+      {"arm_id", arm.arm_id},
+      {"kind", std::string(post_training_arm_kind_name(arm.kind))},
+      {"bounds", std::move(bounds)},
+      {"reproducibility_claim",
+       std::string(reproducibility_claim_name(arm.claim))},
+      {"claims_trajectory_preserving_resume",
+       arm.claims_trajectory_preserving_resume},
+  };
+  // Omitted rather than emitted as null, so the worker sees the same shape a
+  // document without them would produce.
+  if (arm.seed) result["seed"] = *arm.seed;
+  if (arm.verifier_identity) result["verifier_identity"] = *arm.verifier_identity;
+  if (!arm.external_mutations.empty()) result["external_mutations"] = mutations;
+  return result;
+}
+
 std::optional<LifecycleAdmissionRefusal>
 validate_post_training_arm_declaration(const PostTrainingArm& arm) {
   if (arm.arm_id.empty())
