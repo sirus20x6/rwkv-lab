@@ -61,11 +61,41 @@ python scripts/ci_coverage_gate.py -m "not gpu"
 python scripts/validate_benchmark_matrix.py
 python scripts/validate_experiment_documents.py
 python scripts/validate_native_ci_exclusions.py
+for c in docs/experiment-vm/source-dispositions.*.v1.json; do
+  python scripts/print_disposition_digests.py "$c" --check
+done
 ```
 
 Each ends with a line stating `PASSED` or `FAILED`. Read that line — the older
 form printed a neutral tally that looked identical either way, and a PR was
 pushed red because its output was truncated to exactly that line.
+
+## Content pins, and how to refresh them
+
+Editing a classified source moves a content digest, and several are pinned in
+more than one place. None of them should be recomputed by hand.
+
+```bash
+# The compatibility catalog: both digests, plus any empty classification surface.
+trainvm/build/trainvm print-catalog-digests \
+  docs/experiment-vm/compatibility-workflows.v1.json .
+
+# The source-disposition catalogs: per-source hashes and the tree digest.
+python scripts/print_disposition_digests.py <catalog> --write
+```
+
+Two things to know before you paste a new value in:
+
+`source_tree_digest` moving is mechanical — regenerate it and move on. But if
+`classification_surface_digest` also moves, that is a **real** signal: something
+changed a file's entrypoint, argument surface, or checkpoint/resume call sites.
+Read the catalog entry before bumping `kReviewedCatalogDigest`; that bump is the
+review the gate exists to force. It stayed put across an eight-commit port and
+moved for a one-module one, so it does discriminate.
+
+`trainvm/tests/source_disposition_catalog_tests.cpp` holds **two** pins, scripts
+and RWKV. A regex on the first `sha256` in that file changes the wrong one. The
+test catches it only because it prints each computed digest beside its name.
 
 The native suite needs GCC 16 with `-freflection`:
 
