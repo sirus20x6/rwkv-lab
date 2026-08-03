@@ -14,8 +14,11 @@ from rwkv_lab.trainvm_worker import (
     EVAL_GALLERY_SCHEMA,
     EvalGalleryError,
     EvalGalleryItem,
+    EvalGalleryPublicationRequest,
     EvalGalleryPublisher,
     GalleryImage,
+    bind_eval_gallery_checkpoints,
+    publish_eval_gallery_requests,
 )
 
 
@@ -139,6 +142,58 @@ def test_eval_gallery_publisher_freezes_and_atomically_publishes_side_by_side(
     replay = publish(publisher, gallery_item(frozen_generated, frozen_target))
     assert replay.artifact_id == result.artifact_id
     assert replay.manifest_path == result.manifest_path
+
+
+def test_eval_gallery_request_bridge_publishes_without_exposing_session_to_handler(
+    tmp_path,
+) -> None:
+    generated_path = tmp_path / "generated.png"
+    target_path = tmp_path / "target.png"
+    write_image(generated_path, (20, 30, 40))
+    write_image(target_path, (50, 60, 70))
+    session = FakeGallerySession(tmp_path)
+    progress = []
+    request = EvalGalleryPublicationRequest(
+        output_name="eval_gallery",
+        step=125,
+        step_domain="optimizer_step",
+        checkpoint_manifest_digest="sha256:" + "c" * 64,
+        evaluator_profile_digest="sha256:" + "d" * 64,
+        use_policy_digest="sha256:" + "e" * 64,
+        items=(gallery_item(generated_path, target_path),),
+        parent_artifact_ids=("checkpoint-125",),
+    )
+
+    (result,) = publish_eval_gallery_requests(
+        session, (request,), progress=progress.append
+    )
+
+    assert progress == [125]
+    assert result.worker_sequence == 17
+    assert session.artifacts[0]["artifact_id"] == result.artifact_id
+
+
+def test_eval_gallery_request_binds_newly_published_checkpoint() -> None:
+    request = EvalGalleryPublicationRequest(
+        output_name="eval_gallery",
+        step=9,
+        step_domain="optimizer_step",
+        evaluator_profile_digest="sha256:" + "d" * 64,
+        use_policy_digest="sha256:" + "e" * 64,
+        items=(),
+        parent_artifact_ids=("heldout-dataset",),
+        checkpoint_request_index=0,
+    )
+    checkpoint = SimpleNamespace(
+        artifact_id="checkpoint-9",
+        manifest_sha256="sha256:" + "c" * 64,
+    )
+
+    (bound,) = bind_eval_gallery_checkpoints((request,), (checkpoint,))
+
+    assert bound.checkpoint_request_index is None
+    assert bound.checkpoint_manifest_digest == checkpoint.manifest_sha256
+    assert bound.parent_artifact_ids == ("heldout-dataset", "checkpoint-9")
 
 
 def stat_mode(path) -> int:
