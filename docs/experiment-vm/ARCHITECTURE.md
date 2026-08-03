@@ -545,6 +545,13 @@ TrainVM fails closed on these invariants:
 All command endpoints require an idempotency key and optimistic run revision. Destructive operations
 are explicit protocol variants, never stringly typed action names.
 
+The legacy Go server and alert packages are observation-only. A source-level AST gate rejects
+direct process starts, process signals, nonzero `kill` calls, and every subprocess constructor
+except the exact argument shapes of the architecture and post-training read-only inspectors. This
+is a closed allowlist: adding another dashboard subprocess or changing either inspector command
+requires an explicit authority review. Training launch and lifecycle commands remain available only
+through the typed TrainVM client and hostd authority chain.
+
 ## Migration plan
 
 ### Phase 0 — contracts and replay fixtures

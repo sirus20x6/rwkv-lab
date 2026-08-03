@@ -20,6 +20,16 @@ type authorityViolation struct {
 	rule     string
 }
 
+type auditedExecSite struct {
+	relativePath string
+	function     string
+	constructor  string
+}
+
+func (site auditedExecSite) key() string {
+	return filepath.Join(site.relativePath) + ":" + site.function + ":" + site.constructor
+}
+
 func TestServerAndAlertsHaveNoDirectTrainingProcessAuthority(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -28,6 +38,10 @@ func TestServerAndAlertsHaveNoDirectTrainingProcessAuthority(t *testing.T) {
 	internalRoot := filepath.Dir(filepath.Dir(thisFile))
 	fileSet := token.NewFileSet()
 	var violations []authorityViolation
+	auditedExecSites := map[string]int{
+		(auditedExecSite{"server/arch.go", "handleArchitecture", "CommandContext"}).key():         0,
+		(auditedExecSite{"server/posttraining.go", "handleInspectPosttraining", "Command"}).key(): 0,
+	}
 	for _, packageName := range []string{"server", "alerts"} {
 		root := filepath.Join(internalRoot, packageName)
 		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -58,12 +72,40 @@ func TestServerAndAlertsHaveNoDirectTrainingProcessAuthority(t *testing.T) {
 					})
 					return true
 				}
+				if selector.Sel.Name == "Signal" {
+					violations = append(violations, authorityViolation{
+						position: fileSet.Position(call.Pos()),
+						rule:     "direct process Signal",
+					})
+					return true
+				}
 				receiver, receiverOK := selector.X.(*ast.Ident)
 				if !receiverOK {
 					return true
 				}
 				importPath := imports[receiver.Name]
 				switch {
+				case importPath == "os/exec" &&
+					(selector.Sel.Name == "Command" || selector.Sel.Name == "CommandContext"):
+					relative, relativeErr := filepath.Rel(internalRoot, path)
+					if relativeErr != nil {
+						relative = path
+					}
+					site := auditedExecSite{
+						relativePath: filepath.ToSlash(relative),
+						function:     enclosingFunction(parsed, call.Pos()),
+						constructor:  selector.Sel.Name,
+					}
+					key := site.key()
+					if _, allowed := auditedExecSites[key]; !allowed ||
+						!hasAuditedReadOnlyShape(site, call) {
+						violations = append(violations, authorityViolation{
+							position: fileSet.Position(call.Pos()),
+							rule:     "unaudited dashboard subprocess",
+						})
+					} else {
+						auditedExecSites[key]++
+					}
 				case importPath == "os" && selector.Sel.Name == "StartProcess":
 					violations = append(violations, authorityViolation{
 						position: fileSet.Position(call.Pos()),
@@ -83,6 +125,11 @@ func TestServerAndAlertsHaveNoDirectTrainingProcessAuthority(t *testing.T) {
 			t.Fatalf("scan %s source: %v", packageName, err)
 		}
 	}
+	for site, count := range auditedExecSites {
+		if count != 1 {
+			t.Errorf("audited read-only subprocess %s occurred %d times; want exactly one", site, count)
+		}
+	}
 	for _, violation := range violations {
 		relative, err := filepath.Rel(internalRoot, violation.position.Filename)
 		if err != nil {
@@ -91,6 +138,52 @@ func TestServerAndAlertsHaveNoDirectTrainingProcessAuthority(t *testing.T) {
 		t.Errorf("%s:%d: %s violates the observation-only dashboard boundary",
 			relative, violation.position.Line, violation.rule)
 	}
+}
+
+func enclosingFunction(file *ast.File, position token.Pos) string {
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if ok && function.Pos() <= position && position <= function.End() {
+			return function.Name.Name
+		}
+	}
+	return ""
+}
+
+func hasAuditedReadOnlyShape(site auditedExecSite, call *ast.CallExpr) bool {
+	switch site.key() {
+	case (auditedExecSite{"server/arch.go", "handleArchitecture", "CommandContext"}).key():
+		return len(call.Args) == 4 && identifier(call.Args[0]) == "ctx" &&
+			identifier(call.Args[1]) == "py" && identifier(call.Args[2]) == "wrapper" &&
+			identifier(call.Args[3]) == "runDir"
+	case (auditedExecSite{"server/posttraining.go", "handleInspectPosttraining", "Command"}).key():
+		return len(call.Args) == 7 && stringLiteral(call.Args[1]) == "-m" &&
+			stringLiteral(call.Args[2]) == "rwkv_lab.posttrain_data" &&
+			identifier(call.Args[3]) == "path" && stringLiteral(call.Args[4]) == "--limit" &&
+			stringLiteral(call.Args[5]) == "3" && stringLiteral(call.Args[6]) == "--json"
+	default:
+		return false
+	}
+}
+
+func identifier(expression ast.Expr) string {
+	value, ok := expression.(*ast.Ident)
+	if !ok {
+		return ""
+	}
+	return value.Name
+}
+
+func stringLiteral(expression ast.Expr) string {
+	literal, ok := expression.(*ast.BasicLit)
+	if !ok || literal.Kind != token.STRING {
+		return ""
+	}
+	value, err := strconv.Unquote(literal.Value)
+	if err != nil {
+		return ""
+	}
+	return value
 }
 
 func importedPackageNames(file *ast.File) map[string]string {
