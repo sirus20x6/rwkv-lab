@@ -2,6 +2,7 @@
 
 #include <sqlite3.h>
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <linux/magic.h>
 #include <linux/openat2.h>
@@ -13,6 +14,7 @@
 
 #include <array>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -260,16 +262,81 @@ std::string filesystem_name(long filesystem_type,
       "authority directory is not on a supported local filesystem");
 }
 
+// Best-effort listing of every name in the authority directory that resolves to
+// `inode`. Purely diagnostic: it runs only on the failure path, and any error
+// reading the directory yields no suffix rather than masking the real fault.
+std::string names_sharing_inode(int parent_descriptor, ino_t inode) {
+  if (parent_descriptor < 0) return "";
+  const int duplicated = ::dup(parent_descriptor);
+  if (duplicated < 0) return "";
+  DIR *directory = ::fdopendir(duplicated);
+  if (directory == nullptr) {
+    ::close(duplicated);
+    return "";
+  }
+  std::string names;
+  ::rewinddir(directory);
+  while (const dirent *entry = ::readdir(directory)) {
+    if (entry->d_ino != inode) continue;
+    if (std::string_view(entry->d_name) == "." ||
+        std::string_view(entry->d_name) == "..") {
+      continue;
+    }
+    names += names.empty() ? "" : ", ";
+    names += entry->d_name;
+  }
+  ::closedir(directory);
+  return names.empty() ? "" : ("; names in this directory sharing inode " +
+                               std::to_string(
+                                   static_cast<unsigned long long>(inode)) +
+                               ": " + names);
+}
+
+// Four independent properties, reported separately. They used to share one
+// message -- "must be an owned 0600 singleton regular file" -- which named
+// ownership and permissions whatever had actually gone wrong, sending readers
+// after a permissions bug when the real violation was a link count or a file
+// type. A diagnostic that does not say which condition failed, or what it saw
+// instead, is a measurement that looks valid while describing the wrong thing.
 void validate_regular_file(const struct stat &status,
                            const SqliteAuthorityConfig &config,
-                           std::string_view description) {
-  if (!S_ISREG(status.st_mode) || status.st_nlink != 1 ||
-      status.st_uid != config.expected_owner_uid ||
-      status.st_gid != config.expected_owner_gid ||
-      (static_cast<unsigned int>(status.st_mode) & 07777U) !=
-          kProtectedFileMode) {
-    throw SqliteAuthorityError(std::string(description) +
-                               " must be an owned 0600 singleton regular file");
+                           std::string_view description,
+                           int parent_descriptor = -1) {
+  const auto prefix = std::string(description) + " ";
+  if (!S_ISREG(status.st_mode)) {
+    throw SqliteAuthorityError(
+        prefix + "must be a regular file, but its mode is " +
+        std::to_string(static_cast<unsigned int>(status.st_mode) & S_IFMT) +
+        " (S_IFMT); a symlink, directory or device was substituted");
+  }
+  if (status.st_nlink != 1) {
+    // Name the other links rather than only counting them. "another name
+    // refers to these same bytes" tells a reader nothing actionable; which
+    // name does, and it is the difference between diagnosing a planted alias
+    // and diagnosing a transient one this process created itself.
+    std::string aliases = names_sharing_inode(parent_descriptor, status.st_ino);
+    throw SqliteAuthorityError(
+        prefix + "must have exactly one link, but has " +
+        std::to_string(static_cast<unsigned long long>(status.st_nlink)) +
+        "; the authority directory does not solely control these bytes" +
+        aliases);
+  }
+  if (status.st_uid != config.expected_owner_uid ||
+      status.st_gid != config.expected_owner_gid) {
+    throw SqliteAuthorityError(
+        prefix + "must be owned by uid " +
+        std::to_string(config.expected_owner_uid) + " gid " +
+        std::to_string(config.expected_owner_gid) + ", but is owned by uid " +
+        std::to_string(status.st_uid) + " gid " + std::to_string(status.st_gid));
+  }
+  const auto mode = static_cast<unsigned int>(status.st_mode) & 07777U;
+  if (mode != kProtectedFileMode) {
+    // Octal, because that is how the expectation is written and how anybody
+    // reading this will compare it against `ls -l`.
+    std::array<char, 8> observed{};
+    std::snprintf(observed.data(), observed.size(), "%04o", mode);
+    throw SqliteAuthorityError(
+        prefix + "must be mode 0600, but is mode " + observed.data());
   }
 }
 
@@ -558,8 +625,12 @@ SqliteFilesystemAuthority::validate_auxiliary_files() const {
         continue;
       throw_errno("could not inspect SQLite auxiliary path");
     }
+    // Name the suffix. "SQLite auxiliary file" alone left the reader unable to
+    // tell a -wal problem from a -journal one, which are created by different
+    // code paths and mean different things.
     validate_regular_file(path_status, implementation_->config,
-                          "SQLite auxiliary file");
+                          "SQLite auxiliary file " + name,
+                          implementation_->parent.get());
     auto descriptor = open_beneath(
         implementation_->parent.get(), name,
         static_cast<std::uint64_t>(O_RDWR | O_CLOEXEC | O_NOFOLLOW));
@@ -568,7 +639,7 @@ SqliteFilesystemAuthority::validate_auxiliary_files() const {
       throw_errno("could not inspect SQLite auxiliary descriptor");
     }
     validate_regular_file(descriptor_status, implementation_->config,
-                          "SQLite auxiliary file");
+                          "SQLite auxiliary file " + name + " (as opened)");
     if (!same_pinned_inode(identity(path_status),
                            identity(descriptor_status))) {
       throw SqliteAuthorityError(

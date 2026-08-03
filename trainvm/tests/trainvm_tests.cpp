@@ -5550,6 +5550,50 @@ void test_worker_control_grpc_stream() {
   trainvm::v1::ControllerToWorker receipt_message;
   bool receipt_received = false;
   grpc::Status primary_status;
+  // Read by message TYPE, not by position on the stream.
+  //
+  // The controller pushes commands (issued by CommandRun) onto the same stream
+  // that carries telemetry acknowledgements, and a command enqueued before a
+  // metric is written may legitimately arrive either side of that metric's ack.
+  // The test previously assumed a fixed order -- ack, then command -- so a
+  // perfectly valid interleaving consumed the command into the ack variable and
+  // failed. It held on an idle host and flipped under load, where it failed
+  // roughly one run in three.
+  //
+  // This waits on the CONDITION (a message of the wanted shape arrived) rather
+  // than on elapsed time, and keeps anything that arrives early instead of
+  // discarding it, so ordering between independent messages no longer matters
+  // while ordering WITHIN a kind still does: each queue stays FIFO.
+  std::vector<trainvm::v1::ControllerToWorker> stream_buffer;
+  const auto read_matching =
+      [&](const std::function<bool(const trainvm::v1::ControllerToWorker&)>&
+              wanted,
+          trainvm::v1::ControllerToWorker& out) {
+        for (auto position = stream_buffer.begin();
+             position != stream_buffer.end(); ++position) {
+          if (!wanted(*position)) continue;
+          out = *position;
+          stream_buffer.erase(position);
+          return true;
+        }
+        trainvm::v1::ControllerToWorker message;
+        while (primary->Read(&message)) {
+          if (wanted(message)) {
+            out = message;
+            return true;
+          }
+          stream_buffer.push_back(message);
+        }
+        return false;
+      };
+  const auto is_acknowledgement =
+      [](const trainvm::v1::ControllerToWorker& message) {
+        return message.has_acknowledge_worker_sequence();
+      };
+  const auto is_command = [](const trainvm::v1::ControllerToWorker& message) {
+    return message.has_command();
+  };
+
   if (welcome_received && welcome_message.has_welcome()) {
     trainvm::v1::WorkerToController heartbeat_message;
     auto* heartbeat = heartbeat_message.mutable_heartbeat();
@@ -5559,10 +5603,10 @@ void test_worker_control_grpc_stream() {
     heartbeat->mutable_observed_at()->set_seconds(1);
     trainvm::v1::ControllerToWorker heartbeat_ack;
     const bool heartbeat_written = primary->Write(heartbeat_message);
-    const bool heartbeat_received = primary->Read(&heartbeat_ack);
+    const bool heartbeat_received = read_matching(is_acknowledgement, heartbeat_ack);
 
     trainvm::v1::ControllerToWorker worker_command_message;
-    const bool worker_command_received = primary->Read(&worker_command_message);
+    const bool worker_command_received = read_matching(is_command, worker_command_message);
     const bool worker_command_valid =
         live_control_status.ok() && live_control_response.has_control() &&
         worker_command_received && worker_command_message.has_command() &&
@@ -5596,7 +5640,7 @@ void test_worker_control_grpc_stream() {
     control_ack->mutable_acknowledged_at()->set_seconds(2);
     trainvm::v1::ControllerToWorker control_receipt;
     const bool control_ack_written = primary->Write(control_ack_message);
-    const bool control_ack_received = primary->Read(&control_receipt);
+    const bool control_ack_received = read_matching(is_acknowledgement, control_receipt);
 
     trainvm::v1::RunCommandRequest checkpoint_request;
     checkpoint_request.set_run_id(launch.run_id);
@@ -5623,11 +5667,11 @@ void test_worker_control_grpc_stream() {
     metric->mutable_observed_at()->set_seconds(3);
     trainvm::v1::ControllerToWorker metric_ack;
     const bool metric_written = primary->Write(metric_message);
-    const bool metric_received = primary->Read(&metric_ack);
+    const bool metric_received = read_matching(is_acknowledgement, metric_ack);
 
     trainvm::v1::ControllerToWorker checkpoint_command_message;
     const bool checkpoint_command_received =
-        primary->Read(&checkpoint_command_message);
+        read_matching(is_command, checkpoint_command_message);
     const bool checkpoint_command_valid =
         checkpoint_status.ok() && checkpoint_response.has_checkpoint() &&
         checkpoint_response.disposition() ==
@@ -5658,7 +5702,7 @@ void test_worker_control_grpc_stream() {
     artifact->mutable_published_at()->set_seconds(4);
     trainvm::v1::ControllerToWorker artifact_ack;
     const bool artifact_written = primary->Write(artifact_message);
-    const bool artifact_received = primary->Read(&artifact_ack);
+    const bool artifact_received = read_matching(is_acknowledgement, artifact_ack);
 
     trainvm::v1::WorkerToController checkpoint_ack_message;
     auto* checkpoint_ack = checkpoint_ack_message.mutable_checkpoint_ack();
@@ -5675,7 +5719,7 @@ void test_worker_control_grpc_stream() {
     checkpoint_ack->mutable_acknowledged_at()->set_seconds(5);
     trainvm::v1::ControllerToWorker checkpoint_receipt;
     const bool checkpoint_ack_written = primary->Write(checkpoint_ack_message);
-    const bool checkpoint_ack_received = primary->Read(&checkpoint_receipt);
+    const bool checkpoint_ack_received = read_matching(is_acknowledgement, checkpoint_receipt);
 
     trainvm::v1::RunCommandRequest pause_request;
     pause_request.set_run_id(launch.run_id);
@@ -5699,9 +5743,9 @@ void test_worker_control_grpc_stream() {
     pause_trigger->mutable_observed_at()->set_seconds(6);
     trainvm::v1::ControllerToWorker pause_trigger_receipt;
     const bool pause_trigger_written = primary->Write(pause_trigger_message);
-    const bool pause_trigger_received = primary->Read(&pause_trigger_receipt);
+    const bool pause_trigger_received = read_matching(is_acknowledgement, pause_trigger_receipt);
     trainvm::v1::ControllerToWorker pause_command_message;
-    const bool pause_command_received = primary->Read(&pause_command_message);
+    const bool pause_command_received = read_matching(is_command, pause_command_message);
     const bool pause_command_valid =
         pause_status.ok() && pause_response.has_lifecycle() &&
         pause_response.lifecycle().kind() ==
@@ -5725,7 +5769,7 @@ void test_worker_control_grpc_stream() {
     pause_ack->mutable_acknowledged_at()->set_seconds(7);
     trainvm::v1::ControllerToWorker pause_ack_receipt;
     const bool pause_ack_written = primary->Write(pause_ack_message);
-    const bool pause_ack_received = primary->Read(&pause_ack_receipt);
+    const bool pause_ack_received = read_matching(is_acknowledgement, pause_ack_receipt);
     const auto paused_projection = service.journal_.projection(launch.run_id);
 
     trainvm::v1::RunCommandRequest resume_request;
@@ -5749,9 +5793,9 @@ void test_worker_control_grpc_stream() {
     resume_trigger->mutable_observed_at()->set_seconds(8);
     trainvm::v1::ControllerToWorker resume_trigger_receipt;
     const bool resume_trigger_written = primary->Write(resume_trigger_message);
-    const bool resume_trigger_received = primary->Read(&resume_trigger_receipt);
+    const bool resume_trigger_received = read_matching(is_acknowledgement, resume_trigger_receipt);
     trainvm::v1::ControllerToWorker resume_command_message;
-    const bool resume_command_received = primary->Read(&resume_command_message);
+    const bool resume_command_received = read_matching(is_command, resume_command_message);
     const bool resume_command_valid =
         resume_status.ok() && resume_response.has_lifecycle() &&
         resume_response.lifecycle().kind() ==
@@ -5775,7 +5819,7 @@ void test_worker_control_grpc_stream() {
     resume_ack->mutable_acknowledged_at()->set_seconds(9);
     trainvm::v1::ControllerToWorker resume_ack_receipt;
     const bool resume_ack_written = primary->Write(resume_ack_message);
-    const bool resume_ack_received = primary->Read(&resume_ack_receipt);
+    const bool resume_ack_received = read_matching(is_acknowledgement, resume_ack_receipt);
 
     trainvm::v1::WorkerToController resumed_metric_message;
     auto* resumed_metric = resumed_metric_message.mutable_metric();
@@ -5789,41 +5833,82 @@ void test_worker_control_grpc_stream() {
     resumed_metric->mutable_observed_at()->set_seconds(10);
     trainvm::v1::ControllerToWorker resumed_metric_receipt;
     const bool resumed_metric_written = primary->Write(resumed_metric_message);
-    const bool resumed_metric_received = primary->Read(&resumed_metric_receipt);
+    const bool resumed_metric_received = read_matching(is_acknowledgement, resumed_metric_receipt);
+    // Same decomposition as the final check, and for the same reason: this
+    // aggregated thirty terms into one bool, so every one of them reported as
+    // the single opaque "durable telemetry" failure downstream. Each stage now
+    // says which acknowledgement went missing and what sequence it saw.
+    const auto stage = [&](bool written, bool received, bool has_sequence,
+                           std::uint64_t expected, std::uint64_t actual,
+                           std::string_view what) {
+      check(written, std::string("WorkerControl writes the ") +
+                         std::string(what) + " message");
+      check(received, std::string("WorkerControl reads a receipt for the ") +
+                          std::string(what) + " message");
+      check(has_sequence && actual == expected,
+            std::string("WorkerControl acknowledges ") + std::string(what) +
+                " at worker sequence " + std::to_string(expected) + ", saw " +
+                (has_sequence ? std::to_string(actual) : "no sequence"));
+      return written && received && has_sequence && actual == expected;
+    };
     telemetry_acknowledged =
-        heartbeat_written && heartbeat_received &&
-        heartbeat_ack.has_acknowledge_worker_sequence() &&
-        heartbeat_ack.acknowledge_worker_sequence() == 1U &&
-        worker_command_valid && control_ack_written && control_ack_received &&
-        control_receipt.has_acknowledge_worker_sequence() &&
-        control_receipt.acknowledge_worker_sequence() == 2U && metric_written &&
-        metric_received && metric_ack.has_acknowledge_worker_sequence() &&
-        metric_ack.acknowledge_worker_sequence() == 3U &&
-        checkpoint_command_valid && artifact_written &&
-        artifact_received && artifact_ack.has_acknowledge_worker_sequence() &&
-        artifact_ack.acknowledge_worker_sequence() == 4U &&
-        checkpoint_ack_written && checkpoint_ack_received &&
-        checkpoint_receipt.has_acknowledge_worker_sequence() &&
-        checkpoint_receipt.acknowledge_worker_sequence() == 5U &&
-        pause_trigger_written && pause_trigger_received &&
-        pause_trigger_receipt.acknowledge_worker_sequence() == 6U &&
-        pause_command_valid && pause_ack_written && pause_ack_received &&
-        pause_ack_receipt.acknowledge_worker_sequence() == 7U &&
-        paused_projection && paused_projection->desired_state == "paused" &&
-        paused_projection->observed_state == "paused" &&
-        paused_projection->run_revision == 8U &&
-        resume_trigger_written && resume_trigger_received &&
-        resume_trigger_receipt.acknowledge_worker_sequence() == 8U &&
-        resume_command_valid && resume_ack_written && resume_ack_received &&
-        resume_ack_receipt.acknowledge_worker_sequence() == 9U &&
-        resumed_metric_written && resumed_metric_received &&
-        resumed_metric_receipt.acknowledge_worker_sequence() == 10U;
+        stage(heartbeat_written, heartbeat_received,
+              heartbeat_ack.has_acknowledge_worker_sequence(), 1U,
+              heartbeat_ack.acknowledge_worker_sequence(), "heartbeat") &
+        stage(control_ack_written, control_ack_received,
+              control_receipt.has_acknowledge_worker_sequence(), 2U,
+              control_receipt.acknowledge_worker_sequence(),
+              "control acknowledgement") &
+        stage(metric_written, metric_received,
+              metric_ack.has_acknowledge_worker_sequence(), 3U,
+              metric_ack.acknowledge_worker_sequence(), "metric") &
+        stage(artifact_written, artifact_received,
+              artifact_ack.has_acknowledge_worker_sequence(), 4U,
+              artifact_ack.acknowledge_worker_sequence(), "artifact") &
+        stage(checkpoint_ack_written, checkpoint_ack_received,
+              checkpoint_receipt.has_acknowledge_worker_sequence(), 5U,
+              checkpoint_receipt.acknowledge_worker_sequence(),
+              "checkpoint acknowledgement") &
+        stage(pause_trigger_written, pause_trigger_received, true, 6U,
+              pause_trigger_receipt.acknowledge_worker_sequence(),
+              "pause trigger") &
+        stage(pause_ack_written, pause_ack_received, true, 7U,
+              pause_ack_receipt.acknowledge_worker_sequence(),
+              "pause acknowledgement") &
+        stage(resume_trigger_written, resume_trigger_received, true, 8U,
+              resume_trigger_receipt.acknowledge_worker_sequence(),
+              "resume trigger") &
+        stage(resume_ack_written, resume_ack_received, true, 9U,
+              resume_ack_receipt.acknowledge_worker_sequence(),
+              "resume acknowledgement") &
+        stage(resumed_metric_written, resumed_metric_received, true, 10U,
+              resumed_metric_receipt.acknowledge_worker_sequence(),
+              "resumed metric");
+    check(worker_command_valid, "WorkerControl issues a valid worker command");
+    check(checkpoint_command_valid,
+          "WorkerControl issues a valid checkpoint command");
+    check(pause_command_valid, "WorkerControl issues a valid pause command");
+    check(resume_command_valid, "WorkerControl issues a valid resume command");
+    check(paused_projection && paused_projection->desired_state == "paused" &&
+              paused_projection->observed_state == "paused",
+          "WorkerControl projects the run as paused");
+    check(paused_projection && paused_projection->run_revision == 8U,
+          "WorkerControl leaves the paused run at revision 8, saw " +
+              (paused_projection
+                   ? std::to_string(paused_projection->run_revision)
+                   : std::string("no projection")));
 
     auto result = result_for(welcome_message.welcome());
     result.mutable_event()->set_worker_sequence(11);
     result_written = primary->Write(result);
     primary->WritesDone();
-    receipt_received = primary->Read(&receipt_message);
+    // Same reason: a late command must not be mistaken for the result
+    // Receipt just because it arrived first.
+    receipt_received = read_matching(
+        [](const trainvm::v1::ControllerToWorker& message) {
+          return message.has_receipt();
+        },
+        receipt_message);
     trainvm::v1::ControllerToWorker trailing;
     check(!primary->Read(&trailing),
           "WorkerControl gRPC closes after its single result Receipt");
@@ -5867,24 +5952,48 @@ void test_worker_control_grpc_stream() {
                                     welcome_message.welcome().dispatch_id())
                               : std::nullopt;
     const auto projection = observer.projection(run_id);
-    check(telemetry_acknowledged && result_written && receipt_received &&
-              receipt_message.has_receipt() &&
+    // Split rather than one ANDed expression. As a single check this reported
+    // only "FAIL: WorkerControl gRPC orders ..." for any of eighteen distinct
+    // reasons, so a failure said nothing about what broke -- which cost real
+    // time when this went red under host load. Each term now names itself and
+    // reports what it actually saw.
+    const auto observed_events = observer.events_for_run(run_id).size();
+    check(telemetry_acknowledged,
+          "WorkerControl gRPC acknowledges the durable telemetry sequence");
+    check(result_written && receipt_received,
+          "WorkerControl gRPC writes the result and reads a receipt");
+    check(receipt_message.has_receipt() &&
               receipt_message.message_case() ==
-                  trainvm::v1::ControllerToWorker::kReceipt &&
-              primary_status.ok() &&
-              receipt_message.receipt().event_id() ==
-                  welcome_message.welcome().dispatch_id() + ":result" &&
-              receipt_message.receipt().acknowledged_worker_sequence() == 11U &&
-              receipt_message.receipt().committed_run_revision() == 13U &&
-              dispatch &&
-              dispatch->status == trainvm::DispatchStatus::completed &&
-              dispatch->result_event_id ==
-                  std::optional<std::string>{
-                      receipt_message.receipt().event_id()} &&
-              projection && projection->observed_state == "acquiring" &&
-              projection->run_revision == 13U &&
-              observer.events_for_run(run_id).size() == 37U,
-          "WorkerControl gRPC orders Hello, durable telemetry acknowledgements, Event, and durable Receipt");
+                  trainvm::v1::ControllerToWorker::kReceipt,
+          "WorkerControl gRPC returns a Receipt message");
+    check(primary_status.ok(), "WorkerControl gRPC stream finishes ok");
+    check(receipt_message.receipt().event_id() ==
+              welcome_message.welcome().dispatch_id() + ":result",
+          "WorkerControl gRPC receipt names the dispatch result event");
+    check(receipt_message.receipt().acknowledged_worker_sequence() == 11U,
+          "WorkerControl gRPC receipt acknowledges worker sequence 11, saw " +
+              std::to_string(
+                  receipt_message.receipt().acknowledged_worker_sequence()));
+    check(receipt_message.receipt().committed_run_revision() == 13U,
+          "WorkerControl gRPC receipt commits run revision 13, saw " +
+              std::to_string(
+                  receipt_message.receipt().committed_run_revision()));
+    check(dispatch && dispatch->status == trainvm::DispatchStatus::completed,
+          "WorkerControl gRPC marks the dispatch completed");
+    check(dispatch && dispatch->result_event_id ==
+                          std::optional<std::string>{
+                              receipt_message.receipt().event_id()},
+          "WorkerControl gRPC records the dispatch result event id");
+    check(projection && projection->observed_state == "acquiring",
+          "WorkerControl gRPC leaves the run observed as acquiring, saw " +
+              (projection ? projection->observed_state : "no projection"));
+    check(projection && projection->run_revision == 13U,
+          "WorkerControl gRPC leaves the run at revision 13, saw " +
+              (projection ? std::to_string(projection->run_revision)
+                          : std::string("no projection")));
+    check(observed_events == 37U,
+          "WorkerControl gRPC journals exactly 37 events for the run, saw " +
+              std::to_string(observed_events));
   }
 
   server->Shutdown();
