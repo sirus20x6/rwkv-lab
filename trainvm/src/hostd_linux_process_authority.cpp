@@ -757,6 +757,15 @@ std::size_t HostdLinuxProcessSupervisor::finalize_observed_nonlive_processes(
             LinuxProcessRecoveryDisposition::identity_mismatch) {
       continue;
     }
+    const std::string& launch_id = entry.record.intent.request.launch_id;
+    // A prior wake may already have transferred this launch's exact pidfd to
+    // the supervisor and requested termination. A fresh numeric-PID probe can
+    // then report already_gone before the retained pidfd finalizer observes
+    // terminal state. That observation must not create a second terminal
+    // authority or race a different recovery-exit receipt into the ledger.
+    if (recovered_entries_.contains(launch_id)) continue;
+    if (entries_.contains(launch_id))
+      reject("nonlive recovery identity is retained by the current daemon");
     (void)authority_.finalize_nonlive_recovered_exit(
         entry.record, entry.disposition, entry.evidence_digest);
     ++finalized;

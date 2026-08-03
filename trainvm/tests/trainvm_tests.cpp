@@ -7997,6 +7997,14 @@ void test_host_launch_resolution_and_binding() {
   const int work_fd = first.duplicate_working_directory_fd();
   const int executable_seals = ::fcntl(executable_fd, F_GET_SEALS);
   const int code_seals = code_fd ? ::fcntl(*code_fd, F_GET_SEALS) : -1;
+  struct stat sealed_executable_metadata {};
+  struct stat sealed_code_metadata {};
+  const bool nonroot_executable_mode =
+      ::fstat(executable_fd, &sealed_executable_metadata) == 0 &&
+      (sealed_executable_metadata.st_mode & 0777) == 0511;
+  const bool nonroot_code_mode =
+      code_fd && ::fstat(*code_fd, &sealed_code_metadata) == 0 &&
+      (sealed_code_metadata.st_mode & 0777) == 0444;
   errno = 0;
   const bool write_rejected = ::write(executable_fd, "x", 1U) < 0 &&
                               errno == EPERM;
@@ -8012,8 +8020,9 @@ void test_host_launch_resolution_and_binding() {
             (code_seals &
              (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) ==
                 (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) &&
-            write_rejected && chmod_rejected,
-        "resolved payloads are immutable sealed descriptors with executable mode sealed");
+            nonroot_executable_mode && nonroot_code_mode && write_rejected &&
+            chmod_rejected,
+        "resolved payloads are immutable sealed descriptors executable by the designated non-root holder with mode sealed");
   auto delegated = trainvm::ResolvedLaunch::adopt_delegated(
       first.spec(), executable_fd, code_fd, work_fd);
   const int delegated_copy = delegated.duplicate_executable_fd();

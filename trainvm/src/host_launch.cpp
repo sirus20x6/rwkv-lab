@@ -265,7 +265,7 @@ void validate_delegated_artifact(int descriptor,
       static_cast<std::uint64_t>(metadata.st_size) != identity.source_size ||
       (sealed_copy
            ? seals < 0 || (seals & required_seals) != required_seals ||
-                 (metadata.st_mode & 0777) != (executable ? 0500 : 0400)
+                 (metadata.st_mode & 0777) != (executable ? 0511 : 0444)
            : static_cast<std::uint64_t>(metadata.st_dev) !=
                      identity.source_device ||
                  static_cast<std::uint64_t>(metadata.st_ino) !=
@@ -360,7 +360,13 @@ SealedArtifact resolve_artifact(
   }
   const int seals = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK |
                     (executable ? F_SEAL_EXEC : 0) | F_SEAL_SEAL;
-  if (::fchmod(sealed.get(), executable ? 0500 : 0400) != 0 ||
+  // The root host authority drops every worker to a distinct non-root UID
+  // before execveat. Authority remains descriptor-confined by the anonymous
+  // memfd, while 0511 lets the native executable pass the post-setuid
+  // MAY_EXEC check and 0444 lets Python reopen its inherited code through
+  // /proc/self/fd/3. The write and exec seals make these modes immutable
+  // before any descriptor crosses the boundary.
+  if (::fchmod(sealed.get(), executable ? 0511 : 0444) != 0 ||
       ::fcntl(sealed.get(), F_ADD_SEALS, seals) != 0 ||
       ::lseek(sealed.get(), 0, SEEK_SET) != 0) {
     throw HostLaunchResolutionError(
