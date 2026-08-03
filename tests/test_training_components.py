@@ -39,7 +39,9 @@ from rwkv_lab.training_components import (
     PowerCoolConfiguration,
     PrecisionImplementation,
     RegisteredActivation,
+    RWKVMatrixOptimizerRoutingConfiguration,
     ScheduleImplementation,
+    SpectralMuonConfiguration,
     TerminalExpertRoutingConfiguration,
     WeightDecayScheduleImplementation,
     build_registered_activation,
@@ -300,6 +302,34 @@ def test_component_catalog_and_runtime_dispatch_are_exactly_aligned():
     assert grades["weight_decay_schedule"] == "stateless"
 
 
+def test_spectral_muon_factory_requires_explicit_topology_routes():
+    from rwkv_lab.spectral_muon import SpectralMuon
+
+    matrix = torch.nn.Parameter(torch.randn(4, 4))
+    vector = torch.nn.Parameter(torch.randn(4))
+    configuration = SpectralMuonConfiguration(
+        learning_rate=0.02,
+        ns_steps=2,
+        rsav=True,
+    )
+    optimizer = build_registered_optimizer(
+        OptimizerImplementation.SPECTRAL_MUON_NO_DECAY_V1,
+        (
+            {"params": [matrix], "lr": 0.02, "use_muon": True},
+            {"params": [vector], "lr": 0.002, "use_muon": False},
+        ),
+        configuration,
+    )
+
+    assert isinstance(optimizer, SpectralMuon)
+    assert optimizer.param_groups[0]["use_muon"] is True
+    assert optimizer.param_groups[1]["use_muon"] is False
+    with pytest.raises(TypeError, match="explicitly select use_muon"):
+        build_registered_optimizer(
+            OptimizerImplementation.SPECTRAL_MUON_NO_DECAY_V1,
+            ({"params": [matrix], "lr": 0.02},),
+            configuration,
+        )
 def test_registered_layer_norm_factory_owns_construction_not_model_state():
     factory = build_registered_normalization(
         NormalizationImplementation.LAYER_NORM_V1,
@@ -612,6 +642,23 @@ def test_registered_mageflow_routers_own_expert_backbone_and_repa_once():
     ]
     assert [group["lr"] for group in terminal.groups] == pytest.approx(
         [2.0e-5, 1.0e-5, 4.0e-5]
+    )
+
+    rwkv_matrix = build_registered_parameter_routing(
+        ParameterRouterImplementation.RWKV_MATRIX_OPTIMIZER_V1,
+        [("matrix", expert), ("fallback", backbone)],
+        {"muon": frozenset({id(expert)})},
+        base_learning_rate=1.0e-4,
+        configuration=RWKVMatrixOptimizerRoutingConfiguration(
+            fallback_multiplier=0.1
+        ),
+    )
+    assert [group["group_name"] for group in rwkv_matrix.groups] == [
+        "muon",
+        "adam_fallback",
+    ]
+    assert [group["lr"] for group in rwkv_matrix.groups] == pytest.approx(
+        [1.0e-4, 1.0e-5]
     )
 
 

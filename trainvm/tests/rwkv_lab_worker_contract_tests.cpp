@@ -59,6 +59,18 @@ nlohmann::json load_vision_representation_ab_fixture() {
   return source;
 }
 
+nlohmann::json load_rwkv_optimizer_ab_fixture() {
+  const auto path = std::filesystem::path(TRAINVM_SOURCE_ROOT) /
+                    "docs/experiment-vm/examples/rwkv-optimizer-ab.json";
+  std::ifstream input(path);
+  if (!input) {
+    throw std::runtime_error("could not open RWKV optimizer A/B fixture");
+  }
+  nlohmann::json source;
+  input >> source;
+  return source;
+}
+
 }  // namespace
 
 int main() {
@@ -69,8 +81,8 @@ int main() {
     const trainvm::RwkvLabWorkerContract contract =
         trainvm::rwkv_lab_worker_contract(fingerprint);
     require(contract.adapter_registry.api_version == "trainvm.adapters/v2" &&
-                contract.adapter_registry.profiles.size() == 20U,
-            "rwkv_lab catalog must expose twenty exact adapter profiles");
+                contract.adapter_registry.profiles.size() == 21U,
+            "rwkv_lab catalog must expose twenty-one exact adapter profiles");
     require(std::ranges::is_sorted(contract.provided_capabilities) &&
                 std::ranges::adjacent_find(contract.provided_capabilities) ==
                     contract.provided_capabilities.end(),
@@ -80,7 +92,7 @@ int main() {
         trainvm::rwkv_lab_worker_runtime_requirements();
     require(runtime_requirements.api_version ==
                     "trainvm.rwkv-lab-worker-runtime-requirements/v1" &&
-                runtime_requirements.profiles.size() == 20U &&
+                runtime_requirements.profiles.size() == 21U &&
                 runtime_requirements.shared_root_distributions ==
                     std::vector<std::string>(
                         {"grpcio", "pillow", "protobuf", "torch"}),
@@ -109,6 +121,8 @@ int main() {
     const auto& qwen = find_profile(contract, "rwkv-lab.qwen-ao3");
     const auto& posttraining =
         find_profile(contract, "rwkv-lab.rwkv-posttraining");
+    const auto& optimizer_finetune =
+        find_profile(contract, "rwkv-lab.rwkv-optimizer-finetune");
     const auto& rlvr = find_profile(contract, "rwkv-lab.rwkv-rlvr");
     const auto& rwkv = find_profile(contract, "rwkv-lab.rwkv-scratch");
     const auto& decision =
@@ -183,6 +197,18 @@ int main() {
                 rwkv.training_composition &&
                 rwkv.training_composition->model_family == "rwkv" &&
                 rwkv.training_composition->slots.size() == 10U &&
+                optimizer_finetune.training_composition &&
+                optimizer_finetune.training_composition->model_family ==
+                    "rwkv" &&
+                optimizer_finetune.training_composition->slots.size() == 5U &&
+                optimizer_finetune.training_composition->allowed_components->at(
+                    "optimizer").size() == 2U &&
+                optimizer_finetune.training_composition->allowed_components->at(
+                    "optimizer").front().name ==
+                    "spectral_muon_no_decay" &&
+                optimizer_finetune.training_composition->allowed_components->at(
+                    "parameter_router").front().name ==
+                    "rwkv_matrix_optimizer" &&
                 posttraining.training_composition &&
                 posttraining.training_composition->model_family == "rwkv" &&
                 posttraining.training_composition->slots.size() == 4U &&
@@ -266,6 +292,9 @@ int main() {
                 terminal.lifecycle.warmup &&
                 qwen.lifecycle.resume_grade ==
                     trainvm::ResumeGrade::compatible &&
+                optimizer_finetune.lifecycle.resume_grade ==
+                    trainvm::ResumeGrade::compatible &&
+                optimizer_finetune.lifecycle.checkpoint_now &&
                 rwkv.lifecycle.resume_grade ==
                     trainvm::ResumeGrade::terminal_checkpoint &&
                 rwkv.lifecycle.compile && rwkv.lifecycle.warmup &&
@@ -313,7 +342,7 @@ int main() {
         operation_registry.operation_descriptors_json();
     require(operation_document.at("api_version") ==
                     "trainvm.operations/v1" &&
-                operation_document.at("operations").size() == 20U &&
+                operation_document.at("operations").size() == 21U &&
                 operation_registry.operation_descriptors_digest() ==
                     "sha256:" +
                         trainvm::sha256_hex(operation_document.dump()),
@@ -328,26 +357,28 @@ int main() {
                 operations.at(3).at("key").at("adapter") ==
                     "rwkv-lab.qwen-ao3" &&
                 operations.at(4).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-posttraining" &&
+                    "rwkv-lab.rwkv-optimizer-finetune" &&
                 operations.at(5).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-rlvr" &&
+                    "rwkv-lab.rwkv-posttraining" &&
                 operations.at(6).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-scratch" &&
+                    "rwkv-lab.rwkv-rlvr" &&
                 operations.at(7).at("key").at("adapter") ==
-                    "rwkv-lab.scalar-metric-decision" &&
+                    "rwkv-lab.rwkv-scratch" &&
                 operations.at(8).at("key").at("adapter") ==
+                    "rwkv-lab.scalar-metric-decision" &&
+                operations.at(9).at("key").at("adapter") ==
                     "rwkv-lab.transformer-mla" &&
-                operations.at(14).at("key").at("adapter") ==
-                    "rwkv-lab.transformer-mla-parallel" &&
                 operations.at(15).at("key").at("adapter") ==
-                    "rwkv-lab.transformer-mla-rwkv8" &&
+                    "rwkv-lab.transformer-mla-parallel" &&
                 operations.at(16).at("key").at("adapter") ==
-                    "rwkv-lab.vision-frozen-adapter" &&
+                    "rwkv-lab.transformer-mla-rwkv8" &&
                 operations.at(17).at("key").at("adapter") ==
-                    "rwkv-lab.vision-native-head" &&
+                    "rwkv-lab.vision-frozen-adapter" &&
                 operations.at(18).at("key").at("adapter") ==
-                    "rwkv-lab.vision-rwkv-student" &&
+                    "rwkv-lab.vision-native-head" &&
                 operations.at(19).at("key").at("adapter") ==
+                    "rwkv-lab.vision-rwkv-student" &&
+                operations.at(20).at("key").at("adapter") ==
                     "rwkv-lab.vision-teacher-compressor",
             "operation descriptors must use canonical exact-key ordering");
     for (const nlohmann::json& operation : operations) {
@@ -359,6 +390,9 @@ int main() {
           "rwkv-lab.vision-teacher-compressor";
       const bool is_rlvr =
           operation.at("key").at("adapter") == "rwkv-lab.rwkv-rlvr";
+      const bool is_optimizer_finetune =
+          operation.at("key").at("adapter") ==
+          "rwkv-lab.rwkv-optimizer-finetune";
       const bool is_vision_native =
           operation.at("key").at("adapter") ==
           "rwkv-lab.vision-native-head";
@@ -422,7 +456,7 @@ int main() {
                                      .at("required") ==
                                  (is_vision_compressor || is_vision_native ||
                                   is_vision_student || is_vision_frozen ||
-                                  is_rlvr) &&
+                                  is_rlvr || is_optimizer_finetune) &&
                              operation.at("authoring")
                                      .at("outputs")
                                      .at("checkpoint")
@@ -439,6 +473,18 @@ int main() {
                                       .at("checkpoint")
                                       .at("artifact_schema") ==
                                   "rwkv-lab.rlvr-candidate-checkpoint.v1") &&
+                             (!is_optimizer_finetune ||
+                              operation.at("authoring")
+                                      .at("outputs")
+                                      .at("checkpoint")
+                                      .at("artifact_schema") ==
+                                  "rwkv-lab.rwkv-optimizer-finetune-checkpoint.v1") &&
+                             (!is_optimizer_finetune ||
+                              operation.at("authoring")
+                                      .at("outputs")
+                                      .at("result")
+                                      .at("artifact_schema") ==
+                                  "rwkv-lab.scalar-metric-result.v1") &&
                              (!is_vision_native ||
                               operation.at("authoring")
                                       .at("outputs")
@@ -671,6 +717,24 @@ int main() {
     }
     require(vision_ab_plan_accepted,
             "declarative vision representation A/B fixture must validate against the production worker registry");
+    const trainvm::CompileResult optimizer_ab_plan =
+        trainvm::compile_document(load_rwkv_optimizer_ab_fixture());
+    require(optimizer_ab_plan.valid(),
+            "declarative RWKV optimizer A/B fixture must compile");
+    bool optimizer_ab_plan_accepted = optimizer_ab_plan.valid();
+    if (optimizer_ab_plan.valid()) {
+      try {
+        trainvm::AdapterRegistry::load_file(
+            std::filesystem::absolute(registry_path))
+            .validate_plan(*optimizer_ab_plan.plan);
+      } catch (const std::exception& error) {
+        std::cerr << "RWKV optimizer A/B registry rejection: " << error.what()
+                  << '\n';
+        optimizer_ab_plan_accepted = false;
+      }
+    }
+    require(optimizer_ab_plan_accepted,
+            "declarative RWKV optimizer A/B fixture must validate against the production worker registry");
     std::filesystem::remove(registry_path);
 
     nlohmann::json posttraining_source = exact_source;
@@ -905,7 +969,7 @@ int main() {
                     contract.provided_capabilities &&
                 deployment.host_launch_registry.api_version ==
                     "trainvm.host-launches/v4" &&
-                deployment.host_launch_registry.profiles.size() == 20U,
+                deployment.host_launch_registry.profiles.size() == 21U,
             "deployment lowering must retain the complete reflected worker catalog");
     for (const trainvm::HostLaunchProfile& launch :
          deployment.host_launch_registry.profiles) {

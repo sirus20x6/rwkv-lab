@@ -1,0 +1,7 @@
+{
+  "api_version": "trainvm.input-content-root-set/v1",
+  "paths": [
+    "/thearray/git/moe-mla/models/g1g_tokens.bin",
+    "/thearray/git/moe-mla/models/rwkv7-g1g-1.5b.pth"
+  ]
+}
