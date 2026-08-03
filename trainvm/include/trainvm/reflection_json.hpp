@@ -143,9 +143,18 @@ bool decode_reflected_object(const nlohmann::json& input, T& output, const std::
     using Member = std::remove_cvref_t<decltype(output.[:member:])>;
     const auto iterator = input.find(name);
     if (iterator == input.end()) {
+      // std::optional is the ONLY thing that makes a member omissible. A
+      // default member initializer does not: `bool enabled{}` is required.
+      // The message says so because the failure is otherwise misread — the
+      // document passed JSON Schema, which may well have declared the field
+      // optional, and every previously valid document starts failing at once
+      // when a non-optional member is added.
       if constexpr (!is_optional_v<Member>) {
-        diagnostics.push_back({Diagnostic::Severity::error, "field.required",
-                               child_path(path, name), "required field is missing"});
+        diagnostics.push_back(
+            {Diagnostic::Severity::error, "field.required", child_path(path, name),
+             "required field is missing (a reflected member is omissible only "
+             "if it is std::optional; a default initializer does not make it "
+             "optional)"});
         ok = false;
       }
     } else if (!decode_json(*iterator, output.[:member:], child_path(path, name), diagnostics)) {
