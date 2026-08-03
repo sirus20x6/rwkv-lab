@@ -55,6 +55,7 @@ from .execution_phases import (
     ExecutionPhaseRequest,
     WorkerExecutionPhaseError,
     WorkerExecutionPhaseRuntime,
+    WorkerExecutionPhases,
     decode_execution_phase_requests,
     state_fingerprint,
 )
@@ -111,6 +112,7 @@ from .session import (
     WorkerSession,
     WorkerSessionError,
 )
+from .torch_trajectory import TorchTrajectoryStateError, torch_trajectory_state
 from .training import (
     MAXIMUM_COMPONENT_SLOTS,
     RESOLVED_TRAINING_API_VERSION,
@@ -177,6 +179,7 @@ __all__ = [
     "SafePoint",
     "Scalar",
     "TorchStepProfiler",
+    "TorchTrajectoryStateError",
     "TrainingCompositionError",
     "WorkerBootstrap",
     "WorkerCancellationRequested",
@@ -185,6 +188,7 @@ __all__ = [
     "WorkerControlRuntime",
     "WorkerExecutionPhaseError",
     "WorkerExecutionPhaseRuntime",
+    "WorkerExecutionPhases",
     "WorkerInvocation",
     "WorkerObservability",
     "WorkerObservabilityError",
@@ -215,5 +219,6 @@ __all__ = [
     "resolve_resume_checkpoint",
     "state_fingerprint",
     "step_profiler_from_invocation",
+    "torch_trajectory_state",
     "trace_request_from_invocation",
 ]

@@ -253,12 +253,80 @@ class WorkerExecutionPhaseRuntime:
         )
 
 
+class WorkerExecutionPhases:
+    """One-shot coordinator for every phase declared by an invocation.
+
+    Adapters receive this object before they initialize their trainer.  They
+    must explicitly execute (or skip, when disabled) every request.  This
+    prevents a declarative compile/warmup request from being silently ignored.
+    """
+
+    def __init__(
+        self,
+        channel: _PhaseReceiptChannel,
+        requests: Sequence[ExecutionPhaseRequest],
+    ) -> None:
+        self._runtime = WorkerExecutionPhaseRuntime(channel)
+        self._requests: dict[ExecutionPhase, ExecutionPhaseRequest] = {}
+        for request in requests:
+            if request.phase in self._requests:
+                raise WorkerExecutionPhaseError(
+                    "execution phase request is duplicated"
+                )
+            self._requests[request.phase] = request
+        self._receipted: set[ExecutionPhase] = set()
+
+    @property
+    def phases(self) -> frozenset[ExecutionPhase]:
+        return frozenset(self._requests)
+
+    def request(self, phase: ExecutionPhase) -> ExecutionPhaseRequest | None:
+        return self._requests.get(phase)
+
+    def run(
+        self,
+        phase: ExecutionPhase,
+        *,
+        snapshot: Callable[[], Mapping[str, Any]],
+        execute: Callable[[int, Callable[[], None]], None],
+    ) -> int | None:
+        request = self._requests.get(phase)
+        if request is None:
+            return None
+        if phase in self._receipted:
+            raise WorkerExecutionPhaseError(
+                f"execution phase {phase.value} was already receipted"
+            )
+        try:
+            sequence = self._runtime.run(
+                request,
+                snapshot=snapshot,
+                execute=execute,
+            )
+        except Exception:
+            # A failed phase has a durable receipt too.  The adapter still
+            # re-raises and terminates, so no later phase may run accidentally.
+            self._receipted.add(phase)
+            raise
+        self._receipted.add(phase)
+        return sequence
+
+    def require_complete(self) -> None:
+        missing = set(self._requests).difference(self._receipted)
+        if missing:
+            names = ", ".join(sorted(phase.value for phase in missing))
+            raise WorkerExecutionPhaseError(
+                f"adapter omitted declared execution phases: {names}"
+            )
+
+
 __all__ = [
     "ExecutionPhase",
     "ExecutionPhaseDisposition",
     "ExecutionPhaseRequest",
     "WorkerExecutionPhaseError",
     "WorkerExecutionPhaseRuntime",
+    "WorkerExecutionPhases",
     "decode_execution_phase_requests",
     "state_fingerprint",
 ]

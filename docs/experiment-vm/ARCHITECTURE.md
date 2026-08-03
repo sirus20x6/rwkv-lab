@@ -152,6 +152,11 @@ diagnostics, and before/after fingerprints of every trajectory-affecting state c
 successful or skipped phase must restore the identical state fingerprint; failed phases retain
 their possibly changed state evidence and cannot masquerade as completion. Each receipt is a
 replay-safe, dashboard-visible journal observation and does not advance the workflow FSM.
+Adapters receive a one-shot coordinator and must receipt every declared phase; unsupported phase
+sets fail before dispatch. Scratch RWKV is the first adopted runtime and uses content-complete,
+bounded-memory Torch trajectory hashing around cold compile and disposable warmup. The same
+coordinator and proof boundary is family-neutral; other trainers must supply their own real
+disposable workload rather than inheriting RWKV-specific behavior.
 
 Before a run exists, the plan compiler performs:
 
