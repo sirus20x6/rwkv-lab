@@ -11,9 +11,11 @@ from rwkv_lab.training_components import (
     ConstantWeightDecaySchedule,
     ContextLengthCurriculum,
     FixedGradientAccumulation,
+    Float8PrecisionPolicy,
     LayerNormFactory,
     LinearHeadCrossEntropyObjective,
     LinearWarmupCosineConfiguration,
+    NVFP4PrecisionPolicy,
     PowerCoolConfiguration,
     RegisteredActivation,
     ScheduleImplementation,
@@ -126,7 +128,7 @@ class WorkerTrainingComponents:
         self,
         *,
         slot: str = "precision",
-    ) -> BFloat16PrecisionPolicy:
+    ) -> BFloat16PrecisionPolicy | Float8PrecisionPolicy | NVFP4PrecisionPolicy:
         component = self.composition.require(slot, category="precision")
         return precision_policy_from_resolved_component(
             component.runtime_envelope()

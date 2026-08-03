@@ -22,7 +22,9 @@ def supported_implementation_ids() -> frozenset[str]:
             *NormalizationImplementation,
             *OptimizerImplementation,
             *ObjectiveImplementation,
-            *PrecisionImplementation,
+            # Scaled precision codecs are runtime-allowlisted for qualification,
+            # but remain absent from the unchanged native authority registry.
+            PrecisionImplementation.BF16_PARAMETERS_FP32_REDUCTIONS_V1,
             *ScheduleImplementation,
             *ParameterRouterImplementation,
             *GradientClippingImplementation,

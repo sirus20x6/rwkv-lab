@@ -1690,6 +1690,8 @@ def main(
             "component_composition_digest"
         ) != component_digest:
             raise ValueError("resume training-component composition mismatch")
+        if precision_policy is not None:
+            precision_policy.load_state_dict(ck.get("precision_policy", {}))
         if worker_controls is not None:
             worker_controls.verify_checkpoint_state(ck)
         if heads is not None and ck.get("heads") is not None:
@@ -2125,6 +2127,8 @@ def main(
                      "torch_rng": torch.get_rng_state()}
         if component_digest is not None:
             rng_extra["component_composition_digest"] = component_digest
+        if precision_policy is not None:
+            rng_extra["precision_policy"] = precision_policy.state_dict()
         if worker_controls is not None:
             rng_extra.update(worker_controls.checkpoint_state())
         if torch.cuda.is_available():
