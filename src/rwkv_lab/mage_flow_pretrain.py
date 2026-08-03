@@ -642,6 +642,19 @@ def resolved_worker_component_contract(
     )
 
 
+def _manifest_image_id(row: Mapping[str, Any]) -> str:
+    """Return the canonical held-out identity even for older manifests."""
+
+    for field in ("image_id", "image_sha256"):
+        value = row.get(field)
+        if isinstance(value, str) and value:
+            return value
+    image = row.get("image")
+    if not isinstance(image, str) or not image:
+        raise ValueError("manifest row has no image identity source")
+    return hashlib.sha256(image.encode("utf-8")).hexdigest()
+
+
 def load_manifest(path: Path) -> list[dict[str, Any]]:
     rows = []
     with path.open(encoding="utf-8") as handle:
@@ -659,6 +672,14 @@ def load_manifest(path: Path) -> list[dict[str, Any]]:
             missing = [key for key in required if key not in row]
             if missing:
                 raise ValueError(f"{path}:{line_number} missing {missing}")
+            image = row["image"]
+            if not isinstance(image, str) or not image:
+                raise ValueError(f"{path}:{line_number} image is not a path")
+            image_path = Path(image).expanduser()
+            if not image_path.is_absolute():
+                image_path = path.parent / image_path
+            row["image"] = str(image_path.resolve())
+            row["image_id"] = _manifest_image_id(row)
             rows.append(row)
     if not rows:
         raise ValueError(f"empty manifest: {path}")
@@ -1162,7 +1183,10 @@ def _generate_eval_snapshot(
                 caption_hash = hashlib.sha256(
                     str(rows[index]["caption"]).encode("utf-8")
                 ).hexdigest()
-                if caption_hash != item.get("caption_sha256"):
+                if (
+                    caption_hash != item.get("caption_sha256")
+                    or _manifest_image_id(rows[index]) != item.get("image_id")
+                ):
                     selected_indices = []
                     break
                 selected_indices.append(index)
@@ -1193,6 +1217,7 @@ def _generate_eval_snapshot(
                     {
                         "index": index,
                         "image": str(rows[index]["image"]),
+                        "image_id": _manifest_image_id(rows[index]),
                         "caption_sha256": hashlib.sha256(
                             str(rows[index]["caption"]).encode("utf-8")
                         ).hexdigest(),
@@ -1203,7 +1228,22 @@ def _generate_eval_snapshot(
         )
     selected_indices = selected_indices[:count]
     selection_sha256 = hashlib.sha256(
-        json.dumps(selected_indices, separators=(",", ":")).encode("utf-8")
+        json.dumps(
+            [
+                {
+                    "index": index,
+                    "image_id": _manifest_image_id(rows[index]),
+                    "caption_sha256": hashlib.sha256(
+                        str(rows[index]["caption"]).encode("utf-8")
+                    ).hexdigest(),
+                    "train_width": int(rows[index]["train_width"]),
+                    "train_height": int(rows[index]["train_height"]),
+                }
+                for index in selected_indices
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
     ).hexdigest()
     artifact = output_dir / "eval_samples" / f"step_{step:08d}.json"
     if artifact.is_file():
@@ -1270,7 +1310,7 @@ def _generate_eval_snapshot(
         label = "pinned base model" if baseline else f"training step {step}"
         items.append(
             {
-                "image_id": str(row["image_id"]),
+                "image_id": _manifest_image_id(row),
                 "image": str(image_path),
                 "prompt": prompts[index],
                 "route": "full_backbone",

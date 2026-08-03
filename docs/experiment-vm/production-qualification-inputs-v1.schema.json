@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rwkv-lab.local/schemas/trainvm/production-qualification-inputs-v1.schema.json",
+  "title": "TrainVM production qualification deployment inputs",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "api_version",
+    "workspace_root",
+    "run_root",
+    "concurrency_key",
+    "mageflow",
+    "rwkv",
+    "transformer"
+  ],
+  "properties": {
+    "api_version": {
+      "const": "trainvm.production-qualification-inputs/v1"
+    },
+    "workspace_root": {"$ref": "#/$defs/absolute_path"},
+    "run_root": {"$ref": "#/$defs/absolute_path"},
+    "concurrency_key": {"$ref": "#/$defs/identifier"},
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "minimum_accelerator_memory_gib": {"type": "integer", "minimum": 1, "maximum": 1048576},
+        "minimum_host_memory_gib": {"type": "integer", "minimum": 1, "maximum": 1048576},
+        "cpu_threads": {"type": "integer", "minimum": 1, "maximum": 65536},
+        "omp_threads": {"type": "integer", "minimum": 1, "maximum": 65536},
+        "preprocessing_workers": {"type": "integer", "minimum": 0, "maximum": 65536}
+      }
+    },
+    "mageflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_path", "train_manifest", "eval_manifest", "image_roots"],
+      "properties": {
+        "model_path": {"$ref": "#/$defs/absolute_path"},
+        "train_manifest": {"$ref": "#/$defs/absolute_path"},
+        "eval_manifest": {"$ref": "#/$defs/absolute_path"},
+        "image_roots": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/absolute_path"}
+        },
+        "max_steps": {"type": "integer", "minimum": 5, "maximum": 10000},
+        "packed_sequence_tokens": {"type": "integer", "minimum": 1, "maximum": 1048576},
+        "eval_gen_samples": {"type": "integer", "minimum": 1, "maximum": 8},
+        "eval_gen_steps": {"type": "integer", "minimum": 1, "maximum": 100},
+        "learning_rate": {"type": "number", "exclusiveMinimum": 0, "maximum": 1.0}
+      }
+    },
+    "rwkv": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_path", "data_path"],
+      "properties": {
+        "model_path": {"$ref": "#/$defs/absolute_path"},
+        "data_path": {"$ref": "#/$defs/absolute_path"},
+        "max_steps": {"type": "integer", "minimum": 5, "maximum": 10000},
+        "sequence_length": {"type": "integer", "minimum": 16, "maximum": 1048576},
+        "batch_size": {"type": "integer", "minimum": 1, "maximum": 1024},
+        "validation_windows": {"type": "integer", "minimum": 1, "maximum": 1024},
+        "learning_rate": {"type": "number", "exclusiveMinimum": 0, "maximum": 1.0}
+      }
+    },
+    "transformer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_dir", "patch_dir", "tokens_bin", "total_tokens_in_bin"],
+      "properties": {
+        "model_dir": {"$ref": "#/$defs/absolute_path"},
+        "patch_dir": {"$ref": "#/$defs/absolute_path"},
+        "tokens_bin": {"$ref": "#/$defs/absolute_path"},
+        "total_tokens_in_bin": {"type": "integer", "minimum": 2},
+        "max_steps": {"type": "integer", "minimum": 5, "maximum": 10000},
+        "sequence_length": {"type": "integer", "minimum": 16, "maximum": 1048576},
+        "eval_tokens": {"type": "integer", "minimum": 1},
+        "learning_rate": {"type": "number", "exclusiveMinimum": 0, "maximum": 1.0},
+        "minimum_learning_rate": {"type": "number", "minimum": 0, "maximum": 1.0}
+      }
+    }
+  },
+  "$defs": {
+    "absolute_path": {
+      "type": "string",
+      "pattern": "^/[^\\u0000]*$",
+      "minLength": 2,
+      "maxLength": 4096
+    },
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+      "maxLength": 128
+    }
+  }
+}

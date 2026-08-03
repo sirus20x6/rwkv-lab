@@ -127,9 +127,10 @@ def load_qualification_document(family: str, path: Path) -> tuple[dict[str, Any]
         invoke = node.get("invoke")
         if not isinstance(invoke, dict) or invoke.get("component") not in family_components:
             continue
-        if node.get("effect") != "process" or not isinstance(node.get("training"), dict):
+        training = invoke.get("training")
+        if node.get("effect") != "process" or not isinstance(training, dict):
             continue
-        if node["training"].get("model_family") != family:
+        if training.get("model_family") != family:
             raise QualificationRunError(
                 f"{family} training node {name} declares the wrong model family"
             )

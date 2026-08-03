@@ -198,12 +198,69 @@ step, requests a checkpoint-first resource-releasing pause, proves the hostd
 process and fence counts returned to zero, resumes, and requires optimizer and
 metric progress before terminal completion:
 
+Do not hand-author those three documents for a deployment. The strict
+`production-qualification-inputs-v1.schema.json` contract names the local
+MageFlow base/manifests/image roots, RWKV model/token stream, transformer
+model/patch/token stream, and the authority-owned run root. The source-only
+materializer validates every input path and emits three schema-valid real
+experiments plus the exact root sets required for content locking:
+
+```json
+{
+  "api_version": "trainvm.production-qualification-inputs/v1",
+  "workspace_root": "/absolute/moe-mla-deployment",
+  "run_root": "/absolute/runs/production-qualification",
+  "concurrency_key": "production-qualification",
+  "mageflow": {
+    "model_path": "/absolute/Mage-Flow-Base",
+    "train_manifest": "/absolute/mageflow/train.jsonl",
+    "eval_manifest": "/absolute/mageflow/eval.jsonl",
+    "image_roots": ["/absolute/mageflow/images"]
+  },
+  "rwkv": {
+    "model_path": "/absolute/rwkv-model.pth",
+    "data_path": "/absolute/rwkv-tokens.bin"
+  },
+  "transformer": {
+    "model_dir": "/absolute/transformer-base",
+    "patch_dir": "/absolute/mla-patch",
+    "tokens_bin": "/absolute/transformer-tokens.bin",
+    "total_tokens_in_bin": 1000000
+  }
+}
+```
+
+```bash
+scripts/materialize_trainvm_production_qualification.py \
+  /absolute/deployment-inputs.json \
+  /absolute/new/qualification-documents
+
+for family in mageflow rwkv transformer; do
+  trainvm lock-input-content \
+    /absolute/new/qualification-documents/$family.json \
+    /absolute/new/qualification-documents/$family.input-roots.json \
+    > /absolute/new/qualification-documents/$family.locked.json
+done
+```
+
+The materializer never hashes inputs itself, compiles a plan, names an
+executable, or launches a worker. The native authoring command is the sole
+producer of content identities. It uses the full-backbone MageFlow profile, so
+production control-plane qualification needs the local Mage base and real
+train/eval manifests but does not depend on a prior expert checkpoint. The
+transformer MLA profile still requires an actual compatible base-model tree,
+patch tree, and packed uint32 token stream; missing assets fail before any
+document is written. The output directory is new-only and contains a
+`materialization.json` handoff with document digests and pause steps.
+
+Submit only the native-locked documents:
+
 ```bash
 scripts/run_trainvm_production_qualification.py \
   --dashboard-url http://127.0.0.1:9124 \
-  --experiment mageflow=/absolute/mageflow-qualification.json \
-  --experiment rwkv=/absolute/rwkv-qualification.json \
-  --experiment transformer=/absolute/transformer-qualification.json \
+  --experiment mageflow=/absolute/new/qualification-documents/mageflow.locked.json \
+  --experiment rwkv=/absolute/new/qualification-documents/rwkv.locked.json \
+  --experiment transformer=/absolute/new/qualification-documents/transformer.locked.json \
   --pause-after-step mageflow=2 \
   --pause-after-step rwkv=2 \
   --pause-after-step transformer=2 \

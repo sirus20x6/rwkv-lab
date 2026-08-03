@@ -61,8 +61,11 @@ def _document(family: str) -> dict[str, Any]:
                 "entrypoint": "train",
                 "nodes": {
                     "train": {
-                        "invoke": {"component": "trainer", "operation": "train"},
-                        "training": {"model_family": family, "components": {}},
+                        "invoke": {
+                            "component": "trainer",
+                            "operation": "train",
+                            "training": {"model_family": family, "components": {}},
+                        },
                         "publishes": publishes,
                         "effect": "process",
                     }

@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -525,6 +526,12 @@ def test_generation_eval_writes_deterministic_step_zero_dashboard_artifact(tmp_p
         (tmp_path / "run" / "eval_generation_selection.json").read_text()
     )
     assert [item["index"] for item in selection["items"]] == [1, 2]
+    expected_image_ids = [
+        hashlib.sha256(str(rows[index]["image"]).encode()).hexdigest()
+        for index in (1, 2)
+    ]
+    assert [item["image_id"] for item in selection["items"]] == expected_image_ids
+    assert [item["image_id"] for item in artifact["items"]] == expected_image_ids
     assert pipeline.kwargs["steps"] == 30
     assert pipeline.kwargs["cfg"] == 5.0
     assert transformer.training is True
