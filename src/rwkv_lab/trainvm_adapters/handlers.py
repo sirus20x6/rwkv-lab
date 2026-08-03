@@ -46,6 +46,11 @@ from .mageflow_cache import (
     finite_cache_receipt,
 )
 from .mageflow_controls import lower_initial_mageflow_controls
+from .mageflow_eval import (
+    MageFlowStandaloneEvalConfig,
+    evaluate_mageflow_checkpoint,
+    resolve_mageflow_evaluation,
+)
 from .mageflow_gallery import completed_mageflow_gallery_request
 from .mageflow_tread import MageFlowTreadConversionConfig, build_tread_controller
 from .metric_decision import ScalarMetricDecisionConfig
@@ -1070,6 +1075,145 @@ def _mageflow_tread_convert(
                 parent_artifact_ids=(checkpoint.artifact_id,),
             ),
         ),
+    )
+
+
+def _mageflow_standalone_eval(
+    invocation: WorkerInvocation,
+    _components: WorkerTrainingComponents | None,
+    _step_profiler: WorkerStepProfiler | None = None,
+    observability: WorkerObservability | None = None,
+    controls: WorkerControlRuntime | None = None,
+    _execution_phases: WorkerExecutionPhases | None = None,
+) -> HandlerResult:
+    """Evaluate one immutable terminal checkpoint without training authority."""
+
+    if getattr(invocation, "resume", None) is not None:
+        raise AdapterDispatchError(
+            "standalone MageFlow evaluation restarts from its checkpoint input"
+        )
+    if not _declares_artifact_output(
+        invocation, "eval_gallery"
+    ) or not _declares_artifact_output(invocation, "result"):
+        raise AdapterDispatchError(
+            "standalone MageFlow evaluation requires gallery and result outputs"
+        )
+    if controls is not None and controls.effective_values:
+        raise AdapterDispatchError(
+            "standalone MageFlow evaluation rejects live controls"
+        )
+    inputs = getattr(invocation, "inputs", None)
+    if not isinstance(inputs, Mapping) or set(inputs) != {"config", "checkpoint"}:
+        raise AdapterDispatchError(
+            "standalone MageFlow evaluation requires exactly config and checkpoint inputs"
+        )
+    raw_config = read_inline_config({"config": inputs["config"]})
+    paths = WorkspacePathAuthority.from_workspace(
+        invocation.workspace, require_content=True
+    )
+    eval_manifest = paths.read_path(
+        _raw_config_path(raw_config, "eval_manifest", required=True) or "",
+        label="eval_manifest",
+        kind="file",
+    )
+    paths.verify_jsonl_file_references(
+        eval_manifest,
+        fields=("image", "image_path"),
+        label="eval_manifest",
+    )
+    model_path = paths.read_path(
+        _raw_config_path(raw_config, "model_path", required=True) or "",
+        label="model_path",
+        kind="directory",
+    )
+    config = MageFlowStandaloneEvalConfig.from_mapping(
+        {
+            **raw_config,
+            "eval_manifest": str(eval_manifest),
+            "model_path": str(model_path),
+        }
+    )
+    checkpoint = resolve_input_checkpoint(invocation, "checkpoint")
+    node_directory = paths.node_run_directory(invocation.node_id)
+    node_directory.mkdir(mode=0o750, parents=True, exist_ok=True)
+    attempt_id = str(getattr(invocation, "attempt_id", "attempt"))
+    suffix = hashlib.sha256(attempt_id.encode("utf-8")).hexdigest()[:16]
+    output_directory = node_directory / f"checkpoint-eval-{suffix}"
+    evaluation = resolve_mageflow_evaluation(
+        config,
+        checkpoint.payload_directory,
+        output_directory,
+        optimizer_step=checkpoint.optimizer_step,
+    )
+    try:
+        output_directory.mkdir(mode=0o750, exist_ok=False)
+        phase = (
+            observability.keepalive(
+                checkpoint.optimizer_step, "evaluating_immutable_checkpoint"
+            )
+            if observability is not None
+            else nullcontext()
+        )
+        with phase:
+            metrics = evaluate_mageflow_checkpoint(evaluation, output_directory)
+    except BaseException:
+        if (
+            output_directory.exists()
+            and output_directory.is_dir()
+            and not output_directory.is_symlink()
+        ):
+            shutil.rmtree(output_directory)
+        raise
+    if observability is not None:
+        for name, value in sorted(metrics.items()):
+            observability.publish_if_declared(
+                name,
+                value,
+                step=checkpoint.optimizer_step,
+                labels={"domain": config.domain},
+            )
+    gallery = completed_mageflow_gallery_request(
+        invocation,
+        output_directory,
+        eval_manifest,
+        step=checkpoint.optimizer_step,
+        checkpoint_manifest_digest=checkpoint.manifest_sha256,
+        parent_artifact_ids=(checkpoint.artifact_id,),
+    )
+    if gallery is None:  # pragma: no cover - declaration was checked above
+        raise AdapterDispatchError(
+            "standalone MageFlow evaluation omitted its gallery request"
+        )
+    result_directory = _stage_canonical_json_artifact(
+        node_directory,
+        attempt_id=attempt_id,
+        stem="mageflow-eval-result",
+        filename="result.json",
+        document={
+            "api_version": "rwkv-lab.mageflow-eval-result/v1",
+            "checkpoint_artifact_id": checkpoint.artifact_id,
+            "checkpoint_manifest_digest": checkpoint.manifest_sha256,
+            "domain": config.domain,
+            "metrics": dict(sorted(metrics.items())),
+            "optimizer_step": checkpoint.optimizer_step,
+        },
+    )
+    return HandlerResult(
+        "operation.completed",
+        {
+            "checkpoint_optimizer_step": checkpoint.optimizer_step,
+            "domain": config.domain,
+            "primary_loss": metrics["eval/primary_loss"],
+        },
+        optimizer_step=checkpoint.optimizer_step,
+        artifact_requests=(
+            ArtifactPublicationRequest(
+                source_directory=result_directory,
+                output_name="result",
+                parent_artifact_ids=(checkpoint.artifact_id,),
+            ),
+        ),
+        eval_gallery_requests=(gallery,),
     )
 
 
@@ -3223,6 +3367,12 @@ _HANDLERS: Mapping[AdapterKey, Handler] = {
         "rwkv_lab.mageflow_tread_convert.v1.Convert",
     ): _mageflow_tread_convert,
     (
+        "rwkv-lab.mageflow-eval",
+        "1.0.0",
+        "evaluate",
+        "rwkv_lab.mageflow_eval.v1.Evaluate",
+    ): _mageflow_standalone_eval,
+    (
         "rwkv-lab.mageflow-appearance-expert",
         "1.0.0",
         "train",
@@ -3375,6 +3525,7 @@ def execute_invocation(
         if handler not in {
             _mageflow_cache_build,
             _mageflow_cache_plan,
+            _mageflow_standalone_eval,
             _mageflow_tread_convert,
             _scalar_metric_decision,
         }:

@@ -3,10 +3,10 @@
   "kind": "Experiment",
   "metadata": {
     "name": "mageflow-cache-artifact-continuation",
-    "description": "Train to a fixed baseline boundary, derive a zero-gated TREAD controller and exact cache coverage from that checkpoint, then continue with both immutable handoffs.",
+    "description": "Train to a fixed baseline boundary, derive a zero-gated TREAD controller and exact cache coverage, continue with both immutable handoffs, then evaluate the final immutable checkpoint.",
     "labels": {
       "family": "mageflow",
-      "handoff": "checkpoint-cache-tread"
+      "handoff": "checkpoint-cache-tread-eval"
     }
   },
   "spec": {
@@ -73,6 +73,18 @@
         "schema": "rwkv-lab.mageflow-tread-controller.v1",
         "immutability": "immutable",
         "fingerprint": "manifest_sha256"
+      },
+      "standalone_eval_gallery": {
+        "type": "image_gallery",
+        "schema": "rwkv-lab.eval-gallery.v2",
+        "immutability": "append_only",
+        "fingerprint": "manifest_sha256"
+      },
+      "standalone_eval_result": {
+        "type": "report",
+        "schema": "rwkv-lab.mageflow-eval-result.v1",
+        "immutability": "immutable",
+        "fingerprint": "manifest_sha256"
       }
     },
     "components": {
@@ -126,6 +138,16 @@
         "operations": {
           "convert": {
             "contract": "rwkv_lab.mageflow_tread_convert.v1.Convert"
+          }
+        }
+      },
+      "mageflow_eval": {
+        "adapter": "rwkv-lab.mageflow-eval",
+        "version": "1.0.0",
+        "runtime": "python_worker",
+        "operations": {
+          "evaluate": {
+            "contract": "rwkv_lab.mageflow_eval.v1.Evaluate"
           }
         }
       }
@@ -479,6 +501,44 @@
           "transitions": [
             {
               "on": "worker.completed",
+              "target": "evaluate_final"
+            },
+            {
+              "on": "operation.failed",
+              "target": "$failed"
+            }
+          ]
+        },
+        "evaluate_final": {
+          "description": "Run scalar and generated/original evaluation directly against the immutable final checkpoint without creating training state.",
+          "invoke": {
+            "component": "mageflow_eval",
+            "operation": "evaluate",
+            "inputs": {
+              "config": {
+                "literal": {
+                  "domain": "animation",
+                  "eval_manifest": "/thearray/git/datasets/midjourney-v6-recap-continuation-30pct-b-512-1024/eval.jsonl",
+                  "model_path": "/thearray/git/ob/text-generation-webui/models/Mage-Flow-Base",
+                  "eval_microbatch_size": 1,
+                  "eval_examples": 32,
+                  "attention_backend": "flash2"
+                }
+              },
+              "checkpoint": {
+                "artifact": "final_checkpoint"
+              }
+            }
+          },
+          "publishes": {
+            "eval_gallery": "standalone_eval_gallery",
+            "result": "standalone_eval_result"
+          },
+          "idempotency": "receipt_required",
+          "effect": "process",
+          "transitions": [
+            {
+              "on": "operation.completed",
               "target": "release_gpu"
             },
             {
@@ -531,9 +591,31 @@
           "unit": "image/second",
           "step_domain": "optimizer_step",
           "aggregation": "mean"
+        },
+        {
+          "name": "eval/primary_loss",
+          "type": "gauge",
+          "unit": "dimensionless",
+          "step_domain": "optimizer_step",
+          "aggregation": "last"
+        },
+        {
+          "name": "eval/optimization_loss",
+          "type": "gauge",
+          "unit": "dimensionless",
+          "step_domain": "optimizer_step",
+          "aggregation": "last"
+        },
+        {
+          "name": "eval/gallery_samples",
+          "type": "gauge",
+          "unit": "image",
+          "step_domain": "optimizer_step",
+          "aggregation": "last"
         }
       ],
-      "retain_raw_metrics_days": 30
+      "retain_raw_metrics_days": 30,
+      "eval_gallery_artifact": "standalone_eval_gallery"
     },
     "recovery": {
       "exact_resume": false,

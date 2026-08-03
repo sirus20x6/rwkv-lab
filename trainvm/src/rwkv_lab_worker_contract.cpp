@@ -234,6 +234,54 @@ OperationAuthoringDeclaration mageflow_tread_convert_authoring() {
   };
 }
 
+OperationAuthoringDeclaration mageflow_eval_authoring() {
+  return {
+      .inputs = {
+          {"config",
+           OperationPortDescriptor{
+               .type = OperationPortType::object,
+               .required = true,
+               .artifact_type = std::nullopt,
+               .artifact_schema = std::nullopt,
+               .description =
+                   "Content-bound held-out manifest, route, and local base-model "
+                   "configuration.",
+           }},
+          {"checkpoint",
+           OperationPortDescriptor{
+               .type = OperationPortType::artifact,
+               .required = true,
+               .artifact_type = ArtifactType::checkpoint,
+               .artifact_schema = std::nullopt,
+               .description =
+                   "Immutable terminal MageFlow checkpoint whose embedded run "
+                   "contract defines the evaluated architecture.",
+           }},
+      },
+      .outputs = {
+          {"eval_gallery",
+           OperationPortDescriptor{
+               .type = OperationPortType::artifact,
+               .required = true,
+               .artifact_type = ArtifactType::image_gallery,
+               .artifact_schema = "rwkv-lab.eval-gallery.v2",
+               .description =
+                   "Generated/original gallery revision bound directly to the "
+                   "input checkpoint manifest.",
+           }},
+          {"result",
+           OperationPortDescriptor{
+               .type = OperationPortType::artifact,
+               .required = true,
+               .artifact_type = ArtifactType::report,
+               .artifact_schema = "rwkv-lab.mageflow-eval-result.v1",
+               .description =
+                   "Finite scalar metrics with exact checkpoint lineage.",
+           }},
+      },
+  };
+}
+
 OperationAuthoringDeclaration mageflow_cache_build_authoring() {
   return {
       .inputs = {
@@ -706,6 +754,17 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
       .authoring = mageflow_cache_build_authoring(),
   });
   profiles.push_back({
+      .key = key("rwkv-lab.mageflow-eval",
+                 "rwkv_lab.mageflow_eval.v1.Evaluate", "evaluate"),
+      .effect = Effect::process,
+      .idempotency = Idempotency::receipt_required,
+      .code_fingerprint = code_fingerprint,
+      .required_capabilities = {"worker.controls", "worker.metrics"},
+      .lifecycle = atomic_restart_only_operation_lifecycle(),
+      .training_composition = std::nullopt,
+      .authoring = mageflow_eval_authoring(),
+  });
+  profiles.push_back({
       .key = key("rwkv-lab.mageflow-tread-convert",
                  "rwkv_lab.mageflow_tread_convert.v1.Convert", "convert"),
       .effect = Effect::process,
@@ -928,6 +987,11 @@ rwkv_lab_worker_runtime_requirements() {
             "grpcio", "huggingface-hub", "mage-flow", "numpy", "pillow",
             "protobuf", "safetensors", "torch", "transformers"})},
       {"rwkv-lab.mageflow-cache-build",
+       canonical_distributions(
+           {"accelerate", "deepspeed", "diffusers", "einops", "flash-attn",
+            "grpcio", "huggingface-hub", "mage-flow", "numpy", "pillow",
+            "protobuf", "safetensors", "torch", "transformers"})},
+      {"rwkv-lab.mageflow-eval",
        canonical_distributions(
            {"accelerate", "deepspeed", "diffusers", "einops", "flash-attn",
             "grpcio", "huggingface-hub", "mage-flow", "numpy", "pillow",

@@ -4,4 +4,5 @@
 {"event_id":"sim-4","run_id":"simulation","node_id":"prepare_cache","attempt_id":"prepare_cache@1","event_type":"operation.completed","payload":{"start_step":5500,"end_step":12228}}
 {"event_id":"sim-5","run_id":"simulation","node_id":"build_cache","attempt_id":"build_cache@1","event_type":"operation.completed","payload":{"start_step":5500,"end_step":12228}}
 {"event_id":"sim-6","run_id":"simulation","node_id":"resume_training","attempt_id":"resume_training@1","event_type":"worker.completed","optimizer_step":12228,"payload":{"reason":"training_complete"}}
-{"event_id":"sim-7","run_id":"simulation","node_id":"release_gpu","attempt_id":"release_gpu@1","event_type":"resource.released"}
+{"event_id":"sim-7","run_id":"simulation","node_id":"evaluate_final","attempt_id":"evaluate_final@1","event_type":"operation.completed","optimizer_step":12228,"payload":{"checkpoint_optimizer_step":12228,"domain":"animation","primary_loss":0.25}}
+{"event_id":"sim-8","run_id":"simulation","node_id":"release_gpu","attempt_id":"release_gpu@1","event_type":"resource.released"}

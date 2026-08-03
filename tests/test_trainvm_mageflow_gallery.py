@@ -73,6 +73,52 @@ def test_completed_gallery_request_binds_manifest_condition_and_checkpoint(tmp_p
     assert request.items[0].item_id == "photo:photo-1"
 
 
+def test_completed_gallery_request_can_bind_an_external_checkpoint_revision(tmp_path):
+    manifest = tmp_path / "eval.jsonl"
+    manifest.write_text('{"image":"target.png","caption":"portrait"}\n')
+    run_directory = tmp_path / "run"
+    _write_gallery(run_directory, [_item(tmp_path)])
+    invocation = SimpleNamespace(
+        invocation_digest="sha256:" + "a" * 64,
+        publishes={"eval_gallery": {}},
+    )
+    checkpoint_digest = "sha256:" + "b" * 64
+
+    request = completed_mageflow_gallery_request(
+        invocation,
+        run_directory,
+        manifest,
+        step=19,
+        checkpoint_manifest_digest=checkpoint_digest,
+        parent_artifact_ids=("checkpoint-19",),
+    )
+
+    assert request is not None
+    assert request.checkpoint_request_index is None
+    assert request.checkpoint_manifest_digest == checkpoint_digest
+    assert request.parent_artifact_ids == ("checkpoint-19",)
+
+    with pytest.raises(MageFlowGalleryResultError, match="parent artifact"):
+        completed_mageflow_gallery_request(
+            invocation,
+            run_directory,
+            manifest,
+            step=19,
+            checkpoint_manifest_digest=checkpoint_digest,
+        )
+
+    with pytest.raises(MageFlowGalleryResultError, match="exactly one"):
+        completed_mageflow_gallery_request(
+            invocation,
+            run_directory,
+            manifest,
+            step=19,
+            checkpoint_request_index=0,
+            checkpoint_manifest_digest=checkpoint_digest,
+            parent_artifact_ids=("checkpoint-19",),
+        )
+
+
 def test_completed_gallery_request_is_optional_but_rejects_duplicate_items(tmp_path):
     manifest = tmp_path / "eval.jsonl"
     manifest.write_text("{}\n", encoding="utf-8")

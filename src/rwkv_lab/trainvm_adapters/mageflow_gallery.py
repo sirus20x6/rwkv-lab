@@ -201,7 +201,9 @@ def completed_mageflow_gallery_request(
     eval_manifest: Path,
     *,
     step: int,
-    checkpoint_request_index: int,
+    checkpoint_request_index: int | None = None,
+    checkpoint_manifest_digest: str | None = None,
+    parent_artifact_ids: tuple[str, ...] = (),
 ) -> EvalGalleryPublicationRequest | None:
     """Return the exact terminal gallery selected by the invocation, if declared."""
 
@@ -211,6 +213,14 @@ def completed_mageflow_gallery_request(
     invocation_digest = getattr(invocation, "invocation_digest", None)
     if not isinstance(invocation_digest, str):
         raise MageFlowGalleryResultError("worker invocation digest is unavailable")
+    if (checkpoint_request_index is None) == (checkpoint_manifest_digest is None):
+        raise MageFlowGalleryResultError(
+            "gallery must select exactly one checkpoint binding"
+        )
+    if checkpoint_manifest_digest is not None and not parent_artifact_ids:
+        raise MageFlowGalleryResultError(
+            "external checkpoint gallery requires parent artifact lineage"
+        )
     heldout_manifest_digest = _regular_file_digest(
         eval_manifest, maximum_bytes=_MAXIMUM_HELDOUT_MANIFEST_BYTES
     )
@@ -241,6 +251,8 @@ def completed_mageflow_gallery_request(
             }
         ),
         items=items,
+        parent_artifact_ids=parent_artifact_ids,
+        checkpoint_manifest_digest=checkpoint_manifest_digest,
         checkpoint_request_index=checkpoint_request_index,
     )
 

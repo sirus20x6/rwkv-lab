@@ -1827,6 +1827,12 @@ def test_dispatch_table_is_closed_and_training_composition_is_required() -> None
             "rwkv_lab.mageflow_tread_convert.v1.Convert",
         ),
         (
+            "rwkv-lab.mageflow-eval",
+            "1.0.0",
+            "evaluate",
+            "rwkv_lab.mageflow_eval.v1.Evaluate",
+        ),
+        (
             "rwkv-lab.mageflow-appearance-expert",
             "1.0.0",
             "train",
