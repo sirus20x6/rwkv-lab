@@ -15,6 +15,7 @@ from typing import Any
 from rwkv_lab.trainvm_worker import (
     ArtifactPublicationRequest,
     CheckpointPublicationRequest,
+    EvalGalleryPublicationRequest,
     ExecutionPhase,
     NullStepProfiler,
     WorkerControlRuntime,
@@ -59,6 +60,7 @@ class HandlerResult:
     optimizer_step: int | None = None
     checkpoint_requests: tuple[CheckpointPublicationRequest, ...] = ()
     artifact_requests: tuple[ArtifactPublicationRequest, ...] = ()
+    eval_gallery_requests: tuple[EvalGalleryPublicationRequest, ...] = ()
 
 
 def _declares_artifact_output(invocation: object, name: str) -> bool:
