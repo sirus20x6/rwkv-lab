@@ -293,6 +293,15 @@ if(TRAINVM_PYTHON_EXECUTABLE)
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_rwkv_lab_worker_contract.py
       $<TARGET_FILE:trainvm>
   )
+  # Deliberately NOT part of rwkv_lab_worker_artifact: that test builds a
+  # sealed worker artifact and is excluded from the hosted native job, which
+  # is how a stale adapter pin survived for hours. This one needs only the
+  # binary, so it runs everywhere the suite runs.
+  add_test(NAME rwkv_lab_runtime_requirements
+    COMMAND ${TRAINVM_PYTHON_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_rwkv_lab_runtime_requirements.py
+      $<TARGET_FILE:trainvm>
+  )
   add_test(NAME rwkv_lab_worker_artifact
     COMMAND ${TRAINVM_PYTHON_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_rwkv_lab_worker_artifact.py
