@@ -496,6 +496,25 @@ subsequent milestones. A worker launch ticket is a protocol authorization only
 until it is paired with a trusted descriptor digest, resolved launch specification, host identity,
 and durable process receipt.
 
+The enabled hostd unit is GPU-passive by default. It checks the root-owned
+`/etc/trainvm/hostd-gpu-authorization.json` before any startup precondition or NVML load, and a
+missing or prior-boot document causes systemd to skip the service without touching the driver.
+Installation intentionally does not create this authorization. For a boot where display GPUs must
+remain unavailable to training, explicitly authorize inventory with the `deny` policy, then start
+the service:
+
+```bash
+sudo /usr/local/sbin/trainvm-hostd --authorize-gpu-start \
+  /etc/trainvm/hostd.template.json \
+  /etc/trainvm/hostd-gpu-authorization.json deny
+sudo /usr/bin/systemctl start trainvm-hostd.service
+```
+
+`cooperative_allowlist GPU-uuid ...` is the only display-sharing alternative. It grants only
+cooperative-compute eligibility for exact UUIDs that the admitted inventory independently marks as
+display-active; it cannot authorize exclusive display-GPU use. Reboot changes the bound boot ID and
+invalidates either policy.
+
 Host-launch v4 closes capability attestation, code-slot placement, and bootstrap-runtime-closure
 identity over the sealed code identity. Adapter and selected training-component profiles form the
 immutable `required_capabilities` set. The exact host profile separately declares

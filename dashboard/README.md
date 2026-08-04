@@ -27,8 +27,12 @@ The host-global `/api/trainvm/host-authority` view is projected from TrainVM's
 transport. It reports exact coordinator/startup state, ledger chain and occupancy digests, complete
 fence/process counts, fresh inventory/topology degradation evidence, lease-renewal coordinator
 health, terminal cgroup/context cleanup receipts, and a bounded receipt-derived row prefix with
-explicit truncation. The UI does not infer launch health, leases, policy installation, cleanup, or
-recovery from PID discovery or `/proc`.
+explicit truncation. This inspection RPC does not trigger NVML; the UI does not infer launch health,
+leases, policy installation, cleanup, or recovery from PID discovery or `/proc`.
+The dashboard also cannot authorize hostd GPU startup. A root operator must create the current
+boot's `/etc/trainvm/hostd-gpu-authorization.json`; without it, the enabled hostd unit is skipped
+before NVML and the UI reports host authority as unavailable. Dashboard startup and status polling
+remain GPU-passive in that state.
 Checkpoint-now, retained-resource pause, checkpoint-first GPU-releasing pause, exact resume, and
 graceful cancel are posted to `/api/trainvm/runs/{run}/actions`; the independently supervised native
 authority remains the only process that opens or mutates its journal; an unavailable authority is

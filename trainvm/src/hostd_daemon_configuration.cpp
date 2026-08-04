@@ -303,7 +303,8 @@ LinuxNvidiaInventoryConfig HostdDaemonConfiguration::inventory() const {
           .maximum_snapshot_age_ns =
               document_.inventory.maximum_snapshot_age_ns,
           .trusted_host_namespace = true,
-          .trusted_nvml_loader = true};
+          .trusted_nvml_loader = true,
+          .authorized_display_gpu_ids = {}};
 }
 
 LinuxCgroupAuthorityConfig HostdDaemonConfiguration::cgroup() const {

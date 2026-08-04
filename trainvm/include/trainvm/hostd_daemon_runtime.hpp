@@ -4,6 +4,7 @@
 #include <stdexcept>
 
 #include "trainvm/hostd_daemon_configuration.hpp"
+#include "trainvm/hostd_gpu_authorization.hpp"
 #include "trainvm/hostd_startup_controller.hpp"
 #include "trainvm/hostd_transport.hpp"
 
@@ -26,7 +27,8 @@ public:
 // cgroup authority before the socket is admitted.
 class HostdDaemonRuntime final {
 public:
-  explicit HostdDaemonRuntime(HostdDaemonConfiguration configuration);
+  HostdDaemonRuntime(HostdDaemonConfiguration configuration,
+                     HostdGpuAuthorization gpu_authorization);
   ~HostdDaemonRuntime();
 
   HostdDaemonRuntime(const HostdDaemonRuntime &) = delete;

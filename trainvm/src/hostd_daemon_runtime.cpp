@@ -414,8 +414,11 @@ private:
 } // namespace
 
 struct HostdDaemonRuntime::Implementation final {
-  explicit Implementation(HostdDaemonConfiguration input)
-      : configuration(std::move(input)), owner_pid(::getpid()),
+  Implementation(HostdDaemonConfiguration input,
+                 HostdGpuAuthorization input_gpu_authorization)
+      : configuration(std::move(input)),
+        gpu_authorization(std::move(input_gpu_authorization)),
+        owner_pid(::getpid()),
         owner_tid(current_tid()),
         launch_capable(configuration.document().authority_uid == 0U &&
                        ::geteuid() == 0U &&
@@ -424,6 +427,7 @@ struct HostdDaemonRuntime::Implementation final {
                        configuration.worker_credentials().no_new_privileges) {
     if (owner_tid <= 0)
       throw HostdDaemonRuntimeError("could not bind hostd owner thread");
+    gpu_authorization.require_matches(configuration);
 
     clock = std::make_unique<AuthorityClock>();
     session_kernel =
@@ -434,12 +438,6 @@ struct HostdDaemonRuntime::Implementation final {
     service_identity = std::make_shared<HostdLinuxServiceIdentityAuthority>(
         configuration.service_identity());
     cgroups = std::make_unique<LinuxCgroupAuthority>(configuration.cgroup());
-    inventory_kernel = std::make_unique<LinuxNvidiaInventoryCollector>(
-        configuration.inventory());
-    inventory = capture_host_inventory(*inventory_kernel);
-    require_inventory_identity(configuration.document(), inventory,
-                               clock->sample());
-
     journal = std::make_unique<Journal>(
         configuration.journal_path(), configuration.document().journal_identity,
         HostGrantEnforcement::required, configuration.journal_host(), nullptr,
@@ -449,6 +447,27 @@ struct HostdDaemonRuntime::Implementation final {
         SqliteFilesystemAuthority::acquire(
             configuration.ledger_authority()));
     singleton = std::make_shared<HostdLedgerSingletonToken>(ledger_authority);
+    // Socket self-bind temporarily changes the process working directory to a
+    // pinned descriptor, so it must happen before NVML loads the CUDA driver
+    // and creates its helper thread.  The retained singleton token is already
+    // sufficient to authorize the bind; request serving is assembled only
+    // after the inventory, ledger, and recovery authorities are admitted.
+    CloseDescriptor parent(
+        open_socket_parent(configuration.document().socket.path));
+    socket = std::make_shared<HostdSocketAuthority>(
+        HostdSocketAuthority::self_bind(configuration.socket(), parent.get(),
+                                        singleton));
+
+    LinuxNvidiaInventoryConfig inventory_configuration =
+        configuration.inventory();
+    inventory_configuration.authorized_display_gpu_ids =
+        gpu_authorization.allowed_display_gpu_ids();
+    inventory_kernel = std::make_unique<LinuxNvidiaInventoryCollector>(
+        std::move(inventory_configuration));
+    inventory = capture_host_inventory(*inventory_kernel);
+    inventory_observed_at_ns = hostd_monotonic_now_ns();
+    require_inventory_identity(configuration.document(), inventory,
+                               clock->sample());
     ledger = std::make_shared<SQLiteHostLedger>(
         ledger_authority, inventory, nullptr,
         configuration.startup_auditor().policy);
@@ -536,6 +555,7 @@ struct HostdDaemonRuntime::Implementation final {
   }
 
   HostdDaemonConfiguration configuration;
+  HostdGpuAuthorization gpu_authorization;
   pid_t owner_pid{};
   pid_t owner_tid{};
   bool launch_capable{};
@@ -578,9 +598,11 @@ struct HostdDaemonRuntime::Implementation final {
   std::unique_ptr<HostdUnifiedServer> unified_server;
 };
 
-HostdDaemonRuntime::HostdDaemonRuntime(HostdDaemonConfiguration configuration)
-    : implementation_(
-          std::make_unique<Implementation>(std::move(configuration))) {}
+HostdDaemonRuntime::HostdDaemonRuntime(
+    HostdDaemonConfiguration configuration,
+    HostdGpuAuthorization gpu_authorization)
+    : implementation_(std::make_unique<Implementation>(
+          std::move(configuration), std::move(gpu_authorization))) {}
 
 HostdDaemonRuntime::~HostdDaemonRuntime() = default;
 

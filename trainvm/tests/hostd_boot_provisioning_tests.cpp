@@ -1,4 +1,5 @@
 #include "trainvm/hostd_boot_provisioning.hpp"
+#include "trainvm/hostd_gpu_authorization.hpp"
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -207,6 +208,100 @@ class TemporaryDirectory final {
   std::filesystem::path path_;
 };
 
+void gpu_authorization_is_explicit_boot_scoped_and_strict() {
+  constexpr std::string_view kGpuA =
+      "GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  constexpr std::string_view kGpuB =
+      "GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  const HostdDaemonConfiguration daemon(daemon_document());
+  const HostdLinuxBootAuthoritySnapshot first{
+      .boot_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+      .host_namespaces = namespaces(100U),
+  };
+  const HostdLinuxBootAuthoritySnapshot second{
+      .boot_id = "cccccccc-cccc-cccc-cccc-cccccccccccc",
+      .host_namespaces = namespaces(200U),
+  };
+  const HostdDaemonConfiguration first_runtime =
+      materialize_hostd_daemon_boot(daemon, first);
+  const HostdDaemonConfiguration second_runtime =
+      materialize_hostd_daemon_boot(daemon, second);
+
+  const HostdGpuAuthorization deny = make_hostd_gpu_authorization(
+      daemon, first, HostdDisplayGpuPolicy::deny);
+  deny.require_matches(first_runtime);
+  require(deny.display_policy() == HostdDisplayGpuPolicy::deny &&
+              deny.allowed_display_gpu_ids().empty() &&
+              deny.document().driver_probe_authorized,
+          "explicit deny policy authorizes only the boot-scoped read-only probe");
+  require_throws<HostdGpuAuthorizationError>(
+      [&] { deny.require_matches(second_runtime); },
+      "a reboot must invalidate the prior GPU authorization");
+
+  const HostdGpuAuthorization cooperative = make_hostd_gpu_authorization(
+      daemon, first, HostdDisplayGpuPolicy::cooperative_allowlist,
+      {std::string(kGpuB), std::string(kGpuA)});
+  cooperative.require_matches(first_runtime);
+  require(cooperative.allowed_display_gpu_ids() ==
+              std::vector<std::string>({std::string(kGpuA),
+                                        std::string(kGpuB)}),
+          "display authorization must canonicalize its exact UUID allowlist");
+
+  auto tampered = cooperative.document();
+  tampered.host_id = "different-host";
+  require_throws<HostdGpuAuthorizationError>(
+      [&] { (void)HostdGpuAuthorization(tampered); },
+      "authorization identity mutation must invalidate its digest");
+  require_throws<HostdGpuAuthorizationError>(
+      [&] {
+        (void)make_hostd_gpu_authorization(
+            daemon, first, HostdDisplayGpuPolicy::cooperative_allowlist,
+            {std::string(kGpuA), std::string(kGpuA)});
+      },
+      "duplicate display UUID authority must fail closed");
+  require_throws<HostdGpuAuthorizationError>(
+      [&] {
+        (void)make_hostd_gpu_authorization(
+            daemon, first, HostdDisplayGpuPolicy::cooperative_allowlist,
+            {"GPU-not-a-canonical-uuid"});
+      },
+      "malformed display UUID authority must fail closed");
+  auto incomplete_boot = first;
+  incomplete_boot.host_namespaces.mount_namespace = {};
+  require_throws<HostdDaemonConfigurationError>(
+      [&] {
+        (void)make_hostd_gpu_authorization(
+            daemon, incomplete_boot, HostdDisplayGpuPolicy::deny);
+      },
+      "GPU authorization cannot be minted from incomplete boot evidence");
+
+  TemporaryDirectory directory;
+  const AuthorityDocumentPublicationPolicy policy{
+      .owner_uid = ::geteuid(),
+      .owner_gid = ::getegid(),
+      .file_mode = 0600,
+      .parent_owner_uid = ::geteuid(),
+      .parent_owner_gid = ::getegid(),
+  };
+  const auto path = directory.path() / "gpu-authorization.json";
+  publish_authority_document(
+      path, "test GPU authorization",
+      hostd_gpu_authorization_json(cooperative), policy,
+      kHostdGpuAuthorizationMaximumBytes);
+  require(HostdGpuAuthorization::load_file(path).document() ==
+              cooperative.document(),
+          "published GPU authorization must round-trip exactly");
+
+  std::string duplicate_key = hostd_gpu_authorization_json(cooperative);
+  duplicate_key.insert(duplicate_key.find('{') + 1U,
+                       "\n  \"api_version\": \"duplicate\",");
+  publish_authority_document(path, "test GPU authorization", duplicate_key,
+                             policy, kHostdGpuAuthorizationMaximumBytes);
+  require_throws<HostdGpuAuthorizationError>(
+      [&] { (void)HostdGpuAuthorization::load_file(path); },
+      "duplicate JSON fields must fail closed before schema decoding");
+}
+
 void atomic_publication_is_exact_and_rejects_unsafe_ancestry() {
   TemporaryDirectory directory;
   const AuthorityDocumentPublicationPolicy policy{
@@ -316,11 +411,33 @@ void deployment_uses_boot_materialization_and_stable_peer_authority() {
                          std::istreambuf_iterator<char>());
   require(unit.find("--materialize-config /etc/trainvm/hostd.template.json /run/trainvm-hostd/hostd.json") !=
                   std::string::npos &&
+              unit.find("--check-gpu-authorization /etc/trainvm/hostd.template.json /etc/trainvm/hostd-gpu-authorization.json") !=
+                  std::string::npos &&
+              unit.find("--gpu-authorization /etc/trainvm/hostd-gpu-authorization.json") !=
+                  std::string::npos &&
               unit.find("--publish-client-config /run/trainvm-hostd/client.json") !=
                   std::string::npos &&
               unit.find("LoadCredential=") == std::string::npos &&
               unit.find("StartLimitBurst=3") != std::string::npos,
-          "enabled hostd unit must materialize each boot, publish the endpoint, and bound failed starts");
+          "enabled hostd unit must require explicit boot GPU authority, materialize each boot, publish the endpoint, and bound failed starts");
+  const auto authorization_check = unit.find("--check-gpu-authorization");
+  const auto first_start_pre = unit.find("ExecStartPre=");
+  require(authorization_check != std::string::npos &&
+              first_start_pre != std::string::npos &&
+              authorization_check < first_start_pre,
+          "GPU authorization must be checked before startup work or driver probing");
+
+  std::ifstream sudoers_input(root / "deploy/install-hostd-sudoers.sh");
+  require(sudoers_input.is_open(), "sudoers installer must be readable");
+  const std::string sudoers((std::istreambuf_iterator<char>(sudoers_input)),
+                            std::istreambuf_iterator<char>());
+  require(sudoers.find("--authorize-gpu-start /etc/trainvm/hostd.template.json /etc/trainvm/hostd-gpu-authorization.json deny") !=
+                  std::string::npos &&
+              sudoers.find("--authorize-gpu-start /etc/trainvm/hostd.template.json /etc/trainvm/hostd-gpu-authorization.json cooperative_allowlist *") !=
+                  std::string::npos &&
+              sudoers.find("deploy/trainvm-hostd-gpu-authorization") ==
+                  std::string::npos,
+          "deployment must permit an explicit operator command but never install implicit GPU authority");
 }
 
 }  // namespace
@@ -329,6 +446,7 @@ int main() {
   try {
     simulated_reboot_changes_only_boot_authority();
     socket_replacement_requires_a_new_client_document();
+    gpu_authorization_is_explicit_boot_scoped_and_strict();
     atomic_publication_is_exact_and_rejects_unsafe_ancestry();
     live_boot_observation_is_accepted_without_gpu_access();
     deployment_uses_boot_materialization_and_stable_peer_authority();

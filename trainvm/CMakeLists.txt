@@ -96,6 +96,7 @@ add_library(trainvm_core
   src/hostd_daemon_configuration.cpp
   src/hostd_crash_qualification.cpp
   src/hostd_daemon_runtime.cpp
+  src/hostd_gpu_authorization.cpp
   src/hostd_journal_fence_attestor.cpp
   src/hostd_journal_logical_fence.cpp
   src/hostd_ledger_singleton_token.cpp

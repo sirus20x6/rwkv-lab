@@ -7,12 +7,16 @@
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "trainvm/authority_document.hpp"
 #include "trainvm/hostd_boot_provisioning.hpp"
 #include "trainvm/hostd_daemon_configuration.hpp"
 #include "trainvm/hostd_daemon_runtime.hpp"
+#include "trainvm/hostd_gpu_authorization.hpp"
 
 namespace {
 
@@ -88,27 +92,107 @@ int materialize_configuration(const std::filesystem::path& source,
   return 0;
 }
 
+int authorize_gpu_start(int argc, char** argv) {
+  const std::filesystem::path source(argv[2]);
+  const std::filesystem::path destination(argv[3]);
+  const trainvm::HostdDaemonConfiguration configuration_template =
+      trainvm::HostdDaemonConfiguration::load_file(source);
+  require_publication_identity(configuration_template.document());
+  if (!destination.is_absolute() ||
+      destination.lexically_normal() != destination ||
+      destination.parent_path() != source.parent_path() ||
+      destination == source) {
+    throw std::runtime_error(
+        "hostd GPU authorization must be a distinct canonical file beside the protected template");
+  }
+  trainvm::HostdDisplayGpuPolicy policy{};
+  if (std::string_view(argv[4]) == "deny") {
+    policy = trainvm::HostdDisplayGpuPolicy::deny;
+    if (argc != 5)
+      throw std::runtime_error("deny display policy cannot carry GPU IDs");
+  } else if (std::string_view(argv[4]) == "cooperative_allowlist") {
+    policy = trainvm::HostdDisplayGpuPolicy::cooperative_allowlist;
+    if (argc < 6 || argc > 21)
+      throw std::runtime_error(
+          "cooperative display policy requires 1 through 16 exact GPU IDs");
+  } else {
+    throw std::runtime_error(
+        "GPU authorization policy must be deny or cooperative_allowlist");
+  }
+  std::vector<std::string> allowed;
+  for (int index = 5; index < argc; ++index)
+    allowed.emplace_back(argv[index]);
+  const trainvm::HostdGpuAuthorization authorization =
+      trainvm::make_hostd_gpu_authorization(
+          configuration_template,
+          trainvm::observe_hostd_linux_boot_authority(), policy,
+          std::move(allowed));
+  trainvm::publish_authority_document(
+      destination, "hostd GPU authorization",
+      trainvm::hostd_gpu_authorization_json(authorization),
+      {.owner_uid = static_cast<uid_t>(
+           configuration_template.document().authority_uid),
+       .owner_gid = static_cast<gid_t>(
+           configuration_template.document().authority_gid),
+       .file_mode = 0600,
+       .parent_owner_uid = static_cast<uid_t>(
+           configuration_template.document().authority_uid),
+       .parent_owner_gid = static_cast<gid_t>(
+           configuration_template.document().authority_gid)},
+      trainvm::kHostdGpuAuthorizationMaximumBytes);
+  std::cout << "authorized " << trainvm::kHostdGpuAuthorizationApiVersion
+            << " for boot " << authorization.document().boot_id << '\n';
+  return 0;
+}
+
+int check_gpu_authorization(const std::filesystem::path& source,
+                            const std::filesystem::path& authorization_path) {
+  const trainvm::HostdDaemonConfiguration configuration_template =
+      trainvm::HostdDaemonConfiguration::load_file(source);
+  const trainvm::HostdDaemonConfiguration boot_configuration =
+      trainvm::materialize_hostd_daemon_boot(
+          configuration_template,
+          trainvm::observe_hostd_linux_boot_authority());
+  const trainvm::HostdGpuAuthorization authorization =
+      trainvm::HostdGpuAuthorization::load_file(authorization_path);
+  authorization.require_matches(boot_configuration);
+  std::cout << "authorized " << trainvm::kHostdGpuAuthorizationApiVersion
+            << '\n';
+  return 0;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
   try {
-    const bool run =
-        (argc == 3 || argc == 5) &&
-        std::string_view(argv[1]) == "--config" &&
-        (argc == 3 ||
-         std::string_view(argv[3]) == "--publish-client-config");
+    const bool run = argc == 7 &&
+                     std::string_view(argv[1]) == "--config" &&
+                     std::string_view(argv[3]) == "--gpu-authorization" &&
+                     std::string_view(argv[5]) == "--publish-client-config";
     const bool validate =
         argc == 3 && std::string_view(argv[1]) == "--validate-config";
     const bool materialize =
         argc == 4 && std::string_view(argv[1]) == "--materialize-config";
-    if (!run && !validate && !materialize) {
+    const bool check_authorization =
+        argc == 4 &&
+        std::string_view(argv[1]) == "--check-gpu-authorization";
+    const bool authorize =
+        argc >= 5 && std::string_view(argv[1]) == "--authorize-gpu-start";
+    if (!run && !validate && !materialize && !check_authorization &&
+        !authorize) {
       std::cerr
           << "usage:\n"
           << "  trainvm-hostd --validate-config /absolute/hostd.json\n"
           << "  trainvm-hostd --materialize-config /absolute/template.json /absolute/runtime.json\n"
-          << "  trainvm-hostd --config /absolute/runtime.json [--publish-client-config /absolute/client.json]\n";
+          << "  trainvm-hostd --authorize-gpu-start /absolute/template.json /absolute/authorization.json (deny|cooperative_allowlist) [GPU-uuid ...]\n"
+          << "  trainvm-hostd --check-gpu-authorization /absolute/template.json /absolute/authorization.json\n"
+          << "  trainvm-hostd --config /absolute/runtime.json --gpu-authorization /absolute/authorization.json --publish-client-config /absolute/client.json\n";
       return 2;
     }
+    if (authorize)
+      return authorize_gpu_start(argc, argv);
+    if (check_authorization)
+      return check_gpu_authorization(argv[2], argv[3]);
     if (materialize)
       return materialize_configuration(argv[2], argv[3]);
     auto configuration = trainvm::HostdDaemonConfiguration::load_file(argv[2]);
@@ -117,9 +201,13 @@ int main(int argc, char **argv) {
                 << '\n';
       return 0;
     }
+    trainvm::HostdGpuAuthorization gpu_authorization =
+        trainvm::HostdGpuAuthorization::load_file(argv[4]);
+    gpu_authorization.require_matches(configuration);
     install_signal_handlers();
     const std::int64_t wake = configuration.serve_wake_interval_ns();
-    trainvm::HostdDaemonRuntime runtime(std::move(configuration));
+    trainvm::HostdDaemonRuntime runtime(configuration,
+                                        std::move(gpu_authorization));
     while (!runtime.ready() && stop_requested == 0) {
       const auto status = runtime.advance_startup();
       if (status.phase == trainvm::HostdStartupPhase::reconciling)
@@ -127,8 +215,8 @@ int main(int argc, char **argv) {
     }
     if (stop_requested != 0)
       return 0;
-    if (argc == 5) {
-      const std::filesystem::path client_path(argv[4]);
+    {
+      const std::filesystem::path client_path(argv[6]);
       const auto& document = configuration.document();
       const std::filesystem::path socket_path(document.socket.path);
       if (!client_path.is_absolute() ||
