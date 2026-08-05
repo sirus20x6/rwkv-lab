@@ -130,9 +130,9 @@ int main() {
       dashboard_root / "docs/experiment-vm/source-dispositions.rwkv-lab.v1.json";
   const auto scripts_catalog = trainvm::SourceDispositionCatalog::load_file(
       scripts_checked, std::nullopt, known_ids);
-  check(scripts_catalog.entries().size() == 128U,
-        "script disposition catalog covers all 128 reviewed scripts");
-  check(scripts_catalog.catalog_digest() == "sha256:907c98b21235d96fc109b22c2fa1646dcaed5b4b9c9d091c91c3bc69acf4fe46",
+  check(scripts_catalog.entries().size() == 129U,
+        "script disposition catalog covers all 129 reviewed scripts");
+  check(scripts_catalog.catalog_digest() == "sha256:e45a3d56f9498124fa0c717d30ac09a9e8ee188b2e5821f775d7b08339b12cb3",
         std::string("script catalog pins the exact reviewed canonical mapping") +
             " (computed " + scripts_catalog.catalog_digest() + ")");
   std::map<trainvm::SourceDispositionClass, std::size_t> classes;
@@ -157,13 +157,13 @@ int main() {
         "script catalog pins supervisor count");
   check(classes[trainvm::SourceDispositionClass::install_bootstrap] == 3U,
         "script catalog pins bootstrap count");
-  check(classes[trainvm::SourceDispositionClass::test_benchmark] == 3U,
+  check(classes[trainvm::SourceDispositionClass::test_benchmark] == 4U,
         "script catalog pins test/benchmark count");
   check(classes[trainvm::SourceDispositionClass::explicit_exclusion] == 1U,
         "script catalog pins explicit exclusion count");
   check(linked_script_sources == 65U && linked_workflow_ids.size() == 48U &&
-            scripts_catalog.entries().size() - linked_script_sources == 63U,
-        "script catalog pins 65 directly linked sources, 48 primary workflows, and 63 gaps");
+            scripts_catalog.entries().size() - linked_script_sources == 64U,
+        "script catalog pins 65 directly linked sources, 48 primary workflows, and 64 gaps");
   std::set<std::string> all_workflow_ids;
   for (const auto& entry : scripts_catalog.entries()) {
     all_workflow_ids.insert(entry.compatibility_workflow_ids.begin(),

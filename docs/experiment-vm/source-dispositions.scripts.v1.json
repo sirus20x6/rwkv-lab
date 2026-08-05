@@ -11,7 +11,7 @@
       ".sh"
     ]
   },
-  "source_tree_digest": "sha256:1df4d01692fb1eb1e0c5e1d351ba3da8c3b81efb9d77e0632798d2770cc46983",
+  "source_tree_digest": "sha256:0b114866e42489554347fa6dd548068a62ae719f8991409a39f815259f983ef3",
   "entries": [
     {
       "source_path": "scripts/apply_qwen36_civitai_joy_recaptions.py",
@@ -634,6 +634,20 @@
       "compatibility_workflow_ids": [
         "scoring.i1-deepghs-classification"
       ]
+    },
+    {
+      "source_path": "scripts/classify_native_ci_changes.py",
+      "class": "test_benchmark",
+      "canonical_entry_point": "python scripts/classify_native_ci_changes.py --base BASE --head HEAD",
+      "effects": [
+        "read_source",
+        "subprocess",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:e16bd7c43d022b5e2c2d36d9198fc1805b75622ce7ecce709b9c588336e95e97",
+      "language": "python"
     },
     {
       "source_path": "scripts/combine_vision_manifests.py",

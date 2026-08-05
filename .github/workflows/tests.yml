@@ -281,27 +281,90 @@ jobs:
           path: evidence-go.txt
           if-no-files-found: warn
 
+  # Decide how much native work this change honestly needs. The classifier is
+  # fail-closed: an unfamiliar path selects the full suite, never a skip.
+  # Pushes to main always run full native acceptance; tiering is only a PR
+  # turnaround optimization.
+  native-change-scope:
+    name: Native change scope
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.scope.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: scope
+        name: Classify changed paths (fail closed)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # pipefail matters here rather than being boilerplate. GitHub runs
+          # this with `bash -e`, not `-o pipefail`, so a crashed classifier
+          # piped into tee would exit 0, emit no `mode=` line, and leave the
+          # output empty -- which reads as "not full" downstream and would have
+          # quietly demoted the tier. The classifier failing must be red.
+          set -euo pipefail
+          mkdir -p evidence
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            python scripts/classify_native_ci_changes.py \
+              --base "$BASE_SHA" --head "$HEAD_SHA" \
+              --github-output "$GITHUB_OUTPUT" | tee evidence/native-change-scope.json
+          else
+            receipt='{"api_version":"trainvm.native-ci-change-scope/v1","mode":"full","paths":[{"mode":"full","path":"<push-to-main>","reason":"main integration always runs full native acceptance"}]}'
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            echo "$receipt" | tee evidence/native-change-scope.json
+          fi
+          # The job output is a string a later `if:` compares against; assert
+          # it is one of the three known values rather than trusting that it is.
+          emitted="$(grep '^mode=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)"
+          case "$emitted" in
+            none|catalog|full) echo "selected native tier: $emitted" ;;
+            *) echo "classifier emitted no usable mode ($emitted)" >&2; exit 1 ;;
+          esac
+      - name: Publish classification receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-native-change-scope
+          path: evidence/
+          if-no-files-found: error
+
   # TrainVM needs GCC 16 with -freflection (C++26 P2996) and a set of
   # dependencies no stock image provides together. The job builds its own
   # toolchain image from .github/docker/trainvm-ci.Dockerfile and caches the
   # layers, so it needs no registry, no package permissions, and no
-  # self-hosted runner. Native regressions are visible on every PR.
+  # self-hosted runner. Every PR either runs the full suite, builds the real
+  # CLI for catalog/adapter-contract validation, or publishes a fail-closed
+  # receipt proving that its paths are covered by another job.
   #
   # Building rather than pulling is deliberate: a registry image has to be
   # published, made visible to this repository, and kept in step with the
   # Dockerfile. Every one of those is a way for CI to drift from the source it
   # claims to test. The cache makes the cost a first-run one.
   native:
+    # Keep the check name stable for branch-protection rules; the selected mode
+    # is recorded in the scope/timing artifacts and build-step log.
     name: TrainVM native (ctest)
+    needs: native-change-scope
     runs-on: ubuntu-latest
     steps:
+      - name: No native build required
+        if: ${{ needs.native-change-scope.outputs.mode == 'none' }}
+        run: echo 'All changed paths are covered by the Python, schema, or Go jobs.'
+
       - uses: actions/checkout@v4
+        if: ${{ needs.native-change-scope.outputs.mode != 'none' }}
 
       - uses: docker/setup-buildx-action@v3
+        if: ${{ needs.native-change-scope.outputs.mode != 'none' }}
 
       # The Dockerfile ends in a smoke test over the whole toolchain contract,
       # so a broken image fails here rather than as an unexplained red suite.
       - name: Build toolchain image
+        if: ${{ needs.native-change-scope.outputs.mode != 'none' }}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -310,6 +373,18 @@ jobs:
           tags: trainvm-ci:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Object compilation happens after docker build, so BuildKit's layer
+      # cache cannot help it. Restore a bounded compiler cache separately.
+      - name: Restore native compiler cache
+        if: ${{ needs.native-change-scope.outputs.mode != 'none' }}
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/trainvm-ccache
+          key: trainvm-ccache-v1-${{ runner.os }}-${{ hashFiles('.github/docker/trainvm-ci.Dockerfile') }}-${{ github.sha }}
+          restore-keys: |
+            trainvm-ccache-v1-${{ runner.os }}-${{ hashFiles('.github/docker/trainvm-ci.Dockerfile') }}-
 
       # The source is copied into the container rather than built in the mount:
       # the live-stack E2E requires an authority directory whose whole ancestry
@@ -347,19 +422,66 @@ jobs:
       # and checked by scripts/validate_native_ci_exclusions.py in the
       # schema-golden job, so it cannot grow without a stated reason.
       - name: State which suites this job does not run
+        if: ${{ needs.native-change-scope.outputs.mode != 'none' && needs.native-change-scope.outputs.mode != 'catalog' }}
         run: python scripts/validate_native_ci_exclusions.py
 
-      - name: Build and test
+      - name: Build and validate selected native tier
+        if: ${{ needs.native-change-scope.outputs.mode != 'none' }}
+        env:
+          NATIVE_CI_MODE: ${{ needs.native-change-scope.outputs.mode }}
         run: |
-          docker run --rm -v "$PWD":/w:ro trainvm-ci:ci bash -euo pipefail -c '
+          mkdir -p "${RUNNER_TEMP}/trainvm-ccache" evidence
+          chmod 0777 "${RUNNER_TEMP}/trainvm-ccache" evidence
+          docker run --rm \
+            -e NATIVE_CI_MODE \
+            -e CCACHE_DIR=/ccache \
+            -e CCACHE_BASEDIR=/build \
+            -e CCACHE_COMPILERCHECK=content \
+            -e CCACHE_MAXSIZE=1G \
+            -v "${RUNNER_TEMP}/trainvm-ccache":/ccache \
+            -v "$PWD":/w:ro \
+            -v "$PWD/evidence":/evidence \
+            trainvm-ci:ci bash -euo pipefail -c '
+            started=$(date +%s)
             cp -a /w /build && chown -R root:root /build && cd /build
-            cmake -S trainvm -B b -G Ninja -DCMAKE_BUILD_TYPE=Debug
-            cmake --build b -j "$(nproc)"
+            ccache --zero-stats
+            cmake -S trainvm -B b -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+              -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+            cmake --build b --target trainvm -j "$(nproc)"
             ./b/trainvm validate-catalog \
               /build/docs/experiment-vm/compatibility-workflows.v1.json /build
-            ctest --test-dir b -j 4 --output-on-failure \
-              -E "^(hostd_linux_session_authority_tests|host_resources_tests|trainvm_dashboard_live_e2e|rwkv_lab_worker_artifact)$"
+            PYTHONPATH=/build/src /opt/venv/bin/python \
+              trainvm/tests/verify_rwkv_lab_worker_contract.py ./b/trainvm
+            PYTHONPATH=/build/src /opt/venv/bin/python \
+              trainvm/tests/verify_rwkv_lab_runtime_requirements.py ./b/trainvm
+            # Written as "not catalog" rather than "is full" on purpose: every
+            # comparison that decides to do LESS work is spelled against the
+            # narrow tier, so an unexpected mode string buys the full suite.
+            if [[ "$NATIVE_CI_MODE" != "catalog" ]]; then
+              cmake --build b -j "$(nproc)"
+              ctest --test-dir b -j 4 --output-on-failure \
+                -E "^(hostd_linux_session_authority_tests|host_resources_tests|trainvm_dashboard_live_e2e|rwkv_lab_worker_artifact)$"
+            fi
+            ccache --show-stats > /evidence/ccache.txt
+            elapsed=$(($(date +%s) - started))
+            printf "{\"api_version\":\"trainvm.native-ci-timing/v1\",\"elapsed_seconds\":%s,\"mode\":\"%s\"}\n" \
+              "$elapsed" "$NATIVE_CI_MODE" > /evidence/native-ci-timing.json
           '
+
+      - name: Save native compiler cache
+        if: ${{ success() && needs.native-change-scope.outputs.mode != 'none' && steps.ccache-restore.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/trainvm-ccache
+          key: trainvm-ccache-v1-${{ runner.os }}-${{ hashFiles('.github/docker/trainvm-ci.Dockerfile') }}-${{ github.sha }}
+
+      - name: Publish native timing and cache evidence
+        if: ${{ always() && needs.native-change-scope.outputs.mode != 'none' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-native-${{ needs.native-change-scope.outputs.mode }}
+          path: evidence/
+          if-no-files-found: warn
 
   # GPU tests share one device. The concurrency group is intentionally global
   # rather than per-ref, so two branches cannot run CUDA suites at the same
