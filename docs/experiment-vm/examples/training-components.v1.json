@@ -48,6 +48,30 @@
       "reference_implementation": true
     },
     {
+      "key": {"category": "model_loader", "name": "hf_multimodal", "version": "2.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.model_loader.hf_multimodal.v2",
+      "model_families": ["transformer", "vision"],
+      "required_capabilities": ["model_loader.hf_multimodal.v2"],
+      "configuration": [
+        {"name": "model_path", "type": "path", "required": true},
+        {"name": "checkpoint_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "revision", "type": "string", "required": false, "default": "main"},
+        {"name": "local_files_only", "type": "boolean", "required": false, "default": true},
+        {"name": "trust_remote_code", "type": "boolean", "required": false, "default": false},
+        {"name": "attention_implementation", "type": "enumeration", "required": false, "default": "sdpa", "values": ["eager", "flash_attention_2", "sdpa"]},
+        {"name": "experts_implementation", "type": "enumeration", "required": false, "default": "auto", "values": ["auto", "grouped_mm"]},
+        {"name": "quantization", "type": "enumeration", "required": false, "default": "none", "values": ["4bit", "8bit", "none"]},
+        {"name": "exact_checkpoint", "type": "boolean", "required": false, "default": true}
+      ],
+      "state": [
+        {"name": "base_checkpoint_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "load_receipt_digest", "type": "string", "required": true, "string_format": "sha256_digest"}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
       "key": {"category": "trainability", "name": "full", "version": "1.0.0"},
       "backend": "python",
       "implementation": "rwkv_lab.trainability.full.v1",
@@ -908,6 +932,25 @@
       "model_families": ["*"],
       "required_capabilities": ["qualitative_sample.fixed_held_out.v2"],
       "configuration": [
+        {"name": "identity_field", "type": "string", "required": true},
+        {"name": "sample_count", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000, "unit": "samples"}
+      ],
+      "state": [
+        {"name": "identities_digest", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "selector_digest", "type": "string", "required": true, "string_format": "sha256_digest"}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "qualitative_sample", "name": "fixed_manifest", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.qualitative_sample.fixed_manifest.v1",
+      "model_families": ["*"],
+      "required_capabilities": ["qualitative_sample.fixed_manifest.v1"],
+      "configuration": [
+        {"name": "manifest_name", "type": "string", "required": true},
+        {"name": "manifest_sha256", "type": "string", "required": true, "string_format": "sha256_digest"},
         {"name": "identity_field", "type": "string", "required": true},
         {"name": "sample_count", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000, "unit": "samples"}
       ],

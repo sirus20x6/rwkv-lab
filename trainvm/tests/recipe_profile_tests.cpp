@@ -337,7 +337,7 @@ void checked_in_qwen_example_expands_without_source_changes() {
   if (!input) throw std::runtime_error("could not open recipe instance fixture");
   const auto expanded = registry.expand_json(nlohmann::json::parse(input));
   check(expanded.recipe ==
-            trainvm::RecipeKey{.name = "hf_multimodal_sft", .version = "1"},
+            trainvm::RecipeKey{.name = "hf_multimodal_sft", .version = "2"},
         "compact Qwen instance selects the exact versioned recipe");
   check(expanded.effective_overrides.at("trainability.lora_rank") == 256 &&
             expanded.effective_overrides.at(
