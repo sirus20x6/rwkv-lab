@@ -448,6 +448,42 @@ func TestTrainVMDescriptorComposerRoundTripsInBrowser(t *testing.T) {
 	}
 }
 
+func TestTrainVMRecipeComposerUsesCanonicalAuthorRunContract(t *testing.T) {
+	assets := Static()
+	index, err := fs.ReadFile(assets, "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipes, err := fs.ReadFile(assets, "trainvm-recipes.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(index), `id="vm-recipe-composer"`) ||
+		!strings.Contains(string(index), `/static/trainvm-recipes.js`) {
+		t.Fatal("descriptor-driven recipe composer is not mounted")
+	}
+	for _, required := range []string{
+		`trainvm.author-run/v1`, `trainvm.recipe-instance/v1`,
+		`/api/trainvm/recipe-profiles`, `/api/trainvm/author-runs`,
+		`request_document: source`, `source_format: "json"`, `dry_run: dryRun`,
+		`application/x-ndjson`, `profile.overrides || []`,
+		`profile?.compatibility || []`, `field.minimum`, `field.maximum`,
+		`recipe_expansion_json`, `effective-value provenance`,
+		`change from previous canonical preview`, `exactImportedDocument`,
+		`compact document contains an unknown recipe override`,
+		`preview.source !== source`,
+	} {
+		if !strings.Contains(string(recipes), required) {
+			t.Fatalf("TrainVM recipe composer is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"qwen", "rwkv", "mageflow", "transformer"} {
+		if strings.Contains(strings.ToLower(string(recipes)), forbidden) {
+			t.Fatalf("generic recipe composer contains family-specific branch %q", forbidden)
+		}
+	}
+}
+
 func TestTrainVMPlanDiffCreatesExplicitImmutableRevisionFork(t *testing.T) {
 	assets := Static()
 	index, err := fs.ReadFile(assets, "index.html")

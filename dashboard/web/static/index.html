@@ -171,6 +171,10 @@
             <button class="btn sm" id="vm-submit" type="button" disabled>create queued run</button>
             <span id="vm-editor-state" class="sub">open to load schema</span>
           </div>
+          <details class="vm-component-library" id="vm-recipe-library" open>
+            <summary>training recipes <span id="vm-recipe-registry-state">authority registry not loaded</span></summary>
+            <div id="vm-recipe-composer"><div class="empty">open the editor to load exact recipe profiles</div></div>
+          </details>
           <details class="vm-component-library" open>
             <summary>registered operations <span id="vm-operation-registry-state">authority registry not loaded</span></summary>
             <div id="vm-operation-composer"><div class="empty">open the editor to load the authority registry</div></div>
@@ -395,6 +399,7 @@
 
   <script src="/static/app.js"></script>
   <script src="/static/trainvm-editor.js"></script>
+  <script src="/static/trainvm-recipes.js"></script>
   <script src="/static/pixi-glue.js"></script>
 </body>
 </html>

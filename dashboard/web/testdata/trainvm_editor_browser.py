@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import copy
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -124,6 +125,47 @@ OPERATIONS = {
     ],
 }
 
+
+def recipe_profile(name: str, version: str = "1") -> dict[str, object]:
+    template = copy.deepcopy(EXAMPLE)
+    return {
+        "key": {"name": name, "version": version},
+        "description": f"Generic browser fixture for {name}.",
+        "template_document": template,
+        "overrides": [
+            {"domain": "model", "name": "model.path", "type": "path", "target": "/spec/parameters/source_config/value", "required": True},
+            {"domain": "data", "name": "data.manifest", "type": "path", "target": "/spec/parameters/cache_directory/value", "required": True},
+            {"domain": "trainability", "name": "trainability.rank", "type": "integer", "target": "/spec/parameters/target_step/value", "required": False, "minimum": 1, "maximum": 4096},
+            {"domain": "optimizer", "name": "optimizer.learning_rate", "type": "number", "target": "/spec/controls/catalog/learning_rate/default", "required": False, "minimum": 1e-8, "maximum": 0.1},
+            {"domain": "schedule", "name": "schedule.maximum_steps", "type": "integer", "target": "/spec/parameters/final_step/value", "required": False, "minimum": 1, "maximum": 10_000_000},
+            {"domain": "precision", "name": "precision.mode", "type": "enumeration", "target": "/spec/controls/catalog/mixed_precision/default", "required": False, "values": ["bf16", "fp16"]},
+            {"domain": "evaluation", "name": "evaluation.every", "type": "integer", "target": "/spec/controls/catalog/eval_every/default", "required": False, "minimum": 1, "maximum": 100_000},
+            {"domain": "checkpointing", "name": "checkpointing.enabled", "type": "boolean", "target": "/spec/resources/accelerators/exclusive", "required": False},
+            {"domain": "resources", "name": "resources.gpu_memory_gib", "type": "number", "target": "/spec/resources/accelerators/minimum_memory_gib", "required": False, "minimum": 24, "maximum": 192},
+            {"domain": "profiling", "name": "profiling.enabled", "type": "boolean", "target": "/spec/resources/accelerators/exclusive", "required": False},
+            {"domain": "controls", "name": "controls.caption_dropout", "type": "number", "target": "/spec/controls/catalog/caption_dropout/default", "required": False, "minimum": 0, "maximum": 1},
+        ],
+        "compatibility": [{
+            "fields": ["precision.mode", "resources.gpu_memory_gib"],
+            "allowed": [["bf16", 48], ["fp16", 64]],
+            "description": "Only measured precision/memory tuples are allowed.",
+        }],
+    }
+
+
+RECIPES = {
+    "api_version": "trainvm.recipe-profiles/v1",
+    "default_registry_path": "/etc/trainvm/recipe-profiles.json",
+    "registry_digest": "sha256:" + "a" * 64,
+    "registry_path": "/etc/trainvm/recipe-profiles.json",
+    "recipes": [
+        recipe_profile("hf_multimodal_sft"),
+        recipe_profile("mageflow_flow_matching"),
+        recipe_profile("rwkv_language_model"),
+        recipe_profile("transformer_language_model"),
+    ],
+}
+
 HTML = """<!doctype html><html><body>
 <details id="trainvm-authoring">
   <button id="vm-load-example"></button><button id="vm-compile"></button>
@@ -131,10 +173,11 @@ HTML = """<!doctype html><html><body>
   <button id="vm-submit" disabled></button><span id="vm-editor-state"></span>
   <span id="vm-operation-registry-state"></span><div id="vm-operation-composer"></div>
   <span id="vm-component-registry-state"></span><div id="vm-component-composer"></div>
+  <span id="vm-recipe-registry-state"></span><div id="vm-recipe-composer"></div>
   <div id="vm-schema-form"></div><textarea id="vm-json-source"></textarea>
   <button id="vm-apply-json"></button><div id="vm-diagnostics"></div>
   <div id="vm-plan-preview"></div><div id="vm-plan-diff"></div>
-</details><script src="/trainvm-editor.js"></script></body></html>"""
+</details><script src="/trainvm-editor.js"></script><script src="/trainvm-recipes.js"></script></body></html>"""
 
 
 def compact(value: object) -> bytes:
@@ -147,6 +190,7 @@ def tuple_identity(*parts: str) -> str:
 
 class Handler(BaseHTTPRequestHandler):
     submitted: dict[str, object] | None = None
+    authored: list[dict[str, object]] = []
 
     def log_message(self, *_: object) -> None:
         pass
@@ -174,6 +218,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path == "/trainvm-recipes.js":
+            body = (WEB_ROOT / "static/trainvm-recipes.js").read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/javascript")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         elif self.path == "/api/trainvm/schema":
             self.send_json(SCHEMA)
         elif self.path == "/api/trainvm/example":
@@ -186,6 +237,9 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/trainvm/operations":
             raw = compact(OPERATIONS)
             self.send_json({"schema": OPERATIONS, "schema_hash": "sha256:" + hashlib.sha256(raw).hexdigest()})
+        elif self.path == "/api/trainvm/recipe-profiles":
+            raw = compact(RECIPES)
+            self.send_json({"schema": RECIPES, "schema_hash": "sha256:" + hashlib.sha256(raw).hexdigest()})
         else:
             self.send_error(404)
 
@@ -220,6 +274,45 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                 }
             )
+        elif self.path == "/api/trainvm/author-runs":
+            request_document = json.loads(payload["request_document"])
+            type(self).authored.append(payload)
+            overrides = request_document["source"]["recipe"]["instance"]["overrides"]
+            plan = {
+                "experiment": request_document["source"]["recipe"]["instance"]["recipe"],
+                "run_identity": request_document["source"]["recipe"]["instance"]["run_identity"],
+                "overrides": overrides,
+            }
+            provenance = {
+                f"/effective/{name}": {"kind": "instance_override", "reference": name}
+                for name in overrides
+            }
+            updates = [
+                {"stage": "validating", "detail": "closed document accepted", "terminal": False, "dry_run": payload["dry_run"]},
+                {"stage": "resolving", "detail": "exact recipe expanded", "terminal": False, "dry_run": payload["dry_run"]},
+                {"stage": "locking_inputs", "detail": "content identities locked", "terminal": False, "dry_run": payload["dry_run"]},
+                {"stage": "preflight", "detail": "passive checks passed", "terminal": False, "dry_run": payload["dry_run"]},
+                *([] if payload["dry_run"] else [
+                    {"stage": "provisioning", "detail": "workspace provisioned", "terminal": False, "dry_run": False},
+                    {"stage": "submitting", "detail": "journal submission", "terminal": False, "dry_run": False},
+                ]),
+                {
+                    "stage": "failed" if (not payload["dry_run"] and request_document["reason"] == "fail launch") else "complete",
+                    "detail": "synthetic launch failure" if (not payload["dry_run"] and request_document["reason"] == "fail launch") else ("canonical dry-run complete" if payload["dry_run"] else "queued"),
+                    "plan_hash": "sha256:recipe-browser", "canonical_plan_json": json.dumps(plan),
+                    "recipe_expansion_json": json.dumps({"effective_overrides": overrides, "provenance": provenance}),
+                    "preflight_receipt_json": json.dumps({"passed": True}),
+                    "diagnostics": ([{"severity": "error", "path": "/submission", "message": "synthetic launch failure"}]
+                                    if (not payload["dry_run"] and request_document["reason"] == "fail launch") else []),
+                    "run": {"run_id": "browser-recipe-run"}, "terminal": True, "dry_run": payload["dry_run"],
+                },
+            ]
+            body = b"".join(json.dumps(update).encode() + b"\n" for update in updates)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self.send_error(404)
 
@@ -247,6 +340,73 @@ def main() -> None:
             page.wait_for_function(
                 "document.querySelector('#vm-editor-state').textContent.includes('valid')"
             )
+            page.wait_for_function(
+                "document.querySelectorAll('#vm-recipe-select option').length === 4"
+            )
+
+            authored_families = [
+                "hf_multimodal_sft", "mageflow_flow_matching",
+                "rwkv_language_model", "transformer_language_model",
+            ]
+            for index, family in enumerate(authored_families):
+                page.select_option("#vm-recipe-select", tuple_identity(family, "1"))
+                page.locator("#vm-recipe-run").fill(f"browser-{family.replace('_', '-')}")
+                page.locator("#vm-recipe-author").fill("browser-agent")
+                page.locator("#vm-recipe-reason").fill(f"author {family}")
+                page.locator("#vm-recipe-reason").blur()
+                page.wait_for_function("!document.querySelector('#vm-recipe-preview').disabled")
+                page.click("#vm-recipe-preview")
+                page.wait_for_function(
+                    "document.querySelector('#vm-recipe-request-state').textContent.includes('ready')"
+                )
+                exported = json.loads(page.locator("#vm-recipe-source").input_value())
+                assert exported["source"]["recipe"]["instance"]["recipe"]["name"] == family
+                assert exported["source"]["recipe"]["registry_path"] == "/etc/trainvm/recipe-profiles.json"
+                assert exported["source"]["recipe"]["instance"]["overrides"]["model.path"]
+                assert page.locator(".vm-recipe-domain").count() == 11
+                assert set(page.locator(".vm-recipe-domain .vm-editor-heading").all_inner_texts()) == {
+                    "model", "data", "trainability", "optimizer", "schedule", "precision",
+                    "evaluation", "checkpointing", "resources", "profiling", "controls",
+                }
+                assert page.locator(".vm-recipe-provenance.override").count() >= 2
+                assert page.locator(".vm-recipe-provenance.template").count() >= 1
+                precision = page.locator('[data-vm-recipe-field="precision.mode"]')
+                assert precision.locator("option").all_inner_texts() == ["bf16"]
+                if index == 0:
+                    original = page.locator("#vm-recipe-source").input_value()
+                    page.click("#vm-recipe-import")
+                    assert json.loads(page.locator("#vm-recipe-source").input_value()) == json.loads(original)
+                    rejected = json.loads(original)
+                    rejected["unknown"] = True
+                    page.locator("#vm-recipe-source").fill(json.dumps(rejected))
+                    page.click("#vm-recipe-import")
+                    assert "import rejected" in page.locator("#vm-recipe-request-state").inner_text()
+                    page.locator("#vm-recipe-source").fill(original)
+                    page.click("#vm-recipe-import")
+                    page.click("#vm-recipe-preview")
+                    page.wait_for_function(
+                        "document.querySelector('#vm-recipe-request-state').textContent.includes('ready')"
+                    )
+
+            assert len(Handler.authored) >= 5
+            page.click("#vm-recipe-launch")
+            page.wait_for_function(
+                "document.querySelector('#vm-recipe-request-state').textContent.includes('queued')"
+            )
+            assert Handler.authored[-1]["dry_run"] is False
+            assert "submitting" in page.locator("#vm-recipe-preview-panel").inner_text()
+
+            page.locator("#vm-recipe-reason").fill("fail launch")
+            page.locator("#vm-recipe-reason").blur()
+            page.click("#vm-recipe-preview")
+            page.wait_for_function(
+                "document.querySelector('#vm-recipe-request-state').textContent.includes('ready')"
+            )
+            page.click("#vm-recipe-launch")
+            page.wait_for_function(
+                "document.querySelector('#vm-recipe-request-state').textContent.includes('failed')"
+            )
+            assert "synthetic launch failure" in page.locator("#vm-recipe-preview-panel").inner_text()
             operation_select = page.locator("#vm-operation-select")
             assert operation_select.locator("option").count() == 2
 

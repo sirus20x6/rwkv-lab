@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,11 +19,14 @@ import (
 const trainVMDescriptorLimit = 1 << 20
 
 type trainVMDescriptorSpec struct {
-	provider   string
-	version    string
-	apiVersion string
-	listField  string
-	validate   func([]any) error
+	provider               string
+	version                string
+	apiVersion             string
+	listField              string
+	requiredEnvelopeFields []string
+	optionalEnvelopeFields []string
+	maximumBytes           int
+	validate               func([]any) error
 }
 
 var (
@@ -36,6 +40,13 @@ var (
 		apiVersion: "trainvm.operations/v1", listField: "operations",
 		validate: validateOperationDescriptors,
 	}
+	trainVMRecipeProfilesDescriptor = trainVMDescriptorSpec{
+		provider: "trainvm.recipe-profiles", version: "1.0.0",
+		apiVersion: "trainvm.recipe-profiles/v1", listField: "recipes",
+		requiredEnvelopeFields: []string{"default_registry_path", "registry_digest", "registry_path"},
+		maximumBytes:           16 << 20,
+		validate:               validateRecipeProfileDescriptors,
+	}
 )
 
 func (s *Server) handleTrainVMTrainingComponents(w http.ResponseWriter, r *http.Request) {
@@ -44,6 +55,10 @@ func (s *Server) handleTrainVMTrainingComponents(w http.ResponseWriter, r *http.
 
 func (s *Server) handleTrainVMOperations(w http.ResponseWriter, r *http.Request) {
 	s.handleTrainVMDescriptor(w, r, trainVMOperationsDescriptor)
+}
+
+func (s *Server) handleTrainVMRecipeProfiles(w http.ResponseWriter, r *http.Request) {
+	s.handleTrainVMDescriptor(w, r, trainVMRecipeProfilesDescriptor)
 }
 
 func (s *Server) handleTrainVMDescriptor(w http.ResponseWriter, r *http.Request,
@@ -75,19 +90,32 @@ func (s *Server) handleTrainVMDescriptor(w http.ResponseWriter, r *http.Request,
 func validateTrainVMDescriptor(result trainvmstore.DescriptorResult,
 	spec trainVMDescriptorSpec) (map[string]any, error) {
 	raw := []byte(result.SchemaJSON)
-	if len(raw) == 0 || len(raw) > trainVMDescriptorLimit {
+	maximum := spec.maximumBytes
+	if maximum == 0 {
+		maximum = trainVMDescriptorLimit
+	}
+	if len(raw) == 0 || len(raw) > maximum {
 		return nil, fmt.Errorf("descriptor size is outside the authority bound")
 	}
 	decoded, err := decodeCanonicalJSONObject(raw)
 	if err != nil {
 		return nil, err
 	}
-	if !exactObjectKeys(decoded, []string{"api_version", spec.listField}, nil) {
+	required := append([]string{"api_version", spec.listField}, spec.requiredEnvelopeFields...)
+	if !exactObjectKeys(decoded, required, spec.optionalEnvelopeFields) {
 		return nil, fmt.Errorf("descriptor top-level envelope is not exact")
 	}
 	apiVersion, ok := decoded["api_version"].(string)
 	if !ok || apiVersion != spec.apiVersion {
 		return nil, fmt.Errorf("descriptor api_version is not the requested contract")
+	}
+	if registryPath, present := decoded["registry_path"]; present {
+		path, ok := canonicalDescriptorPath(registryPath)
+		defaultPath, defaultOK := canonicalDescriptorPath(decoded["default_registry_path"])
+		registryDigest, digestOK := decoded["registry_digest"].(string)
+		if !ok || !defaultOK || defaultPath != path || !digestOK || !canonicalSHA256(registryDigest) {
+			return nil, fmt.Errorf("descriptor recipe registry authority metadata is invalid")
+		}
 	}
 	items, ok := decoded[spec.listField].([]any)
 	if !ok {
@@ -98,11 +126,222 @@ func validateTrainVMDescriptor(result trainvmstore.DescriptorResult,
 			return nil, err
 		}
 	}
+	if registryDigest, present := decoded["registry_digest"].(string); present {
+		canonicalRegistry, err := canonicalJSONBytes(map[string]any{
+			"api_version":  decoded["api_version"],
+			spec.listField: items,
+		})
+		if err != nil || registryDigest != fmt.Sprintf("sha256:%x", sha256.Sum256(canonicalRegistry)) {
+			return nil, fmt.Errorf("descriptor recipe registry digest does not match its canonical profiles")
+		}
+	}
 	digest := fmt.Sprintf("sha256:%x", sha256.Sum256(raw))
 	if result.SchemaHash != digest {
 		return nil, fmt.Errorf("descriptor identity does not match its canonical bytes")
 	}
 	return decoded, nil
+}
+
+func canonicalDescriptorPath(value any) (string, bool) {
+	path, ok := value.(string)
+	return path, ok && path != "" && path != string(filepath.Separator) && len(path) <= 4096 &&
+		filepath.IsAbs(path) && filepath.Clean(path) == path && !strings.Contains(path, "\x00")
+}
+
+func canonicalSHA256(value string) bool {
+	if len(value) != 71 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	for _, character := range value[7:] {
+		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validateRecipeProfileDescriptors(items []any) error {
+	if len(items) > 256 {
+		return fmt.Errorf("recipe profile count exceeds its bound")
+	}
+	previous := ""
+	for _, item := range items {
+		profile, ok := item.(map[string]any)
+		if !ok || !exactObjectKeys(profile,
+			[]string{"key", "overrides", "template_document"},
+			[]string{"compatibility", "description"}) {
+			return fmt.Errorf("recipe profile descriptor has the wrong shape")
+		}
+		key, ok := profile["key"].(map[string]any)
+		if !ok || !exactObjectKeys(key, []string{"name", "version"}, nil) {
+			return fmt.Errorf("recipe profile key has the wrong shape")
+		}
+		name, nameOK := trainingSymbolicIdentity(key["name"], false, false)
+		version, versionOK := trainingSymbolicIdentity(key["version"], false, true)
+		identity := name + "\x00" + version
+		if !nameOK || !versionOK || previous != "" && identity <= previous {
+			return fmt.Errorf("recipe profile identities are malformed or noncanonical")
+		}
+		previous = identity
+		if description, present := profile["description"]; present {
+			text, ok := description.(string)
+			if !ok || text == "" || len(text) > 4096 {
+				return fmt.Errorf("recipe profile description is malformed")
+			}
+		}
+		if _, ok := profile["template_document"].(map[string]any); !ok {
+			return fmt.Errorf("recipe template document is not an object")
+		}
+		rawOverrides, ok := profile["overrides"].([]any)
+		if !ok || len(rawOverrides) > 256 {
+			return fmt.Errorf("recipe override fields have the wrong type or exceed their bound")
+		}
+		fieldNames := make(map[string]bool, len(rawOverrides))
+		fields := make(map[string]map[string]any, len(rawOverrides))
+		previousField := ""
+		for _, raw := range rawOverrides {
+			field, ok := raw.(map[string]any)
+			if !ok || !exactObjectKeys(field,
+				[]string{"domain", "name", "required", "target", "type"},
+				[]string{"description", "maximum", "minimum", "values"}) {
+				return fmt.Errorf("recipe override field has the wrong shape")
+			}
+			fieldName, nameOK := recipeFieldName(field["name"])
+			_, domainOK := trainingSymbolicIdentity(field["domain"], false, false)
+			fieldType, typeOK := field["type"].(string)
+			target, targetOK := field["target"].(string)
+			_, requiredOK := field["required"].(bool)
+			if !nameOK || !domainOK || !typeOK ||
+				!oneOf(fieldType, "boolean", "integer", "number", "string", "path", "enumeration") ||
+				!targetOK || target == "" || len(target) > 4096 || target[0] != '/' || !requiredOK ||
+				previousField != "" && fieldName <= previousField {
+				return fmt.Errorf("recipe override identity, target, or type is invalid")
+			}
+			previousField, fieldNames[fieldName] = fieldName, true
+			fields[fieldName] = field
+			minimum, hasMinimum := finiteJSONNumber(field["minimum"])
+			maximum, hasMaximum := finiteJSONNumber(field["maximum"])
+			if (hasMinimum || hasMaximum) && fieldType != "integer" && fieldType != "number" ||
+				hasMinimum && hasMaximum && minimum > maximum {
+				return fmt.Errorf("recipe override bounds are invalid")
+			}
+			values, hasValues := field["values"]
+			if fieldType == "enumeration" {
+				rawValues, ok := values.([]any)
+				if !hasValues || !ok || len(rawValues) == 0 || len(rawValues) > 256 {
+					return fmt.Errorf("recipe enumeration values are invalid")
+				}
+				seenValues := make(map[string]bool, len(rawValues))
+				for _, value := range rawValues {
+					text, stringOK := value.(string)
+					encoded, err := json.Marshal(value)
+					if !stringOK || text == "" || len(text) > 192 || err != nil || seenValues[string(encoded)] {
+						return fmt.Errorf("recipe enumeration values are duplicate or unencodable")
+					}
+					seenValues[string(encoded)] = true
+				}
+				for index := 1; index < len(rawValues); index++ {
+					if rawValues[index-1].(string) >= rawValues[index].(string) {
+						return fmt.Errorf("recipe enumeration values are not canonical")
+					}
+				}
+			} else if hasValues {
+				return fmt.Errorf("non-enumeration recipe override carries values")
+			}
+		}
+		if compatibility, present := profile["compatibility"]; present {
+			rules, ok := compatibility.([]any)
+			if !ok || len(rules) > 128 {
+				return fmt.Errorf("recipe compatibility rules are invalid")
+			}
+			for _, raw := range rules {
+				rule, ok := raw.(map[string]any)
+				if !ok || !exactObjectKeys(rule, []string{"allowed", "fields"}, []string{"description"}) {
+					return fmt.Errorf("recipe compatibility rule has the wrong shape")
+				}
+				rawFields, fieldsOK := rule["fields"].([]any)
+				allowed, allowedOK := rule["allowed"].([]any)
+				if !fieldsOK || !allowedOK || len(rawFields) == 0 || len(rawFields) > 32 ||
+					len(allowed) == 0 || len(allowed) > 1024 {
+					return fmt.Errorf("recipe compatibility rule exceeds its bounds")
+				}
+				seenFields := make(map[string]bool, len(rawFields))
+				fieldOrder := make([]string, 0, len(rawFields))
+				for _, value := range rawFields {
+					name, ok := recipeFieldName(value)
+					if !ok || !fieldNames[name] || seenFields[name] {
+						return fmt.Errorf("recipe compatibility rule names an invalid field")
+					}
+					seenFields[name] = true
+					fieldOrder = append(fieldOrder, name)
+				}
+				for _, value := range allowed {
+					tuple, ok := value.([]any)
+					if !ok || len(tuple) != len(rawFields) {
+						return fmt.Errorf("recipe compatibility tuple has the wrong arity")
+					}
+					for index, tupleValue := range tuple {
+						if !recipeValueValid(fields[fieldOrder[index]], tupleValue) {
+							return fmt.Errorf("recipe compatibility tuple value has the wrong type or bound")
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func recipeValueValid(field map[string]any, value any) bool {
+	fieldType, _ := field["type"].(string)
+	switch fieldType {
+	case "boolean":
+		_, ok := value.(bool)
+		return ok
+	case "integer":
+		number, ok := finiteJSONNumber(value)
+		if !ok || math.Trunc(number) != number {
+			return false
+		}
+		minimum, hasMinimum := finiteJSONNumber(field["minimum"])
+		maximum, hasMaximum := finiteJSONNumber(field["maximum"])
+		return (!hasMinimum || number >= minimum) && (!hasMaximum || number <= maximum)
+	case "number":
+		number, ok := finiteJSONNumber(value)
+		if !ok {
+			return false
+		}
+		minimum, hasMinimum := finiteJSONNumber(field["minimum"])
+		maximum, hasMaximum := finiteJSONNumber(field["maximum"])
+		return (!hasMinimum || number >= minimum) && (!hasMaximum || number <= maximum)
+	case "string", "path":
+		text, ok := value.(string)
+		return ok && text != "" && len(text) <= 4096
+	case "enumeration":
+		text, ok := value.(string)
+		if !ok {
+			return false
+		}
+		for _, candidate := range field["values"].([]any) {
+			if candidate == text {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func recipeFieldName(value any) (string, bool) {
+	name, ok := value.(string)
+	if !ok || name == "" || len(name) > 192 || strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") {
+		return "", false
+	}
+	for _, part := range strings.Split(name, ".") {
+		if _, ok := trainingSymbolicIdentity(part, false, false); !ok {
+			return "", false
+		}
+	}
+	return name, true
 }
 
 // decodeCanonicalJSONObject rejects duplicate object keys and any JSON spelling
@@ -125,17 +364,24 @@ func decodeCanonicalJSONObject(raw []byte) (map[string]any, error) {
 	if !ok {
 		return nil, fmt.Errorf("descriptor is not an object")
 	}
+	canonicalBytes, err := canonicalJSONBytes(value)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(raw, canonicalBytes) {
+		return nil, fmt.Errorf("descriptor JSON is not canonical")
+	}
+	return object, nil
+}
+
+func canonicalJSONBytes(value any) ([]byte, error) {
 	var canonical bytes.Buffer
 	encoder := json.NewEncoder(&canonical)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(value); err != nil {
 		return nil, err
 	}
-	canonicalBytes := bytes.TrimSuffix(canonical.Bytes(), []byte("\n"))
-	if !bytes.Equal(raw, canonicalBytes) {
-		return nil, fmt.Errorf("descriptor JSON is not canonical")
-	}
-	return object, nil
+	return bytes.TrimSuffix(canonical.Bytes(), []byte("\n")), nil
 }
 
 func decodeUniqueJSONValue(decoder *json.Decoder) (any, error) {

@@ -502,6 +502,147 @@ func TestTrainVMTrainingComponentsComeFromNativeAuthority(t *testing.T) {
 	}
 }
 
+func TestTrainVMRecipeProfilesComeFromNativeAuthority(t *testing.T) {
+	registryDocument := canonicalTestJSON(t, map[string]any{
+		"api_version": "trainvm.recipe-profiles/v1", "recipes": []any{},
+	})
+	document := canonicalTestJSON(t, map[string]any{
+		"api_version":           "trainvm.recipe-profiles/v1",
+		"recipes":               []any{},
+		"registry_path":         "/etc/trainvm/recipe-profiles.json",
+		"default_registry_path": "/etc/trainvm/recipe-profiles.json",
+		"registry_digest":       fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(registryDocument))),
+	})
+	digest := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(document)))
+	commander := &fakeTrainVMCommander{descriptorResult: trainvmstore.DescriptorResult{
+		SchemaJSON: document, SchemaHash: digest,
+	}}
+	response := httptest.NewRecorder()
+	New(Config{Commander: commander}).Handler().ServeHTTP(response,
+		httptest.NewRequest(http.MethodGet, "/api/trainvm/recipe-profiles", nil))
+	if response.Code != http.StatusOK ||
+		commander.descriptor.Provider != "trainvm.recipe-profiles" ||
+		commander.descriptor.Version != "1.0.0" ||
+		!strings.Contains(response.Body.String(), `"api_version":"trainvm.recipe-profiles/v1"`) ||
+		!strings.Contains(response.Body.String(), `"registry_path":"/etc/trainvm/recipe-profiles.json"`) {
+		t.Fatalf("recipe-profile descriptor status=%d request=%#v body=%s",
+			response.Code, commander.descriptor, response.Body.String())
+	}
+}
+
+func TestTrainVMRecipeProfileDescriptorFailsClosed(t *testing.T) {
+	profile := func() map[string]any {
+		return map[string]any{
+			"key":               map[string]any{"name": "generic_train", "version": "1"},
+			"description":       "Generic training recipe.",
+			"template_document": map[string]any{"api_version": "trainvm.rwkv-lab/v1alpha1"},
+			"overrides": []any{
+				map[string]any{
+					"domain": "model", "name": "model.path", "required": true,
+					"target": "/spec/parameters/model/value", "type": "path",
+				},
+				map[string]any{
+					"domain": "precision", "name": "precision.mode", "required": false,
+					"target": "/spec/parameters/precision/value", "type": "enumeration",
+					"values": []any{"bf16", "fp8"},
+				},
+			},
+			"compatibility": []any{map[string]any{
+				"fields": []any{"precision.mode"}, "allowed": []any{[]any{"bf16"}, []any{"fp8"}},
+			}},
+		}
+	}
+	serve := func(document map[string]any) *httptest.ResponseRecorder {
+		encoded := canonicalTestJSON(t, document)
+		commander := &fakeTrainVMCommander{descriptorResult: trainvmstore.DescriptorResult{
+			SchemaJSON: encoded,
+			SchemaHash: fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(encoded))),
+		}}
+		response := httptest.NewRecorder()
+		New(Config{Commander: commander}).Handler().ServeHTTP(response,
+			httptest.NewRequest(http.MethodGet, "/api/trainvm/recipe-profiles", nil))
+		return response
+	}
+	registryDigest := func(recipes []any) string {
+		encoded := canonicalTestJSON(t, map[string]any{
+			"api_version": "trainvm.recipe-profiles/v1", "recipes": recipes,
+		})
+		return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(encoded)))
+	}
+	profiles := []any{profile()}
+	valid := map[string]any{
+		"api_version": "trainvm.recipe-profiles/v1", "recipes": profiles,
+		"registry_path":         "/etc/trainvm/recipe-profiles.json",
+		"default_registry_path": "/etc/trainvm/recipe-profiles.json",
+		"registry_digest":       registryDigest(profiles),
+	}
+	if response := serve(valid); response.Code != http.StatusOK {
+		t.Fatalf("valid recipe descriptor rejected: status=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, path := range []string{"/", "relative/recipes.json", "/etc//trainvm/recipes.json", "/etc/./trainvm/recipes.json", "/etc/trainvm/../recipes.json", "/etc/trainvm/recipes.json/.."} {
+		t.Run("hostile path "+strings.ReplaceAll(path, "/", "_"), func(t *testing.T) {
+			document := map[string]any{
+				"api_version": "trainvm.recipe-profiles/v1", "recipes": profiles,
+				"registry_path":         path,
+				"default_registry_path": path,
+				"registry_digest":       registryDigest(profiles),
+			}
+			if response := serve(document); response.Code != http.StatusBadGateway {
+				t.Fatalf("hostile registry path accepted: %q status=%d body=%s", path, response.Code, response.Body.String())
+			}
+		})
+	}
+	for name, document := range map[string]map[string]any{
+		"default path differs": {
+			"api_version": "trainvm.recipe-profiles/v1", "recipes": profiles,
+			"registry_path": "/etc/trainvm/recipe-profiles.json", "default_registry_path": "/etc/trainvm/other.json",
+			"registry_digest": registryDigest(profiles),
+		},
+		"digest differs": {
+			"api_version": "trainvm.recipe-profiles/v1", "recipes": profiles,
+			"registry_path": "/etc/trainvm/recipe-profiles.json", "default_registry_path": "/etc/trainvm/recipe-profiles.json",
+			"registry_digest": "sha256:" + strings.Repeat("0", 64),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if response := serve(document); response.Code != http.StatusBadGateway {
+				t.Fatalf("invalid registry metadata accepted: status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+	mutations := map[string]func(map[string]any){
+		"unknown field type": func(value map[string]any) {
+			value["overrides"].([]any)[0].(map[string]any)["type"] = "object"
+		},
+		"duplicate override": func(value map[string]any) {
+			value["overrides"] = append(value["overrides"].([]any),
+				value["overrides"].([]any)[1])
+		},
+		"unknown compatibility field": func(value map[string]any) {
+			value["compatibility"].([]any)[0].(map[string]any)["fields"] = []any{"missing.field"}
+		},
+		"wrong tuple arity": func(value map[string]any) {
+			value["compatibility"].([]any)[0].(map[string]any)["allowed"] = []any{[]any{"bf16", 80}}
+		},
+		"template is not an object": func(value map[string]any) { value["template_document"] = "unsafe" },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			value := profile()
+			mutate(value)
+			mutatedProfiles := []any{value}
+			if response := serve(map[string]any{
+				"api_version": "trainvm.recipe-profiles/v1", "recipes": mutatedProfiles,
+				"registry_path":         "/etc/trainvm/recipe-profiles.json",
+				"default_registry_path": "/etc/trainvm/recipe-profiles.json",
+				"registry_digest":       registryDigest(mutatedProfiles),
+			}); response.Code != http.StatusBadGateway {
+				t.Fatalf("invalid recipe descriptor accepted: status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestTrainVMTrainingComponentDescriptorNativeInvariants(t *testing.T) {
 	serve := func(t *testing.T, document map[string]any) *httptest.ResponseRecorder {
 		t.Helper()
