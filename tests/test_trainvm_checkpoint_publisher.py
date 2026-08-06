@@ -132,6 +132,7 @@ def test_checkpoint_is_copied_hashed_promoted_and_published(tmp_path: Path) -> N
             "fingerprint_algorithm": "manifest_sha256",
             "fingerprint": result.manifest_sha256,
             "parent_artifact_ids": ("base-model-1",),
+            "optimizer_step": 12,
             "wait": True,
         }
     ]

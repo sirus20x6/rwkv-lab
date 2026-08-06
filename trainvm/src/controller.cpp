@@ -241,13 +241,18 @@ void require_worker_observation_shape(const Event& event,
       });
   const std::string kind = event.payload.value("kind", std::string{});
   const bool eval_examples = kind == "eval_examples";
+  const bool checkpoint = kind == "checkpoint";
+  // Historical v1 checkpoint events predate stepped artifact publication and
+  // remain replayable, but cannot satisfy any provenance check that requires an
+  // authoritative step. The service requires the step on every new checkpoint.
   const bool fields_match =
       event.payload.size() == fields.size() + (eval_examples ? 1U : 0U) &&
       (!eval_examples ||
        (event.payload.contains("eval_examples_manifest") &&
         event.payload.at("eval_examples_manifest").is_object()));
   if (!fields_match ||
-      (eval_examples ? !event.optimizer_step : event.optimizer_step.has_value()) ||
+      (eval_examples ? !event.optimizer_step
+                     : (!checkpoint && event.optimizer_step.has_value())) ||
       !std::ranges::all_of(fields, [&](std::string_view field) {
         return event.payload.contains(std::string(field));
       }) ||

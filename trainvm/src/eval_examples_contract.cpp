@@ -364,6 +364,7 @@ void validate_eval_examples_gate_provenance(
         event.payload.value("artifact_id", std::string{}) ==
             manifest.checkpoint.artifact_id &&
         event.payload.value("kind", std::string{}) == "checkpoint" &&
+        event.optimizer_step == 0U &&
         event.payload.value("complete", false) &&
         event.payload.value("fingerprint_algorithm", std::string{}) ==
             "manifest_sha256" &&

@@ -546,6 +546,22 @@ class WorkerSession:
         wait: bool = True,
     ) -> int:
         parents = tuple(parent_artifact_ids)
+        stepped_artifact = kind in {
+            wire.ARTIFACT_KIND_CHECKPOINT,
+            wire.ARTIFACT_KIND_EVAL_EXAMPLES,
+        }
+        valid_optimizer_step = (
+            isinstance(optimizer_step, int)
+            and not isinstance(optimizer_step, bool)
+            and 0 <= optimizer_step < 1 << 64
+        )
+        if (stepped_artifact and not valid_optimizer_step) or (
+            not stepped_artifact and optimizer_step is not None
+        ):
+            raise WorkerSessionError(
+                "checkpoint and eval-examples artifacts require an optimizer step; "
+                "unstepped artifacts must omit it"
+            )
         identity = (
             logical_name,
             kind,

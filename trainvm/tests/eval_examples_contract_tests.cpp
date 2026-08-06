@@ -122,6 +122,7 @@ int main() {
   checkpoint.run_id = "run-1";
   checkpoint.node_id = "train";
   checkpoint.event_type = "artifact.published";
+  checkpoint.optimizer_step = 0U;
   checkpoint.payload = {{"artifact_id", "checkpoint-0"},
                         {"kind", "checkpoint"},
                         {"complete", true},
@@ -206,6 +207,14 @@ int main() {
             manifest, resolved_training, {wrong_digest, metric});
       },
       "wrong checkpoint manifest digest is rejected");
+  trainvm::Event wrong_checkpoint_step = checkpoint;
+  wrong_checkpoint_step.optimizer_step = 1U;
+  rejects(
+      [&] {
+        trainvm::validate_eval_examples_gate_provenance(
+            manifest, resolved_training, {wrong_checkpoint_step, metric});
+      },
+      "post-mutation checkpoint parent provenance is rejected");
   rejects(
       [&] {
         trainvm::validate_eval_examples_gate_provenance(

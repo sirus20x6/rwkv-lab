@@ -1329,6 +1329,7 @@ nlohmann::json invocation_resume_checkpoint(
   }
   if (!checkpoint || checkpoint->node_id != node_id ||
       checkpoint->attempt_id != resume->attempt_id ||
+      checkpoint->optimizer_step != pause->optimizer_step ||
       checkpoint->payload.value("kind", std::string{}) != "checkpoint" ||
       !checkpoint->payload.value("complete", false) ||
       checkpoint->payload.value("producer_node_id", std::string{}) != node_id ||
@@ -3364,6 +3365,7 @@ grpc::Status TrainVMService::record_worker_artifact(
     }
     const bool eval_examples =
         artifact.kind() == v1::ARTIFACT_KIND_EVAL_EXAMPLES;
+    const bool checkpoint = artifact.kind() == v1::ARTIFACT_KIND_CHECKPOINT;
     nlohmann::json eval_examples_document = nullptr;
     std::optional<EvalExamplesManifest> eval_examples_manifest;
     std::optional<WorkerInvocationSpec> eval_examples_invocation;
@@ -3425,10 +3427,11 @@ grpc::Status TrainVMService::record_worker_artifact(
       } catch (const std::invalid_argument& exception) {
         return {grpc::StatusCode::FAILED_PRECONDITION, exception.what()};
       }
-    } else if (artifact.has_optimizer_step() ||
+    } else if ((checkpoint != artifact.has_optimizer_step()) ||
                !artifact.canonical_manifest_json().empty()) {
       return {grpc::StatusCode::INVALID_ARGUMENT,
-              "ordinary artifacts cannot carry eval-examples contract fields"};
+              "checkpoint artifacts require an optimizer step and unstepped "
+              "artifacts must omit eval contract fields"};
     }
     const nlohmann::json* publication = nullptr;
     if (!connection.publishes.is_object()) {
@@ -3511,7 +3514,7 @@ grpc::Status TrainVMService::record_worker_artifact(
         .event_version = 1,
         .wall_time_ns = published_at_ns,
         .monotonic_time_ns = 0,
-        .optimizer_step = eval_examples
+        .optimizer_step = (eval_examples || checkpoint)
                               ? std::optional<std::uint64_t>{
                                     artifact.optimizer_step()}
                               : std::nullopt,

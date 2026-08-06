@@ -362,7 +362,8 @@ message ArtifactManifest {
   // committed to the journal.
   uint64 worker_sequence = 14;
   // The optimizer-step revision represented by this artifact. This is
-  // mandatory for eval-examples and absent for unstepped artifacts.
+  // mandatory for checkpoints and eval-examples and absent for unstepped
+  // artifacts.
   optional uint64 optimizer_step = 15;
   // Exact bounded canonical JSON bytes for controller-validated semantic
   // artifacts. rwkv-lab.eval-examples.v1 requires these bytes and binds them
