@@ -37,7 +37,7 @@
               "vendor": "nvidia",
               "count": 1,
               "minimum_memory_gib": 80,
-              "exclusive": true
+              "exclusive": false
             },
             "minimum_host_memory_gib": 64,
             "cpu_threads": 16,
@@ -789,7 +789,7 @@
               "vendor": "nvidia",
               "count": 1,
               "minimum_memory_gib": 80,
-              "exclusive": true
+              "exclusive": false
             },
             "minimum_host_memory_gib": 64,
             "cpu_threads": 16,
@@ -1558,7 +1558,7 @@
               "vendor": "nvidia",
               "count": 1,
               "minimum_memory_gib": 90,
-              "exclusive": true
+              "exclusive": false
             },
             "minimum_host_memory_gib": 64,
             "cpu_threads": 16,

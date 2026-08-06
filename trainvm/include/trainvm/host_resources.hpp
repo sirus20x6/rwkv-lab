@@ -69,6 +69,7 @@ enum class ResourceContextDisposition {
 };
 
 enum class ResourceAccessMode {
+  cooperative_compute,
   exclusive_compute,
   exclusive_device,
   partition_exclusive,
