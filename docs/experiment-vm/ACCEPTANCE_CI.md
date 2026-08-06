@@ -147,3 +147,25 @@ stamped with the exact commit and whether the worktree was dirty, so a result
 can never be attributed to source it did not run against. Skips are recorded
 with their reason rather than omitted, because a silently missing suite is the
 failure this whole document is about.
+
+The portable `authoring-matrix` suite validates
+`no-code-authoring-matrix.v1.json`. That document is a coverage declaration,
+not evidence that the recipes already run: it freezes the required Qwen
+multimodal, transformer, RWKV, and MageFlow variation axes; the forbidden
+source/build/deployment mutations; and the evidence an eventual sealed
+qualification receipt must contain. The release gate is complete only after
+the declared variants have produced those receipts. A green matrix validator
+alone must never be reported as no-code authoring qualification.
+
+Measured evidence uses `trainvm.no-code-authoring-qualification/v1` and is
+checked with `scripts/validate_no_code_authoring_receipt.py`. The validator
+requires every declared variant, the authority expansion digest, and an exact
+instance-provenanced recipe-field-to-target binding whose target appears in the
+compiled-plan diff. This avoids comparing friendly authoring names with invented
+document paths. It also requires a successful preflight before any accelerator lease, immediate
+step-zero dashboard registration, nonempty modality examples, bounded optimizer
+work, checkpoint publication, pause/resume proof, and matching before/after
+digests for repository source, adapter dispatch, sealed worker deployment,
+dashboard source, and service configuration. It also requires an unsupported
+request probe to stop at `new_implementation_required` without acquiring a
+lease. Until such a complete receipt exists, this capability remains pending.
