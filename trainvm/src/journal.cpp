@@ -2300,10 +2300,11 @@ Journal::Journal(const std::filesystem::path& path,
                  bool require_exclusive_wal)
     : expected_file_(std::move(expected_file)),
       filesystem_authority_(std::move(filesystem_authority)),
-      exclusive_wal_(
-          require_exclusive_wal ||
-          (filesystem_authority_ &&
-           filesystem_authority_->is_protected_filesystem_boundary())),
+      // A protected filesystem boundary does not itself require exclusive
+      // WAL ownership.  The caller must opt into that stronger single-reader
+      // mode explicitly; forcing it here rejects the established production
+      // journal during its connection PRAGMAs.
+      exclusive_wal_(require_exclusive_wal),
       host_grant_enforcement_(host_grant_enforcement),
       expected_host_grant_authority_(
           std::move(expected_host_grant_authority)) {
