@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <limits>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -30,6 +31,7 @@ constexpr std::uint64_t kMaximumBytes =
 constexpr std::size_t kMaximumDepth = 128U;
 constexpr std::size_t kMaximumNameBytes = 4096U;
 constexpr std::size_t kDigestBytes = 32U;
+constexpr std::size_t kReadBufferBytes = 1024U * 1024U;
 constexpr char kFileDomain[] = "trainvm.input-content.file/v1";
 constexpr char kDirectoryDomain[] = "trainvm.input-content.directory/v1";
 
@@ -288,7 +290,8 @@ void add_totals(NodeMeasurement& parent, const NodeMeasurement& child) {
   parent.total_bytes += child.total_bytes;
 }
 
-NodeMeasurement measure_node(Descriptor descriptor, std::size_t depth) {
+NodeMeasurement measure_node(Descriptor descriptor, std::size_t depth,
+                             std::span<unsigned char> read_buffer) {
   if (depth > kMaximumDepth)
     throw std::runtime_error("input content root exceeds the depth bound");
   struct stat before {};
@@ -302,11 +305,10 @@ NodeMeasurement measure_node(Descriptor descriptor, std::size_t depth) {
     if (size > kMaximumBytes)
       throw std::runtime_error("input content root exceeds the byte bound");
     DigestContext content;
-    std::array<unsigned char, 1024U * 1024U> buffer{};
     std::uint64_t observed = 0U;
     for (;;) {
-      const ssize_t count = ::read(descriptor.get(), buffer.data(),
-                                   buffer.size());
+      const ssize_t count = ::read(descriptor.get(), read_buffer.data(),
+                                   read_buffer.size());
       if (count < 0) {
         if (errno == EINTR) continue;
         fail_system("could not read input content file");
@@ -315,7 +317,7 @@ NodeMeasurement measure_node(Descriptor descriptor, std::size_t depth) {
       const auto bytes = static_cast<std::size_t>(count);
       if (static_cast<std::uint64_t>(bytes) > size - observed)
         throw std::runtime_error("input content file changed while hashing");
-      content.update(buffer.data(), bytes);
+      content.update(read_buffer.data(), bytes);
       observed += static_cast<std::uint64_t>(bytes);
     }
     struct stat after {};
@@ -407,7 +409,8 @@ NodeMeasurement measure_node(Descriptor descriptor, std::size_t depth) {
       (void)::close(child_fd);
       throw std::runtime_error("input content child changed while opening");
     }
-    NodeMeasurement child = measure_node(Descriptor(child_fd), depth + 1U);
+    NodeMeasurement child =
+        measure_node(Descriptor(child_fd), depth + 1U, read_buffer);
     struct stat child_after {};
     if (::fstatat(descriptor.get(), name.c_str(), &child_after,
                   AT_SYMLINK_NOFOLLOW) != 0)
@@ -480,7 +483,12 @@ InputContentRootIdentity measure_input_content_root(
         "input content root path must be bounded strict UTF-8");
 
   OpenedRoot opened = open_root_by_components(path);
-  NodeMeasurement root = measure_node(std::move(opened.descriptor), 0U);
+  // Authoring runs on a gRPC worker whose stack is deliberately bounded. Keep
+  // the large streaming buffer on the heap and reuse it through recursion so
+  // deep trees neither overflow that stack nor allocate once per file.
+  std::vector<unsigned char> read_buffer(kReadBufferBytes);
+  NodeMeasurement root =
+      measure_node(std::move(opened.descriptor), 0U, read_buffer);
   require_unchanged_links(opened.links);
   if (root.kind == ContentRootKind::directory && root.file_count == 0U)
     throw std::runtime_error("input content directory root is empty");
