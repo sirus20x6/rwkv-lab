@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -596,6 +597,7 @@ bool path_within(const std::filesystem::path& child,
 InputContentRootIdentity measure_input_content_root(
     const std::filesystem::path& path,
     InputContentMeasurementStats* measurement_stats) {
+  const auto measurement_started = std::chrono::steady_clock::now();
   if (!path.is_absolute() || path.empty() || path.lexically_normal() != path)
     throw std::invalid_argument(
         "input content root path must be absolute and lexically normalized");
@@ -618,6 +620,12 @@ InputContentRootIdentity measure_input_content_root(
   require_unchanged_links(opened.links);
   if (root.kind == ContentRootKind::directory && root.file_count == 0U)
     throw std::runtime_error("input content directory root is empty");
+  if (measurement_stats != nullptr) {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - measurement_started);
+    measurement_stats->elapsed_nanoseconds =
+        static_cast<std::uint64_t>(std::max(elapsed.count(), std::int64_t{0}));
+  }
   return {.api_version = std::string(kInputContentRootApiVersion),
           .path = path.native(),
           .kind = root.kind,

@@ -47,6 +47,7 @@ struct InputContentMeasurementStats final {
   std::uint64_t cache_misses{};
   std::uint64_t cache_bypasses{};
   std::uint64_t bytes_hashed{};
+  std::uint64_t elapsed_nanoseconds{};
 
   bool operator==(const InputContentMeasurementStats&) const = default;
 };

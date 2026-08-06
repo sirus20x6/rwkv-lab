@@ -380,6 +380,7 @@ int main() {
         !resolving->detail().contains(
             "trainvm.input-content-measurement-cache/v1 hits=") ||
         !resolving->detail().contains(" bytes_hashed=0") ||
+        !resolving->detail().contains(" elapsed_nanoseconds=") ||
         std::filesystem::exists(temporary.path() / "runs" / "run"))
       throw std::runtime_error(
           "dry-run mutated state or omitted frozen plan: " +

@@ -265,7 +265,8 @@ void warm_measurements_reuse_bytes_without_reusing_namespace() {
   const auto cold = measure_input_content_root(root, &cold_stats);
   require(cold_stats.cache_hits == 0U && cold_stats.cache_misses == 1U &&
               cold_stats.cache_bypasses == 0U &&
-              cold_stats.bytes_hashed == 64U * 1024U,
+              cold_stats.bytes_hashed == 64U * 1024U &&
+              cold_stats.elapsed_nanoseconds > 0U,
           "cold cache telemetry accounts for every hashed byte");
 
   InputContentMeasurementStats warm_stats;
@@ -273,6 +274,8 @@ void warm_measurements_reuse_bytes_without_reusing_namespace() {
   require(warm == cold && warm_stats.cache_hits == 1U &&
               warm_stats.cache_misses == 0U && warm_stats.bytes_hashed == 0U,
           "warm measurement preserves identity without rereading file bytes");
+  require(warm_stats.elapsed_nanoseconds > 0U,
+          "warm measurement records elapsed time");
 
   const auto original_time = std::filesystem::last_write_time(payload);
   write_file(payload, std::string(64U * 1024U, 'b'));
