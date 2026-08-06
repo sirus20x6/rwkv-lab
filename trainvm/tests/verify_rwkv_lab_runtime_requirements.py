@@ -34,6 +34,7 @@ EXPECTED_ADAPTERS = (
     "rwkv-lab.rwkv-posttraining",
     "rwkv-lab.scalar-metric-decision",
     "rwkv-lab.qwen-ao3",
+    "rwkv-lab.hf-multimodal-sft",
     "rwkv-lab.transformer-mla",
     "rwkv-lab.transformer-mla-mtp",
     "rwkv-lab.transformer-mla-mutor",

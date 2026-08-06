@@ -69,8 +69,8 @@ int main() {
     const trainvm::RwkvLabWorkerContract contract =
         trainvm::rwkv_lab_worker_contract(fingerprint);
     require(contract.adapter_registry.api_version == "trainvm.adapters/v2" &&
-                contract.adapter_registry.profiles.size() == 20U,
-            "rwkv_lab catalog must expose twenty exact adapter profiles");
+                contract.adapter_registry.profiles.size() == 21U,
+            "rwkv_lab catalog must expose twenty-one exact adapter profiles");
     require(std::ranges::is_sorted(contract.provided_capabilities) &&
                 std::ranges::adjacent_find(contract.provided_capabilities) ==
                     contract.provided_capabilities.end(),
@@ -80,7 +80,7 @@ int main() {
         trainvm::rwkv_lab_worker_runtime_requirements();
     require(runtime_requirements.api_version ==
                     "trainvm.rwkv-lab-worker-runtime-requirements/v1" &&
-                runtime_requirements.profiles.size() == 20U &&
+                runtime_requirements.profiles.size() == 21U &&
                 runtime_requirements.shared_root_distributions ==
                     std::vector<std::string>(
                         {"grpcio", "pillow", "protobuf", "torch"}),
@@ -107,6 +107,8 @@ int main() {
     const auto& terminal = find_profile(
         contract, "rwkv-lab.mageflow-terminal-expert");
     const auto& qwen = find_profile(contract, "rwkv-lab.qwen-ao3");
+    const auto& hf =
+        find_profile(contract, "rwkv-lab.hf-multimodal-sft");
     const auto& posttraining =
         find_profile(contract, "rwkv-lab.rwkv-posttraining");
     const auto& rlvr = find_profile(contract, "rwkv-lab.rwkv-rlvr");
@@ -180,6 +182,9 @@ int main() {
                 qwen.training_composition &&
                 qwen.training_composition->model_family == "transformer" &&
                 qwen.training_composition->slots.size() == 4U &&
+                hf.training_composition &&
+                hf.training_composition->model_family == "transformer" &&
+                hf.training_composition->slots.size() == 22U &&
                 rwkv.training_composition &&
                 rwkv.training_composition->model_family == "rwkv" &&
                 rwkv.training_composition->slots.size() == 10U &&
@@ -266,6 +271,10 @@ int main() {
                 terminal.lifecycle.warmup &&
                 qwen.lifecycle.resume_grade ==
                     trainvm::ResumeGrade::compatible &&
+                hf.lifecycle.resume_grade == trainvm::ResumeGrade::exact &&
+                hf.lifecycle.checkpoint_now &&
+                hf.lifecycle.pause_keep_resources &&
+                hf.lifecycle.pause_release_resources &&
                 rwkv.lifecycle.resume_grade ==
                     trainvm::ResumeGrade::terminal_checkpoint &&
                 rwkv.lifecycle.compile && rwkv.lifecycle.warmup &&
@@ -313,41 +322,43 @@ int main() {
         operation_registry.operation_descriptors_json();
     require(operation_document.at("api_version") ==
                     "trainvm.operations/v1" &&
-                operation_document.at("operations").size() == 20U &&
+                operation_document.at("operations").size() == 21U &&
                 operation_registry.operation_descriptors_digest() ==
                     "sha256:" +
                         trainvm::sha256_hex(operation_document.dump()),
             "operation descriptor document must exactly enumerate and hash the registered profiles");
     const auto& operations = operation_document.at("operations");
     require(operations.at(0).at("key").at("adapter") ==
-                    "rwkv-lab.mageflow-appearance-expert" &&
+                    "rwkv-lab.hf-multimodal-sft" &&
                 operations.at(1).at("key").at("adapter") ==
-                    "rwkv-lab.mageflow-full-backbone" &&
+                    "rwkv-lab.mageflow-appearance-expert" &&
                 operations.at(2).at("key").at("adapter") ==
-                    "rwkv-lab.mageflow-terminal-expert" &&
+                    "rwkv-lab.mageflow-full-backbone" &&
                 operations.at(3).at("key").at("adapter") ==
-                    "rwkv-lab.qwen-ao3" &&
+                    "rwkv-lab.mageflow-terminal-expert" &&
                 operations.at(4).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-posttraining" &&
+                    "rwkv-lab.qwen-ao3" &&
                 operations.at(5).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-rlvr" &&
+                    "rwkv-lab.rwkv-posttraining" &&
                 operations.at(6).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-scratch" &&
+                    "rwkv-lab.rwkv-rlvr" &&
                 operations.at(7).at("key").at("adapter") ==
-                    "rwkv-lab.scalar-metric-decision" &&
+                    "rwkv-lab.rwkv-scratch" &&
                 operations.at(8).at("key").at("adapter") ==
+                    "rwkv-lab.scalar-metric-decision" &&
+                operations.at(9).at("key").at("adapter") ==
                     "rwkv-lab.transformer-mla" &&
-                operations.at(14).at("key").at("adapter") ==
-                    "rwkv-lab.transformer-mla-parallel" &&
                 operations.at(15).at("key").at("adapter") ==
-                    "rwkv-lab.transformer-mla-rwkv8" &&
+                    "rwkv-lab.transformer-mla-parallel" &&
                 operations.at(16).at("key").at("adapter") ==
-                    "rwkv-lab.vision-frozen-adapter" &&
+                    "rwkv-lab.transformer-mla-rwkv8" &&
                 operations.at(17).at("key").at("adapter") ==
-                    "rwkv-lab.vision-native-head" &&
+                    "rwkv-lab.vision-frozen-adapter" &&
                 operations.at(18).at("key").at("adapter") ==
-                    "rwkv-lab.vision-rwkv-student" &&
+                    "rwkv-lab.vision-native-head" &&
                 operations.at(19).at("key").at("adapter") ==
+                    "rwkv-lab.vision-rwkv-student" &&
+                operations.at(20).at("key").at("adapter") ==
                     "rwkv-lab.vision-teacher-compressor",
             "operation descriptors must use canonical exact-key ordering");
     for (const nlohmann::json& operation : operations) {
@@ -374,10 +385,16 @@ int main() {
       const bool is_mageflow =
           operation.at("key").at("adapter").get<std::string>().starts_with(
               "rwkv-lab.mageflow-");
-      require(operation.at("authoring").at("inputs").at("config").at(
-                  "type") == "object" &&
-                  operation.at("authoring").at("inputs").at("config").at(
-                      "required") == true &&
+      const bool is_hf = operation.at("key").at("adapter") ==
+                         "rwkv-lab.hf-multimodal-sft";
+      require((is_hf
+                   ? operation.at("authoring").at("inputs").empty()
+                   : operation.at("authoring").at("inputs").at("config").at(
+                             "type") == "object" &&
+                         operation.at("authoring")
+                                 .at("inputs")
+                                 .at("config")
+                                 .at("required") == true) &&
                   (is_decision
                        ? operation.at("authoring")
                                      .at("inputs")
@@ -420,7 +437,7 @@ int main() {
                                      .at("outputs")
                                      .at("checkpoint")
                                      .at("required") ==
-                                 (is_vision_compressor || is_vision_native ||
+                                 (is_hf || is_vision_compressor || is_vision_native ||
                                   is_vision_student || is_vision_frozen ||
                                   is_rlvr) &&
                              operation.at("authoring")
@@ -457,6 +474,21 @@ int main() {
                                       .at("checkpoint")
                                       .at("artifact_schema") ==
                                   "rwkv-lab.vision-frozen-adapter-checkpoint.v1") &&
+                             (!is_hf ||
+                              (operation.at("authoring")
+                                       .at("outputs")
+                                       .at("checkpoint")
+                                       .at("artifact_schema") ==
+                                   "hf.multimodal-sft.v1" &&
+                               operation.at("authoring")
+                                       .at("outputs")
+                                       .at("eval_gallery")
+                                       .at("required") == true &&
+                               operation.at("authoring")
+                                       .at("outputs")
+                                       .at("eval_gallery")
+                                       .at("artifact_schema") ==
+                                   "rwkv-lab.eval-gallery.v2")) &&
                              (!is_vision_frozen ||
                               operation.at("authoring")
                                       .at("outputs")
@@ -796,7 +828,7 @@ int main() {
         extended_registry.operation_descriptors_json();
     const auto& extended_operations =
         extended_document.at("operations");
-    require(extended_operations.size() == 21U &&
+    require(extended_operations.size() == 22U &&
                 std::ranges::any_of(
                     extended_operations, [](const nlohmann::json& operation) {
                       return operation.at("key").at("adapter") ==
@@ -905,7 +937,7 @@ int main() {
                     contract.provided_capabilities &&
                 deployment.host_launch_registry.api_version ==
                     "trainvm.host-launches/v4" &&
-                deployment.host_launch_registry.profiles.size() == 20U,
+                deployment.host_launch_registry.profiles.size() == 21U,
             "deployment lowering must retain the complete reflected worker catalog");
     for (const trainvm::HostLaunchProfile& launch :
          deployment.host_launch_registry.profiles) {

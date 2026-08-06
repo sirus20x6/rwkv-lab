@@ -27,18 +27,10 @@
             "lease_timeout_seconds": 30,
             "cpu_io_policy": {"cpu_weight": 100, "io_weight": 100, "omp_threads": 8, "preprocessing_workers": 8, "nice": 0}
           },
-          "parameters": {
-            "manifest_path": {"type": "path", "value": "/thearray/git/datasets/captiontest/train.jsonl"},
-            "image_column": {"type": "string", "value": "image"},
-            "target_column": {"type": "string", "value": "caption"},
-            "maximum_steps": {"type": "integer", "value": 1000},
-            "step_zero_examples": {"type": "integer", "value": 10},
-            "checkpoint_every": {"type": "integer", "value": 250}
-          },
+          "parameters": {},
           "artifacts": {
             "checkpoint": {"type": "checkpoint", "schema": "hf.multimodal-sft.v1", "immutability": "immutable", "fingerprint": "manifest_sha256"},
-            "eval_gallery": {"type": "image_gallery", "schema": "rwkv-lab.eval-gallery.v2", "immutability": "mutable_until_publish", "fingerprint": "manifest_sha256", "required": true},
-            "metrics": {"type": "metrics", "schema": "hf.multimodal-sft.metrics.v1", "immutability": "append_only", "fingerprint": "sha256"}
+            "eval_gallery": {"type": "image_gallery", "schema": "rwkv-lab.eval-gallery.v2", "immutability": "append_only", "fingerprint": "manifest_sha256", "required": true}
           },
           "components": {
             "core": {
@@ -78,16 +70,7 @@
                 "invoke": {
                   "component": "trainer",
                   "operation": "train",
-                  "inputs": {
-                    "manifest": {"parameter": "manifest_path"},
-                    "image_column": {"parameter": "image_column"},
-                    "target_column": {"parameter": "target_column"},
-                    "maximum_steps": {"parameter": "maximum_steps"},
-                    "step_zero_examples": {"parameter": "step_zero_examples"},
-                    "checkpoint_every": {"parameter": "checkpoint_every"},
-                    "eval_every": {"control": "eval_every"},
-                    "run_directory": {"context": "run_directory"}
-                  },
+                  "inputs": {},
                   "training": {
                     "model_family": "transformer",
                     "components": {
@@ -123,6 +106,22 @@
                       "optimizer": {
                         "key": {"category": "optimizer", "name": "torch_adamw", "version": "1.0.0"},
                         "configuration": {"learning_rate": 0.00002, "weight_decay": 0.01, "beta1": 0.9, "beta2": 0.999, "epsilon": 0.00000001, "foreach": true, "fused": false}
+                      },
+                      "learning_rate": {
+                        "key": {"category": "learning_rate_schedule", "name": "linear_warmup_cosine", "version": "1.0.0"},
+                        "configuration": {"warmup_steps": 50, "max_steps": 1000, "minimum_ratio": 0.1}
+                      },
+                      "weight_decay": {
+                        "key": {"category": "weight_decay_schedule", "name": "constant", "version": "1.0.0"},
+                        "configuration": {"weight_decay": 0.01}
+                      },
+                      "gradient_clipping": {
+                        "key": {"category": "gradient_clipping", "name": "global_norm", "version": "1.0.0"},
+                        "configuration": {"max_norm": 1.0, "norm_type": 2.0, "error_if_nonfinite": true}
+                      },
+                      "gradient_accumulation": {
+                        "key": {"category": "gradient_accumulation", "name": "fixed", "version": "1.0.0"},
+                        "configuration": {"microbatches_per_optimizer_step": 1}
                       },
                       "precision": {
                         "key": {"category": "precision", "name": "bf16_parameters_fp32_reductions", "version": "1.0.0"},
@@ -207,20 +206,7 @@
               }
             }
           },
-          "controls": {
-            "catalog": {
-              "eval_every": {
-                "type": "integer",
-                "default": 100,
-                "minimum": 1,
-                "maximum": 10000,
-                "apply": "next_optimizer_step",
-                "mutable_after_start": true,
-                "targets": ["trainer.train.eval_every"],
-                "unit": "optimizer_step"
-              }
-            }
-          },
+          "controls": {"catalog": {}},
           "observability": {
             "heartbeat_seconds": 5,
             "metrics": [
@@ -243,17 +229,20 @@
       "overrides": [
         {"name": "model.path", "domain": "model", "type": "path", "target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/model_path", "required": true, "description": "Exact local Hugging Face model snapshot"},
         {"name": "model.attention_implementation", "domain": "model", "type": "enumeration", "target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/attention_implementation", "required": false, "values": ["flash_attention_2", "sdpa"]},
-        {"name": "data.manifest", "domain": "data", "type": "path", "target": "/spec/parameters/manifest_path/value", "required": true, "description": "Frozen image-caption manifest"},
-        {"name": "data.image_column", "domain": "data", "type": "string", "target": "/spec/parameters/image_column/value", "required": false},
-        {"name": "data.target_column", "domain": "data", "type": "string", "target": "/spec/parameters/target_column/value", "required": false},
+        {"name": "data.manifest", "domain": "data", "type": "path", "target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/manifest_path", "required": true, "description": "Frozen image-caption manifest"},
+        {"name": "data.image_root", "domain": "data", "type": "path", "target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/image_root", "required": true, "description": "Authority-bounded root for manifest image paths"},
+        {"name": "data.content_fingerprint", "domain": "data", "type": "string", "target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/content_fingerprint", "required": true, "description": "Frozen manifest and image-set identity"},
+        {"name": "data.batch_size", "domain": "data", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/batching/configuration/batch_size", "required": false, "minimum": 1, "maximum": 65536},
         {"name": "trainability.lora_rank", "domain": "trainability", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/trainability/configuration/rank", "required": false, "minimum": 1, "maximum": 1024},
         {"name": "trainability.lora_alpha", "domain": "trainability", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/trainability/configuration/alpha", "required": false, "minimum": 1, "maximum": 4096},
         {"name": "hyperparameters.learning_rate", "domain": "hyperparameters", "type": "number", "target": "/spec/workflow/nodes/train/invoke/training/components/optimizer/configuration/learning_rate", "required": false, "minimum": 0.00000001, "maximum": 0.01},
-        {"name": "hyperparameters.maximum_steps", "domain": "hyperparameters", "type": "integer", "target": "/spec/parameters/maximum_steps/value", "required": false, "minimum": 1, "maximum": 10000000},
-        {"name": "evaluation.step_zero_examples", "domain": "evaluation", "type": "integer", "target": "/spec/parameters/step_zero_examples/value", "required": false, "minimum": 1, "maximum": 256},
-        {"name": "checkpointing.every_steps", "domain": "checkpointing", "type": "integer", "target": "/spec/parameters/checkpoint_every/value", "required": false, "minimum": 1, "maximum": 1000000},
-        {"name": "resources.gpu_memory_gib", "domain": "resources", "type": "number", "target": "/spec/resources/accelerators/minimum_memory_gib", "required": false, "minimum": 24, "maximum": 192},
-        {"name": "controls.eval_every", "domain": "controls", "type": "integer", "target": "/spec/controls/catalog/eval_every/default", "required": false, "minimum": 1, "maximum": 10000}
+        {"name": "hyperparameters.gradient_accumulation", "domain": "hyperparameters", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/gradient_accumulation/configuration/microbatches_per_optimizer_step", "required": false, "minimum": 1, "maximum": 65536},
+        {"name": "hyperparameters.maximum_steps", "domain": "hyperparameters", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/learning_rate/configuration/max_steps", "required": false, "minimum": 1, "maximum": 10000000},
+        {"name": "evaluation.step_zero_examples", "domain": "evaluation", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/evaluation_schedule/configuration/launch_gate_examples", "required": false, "minimum": 1, "maximum": 256},
+        {"name": "evaluation.qualitative_every_steps", "domain": "evaluation", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/evaluation_schedule/configuration/qualitative_every_steps", "required": false, "minimum": 0, "maximum": 10000000},
+        {"name": "evaluation.full_every_steps", "domain": "evaluation", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/evaluation_schedule/configuration/full_every_steps", "required": false, "minimum": 0, "maximum": 10000000},
+        {"name": "checkpointing.every_steps", "domain": "checkpointing", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/checkpoint_policy/configuration/every_steps", "required": false, "minimum": 1, "maximum": 1000000},
+        {"name": "resources.gpu_memory_gib", "domain": "resources", "type": "number", "target": "/spec/resources/accelerators/minimum_memory_gib", "required": false, "minimum": 24, "maximum": 192}
       ],
       "content_bindings": [
         {"path_target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/model_path", "fingerprint_target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/checkpoint_fingerprint"},

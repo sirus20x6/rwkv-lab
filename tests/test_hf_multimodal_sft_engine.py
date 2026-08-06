@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from rwkv_lab.training_components import (
     AssistantOnlyMapperConfiguration,
+    CausalTokensMapperConfiguration,
     ImageCaptionProcessorConfiguration,
     LinearHeadCrossEntropyConfiguration,
     LinearHeadCrossEntropyObjective,
@@ -20,6 +21,7 @@ from rwkv_lab.trainvm_adapters.hf_multimodal_sft import (
     HFMultimodalSFTError,
     component_causal_loss,
     initialize_training_stack,
+    restore_exact_checkpoint,
     stage_exact_checkpoint,
 )
 
@@ -129,6 +131,35 @@ def test_multimodal_codec_keeps_image_target_identity_and_masks_prompt() -> None
     assert (labels != -100).sum(dim=1).tolist() == [4, 5]
     for row, target in zip(labels, ("red" + chr(2), "blue" + chr(2)), strict=True):
         assert row[row != -100].tolist() == [ord(character) for character in target]
+
+
+def _causal_codec(*, mapper_maximum: int = 8, collator_maximum: int = 8):
+    return HFForwardBatchCodec(
+        object(),
+        CausalTokensMapperConfiguration(
+            token_column="tokens", maximum_tokens=mapper_maximum
+        ),
+        object(),
+        PaddedCollatorConfiguration(
+            pad_token_id=0,
+            label_pad_token_id=-100,
+            pad_to_multiple=1,
+            maximum_sequence_length=collator_maximum,
+        ),
+    )
+
+
+@pytest.mark.parametrize("tokens", [[1, True], [1, -1], [1, 2.5]])
+def test_causal_codec_rejects_noncanonical_token_ids(tokens) -> None:
+    sample = ProcessedSample("sample", 0, {"tokens": tokens})
+    with pytest.raises(HFMultimodalSFTError, match="invalid token IDs"):
+        _causal_codec().encode((sample,))
+
+
+def test_causal_codec_rejects_over_limit_instead_of_truncating() -> None:
+    sample = ProcessedSample("sample", 0, {"tokens": [1, 2, 3, 4]})
+    with pytest.raises(HFMultimodalSFTError, match="exceeds"):
+        _causal_codec(mapper_maximum=4, collator_maximum=3).encode((sample,))
 
 
 class TinyCausalModel(torch.nn.Module):
@@ -270,6 +301,9 @@ class StatelessSchedule:
     def state_dict(self):
         return {}
 
+    def load_state_dict(self, state):
+        assert state == {}
+
 
 def test_checkpoint_staging_refuses_preexisting_path_without_mutation(tmp_path) -> None:
     destination = tmp_path / "checkpoint-step0-attempt1"
@@ -285,6 +319,7 @@ def test_checkpoint_staging_refuses_preexisting_path_without_mutation(tmp_path) 
             optimizer=optimizer,
             learning_rate_schedule=StatelessSchedule(),
             weight_decay_schedule=StatelessSchedule(),
+            precision=StatelessSchedule(),
             state=_engine_state(),
         )
     assert sentinel.read_text(encoding="utf-8") == "owned"
@@ -306,6 +341,7 @@ def test_interrupted_checkpoint_staging_is_never_reused(tmp_path) -> None:
             optimizer=optimizer,
             learning_rate_schedule=StatelessSchedule(),
             weight_decay_schedule=StatelessSchedule(),
+            precision=StatelessSchedule(),
             state=_engine_state(),
         )
     assert destination.is_dir()
@@ -317,6 +353,7 @@ def test_interrupted_checkpoint_staging_is_never_reused(tmp_path) -> None:
             optimizer=optimizer,
             learning_rate_schedule=StatelessSchedule(),
             weight_decay_schedule=StatelessSchedule(),
+            precision=StatelessSchedule(),
             state=_engine_state(),
         )
 
@@ -331,10 +368,147 @@ def test_complete_checkpoint_staging_is_durable_and_receipted(tmp_path) -> None:
         optimizer=optimizer,
         learning_rate_schedule=StatelessSchedule(),
         weight_decay_schedule=StatelessSchedule(),
+        precision=StatelessSchedule(),
         state=_engine_state(),
     )
     assert digest.startswith("sha256:")
     assert (destination / "engine-state.json").is_file()
     assert (destination / "optimizer.pt").is_file()
-    assert (destination / "rng.pt").is_file()
+    assert (destination / "rng.json").is_file()
+    assert (destination / "rng-tensors.pt").is_file()
     assert (destination / "staging-complete.json").is_file()
+
+
+def _restore(destination, model, optimizer):
+    class Composition:
+        def validate_resume_state(self, state):
+            assert state == {}
+
+    return restore_exact_checkpoint(
+        destination,
+        model=model,
+        optimizer=optimizer,
+        learning_rate_schedule=StatelessSchedule(),
+        weight_decay_schedule=StatelessSchedule(),
+        precision=StatelessSchedule(),
+        composition=Composition(),
+        expected_composition_digest="sha256:" + "a" * 64,
+        expected_model_load_receipt_digest="sha256:" + "b" * 64,
+        expected_processor_fingerprint="sha256:" + "c" * 64,
+        controls_state_validator=lambda state: state == {},
+    )
+
+
+def test_exact_checkpoint_round_trip_validates_completion_before_restore(tmp_path):
+    destination = tmp_path / "checkpoint-step0-attempt1"
+    model = SaveableModel(2, 2)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    expected = model.weight.detach().clone()
+    stage_exact_checkpoint(
+        destination,
+        model=model,
+        optimizer=optimizer,
+        learning_rate_schedule=StatelessSchedule(),
+        weight_decay_schedule=StatelessSchedule(),
+        precision=StatelessSchedule(),
+        state=_engine_state(),
+    )
+    model.weight.data.zero_()
+    restored = _restore(destination, model, optimizer)
+    assert restored.optimizer_step == 0
+    assert torch.equal(model.weight, expected)
+
+
+def test_exact_checkpoint_rejects_changed_object_before_model_mutation(tmp_path):
+    destination = tmp_path / "checkpoint-step0-attempt1"
+    model = SaveableModel(2, 2)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    stage_exact_checkpoint(
+        destination,
+        model=model,
+        optimizer=optimizer,
+        learning_rate_schedule=StatelessSchedule(),
+        weight_decay_schedule=StatelessSchedule(),
+        precision=StatelessSchedule(),
+        state=_engine_state(),
+    )
+    model.weight.data.fill_(17)
+    before = model.weight.detach().clone()
+    mechanics = destination / "optimizer.pt"
+    corrupted = bytearray(mechanics.read_bytes())
+    corrupted[len(corrupted) // 2] ^= 1
+    mechanics.chmod(0o640)
+    mechanics.write_bytes(corrupted)
+    with pytest.raises(HFMultimodalSFTError, match="completion receipt disagrees"):
+        _restore(destination, model, optimizer)
+    assert torch.equal(model.weight, before)
+
+
+def test_checkpoint_staging_rejects_preplanted_sibling_object(tmp_path):
+    class PreplantingModel(SaveableModel):
+        def save_pretrained(self, directory, *, safe_serialization: bool):
+            super().save_pretrained(directory, safe_serialization=safe_serialization)
+            (directory.parent / "rng.json").write_text("planted", encoding="utf-8")
+
+    destination = tmp_path / "checkpoint-step0-attempt1"
+    model = PreplantingModel(2, 2)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    with pytest.raises(FileExistsError):
+        stage_exact_checkpoint(
+            destination,
+            model=model,
+            optimizer=optimizer,
+            learning_rate_schedule=StatelessSchedule(),
+            weight_decay_schedule=StatelessSchedule(),
+            precision=StatelessSchedule(),
+            state=_engine_state(),
+        )
+    assert (destination / "rng.json").read_text(encoding="utf-8") == "planted"
+    assert not (destination / "staging-complete.json").exists()
+
+
+def test_exact_checkpoint_rejects_symlink_object(tmp_path):
+    destination = tmp_path / "checkpoint-step0-attempt1"
+    model = SaveableModel(2, 2)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    stage_exact_checkpoint(
+        destination,
+        model=model,
+        optimizer=optimizer,
+        learning_rate_schedule=StatelessSchedule(),
+        weight_decay_schedule=StatelessSchedule(),
+        precision=StatelessSchedule(),
+        state=_engine_state(),
+    )
+    rng = destination / "rng.json"
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(rng.read_bytes())
+    rng.unlink()
+    rng.symlink_to(outside)
+    with pytest.raises(HFMultimodalSFTError, match="symlink"):
+        _restore(destination, model, optimizer)
+
+
+def test_exact_checkpoint_refuses_mid_accumulation_boundary(tmp_path):
+    state = HFEngineState(
+        optimizer_step=0,
+        composition_digest="sha256:" + "a" * 64,
+        model_load_receipt_digest="sha256:" + "b" * 64,
+        processor_fingerprint="sha256:" + "c" * 64,
+        component_state={},
+        controls_state={},
+        microbatch_in_optimizer_step=1,
+    )
+    model = SaveableModel(2, 2)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    with pytest.raises(HFMultimodalSFTError, match="accumulation boundary"):
+        stage_exact_checkpoint(
+            tmp_path / "checkpoint",
+            model=model,
+            optimizer=optimizer,
+            learning_rate_schedule=StatelessSchedule(),
+            weight_decay_schedule=StatelessSchedule(),
+            precision=StatelessSchedule(),
+            state=state,
+        )
+    assert not (tmp_path / "checkpoint").exists()

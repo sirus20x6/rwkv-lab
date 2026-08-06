@@ -412,13 +412,24 @@ void validate_data_pipeline_relationships(
   const bool image_processor = processor.descriptor.implementation ==
                                "rwkv_lab.sample_processor.image_caption.v1";
   const bool assistant_mapper = mapper.descriptor.implementation ==
-                                "rwkv_lab.sample_mapper.assistant_only.v1";
+                               "rwkv_lab.sample_mapper.assistant_only.v1";
   if (image_source != image_processor || image_processor != assistant_mapper)
     reject("training data source, processor and mapper modalities are incompatible");
   if (batching.configuration.value("bucket_by", std::string{"token_length"}) ==
           "image_area" &&
       !image_source)
     reject("image-area bucketing requires an image-caption data source");
+
+  const auto loaders = grouped.find(TrainingComponentCategory::model_loader);
+  if (loaders != grouped.end()) {
+    const std::string& implementation =
+        loaders->second.front()->descriptor.implementation;
+    if (implementation == "rwkv_lab.model_loader.hf_multimodal.v1" &&
+        !image_source)
+      reject("Hugging Face multimodal loading requires image-caption data");
+    if (implementation == "rwkv_lab.model_loader.hf_causal.v1" && image_source)
+      reject("Hugging Face causal loading requires token-corpus data");
+  }
 
   const auto declared =
       source.configuration.at("declared_columns").get<std::vector<std::string>>();

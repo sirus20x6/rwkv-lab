@@ -425,6 +425,76 @@ class WorkerControlRuntime:
                 )
         return published
 
+    def publish_policy_checkpoint(
+        self,
+        request: object,
+        *,
+        progress: Callable[[int], None] | None = None,
+    ) -> object:
+        """Immediately publish one adapter-policy checkpoint.
+
+        Periodic and launch-gate checkpoints are operation outputs rather than
+        controller commands.  They still use the same immutable publisher and
+        session authority as an on-demand checkpoint; this method deliberately
+        does not consume or acknowledge a pending command.
+        """
+
+        from .checkpoint import CheckpointPublicationRequest, CheckpointPublisher
+
+        if not isinstance(request, CheckpointPublicationRequest):
+            raise WorkerControlError(
+                "policy checkpoint publication requires a typed request"
+            )
+        return CheckpointPublisher(
+            self._session, output_name=request.output_name
+        ).publish(
+            request.source_directory,
+            optimizer_step=request.optimizer_step,
+            resume_grade=request.resume_grade,
+            state_components=request.state_components,
+            parent_artifact_ids=request.parent_artifact_ids,
+            progress=progress,
+        )
+
+    def publish_evaluation_gallery(
+        self,
+        request: object,
+        *,
+        checkpoint: object,
+    ) -> object:
+        """Publish checkpoint-bound evaluation evidence before training mutates."""
+
+        from .checkpoint import PublishedCheckpoint
+        from .eval_gallery import EvalGalleryPublicationRequest, EvalGalleryPublisher
+
+        if not isinstance(request, EvalGalleryPublicationRequest) or not isinstance(
+            checkpoint, PublishedCheckpoint
+        ):
+            raise WorkerControlError(
+                "evaluation publication requires typed gallery/checkpoint evidence"
+            )
+        if (
+            request.checkpoint_manifest_digest is not None
+            or request.checkpoint_request_index is not None
+        ):
+            raise WorkerControlError(
+                "immediate evaluation request must leave checkpoint binding to the runtime"
+            )
+        return EvalGalleryPublisher(
+            self._session, output_name=request.output_name
+        ).publish(
+            step=request.step,
+            step_domain=request.step_domain,
+            checkpoint_manifest_digest=checkpoint.manifest_sha256,
+            evaluator_profile_digest=request.evaluator_profile_digest,
+            use_policy_digest=request.use_policy_digest,
+            items=request.items,
+            parent_artifact_ids=(
+                *request.parent_artifact_ids,
+                checkpoint.artifact_id,
+            ),
+        )
+
     def _wait_for_resume(self, optimizer_step: int) -> None:
         import time
 

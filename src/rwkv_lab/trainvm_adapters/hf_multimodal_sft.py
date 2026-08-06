@@ -241,9 +241,26 @@ class HFForwardBatchCodec:
         mapped: list[MappedSample] = []
         for sample in samples:
             tokens = sample.values.get(configuration.token_column)
-            if not isinstance(tokens, list) or not tokens:
-                raise HFMultimodalSFTError("causal sample contains no token IDs")
-            values = tuple(tokens[: configuration.maximum_tokens])
+            if (
+                not isinstance(tokens, list)
+                or not tokens
+                or any(
+                    not isinstance(token, int)
+                    or isinstance(token, bool)
+                    or token < 0
+                    for token in tokens
+                )
+            ):
+                raise HFMultimodalSFTError("causal sample contains invalid token IDs")
+            maximum_tokens = min(
+                configuration.maximum_tokens,
+                self.collator_configuration.maximum_sequence_length,
+            )
+            if len(tokens) > maximum_tokens:
+                raise HFMultimodalSFTError(
+                    "causal sample exceeds the declared token policy"
+                )
+            values = tuple(tokens)
             mapped.append(MappedSample(sample.sample_id, values, values))
         maximum = min(
             max(item.token_length for item in mapped),
@@ -266,9 +283,9 @@ class HFForwardBatchCodec:
         )
         attention = torch.zeros((len(mapped), length), dtype=torch.long)
         for index, item in enumerate(mapped):
-            count = min(length, len(item.input_ids))
-            input_ids[index, :count] = torch.tensor(item.input_ids[:count])
-            labels[index, :count] = torch.tensor(item.labels[:count])
+            count = len(item.input_ids)
+            input_ids[index, :count] = torch.tensor(item.input_ids)
+            labels[index, :count] = torch.tensor(item.labels)
             attention[index, :count] = 1
         return HFForwardBatch(
             MappingProxyType(
@@ -468,52 +485,320 @@ class HFEngineState:
     processor_fingerprint: str
     component_state: Mapping[str, Any]
     controls_state: Mapping[str, Any]
+    microbatch_in_optimizer_step: int = 0
 
     def canonical_document(self) -> Mapping[str, Any]:
         if (
             not isinstance(self.optimizer_step, int)
             or isinstance(self.optimizer_step, bool)
             or self.optimizer_step < 0
+            or not isinstance(self.microbatch_in_optimizer_step, int)
+            or isinstance(self.microbatch_in_optimizer_step, bool)
+            or self.microbatch_in_optimizer_step != 0
         ):
-            raise HFMultimodalSFTError("engine optimizer step is invalid")
+            raise HFMultimodalSFTError(
+                "exact checkpoints require a valid optimizer-step accumulation boundary"
+            )
         body = {
             "api_version": _ENGINE_STATE_SCHEMA,
             "component_state": dict(self.component_state),
             "composition_digest": self.composition_digest,
             "controls_state": dict(self.controls_state),
             "model_load_receipt_digest": self.model_load_receipt_digest,
+            "microbatch_in_optimizer_step": self.microbatch_in_optimizer_step,
             "optimizer_step": self.optimizer_step,
             "processor_fingerprint": self.processor_fingerprint,
         }
         return MappingProxyType({**body, "state_digest": _digest(body)})
 
 
-def _staged_objects(directory: Path) -> tuple[dict[str, object], ...]:
+def _staged_objects(
+    directory: Path, *, exclude: frozenset[str] = frozenset()
+) -> tuple[dict[str, object], ...]:
+    """Hash a tree through no-follow directory descriptors.
+
+    The descriptor walk prevents a child symlink or a path-swap between stat
+    and open from entering an exact checkpoint receipt.
+    """
+
     objects: list[dict[str, object]] = []
-    for path in sorted(directory.rglob("*")):
-        if path.is_symlink():
-            raise HFMultimodalSFTError("checkpoint staging contains a symlink")
-        if path.is_dir():
-            continue
-        info = path.stat()
-        if not stat.S_ISREG(info.st_mode):
-            raise HFMultimodalSFTError("checkpoint staging contains a non-file")
-        digest = hashlib.sha256()
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+
+    def walk(parent: int, prefix: str) -> None:
         try:
-            while chunk := os.read(descriptor, 4 * 1024 * 1024):
-                digest.update(chunk)
-            os.fsync(descriptor)
-        finally:
+            names = sorted(os.listdir(parent))
+        except OSError as error:
+            raise HFMultimodalSFTError(
+                "checkpoint staging tree cannot be enumerated"
+            ) from error
+        for name in names:
+            relative = f"{prefix}/{name}" if prefix else name
+            if relative in exclude:
+                continue
+            try:
+                before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except OSError as error:
+                raise HFMultimodalSFTError(
+                    "checkpoint staging object cannot be inspected"
+                ) from error
+            if stat.S_ISLNK(before.st_mode):
+                raise HFMultimodalSFTError("checkpoint staging contains a symlink")
+            if stat.S_ISDIR(before.st_mode):
+                child = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=parent
+                )
+                try:
+                    opened = os.fstat(child)
+                    if (opened.st_dev, opened.st_ino) != (
+                        before.st_dev,
+                        before.st_ino,
+                    ):
+                        raise HFMultimodalSFTError(
+                            "checkpoint staging directory changed during inspection"
+                        )
+                    walk(child, relative)
+                finally:
+                    os.close(child)
+                continue
+            if not stat.S_ISREG(before.st_mode):
+                raise HFMultimodalSFTError(
+                    "checkpoint staging contains a non-file"
+                )
+            descriptor = os.open(name, os.O_RDONLY | nofollow, dir_fd=parent)
+            digest = hashlib.sha256()
+            size = 0
+            try:
+                opened = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or (opened.st_dev, opened.st_ino)
+                    != (before.st_dev, before.st_ino)
+                ):
+                    raise HFMultimodalSFTError(
+                        "checkpoint staging file changed during inspection"
+                    )
+                while chunk := os.read(descriptor, 4 * 1024 * 1024):
+                    digest.update(chunk)
+                    size += len(chunk)
+                after = os.fstat(descriptor)
+                if size != opened.st_size or after.st_size != opened.st_size:
+                    raise HFMultimodalSFTError(
+                        "checkpoint staging file changed while hashing"
+                    )
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            objects.append(
+                {
+                    "relative_path": relative,
+                    "sha256": "sha256:" + digest.hexdigest(),
+                    "size_bytes": size,
+                }
+            )
+
+    root = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+    try:
+        if not stat.S_ISDIR(os.fstat(root).st_mode):
+            raise HFMultimodalSFTError("checkpoint staging root is not a directory")
+        walk(root, "")
+    finally:
+        os.close(root)
+    return tuple(sorted(objects, key=lambda item: str(item["relative_path"])))
+
+
+def _object_matches(data: bytes, expected: Mapping[str, Any]) -> bool:
+    return expected.get("size_bytes") == len(data) and expected.get(
+        "sha256"
+    ) == "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _read_staged_json(
+    directory: Path,
+    relative_path: str,
+    *,
+    expected: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if "/" in relative_path or relative_path in {"", ".", ".."}:
+        raise HFMultimodalSFTError("checkpoint JSON path is invalid")
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    root = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+    descriptor = -1
+    try:
+        descriptor = os.open(relative_path, os.O_RDONLY | nofollow, dir_fd=root)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 1024 * 1024:
+            raise HFMultimodalSFTError("checkpoint JSON object is invalid")
+        pieces: list[bytes] = []
+        remaining = info.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                raise HFMultimodalSFTError("checkpoint JSON object was truncated")
+            pieces.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise HFMultimodalSFTError("checkpoint JSON object changed while reading")
+        encoded = b"".join(pieces)
+        if expected is not None and not _object_matches(encoded, expected):
+            raise HFMultimodalSFTError(
+                "checkpoint JSON object disagrees with its receipt"
+            )
+        value = json.loads(encoded)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise HFMultimodalSFTError("checkpoint JSON object is invalid") from error
+    finally:
+        if descriptor >= 0:
             os.close(descriptor)
-        objects.append(
+        os.close(root)
+    if not isinstance(value, dict):
+        raise HFMultimodalSFTError("checkpoint JSON object must be a mapping")
+    return value
+
+
+def _open_staged_binary(
+    directory: Path, relative_path: str, *, expected: Mapping[str, Any]
+) -> Any:
+    if "/" in relative_path or relative_path in {"", ".", ".."}:
+        raise HFMultimodalSFTError("checkpoint binary path is invalid")
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    root = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+    try:
+        descriptor = os.open(relative_path, os.O_RDONLY | nofollow, dir_fd=root)
+    finally:
+        os.close(root)
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode):
+        os.close(descriptor)
+        raise HFMultimodalSFTError("checkpoint binary object is invalid")
+    digest = hashlib.sha256()
+    size = 0
+    while chunk := os.read(descriptor, 4 * 1024 * 1024):
+        digest.update(chunk)
+        size += len(chunk)
+    if (
+        expected.get("size_bytes") != size
+        or expected.get("sha256") != "sha256:" + digest.hexdigest()
+    ):
+        os.close(descriptor)
+        raise HFMultimodalSFTError(
+            "checkpoint binary object disagrees with its receipt"
+        )
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return os.fdopen(descriptor, "rb")
+
+
+def _exclusive_output(directory: Path, name: str) -> Any:
+    descriptor = os.open(
+        directory / name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o440,
+    )
+    return os.fdopen(descriptor, "wb")
+
+
+def _rng_documents() -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
+    python_state = random.getstate()
+    if (
+        not isinstance(python_state, tuple)
+        or len(python_state) != 3
+        or not isinstance(python_state[1], tuple)
+    ):
+        raise HFMultimodalSFTError("Python RNG returned an unsupported state")
+    document: dict[str, Any] = {
+        "api_version": "rwkv-lab.hf-multimodal-sft-rng/v1",
+        "python": {
+            "version": python_state[0],
+            "state": list(python_state[1]),
+            "gaussian": python_state[2],
+        },
+        "numpy": None,
+    }
+    try:
+        import numpy
+
+        numpy_state = numpy.random.get_state()
+        document["numpy"] = {
+            "algorithm": numpy_state[0],
+            "state": numpy_state[1].tolist(),
+            "position": numpy_state[2],
+            "has_gaussian": numpy_state[3],
+            "cached_gaussian": numpy_state[4],
+        }
+    except ImportError:
+        pass
+    tensors = {"torch_cpu": torch.get_rng_state().cpu()}
+    if torch.cuda.is_available():
+        tensors.update(
             {
-                "relative_path": path.relative_to(directory).as_posix(),
-                "sha256": "sha256:" + digest.hexdigest(),
-                "size_bytes": info.st_size,
+                f"torch_cuda_{index}": value.cpu()
+                for index, value in enumerate(torch.cuda.get_rng_state_all())
             }
         )
-    return tuple(objects)
+    return document, tensors
+
+
+def _restore_rng(document: Mapping[str, Any], tensors: Mapping[str, Any]) -> None:
+    if set(document) != {"api_version", "numpy", "python"} or document.get(
+        "api_version"
+    ) != "rwkv-lab.hf-multimodal-sft-rng/v1":
+        raise HFMultimodalSFTError("exact checkpoint RNG document is inexact")
+    python_state = document.get("python")
+    if not isinstance(python_state, dict) or set(python_state) != {
+        "gaussian",
+        "state",
+        "version",
+    }:
+        raise HFMultimodalSFTError("exact checkpoint Python RNG state is invalid")
+    values = python_state["state"]
+    if not isinstance(values, list) or any(
+        not isinstance(value, int) or isinstance(value, bool) for value in values
+    ):
+        raise HFMultimodalSFTError("exact checkpoint Python RNG words are invalid")
+    torch_cpu = tensors.get("torch_cpu")
+    if not isinstance(torch_cpu, torch.Tensor) or torch_cpu.dtype != torch.uint8:
+        raise HFMultimodalSFTError("exact checkpoint torch RNG state is invalid")
+    numpy_state = document.get("numpy")
+    try:
+        cuda_keys = sorted(
+            (key for key in tensors if key.startswith("torch_cuda_")),
+            key=lambda key: int(key.removeprefix("torch_cuda_")),
+        )
+    except ValueError as error:
+        raise HFMultimodalSFTError("CUDA RNG tensor key is invalid") from error
+    expected_tensor_keys = {"torch_cpu", *cuda_keys}
+    if set(tensors) != expected_tensor_keys:
+        raise HFMultimodalSFTError("exact checkpoint RNG tensor set is invalid")
+    random.setstate(
+        (python_state["version"], tuple(values), python_state["gaussian"])
+    )
+    torch.set_rng_state(torch_cpu)
+    if numpy_state is not None:
+        if not isinstance(numpy_state, dict) or set(numpy_state) != {
+            "algorithm",
+            "cached_gaussian",
+            "has_gaussian",
+            "position",
+            "state",
+        }:
+            raise HFMultimodalSFTError("exact checkpoint NumPy RNG state is invalid")
+        import numpy
+
+        numpy.random.set_state(
+            (
+                numpy_state["algorithm"],
+                numpy.asarray(numpy_state["state"], dtype=numpy.uint32),
+                numpy_state["position"],
+                numpy_state["has_gaussian"],
+                numpy_state["cached_gaussian"],
+            )
+        )
+    if cuda_keys:
+        if not torch.cuda.is_available():
+            raise HFMultimodalSFTError("CUDA RNG state cannot be restored without CUDA")
+        expected = [f"torch_cuda_{index}" for index in range(torch.cuda.device_count())]
+        if cuda_keys != expected:
+            raise HFMultimodalSFTError("CUDA RNG device count disagrees")
+        torch.cuda.set_rng_state_all([tensors[key] for key in expected])
 
 
 def _fsync_directories(directory: Path) -> None:
@@ -541,6 +826,7 @@ def stage_exact_checkpoint(
     optimizer: torch.optim.Optimizer,
     learning_rate_schedule: Any,
     weight_decay_schedule: Any,
+    precision: Any,
     state: HFEngineState,
 ) -> str:
     """Write a fresh complete payload for the existing immutable publisher.
@@ -549,6 +835,9 @@ def stage_exact_checkpoint(
     Existing or interrupted paths are never deleted or reused.
     """
 
+    # The format intentionally excludes in-flight gradients. Validate that the
+    # caller is at an optimizer boundary before creating any filesystem state.
+    state.canonical_document()
     try:
         directory.mkdir(mode=0o750, parents=False, exist_ok=False)
     except FileExistsError as error:
@@ -560,27 +849,45 @@ def stage_exact_checkpoint(
     if not callable(save_pretrained):
         raise HFMultimodalSFTError("HF model cannot publish save_pretrained state")
     save_pretrained(model_directory, safe_serialization=True)
-    torch.save(
-        {
-            "optimizer": optimizer.state_dict(),
-            "learning_rate_schedule": learning_rate_schedule.state_dict(),
-            "weight_decay_schedule": weight_decay_schedule.state_dict(),
-        },
-        directory / "optimizer.pt",
-    )
-    rng: dict[str, Any] = {
-        "python": random.getstate(),
-        "torch": torch.get_rng_state(),
+    trainable_state = {
+        name: parameter.detach().cpu().clone()
+        for name, parameter in sorted(model.named_parameters())
+        if parameter.requires_grad
     }
-    try:
-        import numpy
-
-        rng["numpy"] = numpy.random.get_state()
-    except ImportError:
-        rng["numpy"] = None
-    if torch.cuda.is_available():
-        rng["cuda"] = torch.cuda.get_rng_state_all()
-    torch.save(rng, directory / "rng.pt")
+    if not trainable_state:
+        raise HFMultimodalSFTError("checkpoint contains no trainable model state")
+    with _exclusive_output(directory, "trainable-state.pt") as output:
+        torch.save(trainable_state, output)
+        output.flush()
+        os.fsync(output.fileno())
+    with _exclusive_output(directory, "optimizer.pt") as output:
+        torch.save(
+            {
+                "optimizer": optimizer.state_dict(),
+                "learning_rate_schedule": learning_rate_schedule.state_dict(),
+                "weight_decay_schedule": weight_decay_schedule.state_dict(),
+                "precision": precision.state_dict(),
+            },
+            output,
+        )
+        output.flush()
+        os.fsync(output.fileno())
+    rng_document, rng_tensors = _rng_documents()
+    rng_encoded = json.dumps(
+        rng_document,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    with _exclusive_output(directory, "rng.json") as output:
+        output.write(rng_encoded)
+        output.flush()
+        os.fsync(output.fileno())
+    with _exclusive_output(directory, "rng-tensors.pt") as output:
+        torch.save(rng_tensors, output)
+        output.flush()
+        os.fsync(output.fileno())
     document = dict(state.canonical_document())
     encoded = json.dumps(
         document,
@@ -627,6 +934,164 @@ def stage_exact_checkpoint(
         os.fsync(output.fileno())
     _fsync_directories(directory)
     return str(completion["completion_digest"])
+
+
+def restore_exact_checkpoint(
+    directory: Path,
+    *,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    learning_rate_schedule: Any,
+    weight_decay_schedule: Any,
+    precision: Any,
+    composition: Any,
+    expected_composition_digest: str,
+    expected_model_load_receipt_digest: str,
+    expected_processor_fingerprint: str,
+    controls_state_validator: Any,
+) -> HFEngineState:
+    """Restore a publisher-verified payload with exact identity and slot coverage."""
+    try:
+        root_info = directory.lstat()
+    except OSError as error:
+        raise HFMultimodalSFTError("exact checkpoint payload is incomplete") from error
+    if not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode):
+        raise HFMultimodalSFTError("exact checkpoint payload is incomplete")
+    completion = _read_staged_json(directory, "staging-complete.json")
+    if set(completion) != {
+        "api_version",
+        "completion_digest",
+        "engine_state",
+        "model_load_receipt",
+        "objects_digest",
+        "processor",
+    }:
+        raise HFMultimodalSFTError("exact checkpoint completion receipt is inexact")
+    completion_body = dict(completion)
+    completion_digest = completion_body.pop("completion_digest")
+    objects = _staged_objects(
+        directory, exclude=frozenset({"staging-complete.json"})
+    )
+    object_receipts = {
+        str(item["relative_path"]): item for item in objects
+    }
+    if (
+        completion["api_version"]
+        != "rwkv-lab.hf-multimodal-sft-staging/v1"
+        or completion_digest != _digest(completion_body)
+        or completion["objects_digest"] != _digest(objects)
+        or completion["model_load_receipt"]
+        != expected_model_load_receipt_digest
+        or completion["processor"] != expected_processor_fingerprint
+    ):
+        raise HFMultimodalSFTError("exact checkpoint completion receipt disagrees")
+    required_objects = {
+        "engine-state.json",
+        "optimizer.pt",
+        "rng-tensors.pt",
+        "rng.json",
+        "trainable-state.pt",
+    }
+    if not required_objects.issubset(object_receipts):
+        raise HFMultimodalSFTError("exact checkpoint object set is incomplete")
+    document = _read_staged_json(
+        directory,
+        "engine-state.json",
+        expected=object_receipts["engine-state.json"],
+    )
+    if set(document) != {
+        "api_version",
+        "component_state",
+        "composition_digest",
+        "controls_state",
+        "microbatch_in_optimizer_step",
+        "model_load_receipt_digest",
+        "optimizer_step",
+        "processor_fingerprint",
+        "state_digest",
+    }:
+        raise HFMultimodalSFTError("exact checkpoint engine state is inexact")
+    body = dict(document)
+    state_digest = body.pop("state_digest")
+    if (
+        document["api_version"] != _ENGINE_STATE_SCHEMA
+        or state_digest != _digest(body)
+        or completion["engine_state"] != state_digest
+        or document["composition_digest"] != expected_composition_digest
+        or document["model_load_receipt_digest"]
+        != expected_model_load_receipt_digest
+        or document["processor_fingerprint"] != expected_processor_fingerprint
+    ):
+        raise HFMultimodalSFTError("exact checkpoint identity disagrees")
+    component_state = document["component_state"]
+    controls_state = document["controls_state"]
+    if not isinstance(component_state, dict) or not isinstance(controls_state, dict):
+        raise HFMultimodalSFTError("exact checkpoint state mappings are invalid")
+    restored_state = HFEngineState(
+        optimizer_step=document["optimizer_step"],
+        composition_digest=document["composition_digest"],
+        model_load_receipt_digest=document["model_load_receipt_digest"],
+        processor_fingerprint=document["processor_fingerprint"],
+        component_state=component_state,
+        controls_state=controls_state,
+        microbatch_in_optimizer_step=document["microbatch_in_optimizer_step"],
+    )
+    if dict(restored_state.canonical_document()) != document:
+        raise HFMultimodalSFTError("exact checkpoint engine state is noncanonical")
+    composition.validate_resume_state(component_state)
+    controls_state_validator(controls_state)
+    with _open_staged_binary(
+        directory,
+        "trainable-state.pt",
+        expected=object_receipts["trainable-state.pt"],
+    ) as source:
+        trainable = torch.load(source, map_location="cpu", weights_only=True)
+    expected_parameters = {
+        name: parameter
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    }
+    if not isinstance(trainable, dict) or set(trainable) != set(expected_parameters):
+        raise HFMultimodalSFTError("exact checkpoint trainable tensor set disagrees")
+    for name, parameter in expected_parameters.items():
+        value = trainable[name]
+        if (
+            not isinstance(value, torch.Tensor)
+            or value.shape != parameter.shape
+            or value.dtype != parameter.dtype
+        ):
+            raise HFMultimodalSFTError(
+                f"exact checkpoint trainable tensor {name!r} disagrees"
+            )
+        parameter.data.copy_(value.to(device=parameter.device))
+    with _open_staged_binary(
+        directory, "optimizer.pt", expected=object_receipts["optimizer.pt"]
+    ) as source:
+        mechanics = torch.load(source, map_location="cpu", weights_only=True)
+    if not isinstance(mechanics, dict) or set(mechanics) != {
+        "optimizer",
+        "learning_rate_schedule",
+        "weight_decay_schedule",
+        "precision",
+    }:
+        raise HFMultimodalSFTError("exact checkpoint mechanics state is inexact")
+    optimizer.load_state_dict(mechanics["optimizer"])
+    learning_rate_schedule.load_state_dict(mechanics["learning_rate_schedule"])
+    weight_decay_schedule.load_state_dict(mechanics["weight_decay_schedule"])
+    precision.load_state_dict(mechanics["precision"])
+    rng_document = _read_staged_json(
+        directory, "rng.json", expected=object_receipts["rng.json"]
+    )
+    with _open_staged_binary(
+        directory,
+        "rng-tensors.pt",
+        expected=object_receipts["rng-tensors.pt"],
+    ) as source:
+        rng_tensors = torch.load(source, map_location="cpu", weights_only=True)
+    if not isinstance(rng_tensors, dict):
+        raise HFMultimodalSFTError("exact checkpoint RNG tensors are invalid")
+    _restore_rng(rng_document, rng_tensors)
+    return restored_state
 
 
 def scalar_loss(outputs: Any) -> torch.Tensor:
@@ -697,6 +1162,7 @@ __all__ = [
     "HFTrainingStack",
     "component_causal_loss",
     "initialize_training_stack",
+    "restore_exact_checkpoint",
     "scalar_loss",
     "stage_exact_checkpoint",
     "weighted_loss",
