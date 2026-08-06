@@ -110,7 +110,7 @@
                           "rank": 256,
                           "alpha": 512,
                           "dropout": 0.0,
-                          "target_selectors": ["language_model.layers.*.self_attn.*_proj"],
+                          "target_selectors": ["model.language_model.layers.*.self_attn.*_proj"],
                           "modules_to_save": [],
                           "bias": "none",
                           "merge_on_completion": false
@@ -183,7 +183,7 @@
                     }
                   }
                 },
-                "publishes": {"checkpoint": "checkpoint", "gallery": "eval_gallery", "metrics": "metrics"},
+                "publishes": {"checkpoint": "checkpoint", "eval_gallery": "eval_gallery", "metrics": "metrics"},
                 "idempotency": "receipt_required",
                 "effect": "process",
                 "timeout_seconds": 604800,
@@ -242,7 +242,6 @@
       },
       "overrides": [
         {"name": "model.path", "domain": "model", "type": "path", "target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/model_path", "required": true, "description": "Exact local Hugging Face model snapshot"},
-        {"name": "model.checkpoint_fingerprint", "domain": "model", "type": "string", "target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/checkpoint_fingerprint", "required": true, "description": "SHA-256 identity attested by the exact model load receipt"},
         {"name": "model.attention_implementation", "domain": "model", "type": "enumeration", "target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/attention_implementation", "required": false, "values": ["flash_attention_2", "sdpa"]},
         {"name": "data.manifest", "domain": "data", "type": "path", "target": "/spec/parameters/manifest_path/value", "required": true, "description": "Frozen image-caption manifest"},
         {"name": "data.image_column", "domain": "data", "type": "string", "target": "/spec/parameters/image_column/value", "required": false},
@@ -255,6 +254,10 @@
         {"name": "checkpointing.every_steps", "domain": "checkpointing", "type": "integer", "target": "/spec/parameters/checkpoint_every/value", "required": false, "minimum": 1, "maximum": 1000000},
         {"name": "resources.gpu_memory_gib", "domain": "resources", "type": "number", "target": "/spec/resources/accelerators/minimum_memory_gib", "required": false, "minimum": 24, "maximum": 192},
         {"name": "controls.eval_every", "domain": "controls", "type": "integer", "target": "/spec/controls/catalog/eval_every/default", "required": false, "minimum": 1, "maximum": 10000}
+      ],
+      "content_bindings": [
+        {"path_target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/model_path", "fingerprint_target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/checkpoint_fingerprint"},
+        {"path_target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/image_root", "fingerprint_target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/content_fingerprint"}
       ],
       "compatibility": [
         {

@@ -72,7 +72,8 @@ nlohmann::json load_fixture() {
 }
 
 CompiledPlan compiled_fixture(const TemporaryDirectory &temporary,
-                              bool create_run_directory = true) {
+                              bool create_run_directory = true,
+                              bool require_matching_label = false) {
   const auto root = temporary.path();
   const auto input_root = root / "input";
   const auto run_directory = root / "run";
@@ -109,6 +110,8 @@ CompiledPlan compiled_fixture(const TemporaryDirectory &temporary,
       {"minimum_memory_gib", 90.0},
       {"exclusive", false},
   };
+  if (require_matching_label)
+    spec["resources"]["accelerators"]["selector"] = {{"pool", "training"}};
   spec["parameters"]["source_config"]["value"] =
       (input_root / "config.json").string();
 
@@ -190,6 +193,7 @@ TrainingPreflightEnvironment environment(const CompiledPlan &plan) {
           .stable_id = "GPU-passive-test",
           .total_memory_bytes = 96U * kGib,
           .free_memory_bytes = 90U * kGib,
+          .selector_labels = {},
           .observation_digest = "sha256:" + std::string(64U, '6'),
       }},
       .training_nodes = {{
@@ -272,6 +276,20 @@ void qwen_total_and_free_vram_policies_are_distinct() {
             !has_code(receipt, "resource.total_vram_insufficient"),
         "Qwen-style total-capacity success cannot hide a free-VRAM policy "
         "failure");
+}
+
+void passive_memory_obeys_the_declared_selector() {
+  TemporaryDirectory temporary;
+  const auto plan = compiled_fixture(temporary, true, true);
+  auto evidence = environment(plan);
+  evidence.accelerators.front().selector_labels = {{"pool", "display"}};
+  const auto rejected = run_training_preflight(plan, evidence);
+  check(!rejected.passed &&
+            has_code(rejected, "resource.total_vram_insufficient"),
+        "same-VRAM GPU with mismatched labels is rejected before a lease");
+  evidence.accelerators.front().selector_labels = {{"pool", "training"}};
+  check(run_training_preflight(plan, evidence).passed,
+        "matching passive selector labels satisfy the same plan");
 }
 
 void worker_permission_failure_precedes_run_creation() {
@@ -376,6 +394,7 @@ int main() {
   try {
     passing_preflight_is_passive_and_deterministic();
     qwen_total_and_free_vram_policies_are_distinct();
+    passive_memory_obeys_the_declared_selector();
     worker_permission_failure_precedes_run_creation();
     missing_adapter_evidence_fails_closed();
     credential_sets_and_gpu_qualification_are_bounded();

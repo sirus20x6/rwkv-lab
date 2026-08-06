@@ -128,6 +128,15 @@ LinuxNvidiaRawSnapshot complete_snapshot() {
                   device(std::string(kGpuA), "0000:01:00.0", 0U,
                          {.compute = ResourceContextDisposition::absent,
                           .graphics = ResourceContextDisposition::absent})},
+      .passive_accelerator_memory =
+          {{.vendor = HostAcceleratorVendor::nvidia,
+            .stable_id = std::string(kGpuA),
+            .total_memory_bytes = 24ULL << 30U,
+            .free_memory_bytes = 20ULL << 30U},
+           {.vendor = HostAcceleratorVendor::nvidia,
+            .stable_id = std::string(kGpuB),
+            .total_memory_bytes = 24ULL << 30U,
+            .free_memory_bytes = 18ULL << 30U}},
       .detail = "deterministic-complete"};
   snapshot.devices[1].partitions.push_back(
       {.uuid = std::string(kMigA),
@@ -230,6 +239,30 @@ void complete_capture_is_stable_and_display_is_occupied() {
   require(first.receipt_digest == second.receipt_digest &&
               first.resources == second.resources,
           "input enumeration order cannot alter canonical inventory identity");
+}
+
+void free_memory_is_separate_from_inventory_identity() {
+  auto first_raw = complete_snapshot();
+  auto second_raw = first_raw;
+  second_raw.passive_accelerator_memory.front().free_memory_bytes =
+      4ULL << 30U;
+  auto first_kernel =
+      std::make_shared<FakeReadOnlyKernel>(std::move(first_raw));
+  auto second_kernel =
+      std::make_shared<FakeReadOnlyKernel>(std::move(second_raw));
+  LinuxNvidiaInventoryCollector first_collector(config(), first_kernel);
+  LinuxNvidiaInventoryCollector second_collector(config(), second_kernel);
+  const auto first_receipt = capture_host_inventory(first_collector);
+  const auto second_receipt = capture_host_inventory(second_collector);
+  const auto first_memory = first_collector.passive_memory_snapshot();
+  const auto second_memory = second_collector.passive_memory_snapshot();
+  require(first_receipt.inventory_digest == second_receipt.inventory_digest &&
+              first_receipt.receipt_digest == second_receipt.receipt_digest &&
+              first_receipt.resources == second_receipt.resources,
+          "volatile free bytes never churn inventory/resource identity");
+  require(first_memory && second_memory &&
+              first_memory->accelerators != second_memory->accelerators,
+          "volatile passive memory remains a distinct point-in-time sample");
 }
 
 void missing_partial_and_torn_evidence_fail_closed() {
@@ -552,6 +585,8 @@ int main() {
   try {
     complete_capture_is_stable_and_display_is_occupied();
     std::cout << "PASS complete\n";
+    free_memory_is_separate_from_inventory_identity();
+    std::cout << "PASS passive-memory-separation\n";
     missing_partial_and_torn_evidence_fail_closed();
     std::cout << "PASS fail-closed\n";
     display_mig_pci_and_mode_regressions();

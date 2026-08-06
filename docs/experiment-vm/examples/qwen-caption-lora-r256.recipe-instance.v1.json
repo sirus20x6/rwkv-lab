@@ -4,7 +4,6 @@
   "run_identity": "qwen36-caption-lora-r256",
   "overrides": {
     "model.path": "/thearray/git/ob/text-generation-webui/models/Qwen3.6-35B-A3B-heretic",
-    "model.checkpoint_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
     "data.manifest": "/thearray/git/datasets/captiontest/qwen36-caption-finetune.jsonl",
     "trainability.lora_rank": 256,
     "trainability.lora_alpha": 512,

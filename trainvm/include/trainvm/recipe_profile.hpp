@@ -71,11 +71,22 @@ struct RecipeCompatibilityRule final {
   bool operator==(const RecipeCompatibilityRule&) const = default;
 };
 
+// Authority-derived immutable content identity. Both targets are RFC 6901
+// pointers into the closed canonical template; operators provide the path
+// once and never copy a digest into the instance.
+struct RecipeContentBinding final {
+  std::string path_target;
+  std::string fingerprint_target;
+
+  bool operator==(const RecipeContentBinding&) const = default;
+};
+
 struct RecipeProfile final {
   RecipeKey key;
   std::optional<std::string> description;
   nlohmann::json template_document;
   std::vector<RecipeOverrideField> overrides;
+  std::optional<std::vector<RecipeContentBinding>> content_bindings;
   std::optional<std::vector<RecipeCompatibilityRule>> compatibility;
 
   bool operator==(const RecipeProfile&) const = default;

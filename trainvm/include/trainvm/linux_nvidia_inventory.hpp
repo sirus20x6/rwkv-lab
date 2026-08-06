@@ -95,6 +95,7 @@ struct LinuxNvidiaRawSnapshot final {
   std::vector<std::string> structural_pci_bdfs;
   std::vector<HostDeviceNodeCapability> shared_device_nodes;
   std::vector<LinuxNvidiaRawDevice> devices;
+  std::vector<PassiveHostAcceleratorMemory> passive_accelerator_memory;
   std::string detail;
 
   bool operator==(const LinuxNvidiaRawSnapshot &) const = default;
@@ -158,6 +159,8 @@ public:
   operator=(const LinuxNvidiaInventoryCollector &) = delete;
 
   [[nodiscard]] HostKernelSnapshot capture_inventory() override;
+  [[nodiscard]] std::optional<PassiveHostMemorySnapshot>
+  passive_memory_snapshot() const override;
 
 private:
   struct Implementation;

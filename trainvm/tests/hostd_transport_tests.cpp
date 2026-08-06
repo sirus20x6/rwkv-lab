@@ -1355,6 +1355,62 @@ void authority_status_round_trips_receipt_derived_health() {
   expected.resource_inventory_observed = true;
   expected.current_inventory_digest = fixture.observed.inventory_digest;
   expected.current_inventory_receipt_digest = fixture.observed.receipt_digest;
+  expected.passive_memory_host_id = fixture.observed.host_id;
+  expected.passive_memory_boot_id = fixture.observed.boot_id;
+  expected.passive_memory_inventory_digest = fixture.observed.inventory_digest;
+  expected.passive_memory_inventory_receipt_digest =
+      fixture.observed.receipt_digest;
+  expected.passive_memory_observed_monotonic_ns = 1'234U;
+  expected.passive_accelerator_memory_count = 2U;
+  expected.passive_accelerator_memory = {
+      {.resource_kind = HostResourceKind::accelerator,
+       .vendor = HostAcceleratorVendor::nvidia,
+       .stable_id = "GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+       .parent_id = std::nullopt,
+       .audited_eligible = false,
+       .total_memory_bytes = 96ULL << 30U,
+       .free_memory_bytes = 80ULL << 30U,
+       .selector_labels = {{"partition-parent", "nonselectable"}}},
+      {.resource_kind = HostResourceKind::accelerator_partition,
+       .vendor = HostAcceleratorVendor::nvidia,
+       .stable_id = "MIG-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+       .parent_id = "GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+       .audited_eligible = true,
+       .total_memory_bytes = 48ULL << 30U,
+       .free_memory_bytes = 40ULL << 30U,
+       .selector_labels = {{"partition", "mig"}}},
+  };
+  const nlohmann::json passive_identity{
+      {"api_version", "trainvm.hostd-passive-memory/v1"},
+      {"host_id", expected.passive_memory_host_id},
+      {"boot_id", expected.passive_memory_boot_id},
+      {"inventory_digest", expected.passive_memory_inventory_digest},
+      {"inventory_receipt_digest",
+       expected.passive_memory_inventory_receipt_digest},
+      {"observed_monotonic_ns",
+       expected.passive_memory_observed_monotonic_ns},
+      {"accelerator_count", expected.passive_accelerator_memory_count},
+      {"accelerators_truncated", false},
+      {"accelerators",
+       {{{"resource_kind", "accelerator"},
+         {"vendor", "nvidia"},
+         {"stable_id", "GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"},
+         {"parent_id", nullptr},
+         {"audited_eligible", false},
+         {"total_memory_bytes", 96ULL << 30U},
+         {"free_memory_bytes", 80ULL << 30U},
+         {"selector_labels", {{"partition-parent", "nonselectable"}}}},
+        {{"resource_kind", "accelerator_partition"},
+         {"vendor", "nvidia"},
+         {"stable_id", "MIG-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"},
+         {"parent_id", "GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"},
+         {"audited_eligible", true},
+         {"total_memory_bytes", 48ULL << 30U},
+         {"free_memory_bytes", 40ULL << 30U},
+         {"selector_labels", {{"partition", "mig"}}}}}},
+  };
+  expected.passive_memory_observation_digest =
+      "sha256:" + sha256_hex(passive_identity.dump());
   expected.process_launch_enabled = true;
   expected.mutation_enabled = true;
 
@@ -1375,6 +1431,73 @@ void authority_status_round_trips_receipt_derived_health() {
               source->observations == 1U,
           "status transport carries one exact bounded authority snapshot");
 
+  HostdAuthorityStatus bounded = expected;
+  bounded.passive_accelerator_memory.clear();
+  bounded.passive_accelerator_memory_count =
+      HostResourceBounds::maximum_resources;
+  bounded.passive_accelerator_memory_truncated = true;
+  nlohmann::json bounded_rows = nlohmann::json::array();
+  for (std::size_t index = 0U;
+       index < HostdAuthorityStatus::maximum_passive_memory_rows; ++index) {
+    const std::string stable_id = "GPU-passive-" + std::to_string(index);
+    bounded.passive_accelerator_memory.push_back({
+        .resource_kind = HostResourceKind::accelerator,
+        .vendor = HostAcceleratorVendor::nvidia,
+        .stable_id = stable_id,
+        .parent_id = std::nullopt,
+        .audited_eligible = true,
+        .total_memory_bytes = 96ULL << 30U,
+        .free_memory_bytes = 80ULL << 30U,
+        .selector_labels = {{"pool", "training"}},
+    });
+    bounded_rows.push_back({
+        {"resource_kind", "accelerator"},
+        {"vendor", "nvidia"},
+        {"stable_id", stable_id},
+        {"parent_id", nullptr},
+        {"audited_eligible", true},
+        {"total_memory_bytes", 96ULL << 30U},
+        {"free_memory_bytes", 80ULL << 30U},
+        {"selector_labels", {{"pool", "training"}}},
+    });
+  }
+  bounded.passive_memory_observation_digest =
+      "sha256:" + sha256_hex(nlohmann::json{
+          {"api_version", "trainvm.hostd-passive-memory/v1"},
+          {"host_id", bounded.passive_memory_host_id},
+          {"boot_id", bounded.passive_memory_boot_id},
+          {"inventory_digest", bounded.passive_memory_inventory_digest},
+          {"inventory_receipt_digest",
+           bounded.passive_memory_inventory_receipt_digest},
+          {"observed_monotonic_ns",
+           bounded.passive_memory_observed_monotonic_ns},
+          {"accelerator_count", bounded.passive_accelerator_memory_count},
+          {"accelerators_truncated", true},
+          {"accelerators", std::move(bounded_rows)},
+      }.dump());
+  auto bounded_source =
+      std::make_shared<FixedAuthorityStatusSource>(bounded);
+  HostdStatusServer bounded_server(authority, fixture.coordinator,
+                                   peer_policy(), {}, bounded_source);
+  HostdServeResult bounded_served = HostdServeResult::timed_out;
+  std::jthread bounded_thread(
+      [&] { bounded_served = bounded_server.serve_one(deadline()); });
+  const HostdStatusReply bounded_reply =
+      hostd_request_status(client_config(*authority), 905U, deadline());
+  bounded_thread.join();
+  require(bounded_served == HostdServeResult::served &&
+              bounded_reply.authority_status &&
+              bounded_reply.authority_status
+                      ->passive_accelerator_memory_count ==
+                  HostResourceBounds::maximum_resources &&
+              bounded_reply.authority_status
+                  ->passive_accelerator_memory_truncated &&
+              bounded_reply.authority_status
+                      ->passive_accelerator_memory.size() ==
+                  HostdAuthorityStatus::maximum_passive_memory_rows,
+          "oversized valid inventory is deterministically bounded inside the "
+          "status packet and explicitly marked incomplete");
+
   HostdAuthorityStatus contradictory = expected;
   contradictory.resource_inventory_observed = false;
   auto contradictory_source =
@@ -1394,6 +1517,48 @@ void authority_status_round_trips_receipt_derived_health() {
   contradictory_thread.join();
   require(rejected == HostdServeResult::rejected,
           "server rejects contradictory resource health before projection");
+
+  HostdAuthorityStatus mutated_memory = expected;
+  mutated_memory.passive_accelerator_memory.back().free_memory_bytes -= 1U;
+  auto mutated_source =
+      std::make_shared<FixedAuthorityStatusSource>(mutated_memory);
+  HostdStatusServer mutated_server(authority, fixture.coordinator,
+                                   peer_policy(), {}, mutated_source);
+  HostdServeResult mutated_rejected = HostdServeResult::served;
+  std::jthread mutated_thread(
+      [&] { mutated_rejected = mutated_server.serve_one(deadline()); });
+  require_throws<HostdTransportError>(
+      [&] {
+        (void)hostd_request_status(client_config(*authority), 903U,
+                                   deadline());
+      },
+      "passive-memory row mutation without a new digest is rejected");
+  mutated_thread.join();
+  require(mutated_rejected == HostdServeResult::rejected,
+          "passive-memory attestation digest is exact");
+
+  HostdAuthorityStatus overlapping = expected;
+  overlapping.passive_accelerator_memory.front().audited_eligible = true;
+  auto overlapping_identity = passive_identity;
+  overlapping_identity["accelerators"][0]["audited_eligible"] = true;
+  overlapping.passive_memory_observation_digest =
+      "sha256:" + sha256_hex(overlapping_identity.dump());
+  auto overlapping_source =
+      std::make_shared<FixedAuthorityStatusSource>(overlapping);
+  HostdStatusServer overlapping_server(authority, fixture.coordinator,
+                                       peer_policy(), {}, overlapping_source);
+  HostdServeResult overlap_rejected = HostdServeResult::served;
+  std::jthread overlap_thread(
+      [&] { overlap_rejected = overlapping_server.serve_one(deadline()); });
+  require_throws<HostdTransportError>(
+      [&] {
+        (void)hostd_request_status(client_config(*authority), 904U,
+                                   deadline());
+      },
+      "MIG parent and child cannot both be allocation-eligible observations");
+  overlap_thread.join();
+  require(overlap_rejected == HostdServeResult::rejected,
+          "MIG passive evidence cannot double-count overlapping resources");
 }
 
 void malformed_packets_rights_and_deadlines_are_bounded() {

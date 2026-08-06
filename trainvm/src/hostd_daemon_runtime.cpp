@@ -18,6 +18,8 @@
 #include <vector>
 
 #include "trainvm/authority_time.hpp"
+#include "trainvm/document.hpp"
+#include "trainvm/reflection_json.hpp"
 #include "trainvm/host_ledger.hpp"
 #include "trainvm/sqlite_filesystem_authority.hpp"
 #include "trainvm/hostd_journal_fence_attestor.hpp"
@@ -209,6 +211,75 @@ public:
       status.resource_inventory_observed = true;
       status.current_inventory_digest = current.inventory_digest;
       status.current_inventory_receipt_digest = current.receipt_digest;
+      if (observation.passive_memory &&
+          observation.passive_memory->host_id == current.host_id &&
+          observation.passive_memory->boot_id == current.boot_id) {
+        const auto &passive = *observation.passive_memory;
+        status.passive_memory_host_id = passive.host_id;
+        status.passive_memory_boot_id = passive.boot_id;
+        status.passive_memory_inventory_digest = current.inventory_digest;
+        status.passive_memory_inventory_receipt_digest = current.receipt_digest;
+        status.passive_memory_observed_monotonic_ns =
+            passive.observed_monotonic_ns;
+        for (const auto &memory : passive.accelerators) {
+          const auto resource = std::ranges::find_if(
+              current.resources, [&](const auto &candidate) {
+                return candidate.id.stable_id == memory.stable_id &&
+                       candidate.id.vendor == memory.vendor &&
+                       candidate.total_memory_bytes ==
+                           memory.total_memory_bytes;
+              });
+          if (resource == current.resources.end())
+            continue;
+          status.passive_accelerator_memory.push_back({
+              .resource_kind = resource->id.kind,
+              .vendor = memory.vendor,
+              .stable_id = memory.stable_id,
+              .parent_id = resource->id.parent_id,
+              .audited_eligible =
+                  resource->disposition ==
+                  ResourceObservationDisposition::audited_eligible,
+              .total_memory_bytes = memory.total_memory_bytes,
+              .free_memory_bytes = memory.free_memory_bytes,
+              .selector_labels = resource->labels,
+          });
+        }
+        std::ranges::sort(status.passive_accelerator_memory, {},
+                          &HostdPassiveAcceleratorMemory::stable_id);
+        status.passive_accelerator_memory_count =
+            status.passive_accelerator_memory.size();
+        if (status.passive_accelerator_memory.size() >
+            HostdAuthorityStatus::maximum_passive_memory_rows) {
+          status.passive_accelerator_memory.resize(
+              HostdAuthorityStatus::maximum_passive_memory_rows);
+          status.passive_accelerator_memory_truncated = true;
+        }
+        const auto identity = [&] {
+          return nlohmann::json{
+              {"api_version", "trainvm.hostd-passive-memory/v1"},
+              {"host_id", status.passive_memory_host_id},
+              {"boot_id", status.passive_memory_boot_id},
+              {"inventory_digest", status.passive_memory_inventory_digest},
+              {"inventory_receipt_digest",
+               status.passive_memory_inventory_receipt_digest},
+              {"observed_monotonic_ns",
+               status.passive_memory_observed_monotonic_ns},
+              {"accelerator_count", status.passive_accelerator_memory_count},
+              {"accelerators_truncated",
+               status.passive_accelerator_memory_truncated},
+              {"accelerators", encode_json(status.passive_accelerator_memory)},
+          };
+        };
+        while (!status.passive_accelerator_memory.empty() &&
+               identity().dump().size() >
+                   HostdAuthorityStatus::
+                       maximum_passive_memory_identity_bytes) {
+          status.passive_accelerator_memory.pop_back();
+          status.passive_accelerator_memory_truncated = true;
+        }
+        status.passive_memory_observation_digest =
+            "sha256:" + sha256_hex(identity().dump());
+      }
       for (const ResourceFence &fence : occupancy.active_fences) {
         const auto observed = std::find_if(
             current.resources.begin(), current.resources.end(),
@@ -289,6 +360,7 @@ public:
 private:
   struct InventoryObservation final {
     std::optional<HostInventoryReceipt> receipt;
+    std::optional<PassiveHostMemorySnapshot> passive_memory;
     std::string failure_reason;
     std::uint64_t age_ns{};
   };
@@ -300,14 +372,17 @@ private:
         now - *inventory_observed_at_ns_ >= inventory_refresh_interval_ns) {
       try {
         cached_inventory_ = capture_host_inventory(inventory_kernel_);
+        cached_passive_memory_ = inventory_kernel_.passive_memory_snapshot();
         cached_inventory_failure_.clear();
       } catch (const std::exception &exception) {
         cached_inventory_.reset();
+        cached_passive_memory_.reset();
         cached_inventory_failure_ = bounded_status_reason(
             std::string("current inventory observation failed: ") +
             exception.what());
       } catch (...) {
         cached_inventory_.reset();
+        cached_passive_memory_.reset();
         cached_inventory_failure_ =
             "current inventory observation failed with a non-standard exception";
       }
@@ -319,6 +394,7 @@ private:
                                   ? static_cast<std::uint64_t>(sampled_now - observed_at)
                                   : 0U;
     return {.receipt = cached_inventory_,
+            .passive_memory = cached_passive_memory_,
             .failure_reason = cached_inventory_failure_,
             .age_ns = age};
   }
@@ -329,6 +405,7 @@ private:
   IHostKernel &inventory_kernel_;
   mutable std::mutex inventory_mutex_;
   mutable std::optional<HostInventoryReceipt> cached_inventory_;
+  mutable std::optional<PassiveHostMemorySnapshot> cached_passive_memory_;
   mutable std::string cached_inventory_failure_;
   mutable std::optional<std::int64_t> inventory_observed_at_ns_;
   bool process_launch_enabled_{};

@@ -23,6 +23,7 @@
 #include "trainvm/host_process_saga.hpp"
 #include "trainvm/resource_request_builder.hpp"
 #include "trainvm/reconciler.hpp"
+#include "trainvm/run_authoring.hpp"
 #include "trainvm/lease_renewal.hpp"
 #include "trainvm/training_component_registry.hpp"
 #include "trainvm/v1/trainvm.grpc.pb.h"
@@ -69,12 +70,20 @@ class TrainVMService final : public v1::TrainVM::Service,
       // fails closed when this is absent rather than assuming a verdict.
       ICacheQualificationEvidenceResolver* cache_qualification = nullptr,
       SqliteAuthorityEnforcementGrade filesystem_enforcement_grade =
-          SqliteAuthorityEnforcementGrade::cooperative_test);
+          SqliteAuthorityEnforcementGrade::cooperative_test,
+      std::shared_ptr<ITrainingPreflightEvidenceProvider>
+          preflight_evidence = {},
+      std::filesystem::path recipe_registry_path =
+          std::filesystem::path(std::string(kInstalledRecipeProfilePath)));
   ~TrainVMService() override;
 
   grpc::Status SubmitExperiment(grpc::ServerContext* context,
                                 const v1::SubmitExperimentRequest* request,
                                 v1::SubmitExperimentResponse* response) override;
+
+  grpc::Status AuthorRun(
+      grpc::ServerContext* context, const v1::AuthorRunRequest* request,
+      grpc::ServerWriter<v1::AuthorRunUpdate>* writer) override;
 
   grpc::Status DiffPlan(grpc::ServerContext* context,
                         const v1::PlanDiffRequest* request,
@@ -128,6 +137,16 @@ class TrainVMService final : public v1::TrainVM::Service,
   void stop_reconciliation_supervisor() noexcept;
 
  private:
+  struct AuthorRunAuthority final {
+    std::string request_digest;
+    TrainingPreflightReceipt receipt;
+  };
+
+  grpc::Status submit_experiment(
+      grpc::ServerContext* context,
+      const v1::SubmitExperimentRequest* request,
+      v1::SubmitExperimentResponse* response,
+      const std::optional<AuthorRunAuthority>& authoring);
   struct WorkerConnection {
     WorkerSessionIdentity identity;
     Dispatch dispatch;
@@ -215,7 +234,12 @@ class TrainVMService final : public v1::TrainVM::Service,
                  ICacheQualificationEvidenceResolver* cache_qualification =
                      nullptr,
                  SqliteAuthorityEnforcementGrade filesystem_enforcement_grade =
-                     SqliteAuthorityEnforcementGrade::cooperative_test);
+                     SqliteAuthorityEnforcementGrade::cooperative_test,
+                 std::shared_ptr<ITrainingPreflightEvidenceProvider>
+                     preflight_evidence = {},
+                 std::filesystem::path recipe_registry_path =
+                     std::filesystem::path(
+                         std::string(kInstalledRecipeProfilePath)));
 
   static constexpr std::size_t kMaximumRetainedLaunches = 32U;
   static constexpr std::uint64_t kMaximumRetainedLaunchBytes = 2ULL << 30U;
@@ -230,6 +254,8 @@ class TrainVMService final : public v1::TrainVM::Service,
   const AdapterRegistry adapter_registry_;
   const HostLaunchRegistry host_launch_registry_;
   const TrainingComponentRegistry training_components_;
+  std::shared_ptr<ITrainingPreflightEvidenceProvider> preflight_evidence_;
+  const std::filesystem::path recipe_registry_path_;
   const HostIdentity authority_host_;
   HostLaunchResolver host_launch_resolver_;
   std::shared_ptr<JournalHostdMutationClaimProvider>
@@ -257,6 +283,7 @@ class TrainVMService final : public v1::TrainVM::Service,
   std::jthread reconciliation_thread_;
   std::map<std::string, ResolvedLaunch> resolved_launches_;
   std::mutex worker_sessions_mutex_;
+  std::mutex author_run_mutex_;
   std::set<std::string> active_worker_attempts_;
 };
 
