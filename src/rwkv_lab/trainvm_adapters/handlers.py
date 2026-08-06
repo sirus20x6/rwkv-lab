@@ -1008,25 +1008,27 @@ def _rwkv_scratch(
     )
     run_directory = paths.run_directory
     run_directory.mkdir(mode=0o750, parents=True, exist_ok=True)
-    resume = None
+    controller_resume = None
     if resume_payload is not None:
-        if config.resume is not None:
+        if config.initial_checkpoint is not None:
             raise AdapterDispatchError(
                 "controller resume and model-factory continuation are mutually exclusive"
             )
-        resume = paths.read_path(
+        controller_resume = paths.read_path(
             str(resume_payload / "state.pt"),
             label="controller resume checkpoint state",
             kind="file",
             require_content_identity=False,
         )
-    elif config.resume:
-        resume = paths.read_path(config.resume, label="resume", kind="file")
+    elif config.initial_checkpoint:
+        initial_checkpoint = paths.read_path(
+            config.initial_checkpoint, label="initial checkpoint", kind="file"
+        )
         model_factory = components.model_loader()
         matching_checkpoint_locks = tuple(
             identity
             for identity in paths.input_content_roots
-            if Path(identity.path) == resume
+            if Path(identity.path) == initial_checkpoint
         )
         if (
             len(matching_checkpoint_locks) != 1
@@ -1037,6 +1039,7 @@ def _rwkv_scratch(
             raise AdapterDispatchError(
                 "RWKV continuation checkpoint disagrees with content authority"
             )
+        config = replace(config, initial_checkpoint=str(initial_checkpoint))
     try:
         prepared = prepare_registered_corpus(
             components,
@@ -1064,7 +1067,11 @@ def _rwkv_scratch(
                 data=str(prepared.path),
                 output_dir=str(run_directory),
                 checkpoint=str(checkpoint),
-                resume=(str(resume) if resume is not None else None),
+                resume=(
+                    str(controller_resume)
+                    if controller_resume is not None
+                    else None
+                ),
                 schedule=schedule_implementation,
             ),
             worker_components=components,

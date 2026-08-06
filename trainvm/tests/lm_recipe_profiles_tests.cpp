@@ -171,8 +171,21 @@ int main() {
   };
   const auto rwkv_scratch =
       expand_rwkv("rwkv-lm-scratch.recipe-instance.v1.json");
+  auto continuation_instance = read_json(
+      root / "docs/experiment-vm/examples/rwkv-lm-scratch.recipe-instance.v1.json");
+  continuation_instance["recipe"]["name"] = "rwkv_lm_continuation";
+  continuation_instance["run_identity"] = "rwkv-lm-continuation-test";
+  continuation_instance["overrides"]["model.checkpoint_path"] =
+      "/thearray/git/moe-mla/README.md";
+  continuation_instance["overrides"]["model.activation"] = "silu@1.0.0";
+  continuation_instance["overrides"]["hyperparameters.optimizer"] =
+      "torch_adamw_no_decay@2.0.0";
+  continuation_instance["overrides"]["hyperparameters.learning_rate_schedule"] =
+      "linear_warmup_cosine@1.0.0";
   const auto rwkv_continuation =
-      expand_rwkv("rwkv-lm-continuation.recipe-instance.v1.json");
+      rwkv_registry.expand_json(continuation_instance);
+  components.validate_plan(rwkv_continuation.plan);
+  adapters.validate_plan(rwkv_continuation.plan);
   for (const auto* recipe : {&rwkv_scratch, &rwkv_continuation}) {
     const auto& selected = training_components(*recipe);
     check(selected.at("data").at("key").at("name") ==

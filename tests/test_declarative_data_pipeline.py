@@ -155,7 +155,9 @@ def test_packed_token_collator_combines_short_samples_with_separator() -> None:
         tensor_output=False,
     )
 
-    assert batch["sample_ids"] == ("first+second",)
+    assert len(batch["sample_ids"]) == 1
+    assert batch["sample_ids"][0].startswith("sha256:")
+    assert batch["packed_sample_members"] == (("first", "second"),)
     assert batch["input_ids"] == [[10, 11, 2, 20, 21, 22, 0, 0]]
     assert batch["labels"] == [[10, 11, 2, 20, 21, 22, -100, -100]]
     assert batch["attention_mask"] == [[1, 1, 1, 1, 1, 1, 0, 0]]

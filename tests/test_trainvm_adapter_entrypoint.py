@@ -559,6 +559,7 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
     tmp_path, monkeypatch
 ) -> None:
     import hashlib
+    from pathlib import Path
 
     from rwkv_lab import rwkv_pretrain
     from rwkv_lab.training_components import (
@@ -575,6 +576,7 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
         FrozenNamedSplitConfiguration,
         FullTrainabilityConfiguration,
         JsonlFrozenTokenSplitsConfiguration,
+        ModelLoaderImplementation,
         PaddedCollatorConfiguration,
         PowerCoolConfiguration,
         RegisteredBatching,
@@ -600,6 +602,10 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
     run_directory = tmp_path / "write" / "run"
     read_root.mkdir()
     run_directory.parent.mkdir()
+    checkpoint_root = tmp_path / "checkpoint-input"
+    checkpoint_root.mkdir()
+    initial_checkpoint = checkpoint_root / "scratch-state.pt"
+    initial_checkpoint.write_bytes(b"sealed checkpoint fixture")
     rows = {
         "train": [
             {"id": "train-a", "split": "train", "tokens": list(range(1, 17))},
@@ -773,7 +779,7 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
 
     def train(arguments, **kwargs):
         observed.append((arguments, kwargs))
-        checkpoint = run_directory / "checkpoint-final" / "state.pt"
+        checkpoint = Path(arguments[arguments.index("--save") + 1])
         checkpoint.write_bytes(b"checkpoint")
         return {"checkpoint": str(checkpoint), "step": 120}
 
@@ -816,6 +822,50 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
     request = result.checkpoint_requests[0]
     assert request.source_directory == run_directory / "checkpoint-final"
     assert request.resume_grade == "terminal_checkpoint"
+
+    class ContinuationComponents(Components):
+        def model_loader(self):
+            return RWKVModelFactory(
+                implementation=ModelLoaderImplementation.RWKV_CHECKPOINT_V1,
+                configuration=RWKVModelFactoryConfiguration(
+                    65_536,
+                    64,
+                    1,
+                    16,
+                    7,
+                    str(initial_checkpoint),
+                    measure_input_content_root(initial_checkpoint).tree_sha256,
+                ),
+            )
+
+    continuation_run_directory = tmp_path / "write" / "continued"
+    continuation_workspace = _sealed_workspace(
+        read_root, continuation_run_directory
+    )
+    continuation_workspace["allowed_read_roots"].append(str(checkpoint_root))
+    continuation_workspace["allowed_read_roots"].sort()
+    continuation_workspace["input_content_roots"].append(
+        asdict(measure_input_content_root(initial_checkpoint))
+    )
+    continuation_workspace["input_content_roots"].sort(key=lambda item: item["path"])
+    continuation = _rwkv_scratch(
+        SimpleNamespace(
+            inputs={"config": {}},
+            workspace=continuation_workspace,
+            publishes={"checkpoint": {}},
+        ),
+        ContinuationComponents(),
+        step_profiler=profiler,
+        observability=observability,
+        controls=controls,
+        execution_phases=execution_phases,
+    )
+    continuation_arguments = observed[1][0]
+    assert continuation_arguments[
+        continuation_arguments.index("--init-checkpoint") + 1
+    ] == str(initial_checkpoint.resolve())
+    assert "--resume" not in continuation_arguments
+    assert continuation.optimizer_step == 120
 
 
 def test_rwkv_posttraining_handler_seals_inputs_and_publishes_adapter_bundle(

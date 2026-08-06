@@ -1262,9 +1262,10 @@ class RegisteredCollator:
             input_ids.append(ids + [configuration.pad_token_id] * padding)
             labels.append(target + [configuration.label_pad_token_id] * padding)
             attention.append([1] * len(ids) + [0] * padding)
-            packed_sample_ids.append("+".join(members))
+            packed_sample_ids.append(_canonical_digest(members))
         result: dict[str, Any] = {
             "sample_ids": tuple(packed_sample_ids),
+            "packed_sample_members": tuple(tuple(row[2]) for row in rows),
             "input_ids": input_ids,
             "labels": labels,
             "attention_mask": attention,

@@ -22,7 +22,7 @@ import math
 import os
 import random
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
@@ -830,6 +830,21 @@ def resolved_worker_component_contract(
     )
 
 
+def initialize_model_weights_from_checkpoint(
+    model: nn.Module, checkpoint_path: str
+) -> int:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if not isinstance(checkpoint, Mapping) or not isinstance(
+        checkpoint.get("model"), Mapping
+    ):
+        raise TypeError("initial checkpoint has no model state")
+    model.load_state_dict(checkpoint["model"], strict=True)
+    source_step = checkpoint.get("step", 0)
+    if not isinstance(source_step, int) or isinstance(source_step, bool):
+        raise TypeError("initial checkpoint step is invalid")
+    return source_step
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -905,6 +920,11 @@ def main(
     ap.add_argument("--cosine-min-ratio", type=float, default=0.1)
     ap.add_argument("--decay-steps", type=int, default=0)   # cosine horizon; 0 => use --steps
     ap.add_argument("--save", default=""); ap.add_argument("--resume", default="")
+    ap.add_argument(
+        "--init-checkpoint",
+        default="",
+        help="initialize model weights only; optimizer, RNG, and step start fresh",
+    )
     ap.add_argument("--init-g1g", default="", help="continue-train from a pretrained g1g .pth (dims forced to g1g)")
     # loop levers
     ap.add_argument("--loop-count", type=int, default=1)
@@ -1131,6 +1151,12 @@ def main(
         0, 1, 0, "cuda" if torch.cuda.is_available() else "cpu")
     if args.distributed == "fsdp2" and dist.world_size == 1:
         ap.error("--distributed fsdp2 must be launched with torchrun and WORLD_SIZE > 1")
+    if args.resume and args.init_checkpoint:
+        ap.error("--resume and --init-checkpoint are mutually exclusive")
+    if args.init_checkpoint and args.distributed == "fsdp2":
+        ap.error("--init-checkpoint is not supported with FSDP2")
+    if args.init_checkpoint and not os.path.isfile(args.init_checkpoint):
+        ap.error("--init-checkpoint must name an existing checkpoint file")
     os.makedirs(args.out, exist_ok=True)
     jl = open(os.path.join(args.out, "train.jsonl"), "w", buffering=1) if dist.is_primary \
         else open(os.devnull, "w")
@@ -1387,6 +1413,15 @@ def main(
                 ap.error(f"compiled online memory failed parity/performance qualification: {report}")
             else:
                 print(f"online-memory kernel: eager (compiled candidate rejected: {report})", flush=True)
+    if args.init_checkpoint:
+        source_step = initialize_model_weights_from_checkpoint(
+            model, args.init_checkpoint
+        )
+        print(
+            f"initialized model weights from {args.init_checkpoint} "
+            f"(source step {source_step}); optimizer and RNG start fresh",
+            flush=True,
+        )
     nparam = sum(p.numel() for p in model.parameters())
     seed_chain = bool(args.seed_chain) and not args.init_g1g  # g1g branch ignores the flag
     tag = f"scratch-L{args.n_layers}d{args.d_model}-loop{args.loop_count}" + \

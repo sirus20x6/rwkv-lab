@@ -1,5 +1,7 @@
 import pytest
+import torch
 
+from rwkv_lab.rwkv_pretrain import initialize_model_weights_from_checkpoint
 from rwkv_lab.trainvm_adapters.rwkv_scratch import RWKVScratchTrainConfig
 
 
@@ -48,3 +50,59 @@ def test_rwkv_scratch_config_constructor_rejects_unknown_research_switches() -> 
             steps=200,
             arbitrary_module="user.code",
         )
+
+
+def test_continuation_initializes_weights_but_not_optimizer_state(tmp_path) -> None:
+    source = torch.nn.Linear(3, 2)
+    with torch.no_grad():
+        source.weight.fill_(4.0)
+        source.bias.fill_(5.0)
+    checkpoint = tmp_path / "scratch-state.pt"
+    torch.save(
+        {
+            "model": source.state_dict(),
+            "opt": {"source-only": True},
+            "step": 73,
+            "component_composition_digest": "sha256:" + "a" * 64,
+        },
+        checkpoint,
+    )
+    continued = torch.nn.Linear(3, 2)
+
+    assert initialize_model_weights_from_checkpoint(continued, str(checkpoint)) == 73
+    assert torch.equal(continued.weight, source.weight)
+    assert torch.equal(continued.bias, source.bias)
+    fresh_optimizer = torch.optim.AdamW(continued.parameters())
+    assert fresh_optimizer.state == {}
+
+
+def test_continuation_and_exact_resume_flags_are_mutually_exclusive() -> None:
+    config = RWKVScratchTrainConfig(
+        steps=200,
+        initial_checkpoint="/sealed/scratch-state.pt",
+    )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        config.trainer_arguments(
+            data="/data/tokens.bin",
+            output_dir="/runs/one",
+            checkpoint="/runs/one/checkpoint-final/state.pt",
+            resume="/controller/resume/state.pt",
+        )
+
+
+def test_continuation_lowers_to_model_only_initialization() -> None:
+    config = RWKVScratchTrainConfig(
+        steps=200,
+        initial_checkpoint="/sealed/scratch-state.pt",
+    )
+    arguments = config.trainer_arguments(
+        data="/data/tokens.bin",
+        output_dir="/runs/continued",
+        checkpoint="/runs/continued/checkpoint-final/state.pt",
+        resume=None,
+    )
+
+    assert arguments[arguments.index("--init-checkpoint") + 1] == (
+        "/sealed/scratch-state.pt"
+    )
+    assert "--resume" not in arguments

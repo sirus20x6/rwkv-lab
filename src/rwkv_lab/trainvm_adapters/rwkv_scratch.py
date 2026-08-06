@@ -67,13 +67,14 @@ class RWKVScratchTrainConfig:
     eval_every_steps: int = 50
     log_every_steps: int = 10
     seed: int = 0
-    resume: str | None = None
+    initial_checkpoint: str | None = None
 
     def __post_init__(self) -> None:
-        if self.resume is not None and (
-            not isinstance(self.resume, str) or not self.resume
+        if self.initial_checkpoint is not None and (
+            not isinstance(self.initial_checkpoint, str)
+            or not self.initial_checkpoint
         ):
-            raise ValueError("resume must be a nonempty path when present")
+            raise ValueError("initial_checkpoint must be a nonempty path when present")
         _integer(self.steps, "steps", 1, 1_000_000_000)
         _integer(self.d_model, "d_model", 64, 65_536)
         _integer(self.n_layers, "n_layers", 1, 4_096)
@@ -210,7 +211,7 @@ class RWKVScratchTrainConfig:
             eval_every_steps=evaluation.configuration.full_every_steps,
             log_every_steps=min(10, evaluation.configuration.full_every_steps),
             seed=model.configuration.seed,
-            resume=(
+            initial_checkpoint=(
                 model.configuration.checkpoint_path if model.continuation else None
             ),
         )
@@ -264,6 +265,12 @@ class RWKVScratchTrainConfig:
         arguments.extend(("--distributed", "none"))
         if resume is not None:
             arguments.extend(("--resume", resume))
+        if self.initial_checkpoint is not None:
+            if resume is not None:
+                raise ValueError(
+                    "controller resume and model-only initialization are mutually exclusive"
+                )
+            arguments.extend(("--init-checkpoint", self.initial_checkpoint))
         return arguments
 
 

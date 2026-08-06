@@ -213,7 +213,8 @@ def test_causal_codec_uses_registered_packed_token_collator() -> None:
         )
     )
 
-    assert batch.sample_ids == ("first+second",)
+    assert len(batch.sample_ids) == 1
+    assert batch.sample_ids[0].startswith("sha256:")
     assert batch.tensors["input_ids"].tolist() == [
         [10, 11, 2, 20, 21, 22, 0, 0]
     ]

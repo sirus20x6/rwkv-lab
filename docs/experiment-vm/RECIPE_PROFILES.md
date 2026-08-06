@@ -71,7 +71,9 @@ The registered RWKV equivalents live in
 [rwkv-lm.recipe-profiles.v1.json](examples/rwkv-lm.recipe-profiles.v1.json),
 with compact examples for
 [scratch training](examples/rwkv-lm-scratch.recipe-instance.v1.json) and
-[checkpoint continuation](examples/rwkv-lm-continuation.recipe-instance.v1.json).
+checkpoint continuation. Continuation instances must name a real, immutable
+RWKV checkpoint under their declared read authority; the repository does not
+ship a fake checkpoint placeholder.
 Their model loader, activation, normalization, optimizer, learning-rate
 schedule, frozen train/validation/test splits, and full-trainability policy are
 finite registry selections. Architecture dimensions remain versioned in the
