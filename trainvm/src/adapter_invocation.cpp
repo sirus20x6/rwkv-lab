@@ -225,7 +225,8 @@ bool control_targets_operation(std::string_view name,
 }  // namespace
 
 WorkerInvocationSpec build_worker_invocation(
-    const CompiledPlan& plan, const WorkerInvocationContext& context) {
+    const CompiledPlan& plan, const WorkerInvocationContext& context,
+    std::string_view finalization_policy_digest) {
   const Spec& spec = plan.experiment.spec;
   const auto selected = spec.workflow.nodes.find(context.node_id);
   if (selected == spec.workflow.nodes.end())
@@ -277,6 +278,14 @@ WorkerInvocationSpec build_worker_invocation(
           {"declaration", encode_json(spec.artifacts.at(logical_name))},
           {"logical_name", logical_name},
       };
+      if (spec.artifacts.at(logical_name).schema ==
+          std::optional<std::string>{"rwkv-lab.final-evaluation.v1"}) {
+        if (!valid_digest(finalization_policy_digest)) {
+          reject("final evaluation publication lacks controller policy authority");
+        }
+        publishes[output]["finalization_policy_digest"] =
+            finalization_policy_digest;
+      }
     }
   }
   Json execution = nullptr;

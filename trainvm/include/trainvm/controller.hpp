@@ -8,6 +8,7 @@
 #include "trainvm/dispatch.hpp"
 #include "trainvm/control.hpp"
 #include "trainvm/fsm.hpp"
+#include "trainvm/final_evaluation.hpp"
 #include "trainvm/journal.hpp"
 #include "trainvm/worker.hpp"
 
@@ -34,6 +35,13 @@ class Controller {
   WorkerInvocationSpec bind_worker_invocation(
       const WorkerInvocationSpec& invocation,
       const WorkerSessionIdentity& identity, const AuthorityTimeSample& now);
+  FinalEvaluationExpectation freeze_final_evaluation_expectation(
+      const FinalEvaluationExpectation& expectation,
+      const AuthorityTimeSample& now);
+  void record_finalization_verdict(
+      const FinalizationVerdict& verdict,
+      std::optional<std::uint64_t> optimizer_step,
+      const AuthorityTimeSample& now);
   const ExecutionState& handle_event(const Event& event,
                                      const WorkerSessionIdentity& identity,
                                      const AuthorityTimeSample& now);

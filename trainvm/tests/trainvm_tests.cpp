@@ -4,6 +4,7 @@
 #include "trainvm/document.hpp"
 #include "trainvm/fake_worker.hpp"
 #include "trainvm/fsm.hpp"
+#include "trainvm/final_evaluation.hpp"
 #include "trainvm/host_launch.hpp"
 #include "trainvm/host_launch_registry.hpp"
 #include "trainvm/hostd_mutation_claim_provider.hpp"
@@ -5303,6 +5304,404 @@ void test_worker_control_service_boundary() {
     if (tamper != nullptr) sqlite3_close(tamper);
   }
 
+  std::filesystem::remove_all(directory);
+}
+
+void test_service_blocks_674_failed_final_members() {
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-final-evaluation-service-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  const std::filesystem::path run_directory = directory / "run";
+  std::filesystem::create_directories(run_directory);
+
+  auto source = load_fixture();
+  source["metadata"]["name"] = "final-evaluation-674-errors";
+  source["spec"]["workspace"]["root"] = directory.string();
+  source["spec"]["workspace"]["run_directory"] = run_directory.string();
+  source["spec"]["workspace"]["allowed_read_roots"] = {directory.string()};
+  source["spec"]["workspace"]["allowed_write_roots"] =
+      {run_directory.string()};
+  source["spec"]["artifacts"]["checkpoint"]["required"] = true;
+  source["spec"]["artifacts"]["eval_gallery"]["required"] = true;
+  source["spec"]["artifacts"]["test_eval"] = {
+      {"type", "report"},
+      {"schema", "rwkv-lab.hf-test-caption-evidence-bundle.v1"},
+      {"immutability", "immutable"},
+      {"fingerprint", "manifest_sha256"},
+      {"required", true}};
+  source["spec"]["artifacts"]["final_evaluation"] = {
+      {"type", "report"},
+      {"schema", "rwkv-lab.final-evaluation.v1"},
+      {"immutability", "immutable"},
+      {"fingerprint", "manifest_sha256"},
+      {"required", true}};
+  auto& publishes = source["spec"]["workflow"]["nodes"]
+                             ["train_to_boundary"]["publishes"];
+  publishes.erase("log");
+  publishes["test_eval"] = "test_eval";
+  publishes["final_evaluation"] = "final_evaluation";
+  auto& resume_publishes = source["spec"]["workflow"]["nodes"]
+                                  ["resume_training"]["publishes"];
+  resume_publishes["test_eval"] = "test_eval";
+  resume_publishes["final_evaluation"] = "final_evaluation";
+  const auto compiled = trainvm::compile_document(source);
+  check(compiled.valid(),
+        "674-error finalization service fixture compiles");
+  if (!compiled.plan) {
+    std::filesystem::remove_all(directory);
+    return;
+  }
+
+  auto profiles = fixture_adapter_profiles();
+  const auto train_profile = std::ranges::find_if(
+      profiles, [](const trainvm::AdapterProfile& profile) {
+        return profile.key.operation == "train";
+      });
+  train_profile->authoring->outputs.at("checkpoint").required = true;
+  train_profile->authoring->outputs.at("eval_gallery").required = true;
+  train_profile->authoring->outputs.emplace(
+      "test_eval",
+      operation_port(trainvm::OperationPortType::artifact, true,
+                     trainvm::ArtifactType::report,
+                     "rwkv-lab.hf-test-caption-evidence-bundle.v1"));
+  train_profile->authoring->outputs.emplace(
+      "final_evaluation",
+      operation_port(trainvm::OperationPortType::artifact, true,
+                     trainvm::ArtifactType::report,
+                     "rwkv-lab.final-evaluation.v1"));
+  const trainvm::FinalizationPolicyRegistry policy_registry({*train_profile});
+  const auto& policy = policy_registry.resolve(train_profile->key);
+
+  const auto database = directory / "journal.db";
+  const std::string run_id = "service-final-evaluation-674-errors";
+  trainvm::WorkerLaunchTicket launch;
+  {
+    trainvm::Journal journal(
+        database, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued(
+        adapter_locked_submission(*compiled.plan,
+                                  trainvm::AdapterRegistry(profiles)));
+    (void)controller.begin_acquisition(test_time(1'000));
+    launch = controller.prepare_worker_launch(
+        {.code_fingerprint = "sha256:" + std::string(64U, 'a'),
+         .required_capabilities = {"worker.controls", "worker.metrics"}},
+        test_time(1'100));
+    (void)bind_test_worker_launch(controller, launch, 1'150);
+  }
+  trainvm::TrainVMService service(
+      database, trainvm::AdapterRegistry(profiles),
+      fixture_test_host_launch_registry(*compiled.plan, launch),
+      fixture_test_host_identity(), [] { return test_time(1'200); },
+      trainvm::HostGrantEnforcement::legacy_process_free_test);
+  prime_test_service_launch(service, launch);
+  trainvm::v1::WorkerHello hello;
+  hello.set_run_id(launch.run_id);
+  hello.set_node_id(launch.node_id);
+  hello.set_attempt_id(launch.attempt_id);
+  hello.set_launch_nonce(launch.launch_nonce);
+  hello.set_adapter(launch.adapter);
+  hello.set_adapter_version(launch.adapter_version);
+  hello.set_code_fingerprint(launch.code_fingerprint);
+  for (const auto& capability : launch.required_capabilities)
+    hello.add_capabilities(capability);
+  hello.set_concurrency_key(launch.concurrency_key);
+  hello.set_lease_id(launch.lease_id);
+  hello.set_fencing_token(launch.fencing_token);
+  trainvm::TrainVMService::WorkerConnection connection;
+  const grpc::Status opened =
+      service.open_worker_connection(hello, connection);
+  check(opened.ok(), "674-error finalization worker session opens");
+  if (!opened.ok()) {
+    std::filesystem::remove_all(directory);
+    return;
+  }
+
+  std::vector<std::string> members;
+  std::vector<trainvm::FinalMemberContext> contexts;
+  std::vector<trainvm::FinalMemberRecord> records;
+  for (std::size_t index = 0U; index < 674U; ++index) {
+    const std::string member =
+        "member-" + std::string(3U - std::to_string(index).size(), '0') +
+        std::to_string(index);
+    members.push_back(member);
+    contexts.push_back(
+        {.member_id = member,
+         .context_digest = "sha256:" + std::string(64U, 'c')});
+    records.push_back(
+        {.member_id = member,
+         .context_digest = "sha256:" + std::string(64U, 'c'),
+         .attempt = 1U,
+         .disposition = trainvm::FinalMemberDisposition::error,
+         .result_digest = std::nullopt,
+         .error_code = "generation_failed"});
+  }
+  const std::string checkpoint_id = "final-checkpoint";
+  const std::string checkpoint_fingerprint =
+      "sha256:" + std::string(64U, 'a');
+  trainvm::FinalEvaluationExpectation expectation{
+      .output_name = "test_eval",
+      .required_output_names = {"checkpoint", "eval_gallery", "test_eval"},
+      .policy_digest = trainvm::finalization_policy_digest(policy),
+      .optimizer_step = 5'500U,
+      .checkpoint_artifact_id = checkpoint_id,
+      .checkpoint_fingerprint = checkpoint_fingerprint,
+      .required_members = members,
+      .member_contexts = contexts,
+      .membership_digest = trainvm::final_membership_digest(members),
+      .membership_count = members.size(),
+      .required_scalars = {},
+      .terminal_optimizer_fingerprint = std::nullopt,
+  };
+  trainvm::Controller authority(*compiled.plan, service.journal_, run_id);
+  (void)authority.freeze_final_evaluation_expectation(expectation,
+                                                       test_time(1'250));
+
+  const std::string gallery_id = "final-gallery";
+  const std::string gallery_fingerprint =
+      "sha256:" + std::string(64U, 'b');
+  const std::string test_id = "final-test-report";
+  const std::string test_fingerprint =
+      "sha256:" + std::string(64U, 'd');
+  const auto publish = [&](std::uint64_t sequence, const std::string& output,
+                           const std::string& artifact_id,
+                           trainvm::v1::ArtifactKind kind,
+                           const std::string& fingerprint,
+                           const std::vector<std::string>& parents,
+                           const std::string& uri,
+                           std::uint64_t size_bytes) {
+    const auto& publication = connection.publishes.at(output);
+    trainvm::v1::ArtifactManifest artifact;
+    artifact.set_worker_sequence(sequence);
+    artifact.set_artifact_id(artifact_id);
+    artifact.set_logical_name(
+        publication.at("logical_name").get<std::string>());
+    artifact.set_kind(kind);
+    artifact.set_schema(
+        publication.at("declaration").at("schema").get<std::string>());
+    artifact.set_uri(uri);
+    artifact.set_size_bytes(size_bytes);
+    artifact.set_fingerprint_algorithm("manifest_sha256");
+    artifact.set_fingerprint(fingerprint);
+    artifact.set_complete(true);
+    artifact.set_optimizer_step(5'500U);
+    artifact.set_producer_node_id(connection.identity.node_id);
+    artifact.set_producer_attempt_id(connection.identity.attempt_id);
+    for (const std::string& parent : parents)
+      artifact.add_parent_artifact_ids(parent);
+    artifact.mutable_published_at()->set_seconds(2);
+    std::uint64_t acknowledged = 0U;
+    return service.record_worker_artifact(artifact, connection,
+                                          acknowledged);
+  };
+  const grpc::Status checkpoint_status = publish(
+      1U, "checkpoint", checkpoint_id,
+      trainvm::v1::ARTIFACT_KIND_CHECKPOINT, checkpoint_fingerprint, {},
+      "file:///sealed/final-checkpoint", 1U);
+  const grpc::Status gallery_status = publish(
+      2U, "eval_gallery", gallery_id,
+      trainvm::v1::ARTIFACT_KIND_IMAGE_GALLERY, gallery_fingerprint,
+      {checkpoint_id}, "file:///sealed/final-gallery", 1U);
+  const grpc::Status test_status = publish(
+      3U, "test_eval", test_id, trainvm::v1::ARTIFACT_KIND_REPORT,
+      test_fingerprint, {checkpoint_id}, "file:///sealed/final-test", 1U);
+
+  trainvm::FinalEvaluationManifest manifest{
+      .api_version = "rwkv-lab.final-evaluation/v1",
+      .policy_digest = expectation.policy_digest,
+      .optimizer_step = 5'500U,
+      .checkpoint_artifact_id = checkpoint_id,
+      .checkpoint_fingerprint = checkpoint_fingerprint,
+      .membership_digest = expectation.membership_digest,
+      .membership_count = members.size(),
+      .resolved_member_count = 0U,
+      .failed_member_count = members.size(),
+      .required_members = members,
+      .output_receipts =
+          {{.output_name = "checkpoint",
+            .artifact_id = checkpoint_id,
+            .artifact_fingerprint = checkpoint_fingerprint},
+           {.output_name = "eval_gallery",
+            .artifact_id = gallery_id,
+            .artifact_fingerprint = gallery_fingerprint},
+           {.output_name = "test_eval",
+            .artifact_id = test_id,
+            .artifact_fingerprint = test_fingerprint}},
+      .required_scalars = {},
+      .records = records,
+      .recovery = std::nullopt,
+  };
+  const std::string closure_bytes =
+      trainvm::final_evaluation_manifest_json(manifest).dump();
+  const std::string closure_id = "final-evaluation-674-errors";
+  const auto closure_directory = run_directory / "trainvm_artifacts" /
+                                 "final_evaluation" / closure_id;
+  std::filesystem::create_directories(closure_directory);
+  const auto closure_path = closure_directory / "manifest.json";
+  {
+    std::ofstream output(closure_path, std::ios::binary);
+    output.write(closure_bytes.data(),
+                 static_cast<std::streamsize>(closure_bytes.size()));
+  }
+  const grpc::Status closure_status = publish(
+      4U, "final_evaluation", closure_id,
+      trainvm::v1::ARTIFACT_KIND_REPORT,
+      "sha256:" + trainvm::sha256_hex(closure_bytes),
+      {checkpoint_id, gallery_id, test_id},
+      "file://" + closure_path.string(), closure_bytes.size());
+
+  const trainvm::WorkerInvocationSpec invocation =
+      trainvm::worker_invocation_from_canonical_json(
+          connection.welcome.canonical_invocation_json());
+  const auto durable_evidence = service.journal_.events_for_run(run_id);
+  const auto resolved = trainvm::resolve_final_evaluation_receipts(
+      invocation, expectation, durable_evidence);
+  check(resolved.size() == 1U &&
+            !std::ranges::binary_search(expectation.required_output_names,
+                                        std::string("final_evaluation")) &&
+            !expectation.terminal_optimizer_fingerprint,
+        "controller resolution excludes the closure from its parent set and "
+        "does not forge optimizer-state identity");
+  const auto resolver_rejects = [&](std::vector<trainvm::Event> evidence,
+                                    trainvm::FinalEvaluationExpectation
+                                        candidate) {
+    try {
+      (void)trainvm::resolve_final_evaluation_receipts(
+          invocation, candidate, evidence);
+      return false;
+    } catch (const std::invalid_argument&) {
+      return true;
+    }
+  };
+  const auto closure_event = std::ranges::find_if(
+      durable_evidence, [&](const trainvm::Event& event) {
+        return event.event_type == "artifact.published" &&
+               event.payload.value("artifact_id", std::string{}) == closure_id;
+      });
+  const auto checkpoint_event = std::ranges::find_if(
+      durable_evidence, [&](const trainvm::Event& event) {
+        return event.event_type == "artifact.published" &&
+               event.payload.value("artifact_id", std::string{}) ==
+                   checkpoint_id;
+      });
+  check(closure_event != durable_evidence.end() &&
+            checkpoint_event != durable_evidence.end(),
+        "adversarial resolver fixture contains exact durable events");
+  const auto closure_alias = closure_directory / "manifest-alias.json";
+  std::filesystem::create_hard_link(closure_path, closure_alias);
+  check(resolver_rejects(durable_evidence, expectation),
+        "closure resolution rejects a hardlink alias of immutable bytes");
+  std::filesystem::remove(closure_alias);
+  if (closure_event != durable_evidence.end() &&
+      checkpoint_event != durable_evidence.end()) {
+    const std::size_t closure_index = static_cast<std::size_t>(
+        std::distance(durable_evidence.begin(), closure_event));
+    const auto mutate_closure = [&](std::string_view field,
+                                    nlohmann::json value) {
+      auto evidence = durable_evidence;
+      evidence.at(closure_index).payload[std::string(field)] =
+          std::move(value);
+      return evidence;
+    };
+    check(resolver_rejects(mutate_closure("complete", false), expectation) &&
+              resolver_rejects(mutate_closure("kind", "checkpoint"),
+                               expectation) &&
+              resolver_rejects(
+                  mutate_closure("logical_name", "test_eval"), expectation) &&
+              resolver_rejects(
+                  mutate_closure("fingerprint_algorithm", "sha256"),
+                  expectation),
+          "closure completeness, kind, logical identity, and fingerprint "
+          "algorithm are controller validated");
+
+    auto duplicate_parent = durable_evidence;
+    trainvm::Event duplicate = *checkpoint_event;
+    duplicate.event_id += ":duplicate";
+    duplicate_parent.push_back(std::move(duplicate));
+    auto late_parent = durable_evidence;
+    const std::size_t checkpoint_index = static_cast<std::size_t>(
+        std::distance(durable_evidence.begin(), checkpoint_event));
+    late_parent.at(checkpoint_index).worker_sequence =
+        closure_event->worker_sequence;
+    auto self_parent = durable_evidence;
+    self_parent.at(closure_index)
+        .payload["parent_artifact_ids"]
+        .push_back(closure_id);
+    check(resolver_rejects(std::move(duplicate_parent), expectation) &&
+              resolver_rejects(std::move(late_parent), expectation) &&
+              resolver_rejects(std::move(self_parent), expectation),
+          "closure parents must be unique exact earlier events and cannot "
+          "include the closure itself");
+
+    auto scalar_expectation = expectation;
+    scalar_expectation.required_scalars = {
+        {.metric_name = "eval.loss", .step_domain = "optimizer_step"}};
+    auto late_scalar = durable_evidence;
+    late_scalar.push_back(
+        {.event_id = "late-terminal-eval-loss",
+         .run_id = run_id,
+         .run_revision = connection.dispatch.run_revision,
+         .plan_revision = connection.dispatch.plan_revision,
+         .node_id = connection.identity.node_id,
+         .attempt_id = connection.identity.attempt_id,
+         .worker_sequence = closure_event->worker_sequence + 1U,
+         .event_type = "metric.sampled",
+         .event_version = 1U,
+         .wall_time_ns = 2U,
+         .monotonic_time_ns = 2U,
+         .optimizer_step = 5'500U,
+         .payload = {{"name", "eval.loss"},
+                     {"step_domain", "optimizer_step"},
+                     {"value", 1.0}}});
+    check(resolver_rejects(std::move(late_scalar),
+                           std::move(scalar_expectation)),
+          "terminal scalar evidence must predate the closure");
+  }
+
+  trainvm::v1::EventEnvelope completion;
+  completion.set_event_id(connection.dispatch.dispatch_id + ":result");
+  completion.set_run_id(connection.identity.run_id);
+  completion.set_run_revision(connection.dispatch.run_revision);
+  completion.set_plan_revision(connection.dispatch.plan_revision);
+  completion.set_node_id(connection.identity.node_id);
+  completion.set_attempt_id(connection.identity.attempt_id);
+  completion.set_worker_sequence(5U);
+  completion.set_event_type("worker.completed");
+  completion.set_event_version(1U);
+  completion.mutable_wall_time()->set_seconds(3);
+  completion.set_monotonic_time_ns(3U);
+  completion.set_optimizer_step(5'500U);
+  completion.set_canonical_json_payload(
+      R"({"reason":"cache_span_complete"})");
+  const std::size_t before_completion = service.journal_.event_count();
+  trainvm::v1::WorkerReceipt ignored;
+  const grpc::Status blocked = service.complete_worker_connection(
+      completion, connection, ignored);
+  const auto dispatch_after =
+      service.journal_.dispatch(connection.dispatch.dispatch_id);
+  const auto finalization_events =
+      service.journal_.events_for_run(run_id);
+  const auto verdict_event = std::ranges::find_if(
+      finalization_events, [](const trainvm::Event& event) {
+        return event.event_type == "finalization.verdict_recorded";
+      });
+  check(checkpoint_status.ok() && gallery_status.ok() && test_status.ok() &&
+            closure_status.ok() &&
+            blocked.error_code() == grpc::StatusCode::FAILED_PRECONDITION &&
+            blocked.error_message().find("finalization_pending") !=
+                std::string::npos &&
+            blocked.error_message().find("no successful members") !=
+                std::string::npos &&
+            service.journal_.event_count() == before_completion + 1U &&
+            verdict_event != finalization_events.end() &&
+            verdict_event->payload.value("cause", std::string{}) ==
+                "final evaluation has no successful members" &&
+            dispatch_after &&
+            dispatch_after->status == trainvm::DispatchStatus::prepared,
+        "service completion rejects the production-class 674/674 error closure");
   std::filesystem::remove_all(directory);
 }
 
@@ -13188,6 +13587,7 @@ void test_service_orders_physical_before_logical_release() {
         artifact.set_fingerprint_algorithm("manifest_sha256");
         artifact.set_fingerprint(std::string(64U, 'e'));
         artifact.set_complete(true);
+        artifact.set_optimizer_step(9U);
         artifact.set_producer_node_id(replacement_connection.identity.node_id);
         artifact.set_producer_attempt_id(
             replacement_connection.identity.attempt_id);
@@ -13281,6 +13681,7 @@ int main() {
     test_atomic_queue_acquisition_boundary();
     test_worker_launch_and_readiness_boundary();
     test_worker_control_service_boundary();
+    test_service_blocks_674_failed_final_members();
     test_worker_control_grpc_stream();
     test_graceful_cancel_lifecycle();
     test_resource_releasing_pause_lifecycle();

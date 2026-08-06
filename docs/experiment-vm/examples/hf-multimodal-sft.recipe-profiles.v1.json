@@ -32,7 +32,8 @@
             "checkpoint": {"type": "checkpoint", "schema": "hf.multimodal-sft.v1", "immutability": "immutable", "fingerprint": "manifest_sha256", "required": true},
             "eval_gallery": {"type": "image_gallery", "schema": "rwkv-lab.eval-gallery.v2", "immutability": "append_only", "fingerprint": "manifest_sha256", "required": true},
             "metrics": {"type": "metrics", "schema": "hf.multimodal-sft.metrics.v1", "immutability": "append_only", "fingerprint": "manifest_sha256"},
-            "test_eval": {"type": "report", "schema": "rwkv-lab.hf-test-caption-evidence-bundle.v1", "immutability": "immutable", "fingerprint": "manifest_sha256", "required": true}
+            "test_eval": {"type": "report", "schema": "rwkv-lab.hf-test-caption-evidence-bundle.v1", "immutability": "immutable", "fingerprint": "manifest_sha256", "required": true},
+            "final_evaluation": {"type": "report", "schema": "rwkv-lab.final-evaluation.v1", "immutability": "immutable", "fingerprint": "manifest_sha256", "required": true}
           },
           "components": {
             "core": {
@@ -203,7 +204,7 @@
                     }
                   }
                 },
-                "publishes": {"checkpoint": "checkpoint", "eval_gallery": "eval_gallery", "metrics": "metrics", "test_eval": "test_eval"},
+                "publishes": {"checkpoint": "checkpoint", "eval_gallery": "eval_gallery", "metrics": "metrics", "test_eval": "test_eval", "final_evaluation": "final_evaluation"},
                 "idempotency": "receipt_required",
                 "effect": "process",
                 "timeout_seconds": 604800,

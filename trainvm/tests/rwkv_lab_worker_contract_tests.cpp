@@ -537,13 +537,18 @@ int main() {
                 !appearance.authoring->outputs.contains("log") &&
                 !appearance.authoring->outputs.contains("metrics"),
             "MageFlow must advertise only its protocol-published checkpoint and eval gallery outputs");
-    require(hf.authoring && hf.authoring->outputs.size() == 3U &&
+    require(hf.authoring && hf.authoring->outputs.size() == 4U &&
                 hf.authoring->outputs.at("test_eval").required &&
                 hf.authoring->outputs.at("test_eval").artifact_type ==
                     trainvm::ArtifactType::report &&
                 hf.authoring->outputs.at("test_eval").artifact_schema ==
-                    "rwkv-lab.hf-test-caption-evidence-bundle.v1",
-            "HF multimodal SFT discovery must expose its required sealed test-evaluation output");
+                    "rwkv-lab.hf-test-caption-evidence-bundle.v1" &&
+                hf.authoring->outputs.at("final_evaluation").required &&
+                hf.authoring->outputs.at("final_evaluation").artifact_type ==
+                    trainvm::ArtifactType::report &&
+                hf.authoring->outputs.at("final_evaluation").artifact_schema ==
+                    "rwkv-lab.final-evaluation.v1",
+            "HF multimodal SFT discovery must expose required test and final closure outputs");
 
     nlohmann::json exact_source = load_mageflow_fixture();
     exact_source["spec"].erase("execution");

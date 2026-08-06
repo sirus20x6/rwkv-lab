@@ -13,6 +13,9 @@
 
 namespace trainvm {
 
+struct Event;
+struct WorkerInvocationSpec;
+
 inline constexpr std::size_t kMaximumFinalEvaluationManifestBytes =
     32U * 1024U * 1024U;
 
@@ -194,7 +197,9 @@ struct FinalEvaluationExpectation final {
   std::string membership_digest;
   std::uint64_t membership_count{};
   std::vector<FinalScalarRequirement> required_scalars;
-  std::string terminal_optimizer_fingerprint;
+  // Present only when the controller has an independently verified optimizer
+  // state identity and the operation explicitly supports eval-only recovery.
+  std::optional<std::string> terminal_optimizer_fingerprint;
 
   auto operator<=>(const FinalEvaluationExpectation &) const = default;
 };
@@ -237,5 +242,20 @@ final_evaluation_manifest_json(const FinalEvaluationManifest &manifest);
 // byte round-trip prevent duplicate keys, aliases, or alternate encodings.
 [[nodiscard]] FinalEvaluationManifest
 decode_final_evaluation_manifest(std::string_view bytes);
+
+// First live-family authority adapter. It freezes held-out membership from the
+// admitted content root and resolved component graph, then resolves worker
+// closures only through exact durable parent/scalar events.
+[[nodiscard]] FinalEvaluationExpectation
+derive_hf_final_evaluation_expectation(
+    const OperationFinalizationPolicy &policy,
+    const WorkerInvocationSpec &invocation, std::uint64_t terminal_step,
+    const std::vector<Event> &durable_events);
+
+[[nodiscard]] std::vector<FinalEvaluationReceipt>
+resolve_final_evaluation_receipts(
+    const WorkerInvocationSpec &invocation,
+    const FinalEvaluationExpectation &expectation,
+    const std::vector<Event> &durable_events);
 
 } // namespace trainvm

@@ -6,6 +6,7 @@
 #include "trainvm/document.hpp"
 #include "trainvm/eval_examples_contract.hpp"
 #include "trainvm/external_profiler_artifact.hpp"
+#include "trainvm/final_evaluation.hpp"
 #include "trainvm/reflection_json.hpp"
 
 #include <fcntl.h>
@@ -2861,8 +2862,25 @@ grpc::Status TrainVMService::open_worker_connection(
           .resume = invocation_resume_checkpoint(
               journal_, hello.run_id, hello.node_id, hello.attempt_id),
       };
+      const Component& invocation_component =
+          plan->experiment.spec.components.at(
+              invocation_node.invoke.component);
+      const Operation& invocation_operation =
+          invocation_component.operations.at(invocation_node.invoke.operation);
+      const AdapterKey invocation_key{
+          .adapter = invocation_component.adapter,
+          .version = invocation_component.version,
+          .runtime = invocation_component.runtime,
+          .operation = invocation_node.invoke.operation,
+          .contract = invocation_operation.contract,
+      };
+      const FinalizationPolicyRegistry finalization_registry(
+          {adapter_registry_.resolve(invocation_key)});
       const WorkerInvocationSpec candidate =
-          build_worker_invocation(*plan, context);
+          build_worker_invocation(
+              *plan, context,
+              finalization_policy_digest(
+                  finalization_registry.resolve(invocation_key)));
       invocation = controller.bind_worker_invocation(
           candidate, connection.identity, authority_now());
     }
@@ -3103,6 +3121,88 @@ grpc::Status TrainVMService::complete_worker_connection(
           throw OperationPreconditionError(
               "worker completion is missing required operation output " +
               logical_name);
+        }
+      }
+
+      const AdapterProfile& completion_profile =
+          adapter_registry_.resolve(invocation->adapter);
+      const FinalizationPolicyRegistry completion_registry(
+          {completion_profile});
+      const OperationFinalizationPolicy& finalization_policy =
+          completion_registry.resolve(invocation->adapter);
+      if (finalization_policy.closure_required) {
+        if (finalization_policy.migration_pending ||
+            !envelope.has_optimizer_step() ||
+            (declared_terminal_step &&
+             envelope.optimizer_step() != *declared_terminal_step)) {
+          const FinalizationVerdict verdict{
+              .disposition = FinalizationDisposition::pending,
+              .cause = "terminal optimizer-step authority is incomplete",
+              .unresolved_members = {},
+              .selected_artifact_id = std::nullopt,
+              .selected_artifact_fingerprint = std::nullopt};
+          controller.record_finalization_verdict(
+              verdict,
+              envelope.has_optimizer_step()
+                  ? std::optional<std::uint64_t>{envelope.optimizer_step()}
+                  : std::nullopt,
+              authority_now());
+          throw OperationPreconditionError(
+              "finalization_pending: " + verdict.cause);
+        }
+        FinalizationVerdict verdict;
+        try {
+          FinalEvaluationExpectation expectation;
+          const auto frozen = journal_.event(
+              connection.dispatch.dispatch_id + ":finalization-expectation");
+          if (frozen) {
+            std::vector<Diagnostic> diagnostics;
+            if (frozen->event_type != "finalization.expectation_frozen" ||
+                !decode_json(frozen->payload, expectation, "", diagnostics) ||
+                !diagnostics.empty() ||
+                encode_json(expectation) != frozen->payload) {
+              throw std::runtime_error(
+                  "durable finalization expectation freeze is malformed");
+            }
+          } else {
+            if (!declared_terminal_step) {
+              const FinalizationVerdict pending{
+                  .disposition = FinalizationDisposition::pending,
+                  .cause = "immutable terminal step is undeclared",
+                  .unresolved_members = {},
+                  .selected_artifact_id = std::nullopt,
+                  .selected_artifact_fingerprint = std::nullopt};
+              controller.record_finalization_verdict(
+                  pending, envelope.optimizer_step(), authority_now());
+              throw OperationPreconditionError(
+                  "finalization_pending: " + pending.cause);
+            }
+            expectation = controller.freeze_final_evaluation_expectation(
+                derive_hf_final_evaluation_expectation(
+                    finalization_policy, *invocation,
+                    envelope.optimizer_step(), durable),
+                authority_now());
+          }
+          const auto finalization_history =
+              resolve_final_evaluation_receipts(*invocation, expectation,
+                                                durable);
+          verdict = reduce_final_evaluation(
+              finalization_policy, expectation, finalization_history);
+        } catch (const std::invalid_argument& exception) {
+          verdict = {.disposition = FinalizationDisposition::failed,
+                     .cause = exception.what(),
+                     .unresolved_members = {},
+                     .selected_artifact_id = std::nullopt,
+                     .selected_artifact_fingerprint = std::nullopt};
+        }
+        controller.record_finalization_verdict(
+            verdict, envelope.optimizer_step(), authority_now());
+        if (verdict.disposition != FinalizationDisposition::complete) {
+          const std::string state =
+              verdict.disposition == FinalizationDisposition::pending
+                  ? "finalization_pending: "
+                  : "finalization_failed: ";
+          throw OperationPreconditionError(state + verdict.cause);
         }
       }
     }
@@ -3366,6 +3466,13 @@ grpc::Status TrainVMService::record_worker_artifact(
     const bool eval_examples =
         artifact.kind() == v1::ARTIFACT_KIND_EVAL_EXAMPLES;
     const bool checkpoint = artifact.kind() == v1::ARTIFACT_KIND_CHECKPOINT;
+    const bool image_gallery =
+        artifact.kind() == v1::ARTIFACT_KIND_IMAGE_GALLERY;
+    const bool strict_stepped_report =
+        artifact.kind() == v1::ARTIFACT_KIND_REPORT &&
+        (artifact.schema() == "rwkv-lab.final-evaluation.v1" ||
+         artifact.schema() ==
+             "rwkv-lab.hf-test-caption-evidence-bundle.v1");
     nlohmann::json eval_examples_document = nullptr;
     std::optional<EvalExamplesManifest> eval_examples_manifest;
     std::optional<WorkerInvocationSpec> eval_examples_invocation;
@@ -3427,11 +3534,12 @@ grpc::Status TrainVMService::record_worker_artifact(
       } catch (const std::invalid_argument& exception) {
         return {grpc::StatusCode::FAILED_PRECONDITION, exception.what()};
       }
-    } else if ((checkpoint != artifact.has_optimizer_step()) ||
+    } else if (((checkpoint || image_gallery || strict_stepped_report) !=
+                artifact.has_optimizer_step()) ||
                !artifact.canonical_manifest_json().empty()) {
       return {grpc::StatusCode::INVALID_ARGUMENT,
-              "checkpoint artifacts require an optimizer step and unstepped "
-              "artifacts must omit eval contract fields"};
+              "checkpoint, gallery, and strict final reports require an optimizer step; "
+              "other artifacts must omit eval contract fields"};
     }
     const nlohmann::json* publication = nullptr;
     if (!connection.publishes.is_object()) {
@@ -3514,7 +3622,8 @@ grpc::Status TrainVMService::record_worker_artifact(
         .event_version = 1,
         .wall_time_ns = published_at_ns,
         .monotonic_time_ns = 0,
-        .optimizer_step = (eval_examples || checkpoint)
+        .optimizer_step =
+            (eval_examples || checkpoint || image_gallery || strict_stepped_report)
                               ? std::optional<std::uint64_t>{
                                     artifact.optimizer_step()}
                               : std::nullopt,

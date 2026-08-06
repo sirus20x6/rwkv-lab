@@ -1,13 +1,27 @@
 #include "trainvm/final_evaluation.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cerrno>
+#include <fcntl.h>
+#include <filesystem>
+#include <linux/openat2.h>
+#include <memory>
+#include <openssl/evp.h>
 #include <ranges>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <utility>
 
+#include "trainvm/adapter_invocation.hpp"
 #include "trainvm/document.hpp"
+#include "trainvm/input_content_authority.hpp"
+#include "trainvm/journal.hpp"
 #include "trainvm/reflection_json.hpp"
 
 namespace trainvm {
@@ -26,6 +40,125 @@ constexpr std::size_t kMaximumAggregateCollectionEntries = 4'000'000U;
 constexpr std::size_t kMaximumAggregateIdentityBytes = 64U * 1024U * 1024U;
 constexpr std::size_t kMaximumManifestParserNodes = 500'000U;
 constexpr int kMaximumManifestParserDepth = 64;
+constexpr std::uint64_t kMaximumFrozenDatasetReceiptBytes = 4U * 1024U * 1024U;
+constexpr std::uint64_t kMaximumFrozenTestManifestBytes = 64U * 1024U * 1024U;
+
+class FinalDescriptor final {
+public:
+  explicit FinalDescriptor(int value = -1) : value_(value) {}
+  FinalDescriptor(const FinalDescriptor &) = delete;
+  FinalDescriptor &operator=(const FinalDescriptor &) = delete;
+  FinalDescriptor(FinalDescriptor &&other) noexcept
+      : value_(std::exchange(other.value_, -1)) {}
+  ~FinalDescriptor() {
+    if (value_ >= 0)
+      ::close(value_);
+  }
+  int get() const { return value_; }
+  explicit operator bool() const { return value_ >= 0; }
+
+private:
+  int value_;
+};
+
+FinalDescriptor final_open_beneath(int root, std::string_view relative,
+                                   int flags) {
+  const std::string owned(relative);
+  open_how how{};
+  how.flags = static_cast<std::uint64_t>(flags | O_CLOEXEC | O_NOFOLLOW);
+  how.resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS;
+  const long result =
+      ::syscall(SYS_openat2, root, owned.c_str(), &how, sizeof(how));
+  if (result < 0)
+    throw std::invalid_argument("final evaluation path cannot be pinned");
+  return FinalDescriptor(static_cast<int>(result));
+}
+
+std::string final_descriptor_bytes(int descriptor, std::uint64_t maximum) {
+  struct stat before {};
+  if (::fstat(descriptor, &before) != 0 || !S_ISREG(before.st_mode) ||
+      before.st_nlink != 1 || before.st_size < 0 ||
+      static_cast<std::uint64_t>(before.st_size) > maximum ||
+      ::lseek(descriptor, 0, SEEK_SET) < 0)
+    throw std::invalid_argument("final evaluation file is invalid");
+  std::string result(static_cast<std::size_t>(before.st_size), '\0');
+  std::size_t offset = 0U;
+  while (offset < result.size()) {
+    const ssize_t count =
+        ::read(descriptor, result.data() + offset, result.size() - offset);
+    if (count < 0) {
+      if (errno == EINTR)
+        continue;
+      throw std::invalid_argument("final evaluation file read failed");
+    }
+    if (count == 0)
+      throw std::invalid_argument("final evaluation file was truncated");
+    offset += static_cast<std::size_t>(count);
+  }
+  struct stat after {};
+  if (::fstat(descriptor, &after) != 0 || before.st_dev != after.st_dev ||
+      before.st_ino != after.st_ino || before.st_size != after.st_size ||
+      after.st_nlink != 1 ||
+      before.st_mtim.tv_sec != after.st_mtim.tv_sec ||
+      before.st_mtim.tv_nsec != after.st_mtim.tv_nsec)
+    throw std::invalid_argument("final evaluation file changed while reading");
+  return result;
+}
+
+std::string final_file_bytes(int root, std::string_view relative,
+                             std::uint64_t maximum) {
+  FinalDescriptor file = final_open_beneath(root, relative, O_RDONLY);
+  return final_descriptor_bytes(file.get(), maximum);
+}
+
+nlohmann::json parse_bounded_authority_json(std::string_view bytes,
+                                            std::size_t maximum_nodes,
+                                            int maximum_depth) {
+  std::size_t nodes = 0U;
+  std::vector<std::optional<std::set<std::string>>> containers;
+  try {
+    const nlohmann::json::parser_callback_t callback =
+        [&](int depth, nlohmann::json::parse_event_t event,
+            nlohmann::json &value) {
+          if (depth > maximum_depth)
+            throw std::invalid_argument(
+                "final evaluation authority JSON exceeds its depth bound");
+          if (event == nlohmann::json::parse_event_t::object_start) {
+            containers.emplace_back(std::set<std::string>{});
+            ++nodes;
+          } else if (event == nlohmann::json::parse_event_t::array_start) {
+            containers.emplace_back(std::nullopt);
+            ++nodes;
+          } else if (event == nlohmann::json::parse_event_t::key) {
+            if (containers.empty() || !containers.back() ||
+                !containers.back()->insert(value.get<std::string>()).second)
+              throw std::invalid_argument(
+                  "final evaluation authority JSON has duplicate keys");
+          } else if (event == nlohmann::json::parse_event_t::value) {
+            ++nodes;
+          } else if (event == nlohmann::json::parse_event_t::object_end ||
+                     event == nlohmann::json::parse_event_t::array_end) {
+            if (containers.empty())
+              throw std::invalid_argument(
+                  "final evaluation authority JSON nesting is invalid");
+            containers.pop_back();
+          }
+          if (nodes > maximum_nodes)
+            throw std::invalid_argument(
+                "final evaluation authority JSON exceeds its node bound");
+          return true;
+        };
+    nlohmann::json result =
+        nlohmann::json::parse(bytes.begin(), bytes.end(), callback);
+    if (!containers.empty())
+      throw std::invalid_argument(
+          "final evaluation authority JSON nesting is incomplete");
+    return result;
+  } catch (const nlohmann::json::exception &) {
+    throw std::invalid_argument(
+        "final evaluation authority JSON is malformed");
+  }
+}
 
 bool valid_digest(std::string_view value) {
   return value.size() == 71U && value.starts_with("sha256:") &&
@@ -198,10 +331,10 @@ FinalizationPolicyRegistry::FinalizationPolicyRegistry(
     OperationFinalizationPolicy policy{
         .key = profile.key,
         .outputs = {},
-        .eval_only_recovery =
-            profile.lifecycle.resume_grade == ResumeGrade::compatible ||
-            profile.lifecycle.resume_grade == ResumeGrade::exact ||
-            profile.lifecycle.resume_grade == ResumeGrade::terminal_checkpoint,
+        // Resume-grade alone does not prove that an eval-only retry preserves
+        // optimizer bytes. Families opt in only after a controller-verifiable
+        // optimizer-state receipt exists.
+        .eval_only_recovery = false,
         .closure_output_name = std::nullopt,
         .closure_required = false,
         .migration_pending = true,
@@ -288,7 +421,10 @@ reduce_final_evaluation(const OperationFinalizationPolicy &operation_policy,
           finalization_policy_digest(operation_policy) ||
       !bounded_identity(expectation.checkpoint_artifact_id) ||
       !valid_digest(expectation.checkpoint_fingerprint) ||
-      !valid_digest(expectation.terminal_optimizer_fingerprint) ||
+      (operation_policy.eval_only_recovery
+           ? (!expectation.terminal_optimizer_fingerprint ||
+              !valid_digest(*expectation.terminal_optimizer_fingerprint))
+           : expectation.terminal_optimizer_fingerprint.has_value()) ||
       expectation.required_members.size() > kMaximumFinalMembers ||
       !canonical_members(expectation.required_members) ||
       !canonical_member_contexts(expectation.member_contexts) ||
@@ -558,9 +694,9 @@ reduce_final_evaluation(const OperationFinalizationPolicy &operation_policy,
           manifest.recovery->requested_members != unresolved_before ||
           appended_record_count != unresolved_before.size() ||
           manifest.recovery->optimizer_state_before !=
-              expectation.terminal_optimizer_fingerprint ||
+              *expectation.terminal_optimizer_fingerprint ||
           manifest.recovery->optimizer_state_after !=
-              expectation.terminal_optimizer_fingerprint) {
+              *expectation.terminal_optimizer_fingerprint) {
         return verdict(
             FinalizationDisposition::failed,
             "eval-only recovery disagrees with controller authority");
@@ -809,6 +945,385 @@ decode_final_evaluation_manifest(std::string_view bytes) {
     }
   }
   return manifest;
+}
+
+FinalEvaluationExpectation derive_hf_final_evaluation_expectation(
+    const OperationFinalizationPolicy &policy,
+    const WorkerInvocationSpec &invocation, std::uint64_t terminal_step,
+    const std::vector<Event> &durable_events) {
+  if (policy.key != invocation.adapter || policy.migration_pending ||
+      policy.closure_output_name !=
+          std::optional<std::string>{"final_evaluation"} ||
+      !policy.closure_required || !invocation.training.is_object() ||
+      !invocation.training.contains("components") ||
+      !invocation.training.at("components").is_object() ||
+      !invocation.workspace.is_object() ||
+      !invocation.publishes.is_object() ||
+      !invocation.observability.is_object())
+    throw std::invalid_argument(
+        "HF finalization authority lacks an immutable invocation");
+
+  std::vector<std::string> required_output_names;
+  for (const FinalOutputPolicy &output : policy.outputs) {
+    const bool declared = invocation.publishes.contains(output.output_name);
+    if (output.required && !declared)
+      throw std::invalid_argument(
+          "HF finalization invocation omits a required policy output");
+    if (output.required || (output.required_when_declared && declared))
+      required_output_names.push_back(output.output_name);
+  }
+  std::ranges::sort(required_output_names);
+  if (!std::ranges::binary_search(required_output_names,
+                                  std::string("test_eval")))
+    throw std::invalid_argument(
+        "HF finalization lacks strict test-evaluation authority");
+
+  const Event *checkpoint = nullptr;
+  for (const Event &event : durable_events) {
+    if (event.event_type != "artifact.published" ||
+        event.node_id != invocation.node_id ||
+        event.attempt_id != invocation.attempt_id ||
+        event.optimizer_step != terminal_step ||
+        event.payload.value("logical_name", std::string{}) !=
+            invocation.publishes.at("checkpoint")
+                .value("logical_name", std::string{}) ||
+        event.payload.value("kind", std::string{}) != "checkpoint" ||
+        !event.payload.value("complete", false))
+      continue;
+    if (checkpoint != nullptr)
+      throw std::invalid_argument(
+          "HF finalization has ambiguous terminal checkpoints");
+    checkpoint = &event;
+  }
+  if (checkpoint == nullptr)
+    throw std::invalid_argument(
+        "HF finalization has no exact terminal checkpoint");
+  const std::string checkpoint_id =
+      checkpoint->payload.value("artifact_id", std::string{});
+  const std::string checkpoint_fingerprint =
+      checkpoint->payload.value("fingerprint", std::string{});
+
+  const nlohmann::json &components =
+      invocation.training.at("components");
+  constexpr std::array<std::string_view, 7> context_slots{
+      "artifact_renderer", "data",       "evaluator", "generation_policy",
+      "processor",         "sample_mapping", "test_split"};
+  nlohmann::json component_digests = nlohmann::json::object();
+  for (const std::string_view slot : context_slots) {
+    const auto component = components.find(std::string(slot));
+    if (component == components.end() || !component->is_object() ||
+        !valid_digest(component->value("descriptor_digest", std::string{})))
+      throw std::invalid_argument(
+          "HF final member context lacks a component descriptor");
+    component_digests[std::string(slot)] =
+        component->at("descriptor_digest");
+  }
+  const nlohmann::json &data = components.at("data");
+  if (!data.contains("configuration") ||
+      !data.at("configuration").is_object())
+    throw std::invalid_argument("HF finalization data authority is malformed");
+  const nlohmann::json &configuration = data.at("configuration");
+  const std::filesystem::path dataset_root(
+      configuration.value("dataset_root", std::string{}));
+  const std::string content_fingerprint =
+      configuration.value("content_fingerprint", std::string{});
+  const std::string id_column =
+      configuration.value("id_column", std::string{});
+  if (!dataset_root.is_absolute() ||
+      dataset_root.lexically_normal() != dataset_root ||
+      !valid_digest(content_fingerprint) || !bounded_identity(id_column) ||
+      !invocation.workspace.contains("input_content_roots") ||
+      !invocation.workspace.at("input_content_roots").is_array())
+    throw std::invalid_argument(
+        "HF finalization dataset root lacks admitted content authority");
+  const auto admitted = std::ranges::find_if(
+      invocation.workspace.at("input_content_roots"),
+      [&](const nlohmann::json &identity) {
+        return identity.is_object() &&
+               identity.value("path", std::string{}) == dataset_root.string();
+      });
+  if (admitted == invocation.workspace.at("input_content_roots").end() ||
+      admitted->value("api_version", std::string{}) !=
+          "trainvm.input-content-root/v1" ||
+      admitted->value("kind", std::string{}) != "directory" ||
+      admitted->value("tree_sha256", std::string{}) != content_fingerprint)
+    throw std::invalid_argument(
+        "HF finalization dataset root disagrees with admission");
+  const InputContentRootIdentity remeasured =
+      measure_input_content_root(dataset_root);
+  InputContentRootIdentity admitted_identity;
+  std::vector<Diagnostic> root_diagnostics;
+  if (!decode_json(*admitted, admitted_identity, "", root_diagnostics) ||
+      !root_diagnostics.empty() || remeasured != admitted_identity)
+    throw std::invalid_argument(
+        "HF finalization dataset content drifted after admission");
+
+  FinalDescriptor filesystem_root(
+      ::open("/", O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+  if (!filesystem_root)
+    throw std::runtime_error("HF finalization cannot pin filesystem root");
+  const std::string dataset_relative =
+      dataset_root.lexically_relative("/").generic_string();
+  FinalDescriptor dataset = final_open_beneath(
+      filesystem_root.get(), dataset_relative, O_PATH | O_DIRECTORY);
+  const std::string receipt_bytes = final_file_bytes(
+      dataset.get(), "manifest.json", kMaximumFrozenDatasetReceiptBytes);
+  const std::string test_bytes = final_file_bytes(
+      dataset.get(), "test.jsonl", kMaximumFrozenTestManifestBytes);
+  const nlohmann::json receipt =
+      parse_bounded_authority_json(receipt_bytes, 100'000U, 32);
+  if (!receipt.is_object() || !receipt.contains("counts") ||
+      !receipt.at("counts").is_object() || !receipt.contains("files") ||
+      !receipt.at("files").is_object() ||
+      !receipt.at("files").contains("test.jsonl") ||
+      !receipt.at("files").at("test.jsonl").is_object() ||
+      !receipt.at("counts").contains("test") ||
+      !receipt.at("counts").at("test").is_number_unsigned() ||
+      !receipt.at("files").at("test.jsonl").contains("rows") ||
+      !receipt.at("files").at("test.jsonl").at("rows").is_number_unsigned() ||
+      receipt.at("files").at("test.jsonl").value("sha256", std::string{}) !=
+          sha256_hex(test_bytes) ||
+      receipt.at("counts").at("test") !=
+          receipt.at("files").at("test.jsonl").at("rows"))
+    throw std::invalid_argument(
+        "HF frozen test manifest disagrees with its receipt");
+
+  std::vector<FinalMemberContext> member_contexts;
+  std::set<std::string> seen_members;
+  std::istringstream lines(test_bytes);
+  std::string line;
+  while (std::getline(lines, line)) {
+    if (line.empty() || line.size() > 1024U * 1024U)
+      throw std::invalid_argument(
+          "HF frozen test manifest row is empty or exceeds its bound");
+    const nlohmann::json row =
+        parse_bounded_authority_json(line, 10'000U, 32);
+    const std::string member = row.value(id_column, std::string{});
+    if (!row.is_object() || row.value("split", std::string{}) != "test" ||
+        !bounded_identity(member) || !seen_members.insert(member).second)
+      throw std::invalid_argument(
+          "HF frozen test membership is invalid or duplicated");
+    const nlohmann::json context{
+        {"api_version", "rwkv-lab.hf-final-member-context/v1"},
+        {"components", component_digests},
+        {"member_id", member},
+        {"raw_sample", row},
+    };
+    member_contexts.push_back(
+        {.member_id = member,
+         .context_digest = "sha256:" + sha256_hex(context.dump())});
+  }
+  if (member_contexts.size() !=
+      receipt.at("counts").at("test").get<std::uint64_t>())
+    throw std::invalid_argument(
+        "HF frozen test row count disagrees with its receipt");
+  std::ranges::sort(member_contexts, {}, &FinalMemberContext::member_id);
+  std::vector<std::string> required_members;
+  required_members.reserve(member_contexts.size());
+  std::ranges::transform(member_contexts,
+                         std::back_inserter(required_members),
+                         &FinalMemberContext::member_id);
+
+  std::vector<FinalScalarRequirement> required_scalars;
+  if (!invocation.observability.contains("metrics") ||
+      !invocation.observability.at("metrics").is_array() ||
+      !components.at("evaluator").contains("configuration") ||
+      !components.at("evaluator").at("configuration").is_object() ||
+      !components.at("evaluator").at("configuration").contains("metrics") ||
+      !components.at("evaluator")
+           .at("configuration")
+           .at("metrics")
+           .is_array())
+    throw std::invalid_argument(
+        "HF finalization metric composition is malformed");
+  for (const nlohmann::json &declared :
+       components.at("evaluator").at("configuration").at("metrics")) {
+    if (!declared.is_string() || declared.get_ref<const std::string &>().empty())
+      throw std::invalid_argument(
+          "HF evaluator metric identity is malformed");
+    std::string name = declared.get<std::string>();
+    if (!name.starts_with("eval."))
+      name = "eval." + name;
+    const std::size_t matches = static_cast<std::size_t>(std::ranges::count_if(
+        invocation.observability.at("metrics"),
+        [&](const nlohmann::json &metric) {
+          return metric.is_object() &&
+                 metric.value("name", std::string{}) == name &&
+                 metric.value("step_domain", std::string{}) ==
+                     "optimizer_step";
+        }));
+    if (matches != 1U)
+      throw std::invalid_argument(
+          "HF evaluator metric lacks one exact observable scalar");
+    required_scalars.push_back(
+        {.metric_name = std::move(name),
+         .step_domain = "optimizer_step"});
+  }
+  std::ranges::sort(required_scalars, {},
+                    &FinalScalarRequirement::metric_name);
+  return {
+      .output_name = "test_eval",
+      .required_output_names = std::move(required_output_names),
+      .policy_digest = finalization_policy_digest(policy),
+      .optimizer_step = terminal_step,
+      .checkpoint_artifact_id = checkpoint_id,
+      .checkpoint_fingerprint = checkpoint_fingerprint,
+      .required_members = required_members,
+      .member_contexts = std::move(member_contexts),
+      .membership_digest = final_membership_digest(required_members),
+      .membership_count = required_members.size(),
+      .required_scalars = std::move(required_scalars),
+      .terminal_optimizer_fingerprint = std::nullopt,
+  };
+}
+
+std::vector<FinalEvaluationReceipt> resolve_final_evaluation_receipts(
+    const WorkerInvocationSpec &invocation,
+    const FinalEvaluationExpectation &expectation,
+    const std::vector<Event> &durable_events) {
+  constexpr std::string_view file_prefix = "file://";
+  const std::filesystem::path run_root(
+      invocation.workspace.value("run_directory", std::string{}));
+  if (!run_root.is_absolute() || run_root.lexically_normal() != run_root)
+    throw std::invalid_argument(
+        "final evaluation run workspace is noncanonical");
+  FinalDescriptor filesystem_root(
+      ::open("/", O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+  if (!filesystem_root)
+    throw std::runtime_error("final evaluation cannot pin filesystem root");
+  std::vector<FinalEvaluationReceipt> result;
+  for (const Event &closure : durable_events) {
+    if (closure.event_type != "artifact.published" ||
+        closure.node_id != invocation.node_id ||
+        closure.attempt_id != invocation.attempt_id ||
+        closure.optimizer_step != expectation.optimizer_step ||
+        closure.payload.value("schema", std::string{}) !=
+            "rwkv-lab.final-evaluation.v1")
+      continue;
+    const std::string artifact_id =
+        closure.payload.value("artifact_id", std::string{});
+    const std::string fingerprint =
+        closure.payload.value("fingerprint", std::string{});
+    const std::string uri = closure.payload.value("uri", std::string{});
+    const std::uint64_t size =
+        closure.payload.value("size_bytes", std::uint64_t{});
+    if (closure.worker_sequence == 0U ||
+        closure.payload.value("logical_name", std::string{}) !=
+            invocation.publishes.at("final_evaluation")
+                .value("logical_name", std::string{}) ||
+        closure.payload.value("kind", std::string{}) != "report" ||
+        closure.payload.value("fingerprint_algorithm", std::string{}) !=
+            "manifest_sha256" ||
+        !closure.payload.value("complete", false) ||
+        !bounded_identity(artifact_id) || !valid_digest(fingerprint) ||
+        size == 0U || size > kMaximumFinalEvaluationManifestBytes ||
+        !uri.starts_with(file_prefix) || uri.find('%') != std::string::npos)
+      throw std::invalid_argument(
+          "final evaluation artifact identity is invalid");
+    const std::filesystem::path path(uri.substr(file_prefix.size()));
+    const std::filesystem::path expected =
+        run_root / "trainvm_artifacts" / "final_evaluation" / artifact_id /
+        "manifest.json";
+    if (!path.is_absolute() || path.lexically_normal() != path ||
+        path != expected)
+      throw std::invalid_argument(
+          "final evaluation artifact escaped its immutable revision");
+    const std::string bytes = final_file_bytes(
+        filesystem_root.get(), path.lexically_relative("/").generic_string(),
+        size);
+    if (bytes.size() != size ||
+        fingerprint != "sha256:" + sha256_hex(bytes))
+      throw std::invalid_argument(
+          "final evaluation artifact bytes disagree with durability");
+    FinalEvaluationManifest manifest =
+        decode_final_evaluation_manifest(bytes);
+
+    std::set<std::string> declared_parents;
+    const nlohmann::json parents =
+        closure.payload.value("parent_artifact_ids", nlohmann::json::array());
+    if (!parents.is_array() ||
+        std::ranges::any_of(parents, [&](const nlohmann::json &parent) {
+          return !parent.is_string() ||
+                 !declared_parents.insert(parent.get<std::string>()).second;
+        }))
+      throw std::invalid_argument(
+          "final evaluation closure parents are invalid");
+    std::vector<FinalOutputReceipt> durable_outputs;
+    for (const FinalOutputReceipt &claimed : manifest.output_receipts) {
+      if (!declared_parents.contains(claimed.artifact_id))
+        throw std::invalid_argument(
+            "final evaluation output is not a durable closure parent");
+      const auto matches_parent = [&](const Event &event) {
+            return event.event_type == "artifact.published" &&
+                   event.node_id == invocation.node_id &&
+                   event.attempt_id == invocation.attempt_id &&
+                   event.payload.value("artifact_id", std::string{}) ==
+                       claimed.artifact_id;
+          };
+      if (std::ranges::count_if(durable_events, matches_parent) != 1)
+        throw std::invalid_argument(
+            "final evaluation parent event identity is ambiguous");
+      const auto parent = std::ranges::find_if(durable_events, matches_parent);
+      if (parent == durable_events.end() ||
+          parent->worker_sequence == 0U ||
+          parent->worker_sequence >= closure.worker_sequence ||
+          !parent->payload.value("complete", false) ||
+          parent->payload.value("fingerprint_algorithm", std::string{}) !=
+              "manifest_sha256" ||
+          parent->payload.value("logical_name", std::string{}) !=
+              invocation.publishes.at(claimed.output_name)
+                  .value("logical_name", std::string{}) ||
+          parent->payload.value("fingerprint", std::string{}) !=
+              claimed.artifact_fingerprint ||
+          parent->optimizer_step != expectation.optimizer_step)
+        throw std::invalid_argument(
+            "final evaluation output receipt disagrees with durable parent");
+      durable_outputs.push_back(claimed);
+    }
+    std::set<std::string> output_ids;
+    for (const FinalOutputReceipt &output : manifest.output_receipts)
+      output_ids.insert(output.artifact_id);
+    if (output_ids != declared_parents)
+      throw std::invalid_argument(
+          "final evaluation closure has unclaimed durable parents");
+
+    std::vector<FinalScalarObservation> scalar_observations;
+    for (const FinalScalarRequirement &required :
+         expectation.required_scalars) {
+      const Event *selected = nullptr;
+      for (const Event &event : durable_events) {
+        if (event.event_type == "metric.sampled" &&
+            event.node_id == invocation.node_id &&
+            event.attempt_id == invocation.attempt_id &&
+            event.optimizer_step == expectation.optimizer_step &&
+            event.payload.value("name", std::string{}) ==
+                required.metric_name &&
+            event.payload.value("step_domain", std::string{}) ==
+                required.step_domain &&
+            event.worker_sequence < closure.worker_sequence &&
+            (selected == nullptr ||
+             event.worker_sequence > selected->worker_sequence))
+          selected = &event;
+      }
+      if (selected == nullptr)
+        throw std::invalid_argument(
+            "final evaluation lacks an exact terminal scalar event");
+      scalar_observations.push_back(
+          {.metric_name = required.metric_name,
+           .step_domain = required.step_domain,
+           .optimizer_step = expectation.optimizer_step,
+           .event_id = selected->event_id});
+    }
+    result.push_back(
+        {.artifact_id = artifact_id,
+         .artifact_fingerprint = fingerprint,
+         .durable_sequence = closure.worker_sequence,
+         .durable_output_receipts = std::move(durable_outputs),
+         .durable_scalar_observations = std::move(scalar_observations),
+         .manifest = std::move(manifest)});
+  }
+  std::ranges::sort(result, {}, &FinalEvaluationReceipt::durable_sequence);
+  return result;
 }
 
 } // namespace trainvm

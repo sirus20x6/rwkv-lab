@@ -1,6 +1,8 @@
 #include "trainvm/final_evaluation.hpp"
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <ranges>
 #include <set>
@@ -10,7 +12,10 @@
 #include <vector>
 
 #include "trainvm/document.hpp"
+#include "trainvm/adapter_invocation.hpp"
 #include "trainvm/eval_examples_contract.hpp"
+#include "trainvm/input_content_authority.hpp"
+#include "trainvm/journal.hpp"
 #include "trainvm/reflection_json.hpp"
 #include "trainvm/rwkv_lab_worker_contract.hpp"
 
@@ -159,7 +164,10 @@ expectation(const trainvm::OperationFinalizationPolicy &policy,
       .membership_digest = trainvm::final_membership_digest(members),
       .membership_count = members.size(),
       .required_scalars = std::move(scalars),
-      .terminal_optimizer_fingerprint = digest('8'),
+      .terminal_optimizer_fingerprint =
+          policy.eval_only_recovery
+              ? std::optional<std::string>{digest('8')}
+              : std::nullopt,
   };
 }
 
@@ -216,14 +224,8 @@ int main() {
         worker.adapter_registry.profiles, [](const auto &profile) {
           return profile.key.adapter == "rwkv-lab.hf-multimodal-sft";
         });
-    optional_closure_profile.authoring->outputs.emplace(
-        "final_evaluation",
-        trainvm::OperationPortDescriptor{
-            .type = trainvm::OperationPortType::artifact,
-            .required = false,
-            .artifact_type = trainvm::ArtifactType::report,
-            .artifact_schema = "rwkv-lab.final-evaluation.v1",
-            .description = std::nullopt});
+    optional_closure_profile.authoring->outputs.at("final_evaluation")
+        .required = false;
     const trainvm::FinalizationPolicyRegistry optional_closure_registry(
         {optional_closure_profile});
     const auto &optional_closure =
@@ -296,6 +298,174 @@ int main() {
                              trainvm::FinalErrorPolicy::zero_unresolved_errors;
                 }),
             "Qwen/HF test evidence must be a strict final completion barrier");
+    require(hf.closure_required && !hf.migration_pending &&
+                hf.closure_output_name ==
+                    std::optional<std::string>{"final_evaluation"},
+            "HF must leave migration-pending only with its required closure");
+
+    const std::filesystem::path authority_root =
+        std::filesystem::temp_directory_path() /
+        "trainvm-final-evaluation-authority-test";
+    std::filesystem::remove_all(authority_root);
+    std::filesystem::create_directories(authority_root);
+    trainvm::WorkerInvocationSpec authority_invocation{
+        .api_version = std::string(trainvm::kWorkerInvocationApiVersion),
+        .run_id = "authority-run",
+        .host_id = "authority-host",
+        .plan_hash = digest('1'),
+        .plan_revision = 1U,
+        .node_id = "train",
+        .attempt_id = "train@1",
+        .dispatch_id = "authority-dispatch",
+        .adapter = hf.key,
+        .workspace = {{"run_directory", (authority_root / "run").string()}},
+        .resources = nlohmann::json::object(),
+        .inputs = nlohmann::json::object(),
+        .controls = nlohmann::json::object(),
+        .effective_control_revision = 0U,
+        .publishes =
+            {{"checkpoint", {{"logical_name", "checkpoint"}}},
+             {"eval_gallery", {{"logical_name", "eval_gallery"}}},
+             {"test_eval", {{"logical_name", "test_eval"}}},
+             {"final_evaluation",
+              {{"logical_name", "final_evaluation"}}}},
+        .observability =
+            {{"metrics",
+              nlohmann::json::array(
+                  {{{"name", "eval.loss"},
+                    {"step_domain", "optimizer_step"}},
+                   {{"name", "eval.worker_extra"},
+                    {"step_domain", "optimizer_step"}}})}},
+        .execution = nlohmann::json::object(),
+        .training = nlohmann::json::object(),
+        .resume = nlohmann::json::object(),
+        .invocation_digest = digest('2')};
+    nlohmann::json components = nlohmann::json::object();
+    for (const std::string slot :
+         {"artifact_renderer", "data", "evaluator", "generation_policy",
+          "processor", "sample_mapping", "test_split"}) {
+      components[slot] = {{"descriptor_digest", digest('3')},
+                          {"configuration", nlohmann::json::object()}};
+    }
+    components["evaluator"]["configuration"]["metrics"] = {"loss"};
+    components["data"]["configuration"] =
+        {{"dataset_root", authority_root.string()},
+         {"content_fingerprint", digest('4')},
+         {"id_column", "id"}};
+    authority_invocation.training["components"] = components;
+    const auto seal_authority_dataset = [&](const std::string& test_bytes,
+                                            std::optional<std::string>
+                                                receipt_override =
+                                                    std::nullopt) {
+      {
+        std::ofstream output(authority_root / "test.jsonl",
+                             std::ios::binary | std::ios::trunc);
+        output.write(test_bytes.data(),
+                     static_cast<std::streamsize>(test_bytes.size()));
+      }
+      const std::size_t rows = static_cast<std::size_t>(
+          std::ranges::count(test_bytes, '\n'));
+      const std::string receipt = receipt_override.value_or(
+          nlohmann::json(
+              {{"counts", {{"test", rows}}},
+               {"files",
+                {{"test.jsonl",
+                  {{"rows", rows},
+                   {"sha256", trainvm::sha256_hex(test_bytes)}}}}}})
+              .dump());
+      {
+        std::ofstream output(authority_root / "manifest.json",
+                             std::ios::binary | std::ios::trunc);
+        output.write(receipt.data(),
+                     static_cast<std::streamsize>(receipt.size()));
+      }
+      const auto identity =
+          trainvm::measure_input_content_root(authority_root);
+      authority_invocation.workspace["input_content_roots"] =
+          nlohmann::json::array({trainvm::encode_json(identity)});
+      authority_invocation.training["components"]["data"]["configuration"]
+                                  ["content_fingerprint"] =
+          identity.tree_sha256;
+    };
+    const trainvm::Event terminal_checkpoint{
+        .event_id = "terminal-checkpoint-event",
+        .run_id = authority_invocation.run_id,
+        .run_revision = 1U,
+        .plan_revision = 1U,
+        .node_id = authority_invocation.node_id,
+        .attempt_id = authority_invocation.attempt_id,
+        .worker_sequence = 1U,
+        .event_type = "artifact.published",
+        .event_version = 1U,
+        .wall_time_ns = 1U,
+        .monotonic_time_ns = 1U,
+        .optimizer_step = 745U,
+        .payload = {{"logical_name", "checkpoint"},
+                    {"kind", "checkpoint"},
+                    {"complete", true},
+                    {"artifact_id", "checkpoint-step-745"},
+                    {"fingerprint", digest('5')}}};
+    const std::string valid_test_row =
+        R"({"id":"member-a","split":"test"})" "\n";
+    seal_authority_dataset(valid_test_row);
+    const auto authority_expectation =
+        trainvm::derive_hf_final_evaluation_expectation(
+            hf, authority_invocation, 745U, {terminal_checkpoint});
+    const std::vector<trainvm::FinalScalarRequirement>
+        expected_authority_scalars{
+            {.metric_name = "eval.loss",
+             .step_domain = "optimizer_step"}};
+    require(authority_expectation.required_members ==
+                    std::vector<std::string>{"member-a"} &&
+                authority_expectation.required_scalars ==
+                    expected_authority_scalars &&
+                !std::ranges::binary_search(
+                    authority_expectation.required_output_names,
+                    std::string("final_evaluation")) &&
+                !authority_expectation.terminal_optimizer_fingerprint,
+            "HF authority freezes test membership and evaluator metrics while "
+            "ignoring worker-only observable extras and closure self-parents");
+    const auto authority_rejects = [&](const std::string& test_bytes,
+                                       std::optional<std::string>
+                                           receipt_override = std::nullopt) {
+      seal_authority_dataset(test_bytes, std::move(receipt_override));
+      try {
+        (void)trainvm::derive_hf_final_evaluation_expectation(
+            hf, authority_invocation, 745U, {terminal_checkpoint});
+        return false;
+      } catch (const std::invalid_argument&) {
+        return true;
+      }
+    };
+    require(authority_rejects(
+                R"({"id":"member-a","id":"member-b","split":"test"})"
+                "\n"),
+            "frozen dataset rows reject duplicate JSON keys");
+    std::string deep_row = R"({"id":"member-a","split":"test","x":)";
+    deep_row.append(34U, '[');
+    deep_row += '0';
+    deep_row.append(34U, ']');
+    deep_row += "}\n";
+    require(authority_rejects(deep_row),
+            "frozen dataset rows reject excessive JSON depth");
+    std::string node_row =
+        R"({"id":"member-a","split":"test","x":[)";
+    for (std::size_t index = 0U; index < 10'001U; ++index)
+      node_row += index == 0U ? "0" : ",0";
+    node_row += "]}\n";
+    require(authority_rejects(node_row),
+            "frozen dataset rows reject excessive JSON nodes");
+    const std::string oversized_row =
+        R"({"id":"member-a","split":"test","blob":")" +
+        std::string(1024U * 1024U, 'x') + "\"}\n";
+    require(authority_rejects(oversized_row),
+            "frozen dataset rows reject oversized lines before parsing");
+    const std::string duplicate_receipt =
+        R"({"counts":{"test":1},"counts":{"test":1},"files":{"test.jsonl":{"rows":1,"sha256":")" +
+        trainvm::sha256_hex(valid_test_row) + "\"}}}";
+    require(authority_rejects(valid_test_row, duplicate_receipt),
+            "frozen dataset receipts reject duplicate JSON keys");
+    std::filesystem::remove_all(authority_root);
 
     const auto strict = strict_operation_policy();
 
@@ -396,6 +566,18 @@ int main() {
     auto no_recovery = strict;
     no_recovery.eval_only_recovery = false;
     const auto no_recovery_expectation = expectation(no_recovery, qwen_members);
+    auto forged_optimizer_expectation = no_recovery_expectation;
+    forged_optimizer_expectation.terminal_optimizer_fingerprint = digest('8');
+    bool forged_optimizer_rejected = false;
+    try {
+      (void)trainvm::reduce_final_evaluation(
+          no_recovery, forged_optimizer_expectation, {all_error});
+    } catch (const std::invalid_argument&) {
+      forged_optimizer_rejected = true;
+    }
+    require(forged_optimizer_rejected,
+            "a checkpoint digest cannot impersonate independently verified "
+            "optimizer-state authority");
     auto no_recovery_base = all_error;
     auto no_recovery_retry = recovered;
     no_recovery_base.manifest.policy_digest =
@@ -583,6 +765,12 @@ int main() {
     require(
         decoder_rejects(manifest.dump(2)),
         "raw semantic manifest decoder must reject alternate JSON encodings");
+    std::string duplicate_key_manifest = canonical_manifest_bytes;
+    duplicate_key_manifest.replace(
+        1U, 0U,
+        R"("api_version":"rwkv-lab.final-evaluation/v1",)" );
+    require(decoder_rejects(duplicate_key_manifest),
+            "raw semantic manifest decoder must reject duplicate JSON keys");
     const std::string oversized_manifest(
         trainvm::kMaximumFinalEvaluationManifestBytes + 1U, ' ');
     require(
