@@ -1345,6 +1345,20 @@ nlohmann::json invocation_resume_checkpoint(
           {"resume_command_id", resume_command_id}};
 }
 
+std::uint64_t invocation_attempt_baseline_optimizer_step(
+    const WorkerInvocationSpec& invocation) {
+  if (invocation.resume.is_null()) return 0U;
+  if (!invocation.resume.is_object() ||
+      invocation.resume.value("api_version", std::string{}) !=
+          "trainvm.resume-checkpoint/v1" ||
+      !invocation.resume.contains("optimizer_step") ||
+      !invocation.resume.at("optimizer_step").is_number_unsigned()) {
+    throw std::runtime_error(
+        "worker invocation has malformed attempt-baseline authority");
+  }
+  return invocation.resume.at("optimizer_step").get<std::uint64_t>();
+}
+
 void populate_invocation(v1::WorkerWelcome& welcome,
                          const WorkerInvocationSpec& invocation) {
   const std::string canonical =
@@ -2759,6 +2773,8 @@ grpc::Status TrainVMService::open_worker_connection(
                 "completed worker attempt has no immutable invocation"};
       }
       connection.publishes = invocation->publishes;
+      connection.attempt_baseline_optimizer_step =
+          invocation_attempt_baseline_optimizer_step(*invocation);
       auto& welcome = connection.welcome;
       welcome.set_disposition(
           v1::WorkerWelcome::DISPOSITION_ALREADY_COMPLETED);
@@ -2779,10 +2795,13 @@ grpc::Status TrainVMService::open_worker_connection(
       welcome.set_acknowledged_worker_sequence(result->worker_sequence);
       welcome.set_step_zero_eval_gate_required(
           invocation_requires_step_zero_eval_gate(invocation->publishes));
+      welcome.set_attempt_baseline_optimizer_step(
+          connection.attempt_baseline_optimizer_step);
       welcome.set_step_zero_eval_gate_satisfied(
-          durable_step_zero_eval_gate_satisfied(
+          durable_attempt_baseline_eval_gate_satisfied(
               journal_.events_for_run(hello.run_id), hello.run_id,
-              hello.node_id, hello.attempt_id));
+              hello.node_id, hello.attempt_id,
+              connection.attempt_baseline_optimizer_step));
       populate_invocation(welcome, *invocation);
       v1::WorkerReceipt receipt;
       receipt.set_event_id(result->event_id);
@@ -2868,6 +2887,8 @@ grpc::Status TrainVMService::open_worker_connection(
     }
     auto& welcome = connection.welcome;
     connection.publishes = invocation->publishes;
+    connection.attempt_baseline_optimizer_step =
+        invocation_attempt_baseline_optimizer_step(*invocation);
     welcome.set_disposition(
         readiness.disposition == WorkerReadinessDisposition::accepted
             ? v1::WorkerWelcome::DISPOSITION_ACCEPTED
@@ -2890,10 +2911,13 @@ grpc::Status TrainVMService::open_worker_connection(
         hello.run_id, hello.node_id, hello.attempt_id));
     welcome.set_step_zero_eval_gate_required(
         invocation_requires_step_zero_eval_gate(invocation->publishes));
+    welcome.set_attempt_baseline_optimizer_step(
+        connection.attempt_baseline_optimizer_step);
     welcome.set_step_zero_eval_gate_satisfied(
-        durable_step_zero_eval_gate_satisfied(
+        durable_attempt_baseline_eval_gate_satisfied(
             journal_.events_for_run(hello.run_id), hello.run_id,
-            hello.node_id, hello.attempt_id));
+            hello.node_id, hello.attempt_id,
+            connection.attempt_baseline_optimizer_step));
     populate_invocation(welcome, *invocation);
     return grpc::Status::OK;
   } catch (const nlohmann::json::exception& exception) {
@@ -2946,14 +2970,23 @@ grpc::Status TrainVMService::complete_worker_connection(
       return {grpc::StatusCode::DATA_LOSS,
               "worker run has no persisted compiled plan"};
     }
+    if (envelope.has_optimizer_step() &&
+        envelope.optimizer_step() <
+            connection.attempt_baseline_optimizer_step) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "worker result optimizer step precedes its immutable attempt "
+              "baseline"};
+    }
     if (invocation_requires_step_zero_eval_gate(connection.publishes) &&
-        envelope.has_optimizer_step() && envelope.optimizer_step() > 0U &&
-        !durable_step_zero_eval_gate_satisfied(
+        envelope.event_type() == "worker.completed" &&
+        !durable_attempt_baseline_eval_gate_satisfied(
             journal_.events_for_run(connection.identity.run_id),
             connection.identity.run_id,
-            connection.identity.node_id, connection.identity.attempt_id)) {
+            connection.identity.node_id, connection.identity.attempt_id,
+            connection.attempt_baseline_optimizer_step)) {
       return {grpc::StatusCode::FAILED_PRECONDITION,
-              "worker result is blocked until durable step-zero scalar and eval-examples evidence"};
+              "worker completion is blocked until durable attempt-baseline "
+              "scalar and eval-examples evidence"};
     }
     Controller controller(*plan, journal_, connection.identity.run_id);
     controller.recover();
@@ -3178,13 +3211,22 @@ grpc::Status TrainVMService::commit_worker_observation(
       return {grpc::StatusCode::DATA_LOSS,
               "worker run has no persisted compiled plan"};
     }
-    if (invocation_requires_step_zero_eval_gate(connection.publishes) &&
-        event.optimizer_step && *event.optimizer_step > 0U &&
-        !durable_step_zero_eval_gate_satisfied(
-            journal_.events_for_run(event.run_id), event.run_id,
-            event.node_id, event.attempt_id)) {
+    if (event.optimizer_step &&
+        *event.optimizer_step < connection.attempt_baseline_optimizer_step) {
       return {grpc::StatusCode::FAILED_PRECONDITION,
-              "optimizer step is blocked until durable step-zero scalar and eval-examples evidence"};
+              "worker observation optimizer step precedes its immutable "
+              "attempt baseline"};
+    }
+    if (invocation_requires_step_zero_eval_gate(connection.publishes) &&
+        event.optimizer_step &&
+        *event.optimizer_step > connection.attempt_baseline_optimizer_step &&
+        !durable_attempt_baseline_eval_gate_satisfied(
+            journal_.events_for_run(event.run_id), event.run_id,
+            event.node_id, event.attempt_id,
+            connection.attempt_baseline_optimizer_step)) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "optimizer step is blocked until durable attempt-baseline "
+              "scalar and eval-examples evidence"};
     }
     if (event.event_type == "metric.sampled") {
       const std::string name =

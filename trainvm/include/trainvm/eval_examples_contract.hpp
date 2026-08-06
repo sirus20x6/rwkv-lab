@@ -89,11 +89,12 @@ void validate_eval_examples_gate_provenance(
     const std::vector<Event> &prior_events);
 
 bool invocation_requires_step_zero_eval_gate(const nlohmann::json &publishes);
-// Gate evidence is intentionally attempt-local. A resumed attempt fails closed
-// until card-986f974e defines checkpoint-carried gate lineage.
-bool durable_step_zero_eval_gate_satisfied(const std::vector<Event> &events,
-                                           std::string_view run_id,
-                                           std::string_view node_id,
-                                           std::string_view attempt_id);
+// Gate evidence is intentionally attempt-local. `baseline_optimizer_step` is
+// controller-derived from the immutable invocation: zero for a fresh attempt,
+// or the exact resume checkpoint step for a replacement attempt.
+bool durable_attempt_baseline_eval_gate_satisfied(
+    const std::vector<Event> &events, std::string_view run_id,
+    std::string_view node_id, std::string_view attempt_id,
+    std::uint64_t baseline_optimizer_step);
 
 } // namespace trainvm

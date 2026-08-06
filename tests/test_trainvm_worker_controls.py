@@ -200,15 +200,18 @@ def test_pre_optimizer_step_blocks_mutation_until_durable_eval_gate() -> None:
     session = FakeSession()
     session.step_zero_eval_gate_required = True
     session.step_zero_eval_gate_satisfied = False
+    session.attempt_baseline_optimizer_step = 7
     runtime = WorkerControlRuntime(session, {}, 0)
     mutated: list[bool] = []
 
+    with pytest.raises(WorkerControlError, match="must follow"):
+        runtime.pre_optimizer_step(7, lambda *_: mutated.append(True))
     with pytest.raises(WorkerControlError, match="optimizer mutation is blocked"):
-        runtime.pre_optimizer_step(1, lambda *_: mutated.append(True))
+        runtime.pre_optimizer_step(8, lambda *_: mutated.append(True))
     assert mutated == []
 
     session.step_zero_eval_gate_satisfied = True
-    assert runtime.pre_optimizer_step(1, lambda *_: mutated.append(True)) == ()
+    assert runtime.pre_optimizer_step(8, lambda *_: mutated.append(True)) == ()
     # The control applier is only called when a patch exists. Reaching this
     # line without an exception is the pre-mutation permit.
     assert mutated == []

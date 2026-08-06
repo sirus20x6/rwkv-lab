@@ -152,6 +152,7 @@ class TrainVMService final : public v1::TrainVM::Service,
     WorkerSessionIdentity identity;
     Dispatch dispatch;
     nlohmann::json publishes = nlohmann::json::object();
+    std::uint64_t attempt_baseline_optimizer_step{};
     v1::WorkerWelcome welcome;
     std::optional<v1::WorkerReceipt> completed_receipt;
   };
