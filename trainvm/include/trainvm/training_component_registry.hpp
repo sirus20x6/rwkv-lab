@@ -9,7 +9,7 @@
 #include <string_view>
 #include <vector>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 #include "trainvm/model.hpp"
 #include "trainvm/worker.hpp"

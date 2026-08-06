@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 #include "trainvm/document.hpp"
 #include "trainvm/journal.hpp"

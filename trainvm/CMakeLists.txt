@@ -22,6 +22,27 @@ find_package(yaml-cpp CONFIG REQUIRED)
 find_package(Protobuf CONFIG REQUIRED)
 find_package(gRPC CONFIG REQUIRED)
 
+# C++26 makes std::optional a range, which lets nlohmann silently encode it as
+# []/[value]. Every native translation unit must pass through TrainVM's explicit
+# null/scalar serializer so a new protocol field cannot regain that ambiguity.
+file(GLOB_RECURSE TRAINVM_NATIVE_JSON_SOURCES CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp"
+)
+set(TRAINVM_JSON_WRAPPER
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/trainvm/json.hpp")
+foreach(TRAINVM_JSON_SOURCE IN LISTS TRAINVM_NATIVE_JSON_SOURCES)
+  if(NOT TRAINVM_JSON_SOURCE STREQUAL TRAINVM_JSON_WRAPPER)
+    file(STRINGS "${TRAINVM_JSON_SOURCE}" TRAINVM_DIRECT_JSON_INCLUDES
+      REGEX "^[ \t]*#[ \t]*include[ \t]*[<\"]nlohmann/json\\.hpp[>\"]")
+    if(TRAINVM_DIRECT_JSON_INCLUDES)
+      message(FATAL_ERROR
+        "${TRAINVM_JSON_SOURCE} bypasses trainvm/json.hpp")
+    endif()
+  endif()
+endforeach()
+
 get_filename_component(TRAINVM_PROTO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../proto" REALPATH)
 set(TRAINVM_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(TRAINVM_PROTO "${TRAINVM_PROTO_ROOT}/trainvm/v1/trainvm.proto")
@@ -811,6 +832,17 @@ target_compile_options(input_content_authority_tests PRIVATE
 )
 target_link_libraries(input_content_authority_tests PRIVATE trainvm_core)
 add_test(NAME input_content_authority_tests COMMAND input_content_authority_tests)
+add_executable(json_optional_tests
+  tests/json_optional_tests.cpp
+)
+target_include_directories(json_optional_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+target_compile_options(json_optional_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(json_optional_tests PRIVATE nlohmann_json::nlohmann_json)
+add_test(NAME json_optional_tests COMMAND json_optional_tests)
 add_test(NAME input_content_authority_python_parity
   COMMAND ${Python3_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_input_content_authority_parity.py"

@@ -22,7 +22,7 @@
 #include <utility>
 #include <utility>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 #include "trainvm/reflection_json.hpp"
 
@@ -42,7 +42,7 @@ constexpr std::size_t kMaximumNotesBytes = 2048U;
 // entry's recorded classification, or the entrypoint/argument/checkpoint
 // surface of a referenced source, has actually changed.
 constexpr std::string_view kReviewedCatalogDigest =
-    "sha256:4253a9374eb9f6fc5d6538123137d4101d4c01e955316f96f08363adc8bff504";
+    "sha256:ad9f19a7af2d16459a17779342ef8b72a805a308cd6b85512bc8cdf3e96ecf36";
 
 constexpr std::array<std::string_view, 156> kReviewedWorkflowIds = {
     "acquisition.civitai-anima",

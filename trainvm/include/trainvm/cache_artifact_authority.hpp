@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 #include "trainvm/cache_namespace_authority.hpp"
 #include "trainvm/lease.hpp"

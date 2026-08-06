@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 #include "trainvm/model.hpp"
 #include "trainvm/reflection_json.hpp"

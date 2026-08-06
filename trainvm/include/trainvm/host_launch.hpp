@@ -6,7 +6,7 @@
 #include <string_view>
 #include <vector>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 #include "trainvm/host_launch_registry.hpp"
 #include "trainvm/profiler_launch_profiles.hpp"

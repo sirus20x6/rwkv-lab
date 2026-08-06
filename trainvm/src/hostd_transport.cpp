@@ -25,7 +25,7 @@
 #include <span>
 #include <utility>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 namespace trainvm {
 namespace {

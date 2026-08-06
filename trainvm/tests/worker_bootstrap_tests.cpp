@@ -7,7 +7,7 @@
 
 #include <unistd.h>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 namespace {
 

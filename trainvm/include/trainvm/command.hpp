@@ -4,7 +4,7 @@
 #include <optional>
 #include <string>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 #include "trainvm/model.hpp"
 

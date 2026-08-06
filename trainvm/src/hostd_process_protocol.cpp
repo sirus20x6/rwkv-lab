@@ -5,7 +5,7 @@
 #include <set>
 #include <stdexcept>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 #include "trainvm/document.hpp"
 

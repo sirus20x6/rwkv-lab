@@ -2,7 +2,7 @@
 
 #include <sqlite3.h>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 #include <algorithm>
 #include <cmath>

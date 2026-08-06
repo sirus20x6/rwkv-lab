@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 #include <sqlite3.h>
 
 #include "trainvm/document.hpp"
