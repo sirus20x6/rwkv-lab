@@ -10,6 +10,7 @@
 #include "trainvm/input_content_authority.hpp"
 #include "trainvm/service.hpp"
 #include "trainvm/training_schedules.hpp"
+#include "trainvm/training_preflight.hpp"
 
 #include <charconv>
 #include <filesystem>
@@ -32,6 +33,7 @@ void usage() {
       << "usage:\n"
       << "  trainvm validate <experiment.json>\n"
       << "  trainvm plan <experiment.json> [--canonical]\n"
+      << "  trainvm preflight <experiment.json> <passive-environment.json>\n"
       << "  trainvm compile  # read JSON from stdin; emit canonical preview JSON\n"
       << "  trainvm validate-catalog <compatibility.json> <repository-root>\n"
       << "  trainvm print-catalog-digests <compatibility.json> <repository-root>"
@@ -112,6 +114,21 @@ int plan_command(int argc, char** argv) {
   }
   std::cout << output.dump(2) << '\n';
   return 0;
+}
+
+int preflight_command(const std::filesystem::path& experiment_path,
+                      const std::filesystem::path& environment_path) {
+  const auto compiled = trainvm::compile_document_file(experiment_path);
+  if (!compiled.valid() || !compiled.plan) {
+    print_diagnostics(compiled);
+    return 2;
+  }
+  const auto environment =
+      trainvm::load_training_preflight_environment(environment_path);
+  const auto receipt =
+      trainvm::run_training_preflight(*compiled.plan, environment);
+  std::cout << trainvm::encode_json(receipt).dump(2) << '\n';
+  return receipt.passed ? 0 : 3;
 }
 
 int compile_command() {
@@ -632,6 +649,9 @@ int main(int argc, char** argv) {
     }
     if (argc >= 3 && std::string_view(argv[1]) == "plan") {
       return plan_command(argc, argv);
+    }
+    if (argc == 4 && std::string_view(argv[1]) == "preflight") {
+      return preflight_command(argv[2], argv[3]);
     }
     if (argc == 2 && std::string_view(argv[1]) == "compile") {
       return compile_command();

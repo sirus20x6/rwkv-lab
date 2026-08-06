@@ -120,6 +120,7 @@ add_library(trainvm_core
   src/rwkv_scratch_profiles.cpp
   src/sqlite_authority_vfs.cpp
   src/training_component_registry.cpp
+  src/training_preflight.cpp
   src/worker_bootstrap.cpp
 )
 target_include_directories(trainvm_core PUBLIC include)
@@ -434,6 +435,17 @@ target_link_libraries(resource_request_builder_tests PRIVATE trainvm_core)
 add_test(NAME resource_request_builder_tests
   COMMAND resource_request_builder_tests
 )
+add_executable(training_preflight_tests
+  tests/training_preflight_tests.cpp
+)
+target_compile_options(training_preflight_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_compile_definitions(training_preflight_tests PRIVATE
+  TRAINVM_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+target_link_libraries(training_preflight_tests PRIVATE trainvm_core)
+add_test(NAME training_preflight_tests COMMAND training_preflight_tests)
 add_executable(lifecycle_equivalence_tests
   tests/lifecycle_equivalence_tests.cpp
 )

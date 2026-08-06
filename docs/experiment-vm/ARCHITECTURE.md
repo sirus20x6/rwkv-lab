@@ -202,9 +202,21 @@ Before a run exists, the plan compiler performs:
   resume reject stop-only, restart-only, or incomplete-state workers;
 - construction of a canonical plan and SHA-256 plan identity.
 
-The CLI must expose `trainvm validate`, `trainvm plan`, and `trainvm diff`. `plan` shows resolved
-components, resources, graph order, possible side effects, mutable fields, and restart boundaries
-without starting a process.
+After compilation and before submission, the accelerator-passive training preflight combines the
+ordinary `CompiledPlan` with bounded, digest-bound family/runtime evidence. Missing adapter probe
+evidence fails closed. The gate checks CPU-decodable model/data/selector/evaluator obligations,
+sealed runtime capabilities and checkpoint compatibility, required step-zero/dashboard example
+declarations, passive total/free accelerator capacity, and POSIX create/write/rename authority for
+the exact hostd uid, primary gid, supplementary groups, and principal-profile digest. Receipts bind
+the plan, locked input identities, the optional recipe registry/profile/instance/expanded-plan
+identities, runtime profile, and passive host snapshot into a cache key; the recipe plan identity
+must name that ordinary compiled plan, and changing any identity invalidates reuse. The gate performs no mutation
+and opens no accelerator context unless the declarative input includes a successful separately
+bounded GPU-qualification receipt.
+
+The CLI must expose `trainvm validate`, `trainvm plan`, `trainvm preflight`, and `trainvm diff`.
+`plan` shows resolved components, resources, graph order, possible side effects, mutable fields, and
+restart boundaries without starting a process.
 
 ### Component registry
 
