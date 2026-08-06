@@ -4,6 +4,12 @@ Status: proposed architecture for `dashboard/declarative-vm-fsm`
 
 Scope: training orchestration, live control, recovery, telemetry, and dashboard integration
 
+Ordinary run authoring uses the authority-owned, exact-versioned recipe layer
+specified in [`RECIPE_PROFILES.md`](RECIPE_PROFILES.md). A compact recipe
+instance expands into the same immutable canonical plan as a fully expanded
+experiment; it is not a second execution format or a dynamic code-loading
+surface.
+
 The cross-family performance, profiling, and optimization plan is maintained in
 [`PERFORMANCE_ROADMAP.md`](PERFORMANCE_ROADMAP.md). It covers MageFlow and other flow/diffusion
 workers, RWKV, transformers, vision/multimodal training, fine-tuning, distillation, post-training,
