@@ -4,7 +4,7 @@
 #include <string>
 #include <string_view>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 #include "trainvm/v1/trainvm.pb.h"
 

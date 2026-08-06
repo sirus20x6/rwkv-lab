@@ -34,7 +34,7 @@
 #include <utility>
 #include <vector>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 #include "trainvm/host_ledger.hpp"
 #include "trainvm/host_ledger_authority.hpp"

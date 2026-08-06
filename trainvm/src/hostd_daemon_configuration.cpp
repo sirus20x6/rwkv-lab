@@ -7,7 +7,7 @@
 #include <set>
 #include <utility>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 #include "trainvm/authority_document.hpp"
 #include "trainvm/reflection_json.hpp"

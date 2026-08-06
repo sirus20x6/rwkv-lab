@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 #include "trainvm/sqlite_filesystem_authority.hpp"
 #include "trainvm/host_resources.hpp"

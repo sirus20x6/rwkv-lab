@@ -7,7 +7,7 @@
 #include <string_view>
 #include <vector>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 #include "trainvm/hostd_linux_cgroup_authority.hpp"
 #include "trainvm/hostd_linux_device_policy.hpp"

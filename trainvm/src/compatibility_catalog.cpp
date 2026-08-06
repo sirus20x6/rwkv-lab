@@ -22,7 +22,7 @@
 #include <utility>
 #include <utility>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 #include "trainvm/reflection_json.hpp"
 

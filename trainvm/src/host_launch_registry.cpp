@@ -10,7 +10,7 @@
 #include <unistd.h>
 #include <utility>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 #include "trainvm/reflection_json.hpp"
 #include "trainvm/profiler_launch_profiles.hpp"

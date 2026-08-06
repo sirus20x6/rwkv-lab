@@ -7,7 +7,7 @@
 
 #include <sys/types.h>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 #include "trainvm/cache_artifact_authority.hpp"
 #include "trainvm/cache_namespace_authority.hpp"

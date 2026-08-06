@@ -17,7 +17,7 @@
 #include <string>
 #include <string_view>
 
-#include <nlohmann/json.hpp>
+#include "trainvm/json.hpp"
 
 namespace {
 
