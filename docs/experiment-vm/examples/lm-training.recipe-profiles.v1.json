@@ -670,6 +670,17 @@
           "maximum": 192
         },
         {
+          "name": "data.collation",
+          "domain": "data",
+          "type": "enumeration",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/collation/key/name",
+          "required": false,
+          "values": [
+            "packed_tokens@1.0.0",
+            "padded@1.0.0"
+          ]
+        },
+        {
           "name": "data.maximum_sequence_length",
           "domain": "data",
           "type": "integer",

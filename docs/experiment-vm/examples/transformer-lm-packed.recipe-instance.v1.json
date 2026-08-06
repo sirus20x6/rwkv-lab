@@ -8,6 +8,7 @@
     "hyperparameters.gradient_accumulation": 4,
     "hyperparameters.maximum_steps": 10000,
     "data.batch_size": 16,
+    "data.collation": "packed_tokens@1.0.0",
     "data.maximum_sequence_length": 4096,
     "evaluation.qualitative_sample_count": 8
   }

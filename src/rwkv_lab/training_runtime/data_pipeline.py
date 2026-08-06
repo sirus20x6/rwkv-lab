@@ -46,6 +46,7 @@ class SampleMapperImplementation(str, Enum):
 
 class CollatorImplementation(str, Enum):
     PADDED_V1 = "rwkv_lab.collator.padded.v1"
+    PACKED_TOKENS_V1 = "rwkv_lab.collator.packed_tokens.v1"
 
 
 class SamplerImplementation(str, Enum):
@@ -1119,15 +1120,62 @@ class PaddedCollatorConfiguration:
 
 
 @dataclass(frozen=True, slots=True)
+class PackedTokenCollatorConfiguration:
+    pad_token_id: int
+    label_pad_token_id: int
+    pad_to_multiple: int
+    maximum_sequence_length: int
+    separator_token_id: int
+
+    def __post_init__(self) -> None:
+        PaddedCollatorConfiguration(
+            self.pad_token_id,
+            self.label_pad_token_id,
+            self.pad_to_multiple,
+            self.maximum_sequence_length,
+        )
+        if not 0 <= self.separator_token_id <= 16_777_215:
+            raise DataPipelineError("separator_token_id is invalid")
+
+    @classmethod
+    def from_resolved(
+        cls, value: Mapping[str, Any]
+    ) -> PackedTokenCollatorConfiguration:
+        return cls(
+            **_exact(
+                value,
+                {
+                    "pad_token_id",
+                    "label_pad_token_id",
+                    "pad_to_multiple",
+                    "maximum_sequence_length",
+                    "separator_token_id",
+                },
+                "packed-token collator",
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RegisteredCollator:
     implementation: CollatorImplementation
-    configuration: PaddedCollatorConfiguration
+    configuration: PaddedCollatorConfiguration | PackedTokenCollatorConfiguration
+
+    def __post_init__(self) -> None:
+        if (
+            self.implementation is CollatorImplementation.PADDED_V1
+        ) != isinstance(self.configuration, PaddedCollatorConfiguration):
+            raise DataPipelineError(
+                "collator implementation and configuration disagree"
+            )
 
     def collate(
         self, samples: Sequence[MappedSample], *, tensor_output: bool = True
     ) -> Mapping[str, Any]:
         if not samples:
             raise DataPipelineError("cannot collate an empty batch")
+        if self.implementation is CollatorImplementation.PACKED_TOKENS_V1:
+            return self._collate_packed_tokens(samples, tensor_output=tensor_output)
         maximum = min(
             max(sample.token_length for sample in samples),
             self.configuration.maximum_sequence_length,
@@ -1159,6 +1207,68 @@ class RegisteredCollator:
                     "a batch cannot mix image and non-image samples"
                 )
             result["images"] = [sample.image for sample in samples]
+        if tensor_output:
+            import torch
+
+            for key in ("input_ids", "labels", "attention_mask"):
+                result[key] = torch.tensor(result[key], dtype=torch.long)
+        return MappingProxyType(result)
+
+    def _collate_packed_tokens(
+        self, samples: Sequence[MappedSample], *, tensor_output: bool
+    ) -> Mapping[str, Any]:
+        configuration = self.configuration
+        if not isinstance(configuration, PackedTokenCollatorConfiguration):
+            raise DataPipelineError("packed-token collator configuration is invalid")
+        if any(sample.image is not None for sample in samples):
+            raise DataPipelineError("packed-token collation does not accept images")
+        maximum = configuration.maximum_sequence_length
+        rows: list[tuple[list[int], list[int], list[str]]] = []
+        row_ids: list[int] = []
+        row_labels: list[int] = []
+        row_samples: list[str] = []
+
+        def flush() -> None:
+            nonlocal row_ids, row_labels, row_samples
+            if row_ids:
+                rows.append((row_ids, row_labels, row_samples))
+                row_ids, row_labels, row_samples = [], [], []
+
+        for sample in samples:
+            ids = list(sample.input_ids)
+            labels = list(sample.labels)
+            if len(ids) != len(labels) or not ids:
+                raise DataPipelineError("packed-token sample shape is invalid")
+            if len(ids) > maximum:
+                raise DataPipelineError(
+                    "packed-token sample exceeds maximum_sequence_length"
+                )
+            required = len(ids) + (1 if row_ids else 0)
+            if row_ids and len(row_ids) + required > maximum:
+                flush()
+            if row_ids:
+                row_ids.append(configuration.separator_token_id)
+                row_labels.append(configuration.separator_token_id)
+            row_ids.extend(ids)
+            row_labels.extend(labels)
+            row_samples.append(sample.sample_id)
+        flush()
+        input_ids: list[list[int]] = []
+        labels: list[list[int]] = []
+        attention: list[list[int]] = []
+        packed_sample_ids: list[str] = []
+        for ids, target, members in rows:
+            padding = maximum - len(ids)
+            input_ids.append(ids + [configuration.pad_token_id] * padding)
+            labels.append(target + [configuration.label_pad_token_id] * padding)
+            attention.append([1] * len(ids) + [0] * padding)
+            packed_sample_ids.append("+".join(members))
+        result: dict[str, Any] = {
+            "sample_ids": tuple(packed_sample_ids),
+            "input_ids": input_ids,
+            "labels": labels,
+            "attention_mask": attention,
+        }
         if tensor_output:
             import torch
 
@@ -1868,9 +1978,12 @@ def collator_from_resolved_component(
 ) -> RegisteredCollator:
     implementation_value, value = _resolved(component, "collator")
     implementation = CollatorImplementation(implementation_value)
-    return RegisteredCollator(
-        implementation, PaddedCollatorConfiguration.from_resolved(value)
-    )
+    configuration: PaddedCollatorConfiguration | PackedTokenCollatorConfiguration
+    if implementation is CollatorImplementation.PADDED_V1:
+        configuration = PaddedCollatorConfiguration.from_resolved(value)
+    else:
+        configuration = PackedTokenCollatorConfiguration.from_resolved(value)
+    return RegisteredCollator(implementation, configuration)
 
 
 def sampler_from_resolved_component(component: Mapping[str, Any]) -> RegisteredSampler:

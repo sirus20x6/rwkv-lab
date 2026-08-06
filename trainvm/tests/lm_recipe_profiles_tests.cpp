@@ -133,13 +133,17 @@ int main() {
         "ordinary full training and LoRA SFT are separate declarative profiles");
   check(training_components(packed)
                 .at("collation")
+                .at("key")
+                .at("name") == "packed_tokens" &&
+            training_components(packed)
+                .at("collation")
                 .at("configuration")
                 .at("maximum_sequence_length") == 4096 &&
             training_components(packed)
                     .at("gradient_accumulation")
                     .at("configuration")
                     .at("microbatches_per_optimizer_step") == 4,
-        "packed-token instance preserves its declared sequence and accumulation trajectory");
+        "packed-token instance selects real packing and preserves its declared trajectory");
   auto invalid = read_json(root / "docs/experiment-vm/examples/"
                                   "transformer-lm.recipe-instance.v1.json");
   invalid["overrides"]["hyperparameters.learning_rate"] = "fast";
@@ -151,9 +155,9 @@ int main() {
         "packed-token trajectory has a source-aware plan diff");
   check(std::ranges::any_of(packed_differences, [](const auto& difference) {
           return difference.path.ends_with(
-              "/collation/configuration/maximum_sequence_length");
+              "/collation/key/name");
         }),
-        "packed-token parity diff names the context-length change");
+        "packed-token parity diff names the collator implementation change");
 
   const auto rwkv_registry = trainvm::RecipeProfileRegistry::load_file(
       root / "docs/experiment-vm/examples/rwkv-lm.recipe-profiles.v1.json");

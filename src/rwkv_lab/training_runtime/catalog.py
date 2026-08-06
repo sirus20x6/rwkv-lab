@@ -88,6 +88,7 @@ def supported_worker_capabilities() -> frozenset[str]:
             "sample_mapper.assistant_conversation.v2",
             "sample_mapper.assistant_only.v1",
             "sample_mapper.causal_tokens.v1",
+            "collator.packed_tokens.v1",
             "collator.padded.v1",
             "sampler.deterministic.v1",
             "batching.fixed.v1",

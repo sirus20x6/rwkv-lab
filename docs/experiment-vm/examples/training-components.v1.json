@@ -371,6 +371,23 @@
       "reference_implementation": true
     },
     {
+      "key": {"category": "collator", "name": "packed_tokens", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.collator.packed_tokens.v1",
+      "model_families": ["rwkv", "transformer"],
+      "required_capabilities": ["collator.packed_tokens.v1"],
+      "configuration": [
+        {"name": "pad_token_id", "type": "integer", "required": true, "minimum": 0, "maximum": 16777215},
+        {"name": "label_pad_token_id", "type": "integer", "required": false, "default": -100, "minimum": -1000000, "maximum": 16777215},
+        {"name": "pad_to_multiple", "type": "integer", "required": false, "default": 1, "minimum": 1, "maximum": 4096},
+        {"name": "maximum_sequence_length", "type": "integer", "required": true, "minimum": 1, "maximum": 1048576, "unit": "tokens"},
+        {"name": "separator_token_id", "type": "integer", "required": false, "default": 0, "minimum": 0, "maximum": 16777215}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
       "key": {"category": "sampler", "name": "deterministic", "version": "1.0.0"},
       "backend": "python",
       "implementation": "rwkv_lab.sampler.deterministic.v1",

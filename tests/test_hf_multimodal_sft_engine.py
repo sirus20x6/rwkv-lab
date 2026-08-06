@@ -13,12 +13,15 @@ import torch.nn.functional as F
 from rwkv_lab.training_components import (
     AssistantOnlyMapperConfiguration,
     CausalTokensMapperConfiguration,
+    CollatorImplementation,
     ImageCaptionProcessorConfiguration,
     JsonlFrozenTokenSplitsConfiguration,
     LinearHeadCrossEntropyConfiguration,
     LinearHeadCrossEntropyObjective,
+    PackedTokenCollatorConfiguration,
     PaddedCollatorConfiguration,
     ProcessedSample,
+    RegisteredCollator,
 )
 from rwkv_lab.training_runtime.activation_memory import (
     HFGradientCheckpointing,
@@ -191,6 +194,30 @@ def test_causal_codec_rejects_over_limit_instead_of_truncating() -> None:
     sample = ProcessedSample("sample", 0, {"tokens": [1, 2, 3, 4]})
     with pytest.raises(HFMultimodalSFTError, match="exceeds"):
         _causal_codec(mapper_maximum=4, collator_maximum=3).encode((sample,))
+
+
+def test_causal_codec_uses_registered_packed_token_collator() -> None:
+    codec = HFForwardBatchCodec(
+        object(),
+        CausalTokensMapperConfiguration("tokens", 8),
+        object(),
+        RegisteredCollator(
+            CollatorImplementation.PACKED_TOKENS_V1,
+            PackedTokenCollatorConfiguration(0, -100, 1, 8, 2),
+        ),
+    )
+    batch = codec.encode(
+        (
+            ProcessedSample("first", 0, {"tokens": [10, 11]}),
+            ProcessedSample("second", 1, {"tokens": [20, 21, 22]}),
+        )
+    )
+
+    assert batch.sample_ids == ("first+second",)
+    assert batch.tensors["input_ids"].tolist() == [
+        [10, 11, 2, 20, 21, 22, 0, 0]
+    ]
+    assert batch.supervised_tokens == 6
 
 
 class TinyCausalModel(torch.nn.Module):
