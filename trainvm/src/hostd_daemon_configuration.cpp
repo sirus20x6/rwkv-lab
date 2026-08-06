@@ -116,6 +116,7 @@ HostdDaemonConfiguration::HostdDaemonConfiguration(
       !identifier(document_.host_id) || !boot_uuid(document_.boot_id) ||
       !identifier(document_.broker_epoch) ||
       !identifier(document_.broker_instance_id) ||
+      document_.authority_uid != 0U ||
       document_.authority_uid >
           static_cast<std::uint64_t>(std::numeric_limits<uid_t>::max()) ||
       document_.authority_gid >
@@ -145,7 +146,7 @@ HostdDaemonConfiguration::HostdDaemonConfiguration(
       document_.journal_identity.inode == 0U ||
       document_.journal_identity.authority_device == 0U ||
       document_.journal_identity.authority_inode == 0U ||
-      document_.journal_identity.owner_uid != document_.authority_uid) {
+      document_.journal_identity.owner_uid != document_.transport.allowed_uid) {
     reject("hostd daemon authority identity or path is invalid");
   }
   if (document_.inventory.maximum_devices == 0U ||
@@ -294,7 +295,7 @@ SqliteAuthorityConfig HostdDaemonConfiguration::ledger_authority() const {
           .ledger_path = document_.ledger_path,
           .expected_owner_uid = static_cast<uid_t>(document_.authority_uid),
           .expected_owner_gid = static_cast<gid_t>(document_.authority_gid),
-          .enforcement_grade = SqliteAuthorityEnforcementGrade::strict_filesystem};
+          .enforcement_grade = SqliteAuthorityEnforcementGrade::strict_privileged_filesystem};
 }
 
 LinuxNvidiaInventoryConfig HostdDaemonConfiguration::inventory() const {

@@ -2830,10 +2830,10 @@ HostdServeResult HostdUnifiedServer::serve_one(
     const std::uint16_t opcode = get_u16(wire_prefix, 8U);
     if (opcode == kStatusRequestOpcode)
       return status_.serve_accepted(connection.release(),
-                                    absolute_monotonic_deadline_ns);
+                                    std::numeric_limits<std::int64_t>::max());
     if (opcode == kMutationOpenOpcode)
       return mutation_.serve_accepted(connection.release(),
-                                      absolute_monotonic_deadline_ns);
+                                      std::numeric_limits<std::int64_t>::max());
     return HostdServeResult::rejected;
   } catch (...) {
     return HostdServeResult::rejected;

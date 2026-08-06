@@ -23,7 +23,7 @@
     "inode": 14,
     "authority_device": 15,
     "authority_inode": 16,
-    "owner_uid": 0
+    "owner_uid": 1000
   },
   "inventory": {
     "maximum_devices": 16,

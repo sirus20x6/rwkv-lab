@@ -41,7 +41,7 @@ HostdDaemonConfigurationDocument document() {
       .boot_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
       .broker_epoch = "broker-daemon",
       .broker_instance_id = "hostd-instance-daemon",
-      .authority_uid = uid,
+      .authority_uid = 0U,
       .authority_gid = gid,
       .worker_identity = {.uid = uid == 1000U ? 1001U : 1000U,
                           .gid = gid == 1000U ? 1001U : 1000U,
@@ -143,7 +143,7 @@ void valid_document_compiles_every_authority_policy() {
   const HostdDaemonConfiguration config(std::move(source));
   require(
       config.ledger_authority().enforcement_grade ==
-              HostLedgerEnforcementGrade::strict_filesystem &&
+              HostLedgerEnforcementGrade::strict_privileged_filesystem &&
           config.inventory().trusted_host_namespace &&
           config.inventory().trusted_nvml_loader &&
           config.document().gpu_fault_guard.has_value() &&
@@ -177,6 +177,26 @@ void valid_document_compiles_every_authority_policy() {
               "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" &&
           config.serve_wake_interval_ns() == 100'000'000LL,
       "one daemon document compiles all strict authority sub-configs");
+}
+
+void root_hostd_accepts_a_separate_journal_service_owner() {
+  auto separated = document();
+  separated.authority_uid = 0U;
+  separated.authority_gid =
+      separated.worker_identity.gid == 1002U ? 1003U : 1002U;
+  separated.journal_identity.owner_uid = separated.transport.allowed_uid;
+  const HostdDaemonConfiguration config(std::move(separated));
+  require(config.document().authority_uid == 0U &&
+              config.document().journal_identity.owner_uid ==
+                  config.document().transport.allowed_uid,
+          "root hostd pins the non-root TrainVM journal service identity");
+
+  auto mismatched = document();
+  mismatched.journal_identity.owner_uid =
+      mismatched.transport.allowed_uid == 1002U ? 1003U : 1002U;
+  require_throws<HostdDaemonConfigurationError>(
+      [&] { HostdDaemonConfiguration invalid(std::move(mismatched)); },
+      "hostd refuses a journal owner unrelated to its admitted TrainVM peer");
 }
 
 void unsafe_paths_trust_roles_and_bounds_are_rejected() {
@@ -276,6 +296,7 @@ void file_loading_is_strict_and_reflection_closed() {
 int main() {
   try {
     valid_document_compiles_every_authority_policy();
+    root_hostd_accepts_a_separate_journal_service_owner();
     unsafe_paths_trust_roles_and_bounds_are_rejected();
     file_loading_is_strict_and_reflection_closed();
     std::cout << "hostd daemon configuration tests passed\n";

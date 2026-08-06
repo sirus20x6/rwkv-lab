@@ -3148,6 +3148,47 @@ void test_authority_lock_file_identity() {
   std::filesystem::remove_all(directory);
 }
 
+void test_read_only_journal_observer() {
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-journal-read-only-observer-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  std::filesystem::permissions(
+      directory, std::filesystem::perms::owner_all,
+      std::filesystem::perm_options::replace);
+  const auto database = directory / "journal.db";
+  {
+    trainvm::AuthorityLock authority(database);
+    trainvm::Journal writer(authority.journal_path(),
+                            authority.journal_identity());
+    const std::string identity = writer.journal_id();
+
+    trainvm::Journal observer(
+        authority.journal_path(), authority.journal_identity(),
+        trainvm::HostGrantEnforcement::required,
+        trainvm::HostIdentity{
+            .host_id = "sha256:" + std::string(64U, 'a'),
+            .boot_id = kTestBootId},
+        {}, false, trainvm::JournalAccessMode::read_only);
+    const auto snapshot = observer.journal_authority_snapshot();
+    check(observer.journal_id() == identity && observer.event_count() == 0U &&
+              snapshot.journal_id == identity,
+          "read-only journal observer attests an established live writer");
+
+    bool mutation_refused = false;
+    try {
+      (void)observer.rebuild_projections();
+    } catch (const std::runtime_error&) {
+      mutation_refused = true;
+    }
+    check(mutation_refused && observer.event_count() == 0U,
+          "read-only journal observer cannot mutate projections");
+  }
+  std::filesystem::remove_all(directory);
+}
+
 void test_control_command_journal() {
   auto compiled = trainvm::compile_document(load_fixture());
   check(compiled.valid(), "fixture required by control command journal compiles");
@@ -13275,6 +13316,7 @@ int main() {
     test_lease_renewal_authority();
     test_authority_clock_integration();
     test_authority_lock_file_identity();
+    test_read_only_journal_observer();
     test_control_command_journal();
     test_command_service();
     test_submission_and_queue_boundary();

@@ -19,6 +19,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -336,6 +337,22 @@ public:
 
 private:
   HostdAuthorityStatus value_;
+};
+
+class DelayedAuthorityStatusSource final : public IHostdAuthorityStatusSource {
+public:
+  DelayedAuthorityStatusSource(HostdAuthorityStatus value,
+                               std::chrono::nanoseconds delay)
+      : value_(std::move(value)), delay_(delay) {}
+
+  [[nodiscard]] HostdAuthorityStatus snapshot() const override {
+    std::this_thread::sleep_for(delay_);
+    return value_;
+  }
+
+private:
+  HostdAuthorityStatus value_;
+  std::chrono::nanoseconds delay_;
 };
 
 constexpr std::string_view kMutationEvidenceDigest =
@@ -1211,6 +1228,9 @@ void status_only_lifecycle_and_endpoint_identity() {
                                       directory.parent_fd(), held));
   HostdStatusServer server(authority, fixture.coordinator, peer_policy());
   const auto client = client_config(*authority);
+  require(client.expected_endpoint.parent_mode == 0700U &&
+              client.expected_endpoint.path_mode == 0600U,
+          "pinned endpoint identity stores permission bits without file-type bits");
 
   HostdServeResult sealed_result = HostdServeResult::timed_out;
   std::jthread sealed_server(
@@ -1913,9 +1933,29 @@ void mutation_transport_dispatches_replays_and_disconnects() {
   auto fault = std::make_shared<MutationFaultInjector>();
   auto process_supervisor =
       std::make_shared<LedgerProcessSupervisor>(*fixture.ledger);
+  const ResourceOccupancySnapshot initial_occupancy =
+      fixture.ledger->occupancy();
+  HostdAuthorityStatus delayed_status;
+  delayed_status.api_version = std::string(kHostdAuthorityStatusApiVersion);
+  delayed_status.startup_phase = HostdStartupPhase::admitting;
+  delayed_status.startup_recovery_steps = 1U;
+  delayed_status.ledger_verified = true;
+  delayed_status.ledger_chain_head = fixture.ledger->chain_head();
+  delayed_status.ledger_record_count = fixture.ledger->record_count();
+  delayed_status.occupancy_ledger_sequence = initial_occupancy.ledger_sequence;
+  delayed_status.occupancy_digest = initial_occupancy.occupancy_digest;
+  delayed_status.resource_inventory_observed = true;
+  delayed_status.current_inventory_digest = fixture.observed.inventory_digest;
+  delayed_status.current_inventory_receipt_digest =
+      fixture.observed.receipt_digest;
+  delayed_status.process_launch_enabled = true;
+  delayed_status.mutation_enabled = true;
+  auto delayed_source = std::make_shared<DelayedAuthorityStatusSource>(
+      delayed_status, std::chrono::milliseconds(200));
   HostdStatusServer status_server(
       authority, fixture.coordinator,
-      {.allowed_uid = ::geteuid(), .allowed_gid = ::getegid()});
+      {.allowed_uid = ::geteuid(), .allowed_gid = ::getegid()}, {},
+      delayed_source);
   HostdMutationServer server(
       authority, fixture.coordinator, verifier, kernel, service, ledger_time,
       {.api_version = std::string(kHostdMutationTransportApiVersion),
@@ -1950,7 +1990,8 @@ void mutation_transport_dispatches_replays_and_disconnects() {
       status_error = std::current_exception();
     }
   });
-  const HostdServeResult status_served = unified.serve_one(deadline());
+  const HostdServeResult status_served =
+      unified.serve_one(deadline(100'000'000LL));
   status_thread.join();
   if (status_error) std::rethrow_exception(status_error);
   require(status_served == HostdServeResult::served && routed_status &&

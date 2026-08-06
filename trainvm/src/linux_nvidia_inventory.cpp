@@ -1,5 +1,7 @@
 #include "trainvm/linux_nvidia_inventory.hpp"
 
+#include "trainvm/document.hpp"
+
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -1071,7 +1073,9 @@ public:
         proc.read("driver/nvidia/version", kMaximumFileBytes);
     const auto boot_end = proc.read("sys/kernel/random/boot_id", 256U);
     const auto host_end = root.read("etc/machine-id", 256U);
-    result.host_id = host ? trim_ascii(*host) : std::string{};
+    result.host_id = host
+                         ? "sha256:" + sha256_hex(trim_ascii(*host))
+                         : std::string{};
     result.boot_id = boot_begin ? trim_ascii(*boot_begin) : std::string{};
     result.nvml_loaded = first.loaded;
     result.nvml_complete = first.complete && second.complete;
