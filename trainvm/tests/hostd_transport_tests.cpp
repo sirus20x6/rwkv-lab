@@ -1380,6 +1380,22 @@ void authority_status_round_trips_receipt_derived_health() {
        .free_memory_bytes = 40ULL << 30U,
        .selector_labels = {{"partition", "mig"}}},
   };
+  // This host mutex deliberately carries absent optionals. Under GCC 16 in
+  // C++26 mode std::optional is a range; implicit nlohmann conversion would
+  // encode these as [] instead of JSON null and break the wire contract.
+  expected.active_fence_count = 1U;
+  expected.active_fences = {{
+      .resource = {.kind = HostResourceKind::host_mutex,
+                   .vendor = std::nullopt,
+                   .stable_id = "host-mutex:transport-status",
+                   .parent_id = std::nullopt},
+      .generation = 1U,
+      .inventory_digest = fixture.observed.inventory_digest,
+      .topology_digest =
+          "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  }};
+  // Construct the attested document independently with explicit JSON scalar
+  // and null values so the transport cannot silently change canonical shape.
   const nlohmann::json passive_identity{
       {"api_version", "trainvm.hostd-passive-memory/v1"},
       {"host_id", expected.passive_memory_host_id},
@@ -1435,8 +1451,13 @@ void authority_status_round_trips_receipt_derived_health() {
   server_thread.join();
   require(served == HostdServeResult::served && reply.status &&
               reply.authority_status && *reply.authority_status == expected &&
+              reply.authority_status->active_fences.size() == 1U &&
+              !reply.authority_status->active_fences.front().resource.vendor &&
+              !reply.authority_status->active_fences.front()
+                   .resource.parent_id &&
               source->observations == 1U,
-          "status transport carries one exact bounded authority snapshot");
+          "status transport carries exact scalar/null optionals and one "
+          "independently attested bounded authority snapshot");
 
   HostdAuthorityStatus bounded = expected;
   bounded.passive_accelerator_memory.clear();

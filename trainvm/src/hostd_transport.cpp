@@ -1,4 +1,5 @@
 #include "trainvm/hostd_transport.hpp"
+#include "trainvm/document.hpp"
 
 #include <fcntl.h>
 #include <linux/openat2.h>
@@ -593,15 +594,25 @@ std::optional<std::string> vendor_name(
   throw HostdTransportError("hostd resource vendor is invalid");
 }
 
+nlohmann::json nullable_string_json(
+    const std::optional<std::string> &value) {
+  return value ? nlohmann::json(*value) : nlohmann::json(nullptr);
+}
+
+nlohmann::json nullable_vendor_json(
+    const std::optional<HostAcceleratorVendor> &vendor) {
+  return nullable_string_json(vendor_name(vendor));
+}
+
 nlohmann::json fence_status_json(const ResourceFence &fence) {
   return {
       {"generation", fence.generation},
       {"inventory_digest", fence.inventory_digest},
       {"resource",
        {{"kind", resource_kind_name(fence.resource.kind)},
-        {"parent_id", fence.resource.parent_id},
+        {"parent_id", nullable_string_json(fence.resource.parent_id)},
         {"stable_id", fence.resource.stable_id},
-        {"vendor", vendor_name(fence.resource.vendor)}}},
+        {"vendor", nullable_vendor_json(fence.resource.vendor)}}},
       {"topology_digest", fence.topology_digest},
   };
 }
@@ -642,9 +653,9 @@ nlohmann::json passive_memory_identity_json(
   for (const auto &memory : status.passive_accelerator_memory) {
     rows.push_back({
         {"resource_kind", resource_kind_name(memory.resource_kind)},
-        {"vendor", vendor_name(memory.vendor)},
+        {"vendor", nullable_vendor_json(memory.vendor)},
         {"stable_id", memory.stable_id},
-        {"parent_id", memory.parent_id},
+        {"parent_id", nullable_string_json(memory.parent_id)},
         {"audited_eligible", memory.audited_eligible},
         {"total_memory_bytes", memory.total_memory_bytes},
         {"free_memory_bytes", memory.free_memory_bytes},
@@ -666,17 +677,7 @@ nlohmann::json passive_memory_identity_json(
 }
 
 std::string plain_sha256(std::string_view bytes) {
-  std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
-  (void)::SHA256(reinterpret_cast<const unsigned char *>(bytes.data()),
-                 bytes.size(), digest.data());
-  static constexpr char digits[] = "0123456789abcdef";
-  std::string result = "sha256:";
-  result.reserve(7U + digest.size() * 2U);
-  for (const unsigned char byte : digest) {
-    result.push_back(digits[byte >> 4U]);
-    result.push_back(digits[byte & 0x0fU]);
-  }
-  return result;
+  return "sha256:" + sha256_hex(bytes);
 }
 
 nlohmann::json authority_status_json(const HostdAuthorityStatus &status) {
@@ -690,9 +691,9 @@ nlohmann::json authority_status_json(const HostdAuthorityStatus &status) {
   for (const auto &memory : status.passive_accelerator_memory) {
     passive_memory.push_back({
         {"resource_kind", resource_kind_name(memory.resource_kind)},
-        {"vendor", vendor_name(memory.vendor)},
+        {"vendor", nullable_vendor_json(memory.vendor)},
         {"stable_id", memory.stable_id},
-        {"parent_id", memory.parent_id},
+        {"parent_id", nullable_string_json(memory.parent_id)},
         {"audited_eligible", memory.audited_eligible},
         {"total_memory_bytes", memory.total_memory_bytes},
         {"free_memory_bytes", memory.free_memory_bytes},
@@ -1484,15 +1485,24 @@ void validate_authority_status_semantics(
        status.passive_memory_inventory_digest !=
            status.current_inventory_digest ||
        status.passive_memory_inventory_receipt_digest !=
-           status.current_inventory_receipt_digest ||
-       status.passive_memory_observed_monotonic_ns == 0U ||
-       status.passive_accelerator_memory_count == 0U ||
-       (status.passive_accelerator_memory.empty() &&
-        !status.passive_accelerator_memory_truncated) ||
-       status.passive_memory_observation_digest !=
-           plain_sha256(passive_memory_identity_json(status).dump())))
+           status.current_inventory_receipt_digest))
     throw HostdTransportError(
         "hostd passive memory is not bound to host/boot/inventory identity");
+  if (has_passive &&
+      (status.passive_memory_observed_monotonic_ns == 0U ||
+       status.passive_accelerator_memory_count == 0U ||
+       (status.passive_accelerator_memory.empty() &&
+        !status.passive_accelerator_memory_truncated)))
+    throw HostdTransportError(
+        "hostd passive memory observation is structurally incomplete");
+  if (has_passive) {
+    const std::string expected_passive_digest =
+        plain_sha256(passive_memory_identity_json(status).dump());
+    if (status.passive_memory_observation_digest != expected_passive_digest)
+      throw HostdTransportError(
+          "hostd passive memory observation digest does not match its "
+          "evidence");
+  }
   if (!has_passive &&
       (!status.passive_memory_host_id.empty() ||
        !status.passive_memory_boot_id.empty() ||
