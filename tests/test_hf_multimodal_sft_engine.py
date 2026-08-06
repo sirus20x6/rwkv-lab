@@ -1098,8 +1098,8 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         def qualitative_samples(self):
             return SimpleNamespace(
                 configuration=SimpleNamespace(sample_count=1),
-                bind=lambda identities, selector_digest: SimpleNamespace(
-                    identities=tuple(identities),
+                select=lambda population, selector_digest, dataset_root: SimpleNamespace(
+                    identities=tuple(population[:1]),
                     identities_digest="sha256:" + "4" * 64,
                     selector_digest=selector_digest,
                 ),
@@ -1280,6 +1280,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         (final_checkpoint / "engine-state.json").read_text(encoding="utf-8")
     )
     assert final_checkpoint_state["runtime_state"]["finalization_pending"] is True
+    before_eval_only_recovery = model.head.weight.detach().clone()
     final_controls = Controls()
     final_observability = Observability()
     step = run_hf_multimodal_sft(
@@ -1295,6 +1296,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         device="cpu",
     )
     assert step == 1
+    assert torch.equal(model.head.weight, before_eval_only_recovery)
     assert [event[0] for event in controls.events] == [
         "checkpoint",
         "gallery",
@@ -1763,6 +1765,59 @@ def test_test_caption_evidence_retries_failed_ids_and_collapses_latest_records(
         "generated-2-b",
     )
     assert json.loads((directory / "receipt.json").read_text())["failures"] == 0
+
+
+def test_all_error_final_audit_cannot_seal_completion_evidence(
+    tmp_path, monkeypatch
+) -> None:
+    import rwkv_lab.trainvm_adapters.hf_multimodal_sft as engine
+
+    samples = tuple(
+        ProcessedSample(
+            sample_id,
+            ordinal,
+            {"caption": f"target-{sample_id}"},
+            image=object(),
+            image_size=(512, 512),
+        )
+        for ordinal, sample_id in enumerate(("a", "b", "c"))
+    )
+    monkeypatch.setattr(
+        engine,
+        "generate_hf_captions",
+        lambda **_values: (_ for _ in ()).throw(
+            RuntimeError("cudaErrorLaunchTimeout")
+        ),
+    )
+    directory = tmp_path / "final-audit"
+    with pytest.raises(engine.HFMultimodalSFTError, match="failed generations"):
+        engine._write_test_caption_evidence(
+            directory=directory,
+            stack=object(),
+            codec=object(),
+            samples=samples,
+            device=torch.device("cpu"),
+            step=745,
+            model_load_receipt="sha256:" + "a" * 64,
+            checkpoint_artifact_id="checkpoint-final",
+            checkpoint_manifest_digest="sha256:" + "b" * 64,
+            model_state_digest="sha256:" + "c" * 64,
+            split_membership_digest="sha256:" + "d" * 64,
+            decode_policy_digest="sha256:" + "e" * 64,
+            model_state_mode="trained",
+            maximum_new_tokens=768,
+            generation_batch_size=3,
+            use_cache=True,
+        )
+    failed = tuple(
+        json.loads(line)
+        for line in (directory / "captions.partial.jsonl").read_text().splitlines()
+    )
+    assert len(failed) == len(samples)
+    assert all(record["status"] == "failed" for record in failed)
+    assert all(record["error_code"] == "generation_failed" for record in failed)
+    assert not (directory / "captions.jsonl").exists()
+    assert not (directory / "receipt.json").exists()
 
 
 def test_test_caption_evidence_rejects_stale_resume_identity(

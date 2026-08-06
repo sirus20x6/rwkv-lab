@@ -287,6 +287,301 @@
           "description": "Only measured attention/memory profiles are admitted by this example version."
         }
       ]
+    },
+    {
+      "key": {"name": "hf_multimodal_sft", "version": "2"},
+      "description": "A compact, exact component graph for Hugging Face multimodal supervised fine-tuning. Runtime registration is a separate authority concern.",
+      "template_document": {
+        "api_version": "trainvm.rwkv-lab/v1alpha1",
+        "kind": "Experiment",
+        "metadata": {
+          "name": "hf-multimodal-sft-v2",
+          "description": "Declarative multimodal SFT recipe profile",
+          "labels": {"family": "transformer", "recipe": "hf_multimodal_sft@2"}
+        },
+        "spec": {
+          "workspace": {
+            "root": "/thearray/git/moe-mla",
+            "run_directory": "/thearray/git/moe-mla/runs/hf-multimodal-sft",
+            "concurrency_key": "hf-multimodal-sft",
+            "allowed_read_roots": ["/thearray/git/moe-mla", "/thearray/git/datasets", "/thearray/git/ob/text-generation-webui/models"],
+            "allowed_write_roots": ["/thearray/git/moe-mla/runs/hf-multimodal-sft"]
+          },
+          "resources": {
+            "accelerators": {"vendor": "nvidia", "count": 1, "minimum_memory_gib": 80, "exclusive": true},
+            "minimum_host_memory_gib": 64,
+            "cpu_threads": 16,
+            "lease_timeout_seconds": 30,
+            "cpu_io_policy": {"cpu_weight": 100, "io_weight": 100, "omp_threads": 8, "preprocessing_workers": 8, "nice": 0}
+          },
+          "parameters": {},
+          "artifacts": {
+            "checkpoint": {"type": "checkpoint", "schema": "hf.multimodal-sft.v1", "immutability": "immutable", "fingerprint": "manifest_sha256", "required": true},
+            "eval_gallery": {"type": "image_gallery", "schema": "rwkv-lab.eval-gallery.v2", "immutability": "append_only", "fingerprint": "manifest_sha256", "required": true},
+            "metrics": {"type": "metrics", "schema": "hf.multimodal-sft.metrics.v1", "immutability": "append_only", "fingerprint": "manifest_sha256"},
+            "test_eval": {"type": "report", "schema": "rwkv-lab.hf-test-caption-evidence-bundle.v1", "immutability": "immutable", "fingerprint": "manifest_sha256", "required": true}
+          },
+          "components": {
+            "core": {
+              "adapter": "trainvm.core",
+              "version": "1.0.0",
+              "runtime": "builtin",
+              "operations": {
+                "acquire_resources": {"contract": "trainvm.v1.AcquireResources"},
+                "release_resources": {"contract": "trainvm.v1.ReleaseResources"}
+              }
+            },
+            "trainer": {
+              "adapter": "rwkv-lab.hf-multimodal-sft",
+              "version": "1.0.0",
+              "runtime": "python_worker",
+              "operations": {"train": {"contract": "rwkv_lab.hf_multimodal_sft.v1.Train"}}
+            }
+          },
+          "workflow": {
+            "entrypoint": "acquire_resources",
+            "nodes": {
+              "acquire_resources": {
+                "invoke": {
+                  "component": "core",
+                  "operation": "acquire_resources",
+                  "inputs": {"concurrency_key": {"literal": "hf-multimodal-sft"}}
+                },
+                "idempotency": "receipt_required",
+                "effect": "resource",
+                "transitions": [
+                  {"on": "resource.acquired", "target": "train"},
+                  {"on": "operation.failed", "target": "$failed"}
+                ]
+              },
+              "train": {
+                "description": "Publish step-zero examples before the first optimizer step, then train and checkpoint.",
+                "invoke": {
+                  "component": "trainer",
+                  "operation": "train",
+                  "inputs": {},
+                  "training": {
+                    "model_family": "transformer",
+                    "components": {
+                      "model_loader": {
+                        "key": {"category": "model_loader", "name": "hf_multimodal", "version": "2.0.0"},
+                        "configuration": {
+                          "model_path": "/thearray/git/ob/text-generation-webui/models/Qwen3.6-35B-A3B-heretic",
+                          "checkpoint_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                          "revision": "main",
+                          "local_files_only": true,
+                          "trust_remote_code": false,
+                          "attention_implementation": "flash_attention_2",
+                          "experts_implementation": "grouped_mm",
+                          "quantization": "none",
+                          "exact_checkpoint": true
+                        }
+                      },
+                      "trainability": {
+                        "key": {"category": "trainability", "name": "lora_target_manifest", "version": "2.0.0"},
+                        "configuration": {
+                          "rank": 256,
+                          "alpha": 512,
+                          "dropout": 0.05,
+                          "target_manifest_path": "/thearray/git/datasets/captiontest/qwen36-caption-finetune-v1/lora-targets.json",
+                          "manifest_schema": "rwkv-lab.qwen-caption-lora-targets.v1",
+                          "required_policy_digest": "sha256:5f29468be7a2bbfeebb9ccc58fd2bdc01ee3027ce50cfd3b03bec624545c1390",
+                          "bias": "none",
+                          "merge_on_completion": false
+                        }
+                      },
+                      "activation_memory": {
+                        "key": {"category": "activation_memory", "name": "hf_gradient_checkpointing", "version": "1.0.0"},
+                        "configuration": {"use_reentrant": false}
+                      },
+                      "objective": {
+                        "key": {"category": "objective", "name": "linear_head_cross_entropy", "version": "1.0.0"},
+                        "configuration": {"chunk_size": 2048, "prefer_fused": true}
+                      },
+                      "optimizer": {
+                        "key": {"category": "optimizer", "name": "torch_adamw_no_decay", "version": "2.0.0"},
+                        "configuration": {"learning_rate": 0.00002, "beta1": 0.9, "beta2": 0.95, "epsilon": 0.00000001, "foreach": false, "fused": true}
+                      },
+                      "learning_rate": {
+                        "key": {"category": "learning_rate_schedule", "name": "linear_warmup_cosine", "version": "1.0.0"},
+                        "configuration": {"warmup_steps": 22, "max_steps": 745, "minimum_ratio": 0.1}
+                      },
+                      "weight_decay": {
+                        "key": {"category": "weight_decay_schedule", "name": "constant", "version": "1.0.0"},
+                        "configuration": {"weight_decay": 0.01}
+                      },
+                      "gradient_clipping": {
+                        "key": {"category": "gradient_clipping", "name": "global_norm", "version": "1.0.0"},
+                        "configuration": {"max_norm": 1.0, "norm_type": 2.0, "error_if_nonfinite": true}
+                      },
+                      "gradient_accumulation": {
+                        "key": {"category": "gradient_accumulation", "name": "fixed", "version": "1.0.0"},
+                        "configuration": {"microbatches_per_optimizer_step": 16}
+                      },
+                      "precision": {
+                        "key": {"category": "precision", "name": "bf16_parameters_fp32_reductions", "version": "1.0.0"},
+                        "configuration": {"parameter_dtype": "bfloat16", "compute_dtype": "bfloat16", "reduction_dtype": "float32", "gradient_scaling": false}
+                      },
+                      "data": {
+                        "key": {"category": "data_source", "name": "manifested_jsonl_image_splits", "version": "1.0.0"},
+                        "configuration": {"dataset_root": "/thearray/git/datasets/captiontest/qwen36-caption-finetune-v1", "content_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "declared_columns": ["caption", "id", "image", "split"], "image_column": "image", "caption_columns": ["caption"], "id_column": "id"}
+                      },
+                      "processor": {
+                        "key": {"category": "sample_processor", "name": "image_caption", "version": "1.0.0"},
+                        "configuration": {"image_column": "image", "caption_columns": ["caption"], "minimum_pixels": 65536, "maximum_pixels": 1048576, "maximum_edge": 4096, "oversize_policy": "downscale"}
+                      },
+                      "sample_mapping": {
+                        "key": {"category": "sample_mapper", "name": "assistant_conversation", "version": "2.0.0"},
+                        "configuration": {
+                          "system_prompt": "You are an expert image-captioning assistant. Describe only what the image supports, in natural language suitable for training a text-to-image model.",
+                          "user_prompt": "Write one detailed master caption in 4-8 sentences. Cover the main subject, secondary objects, actions, spatial relationships, setting, composition, camera viewpoint, lighting, colors, materials, texture, photographic or artistic style, and all genuinely legible text. Integrate details naturally in context rather than listing tags. Do not mention these instructions, metadata, uncertainty policy, or the image file path.",
+                          "target_column": "caption",
+                          "maximum_tokens": 1024,
+                          "append_eos": true
+                        }
+                      },
+                      "collation": {
+                        "key": {"category": "collator", "name": "padded", "version": "1.0.0"},
+                        "configuration": {"pad_token_id": 0, "label_pad_token_id": -100, "pad_to_multiple": 8, "maximum_sequence_length": 1024}
+                      },
+                      "sampler": {
+                        "key": {"category": "sampler", "name": "deterministic", "version": "1.0.0"},
+                        "configuration": {"seed": 20260805, "shuffle": true}
+                      },
+                      "batching": {
+                        "key": {"category": "batching", "name": "fixed", "version": "1.0.0"},
+                        "configuration": {"batch_size": 1, "drop_last": false, "prefetch_workers": 8}
+                      },
+                      "split": {
+                        "key": {"category": "split_selector", "name": "frozen_named", "version": "1.0.0"},
+                        "configuration": {"selection": "train"}
+                      },
+                      "evaluation_split": {
+                        "key": {"category": "split_selector", "name": "frozen_named", "version": "1.0.0"},
+                        "configuration": {"selection": "validation"}
+                      },
+                      "test_split": {
+                        "key": {"category": "split_selector", "name": "frozen_named", "version": "1.0.0"},
+                        "configuration": {"selection": "test"}
+                      },
+                      "evaluator": {
+                        "key": {"category": "evaluator", "name": "scalar_loss", "version": "1.0.0"},
+                        "configuration": {"split_slot": "evaluation_split", "metrics": ["loss"], "reduction": "weighted_mean", "maximum_examples": 0}
+                      },
+                      "evaluation_schedule": {
+                        "key": {"category": "evaluation_schedule", "name": "launch_gate_periodic", "version": "2.0.0"},
+                        "configuration": {"full_step_zero": true, "qualitative_every_steps": 100, "full_every_steps": 100, "final": true}
+                      },
+                      "qualitative_samples": {
+                        "key": {"category": "qualitative_sample", "name": "fixed_manifest", "version": "1.0.0"},
+                        "configuration": {
+                          "manifest_name": "validation-fixed-100.jsonl",
+                          "manifest_sha256": "sha256:e5cfb9fc5edac6cb890409efb02db477060603b8f87a42b401e6235da49a8fdc",
+                          "identity_field": "id",
+                          "sample_count": 10
+                        }
+                      },
+                      "artifact_renderer": {
+                        "key": {"category": "artifact_renderer", "name": "caption_triplet", "version": "1.0.0"},
+                        "configuration": {"modality": "multimodal", "schema": "trainvm.caption-triplet.v1"}
+                      },
+                      "generation_policy": {
+                        "key": {"category": "generation_policy", "name": "greedy", "version": "1.0.0"},
+                        "configuration": {"maximum_new_tokens": 768, "generation_batch_size": 4, "padding_side": "left", "use_cache": true}
+                      },
+                      "checkpoint_policy": {
+                        "key": {"category": "checkpoint_policy", "name": "atomic_retained", "version": "1.0.0"},
+                        "configuration": {"every_steps": 250, "keep_last": 3, "keep_best": 1, "publish_final": true, "resume_grade": "exact"}
+                      }
+                    }
+                  }
+                },
+                "publishes": {"checkpoint": "checkpoint", "eval_gallery": "eval_gallery", "metrics": "metrics", "test_eval": "test_eval"},
+                "idempotency": "receipt_required",
+                "effect": "process",
+                "timeout_seconds": 604800,
+                "transitions": [
+                  {"on": "worker.completed", "target": "release_resources"},
+                  {"on": "operation.failed", "target": "$failed"}
+                ]
+              },
+              "release_resources": {
+                "invoke": {
+                  "component": "core",
+                  "operation": "release_resources",
+                  "inputs": {"concurrency_key": {"literal": "hf-multimodal-sft"}}
+                },
+                "idempotency": "replay_safe",
+                "effect": "resource",
+                "transitions": [
+                  {"on": "resource.released", "target": "$completed"},
+                  {"on": "operation.failed", "target": "$failed"}
+                ]
+              }
+            }
+          },
+          "controls": {"catalog": {}},
+          "observability": {
+            "heartbeat_seconds": 5,
+            "metrics": [
+              {"name": "eval.loss", "type": "gauge", "unit": "dimensionless", "step_domain": "optimizer_step", "aggregation": "last"},
+              {"name": "eval.caption_items_completed", "type": "gauge", "unit": "count", "step_domain": "optimizer_step", "aggregation": "last"},
+              {"name": "eval.caption_items_failed", "type": "gauge", "unit": "count", "step_domain": "optimizer_step", "aggregation": "last"},
+              {"name": "eval.caption_items_total", "type": "gauge", "unit": "count", "step_domain": "optimizer_step", "aggregation": "last"},
+              {"name": "eval.caption_wall_seconds", "type": "gauge", "unit": "second", "step_domain": "optimizer_step", "aggregation": "last"},
+              {"name": "eval.test_loss", "type": "gauge", "unit": "dimensionless", "step_domain": "optimizer_step", "aggregation": "last"},
+              {"name": "train.loss", "type": "gauge", "unit": "dimensionless", "step_domain": "optimizer_step", "aggregation": "weighted_mean"},
+              {"name": "train.tokens_per_second", "type": "gauge", "unit": "token/second", "step_domain": "optimizer_step", "aggregation": "mean"}
+            ],
+            "retain_raw_metrics_days": 30,
+            "eval_gallery_artifact": "eval_gallery"
+          },
+          "recovery": {
+            "exact_resume": true,
+            "checkpoint_artifact": "checkpoint",
+            "reconcile": "fail_closed",
+            "orphan_policy": "leave_and_block",
+            "graceful_stop_seconds": 300,
+            "release_accelerators_when_paused": true
+          }
+        }
+      },
+      "overrides": [
+        {"name": "model.path", "domain": "model", "type": "path", "target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/model_path", "required": true, "description": "Exact local Hugging Face model snapshot"},
+        {"name": "model.attention_implementation", "domain": "model", "type": "enumeration", "target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/attention_implementation", "required": false, "values": ["flash_attention_2", "sdpa"]},
+        {"name": "data.root", "domain": "data", "type": "path", "target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/dataset_root", "required": true, "description": "Authority-bounded manifested train/validation/test dataset root"},
+        {"name": "model.target_manifest", "domain": "model", "type": "path", "target": "/spec/workflow/nodes/train/invoke/training/components/trainability/configuration/target_manifest_path", "required": true, "description": "Exact model-bound LoRA target manifest"},
+        {"name": "data.batch_size", "domain": "data", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/batching/configuration/batch_size", "required": false, "minimum": 1, "maximum": 65536},
+        {"name": "trainability.lora_rank", "domain": "trainability", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/trainability/configuration/rank", "required": false, "minimum": 1, "maximum": 1024},
+        {"name": "trainability.lora_alpha", "domain": "trainability", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/trainability/configuration/alpha", "required": false, "minimum": 1, "maximum": 4096},
+        {"name": "hyperparameters.learning_rate", "domain": "hyperparameters", "type": "number", "target": "/spec/workflow/nodes/train/invoke/training/components/optimizer/configuration/learning_rate", "required": false, "minimum": 0.00000001, "maximum": 0.01},
+        {"name": "hyperparameters.gradient_accumulation", "domain": "hyperparameters", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/gradient_accumulation/configuration/microbatches_per_optimizer_step", "required": false, "minimum": 1, "maximum": 65536},
+        {"name": "hyperparameters.maximum_steps", "domain": "hyperparameters", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/learning_rate/configuration/max_steps", "required": false, "minimum": 1, "maximum": 10000000},
+        {"name": "evaluation.qualitative_sample_count", "domain": "evaluation", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/qualitative_samples/configuration/sample_count", "required": false, "minimum": 1, "maximum": 512},
+        {"name": "data.qualitative_manifest_name", "domain": "data", "type": "string", "target": "/spec/workflow/nodes/train/invoke/training/components/qualitative_samples/configuration/manifest_name", "required": true},
+        {"name": "data.qualitative_manifest_sha256", "domain": "data", "type": "string", "target": "/spec/workflow/nodes/train/invoke/training/components/qualitative_samples/configuration/manifest_sha256", "required": true},
+        {"name": "evaluation.qualitative_every_steps", "domain": "evaluation", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/evaluation_schedule/configuration/qualitative_every_steps", "required": false, "minimum": 0, "maximum": 10000000},
+        {"name": "evaluation.full_every_steps", "domain": "evaluation", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/evaluation_schedule/configuration/full_every_steps", "required": false, "minimum": 0, "maximum": 10000000},
+        {"name": "checkpointing.every_steps", "domain": "checkpointing", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/checkpoint_policy/configuration/every_steps", "required": false, "minimum": 1, "maximum": 1000000},
+        {"name": "resources.gpu_memory_gib", "domain": "resources", "type": "number", "target": "/spec/resources/accelerators/minimum_memory_gib", "required": false, "minimum": 24, "maximum": 192}
+      ],
+      "content_bindings": [
+        {
+          "path_target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/model_path",
+          "fingerprint_target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/checkpoint_fingerprint"
+        },
+        {
+          "path_target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/dataset_root",
+          "fingerprint_target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/content_fingerprint"
+        }
+      ],
+      "compatibility": [
+        {
+          "fields": ["model.attention_implementation", "resources.gpu_memory_gib"],
+          "allowed": [["flash_attention_2", 80], ["sdpa", 96]],
+          "description": "Only measured attention/memory profiles are admitted by this example version."
+        }
+      ]
     }
   ]
 }

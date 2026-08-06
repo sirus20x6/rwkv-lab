@@ -432,7 +432,8 @@ void validate_data_pipeline_relationships(
   if (loaders != grouped.end()) {
     const std::string& implementation =
         loaders->second.front()->descriptor.implementation;
-    if (implementation == "rwkv_lab.model_loader.hf_multimodal.v1" &&
+    if ((implementation == "rwkv_lab.model_loader.hf_multimodal.v1" ||
+         implementation == "rwkv_lab.model_loader.hf_multimodal.v2") &&
         !image_source)
       reject("Hugging Face multimodal loading requires image-caption data");
     if (implementation == "rwkv_lab.model_loader.hf_causal.v1" && image_source)
