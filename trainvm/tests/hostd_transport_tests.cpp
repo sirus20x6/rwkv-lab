@@ -1422,6 +1422,7 @@ void authority_status_round_trips_receipt_derived_health() {
   HostdStatusServer server(authority, fixture.coordinator, peer_policy(), {},
                            source);
   HostdServeResult served = HostdServeResult::timed_out;
+  std::cout << "BEGIN authority-status exact\n" << std::flush;
   std::jthread server_thread([&] { served = server.serve_one(deadline()); });
   const HostdStatusReply reply =
       hostd_request_status(client_config(*authority), 901U, deadline());
@@ -1480,6 +1481,7 @@ void authority_status_round_trips_receipt_derived_health() {
   HostdStatusServer bounded_server(authority, fixture.coordinator,
                                    peer_policy(), {}, bounded_source);
   HostdServeResult bounded_served = HostdServeResult::timed_out;
+  std::cout << "BEGIN authority-status bounded\n" << std::flush;
   std::jthread bounded_thread(
       [&] { bounded_served = bounded_server.serve_one(deadline()); });
   const HostdStatusReply bounded_reply =
@@ -1506,6 +1508,7 @@ void authority_status_round_trips_receipt_derived_health() {
                                           peer_policy(), {},
                                           contradictory_source);
   HostdServeResult rejected = HostdServeResult::served;
+  std::cout << "BEGIN authority-status contradictory\n" << std::flush;
   std::jthread contradictory_thread(
       [&] { rejected = contradictory_server.serve_one(deadline()); });
   require_throws<HostdTransportError>(
@@ -1525,6 +1528,7 @@ void authority_status_round_trips_receipt_derived_health() {
   HostdStatusServer mutated_server(authority, fixture.coordinator,
                                    peer_policy(), {}, mutated_source);
   HostdServeResult mutated_rejected = HostdServeResult::served;
+  std::cout << "BEGIN authority-status mutated-memory\n" << std::flush;
   std::jthread mutated_thread(
       [&] { mutated_rejected = mutated_server.serve_one(deadline()); });
   require_throws<HostdTransportError>(
@@ -1548,6 +1552,7 @@ void authority_status_round_trips_receipt_derived_health() {
   HostdStatusServer overlapping_server(authority, fixture.coordinator,
                                        peer_policy(), {}, overlapping_source);
   HostdServeResult overlap_rejected = HostdServeResult::served;
+  std::cout << "BEGIN authority-status overlapping-partitions\n" << std::flush;
   std::jthread overlap_thread(
       [&] { overlap_rejected = overlapping_server.serve_one(deadline()); });
   require_throws<HostdTransportError>(
@@ -2576,7 +2581,7 @@ void mutation_transport_interruptions_preserve_durable_state() {
 
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
   const std::vector<std::pair<std::string_view, void (*)()>> tests{
       {"authority", authority_requires_external_singleton_and_pins_path},
       {"startup-faults", startup_faults_rollback_and_restore_process_state},
@@ -2593,6 +2598,8 @@ int main() {
   };
   try {
     for (const auto &[name, test] : tests) {
+      if (argc == 2 && name != std::string_view(argv[1]))
+        continue;
       test();
       std::cout << "PASS " << name << '\n';
     }

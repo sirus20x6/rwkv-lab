@@ -23,6 +23,15 @@ using namespace trainvm;
 constexpr std::uint64_t kGib = 1ULL << 30U;
 int failures = 0;
 
+mode_t passing_run_directory_mode() {
+  // Hosted native CI deliberately builds/tests as root, while the evidence
+  // fixture substitutes uid/gid 1000 so a passing preflight never blesses a
+  // privileged worker. Give that synthetic principal write+search through
+  // the "other" bits in that one environment; non-root tests retain the
+  // tighter owner/group fixture used by the permission regressions below.
+  return ::geteuid() == 0U ? 0773 : 0770;
+}
+
 void check(bool condition, std::string_view message) {
   if (!condition) {
     std::cerr << "FAIL: " << message << '\n';
@@ -84,7 +93,7 @@ CompiledPlan compiled_fixture(const TemporaryDirectory &temporary,
   std::ofstream(input_root / "config.json") << "{}\n";
   (void)::chmod(input_root.c_str(), 0755);
   if (create_run_directory)
-    (void)::chmod(run_directory.c_str(), 0770);
+    (void)::chmod(run_directory.c_str(), passing_run_directory_mode());
 
   auto source = load_fixture();
   auto &spec = source["spec"];
@@ -370,7 +379,7 @@ void credential_sets_and_gpu_qualification_are_bounded() {
         "the complete effective supplementary group set participates in "
         "POSIX output authority");
 
-  (void)::chmod(run_directory.c_str(), 0770);
+  (void)::chmod(run_directory.c_str(), passing_run_directory_mode());
   auto qualified = environment(plan);
   qualified.gpu_qualification = BoundedGpuQualificationEvidence{
       .maximum_duration_milliseconds = 1'000U,
