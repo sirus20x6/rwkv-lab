@@ -69,6 +69,13 @@ _CATEGORIES = frozenset(
         "gradient_accumulation",
         "curriculum",
         "metric_reducer",
+        "data_source",
+        "sample_processor",
+        "sample_mapper",
+        "collator",
+        "sampler",
+        "batching",
+        "split_selector",
     }
 )
 

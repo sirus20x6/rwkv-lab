@@ -2,6 +2,15 @@ from __future__ import annotations
 
 from .activations import ActivationImplementation
 from .curricula import CurriculumImplementation
+from .data_pipeline import (
+    BatchingImplementation,
+    CollatorImplementation,
+    DataSourceImplementation,
+    SampleMapperImplementation,
+    SampleProcessorImplementation,
+    SamplerImplementation,
+    SplitSelectorImplementation,
+)
 from .gradient_accumulation import GradientAccumulationImplementation
 from .gradient_clipping import GradientClippingImplementation
 from .model_loaders import ModelLoaderImplementation
@@ -20,6 +29,13 @@ def supported_implementation_ids() -> frozenset[str]:
         implementation.value
         for implementation in (
             *ActivationImplementation,
+            *DataSourceImplementation,
+            *SampleProcessorImplementation,
+            *SampleMapperImplementation,
+            *CollatorImplementation,
+            *SamplerImplementation,
+            *BatchingImplementation,
+            *SplitSelectorImplementation,
             *ModelLoaderImplementation,
             *TrainabilityImplementation,
             *CurriculumImplementation,
@@ -45,6 +61,17 @@ def supported_worker_capabilities() -> frozenset[str]:
     return frozenset(
         {
             "activation.silu.v1",
+            "data_source.jsonl_image_caption.v1",
+            "data_source.jsonl_token_corpus.v1",
+            "sample_processor.image_caption.v1",
+            "sample_processor.token_ids.v1",
+            "sample_mapper.assistant_only.v1",
+            "sample_mapper.causal_tokens.v1",
+            "collator.padded.v1",
+            "sampler.deterministic.v1",
+            "batching.fixed.v1",
+            "batching.bucketed.v1",
+            "split_selector.deterministic_holdout.v1",
             "model_loader.hf_causal.v1",
             "model_loader.hf_multimodal.v1",
             "trainability.full.v1",

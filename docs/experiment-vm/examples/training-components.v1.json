@@ -108,6 +108,203 @@
       "reference_implementation": true
     },
     {
+      "key": {"category": "data_source", "name": "jsonl_image_caption", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.data_source.jsonl_image_caption.v1",
+      "model_families": ["mageflow", "transformer", "vision"],
+      "required_capabilities": ["data_source.jsonl_image_caption.v1"],
+      "configuration": [
+        {"name": "manifest_path", "type": "path", "required": true},
+        {"name": "image_root", "type": "path", "required": true},
+        {"name": "content_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "declared_columns", "type": "string_list", "required": true, "collection_semantics": "set"},
+        {"name": "image_column", "type": "string", "required": true},
+        {"name": "caption_columns", "type": "string_list", "required": true, "collection_semantics": "ordered"},
+        {"name": "id_column", "type": "string", "required": false, "default": ""}
+      ],
+      "state": [
+        {"name": "content_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "cursor", "type": "integer", "required": true}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "data_source", "name": "jsonl_token_corpus", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.data_source.jsonl_token_corpus.v1",
+      "model_families": ["rwkv", "transformer"],
+      "required_capabilities": ["data_source.jsonl_token_corpus.v1"],
+      "configuration": [
+        {"name": "manifest_path", "type": "path", "required": true},
+        {"name": "content_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "declared_columns", "type": "string_list", "required": true, "collection_semantics": "set"},
+        {"name": "token_column", "type": "string", "required": true},
+        {"name": "id_column", "type": "string", "required": false, "default": ""}
+      ],
+      "state": [
+        {"name": "content_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "cursor", "type": "integer", "required": true}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "sample_processor", "name": "image_caption", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.sample_processor.image_caption.v1",
+      "model_families": ["mageflow", "transformer", "vision"],
+      "required_capabilities": ["sample_processor.image_caption.v1"],
+      "configuration": [
+        {"name": "image_column", "type": "string", "required": true},
+        {"name": "caption_columns", "type": "string_list", "required": true, "collection_semantics": "ordered"},
+        {"name": "minimum_pixels", "type": "integer", "required": false, "default": 1024, "minimum": 1, "maximum": 268435456, "unit": "pixels"},
+        {"name": "maximum_pixels", "type": "integer", "required": true, "minimum": 1, "maximum": 268435456, "unit": "pixels"},
+        {"name": "maximum_edge", "type": "integer", "required": true, "minimum": 1, "maximum": 65536, "unit": "pixels"},
+        {"name": "oversize_policy", "type": "enumeration", "required": false, "default": "reject", "values": ["downscale", "reject"]}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "sample_processor", "name": "token_ids", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.sample_processor.token_ids.v1",
+      "model_families": ["rwkv", "transformer"],
+      "required_capabilities": ["sample_processor.token_ids.v1"],
+      "configuration": [
+        {"name": "token_column", "type": "string", "required": true},
+        {"name": "minimum_tokens", "type": "integer", "required": false, "default": 1, "minimum": 1, "maximum": 1048576, "unit": "tokens"},
+        {"name": "maximum_tokens", "type": "integer", "required": true, "minimum": 1, "maximum": 1048576, "unit": "tokens"},
+        {"name": "vocabulary_size", "type": "integer", "required": true, "minimum": 2, "maximum": 16777216, "unit": "tokens"}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "sample_mapper", "name": "assistant_only", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.sample_mapper.assistant_only.v1",
+      "model_families": ["transformer", "vision"],
+      "required_capabilities": ["sample_mapper.assistant_only.v1"],
+      "configuration": [
+        {"name": "prompt_column", "type": "string", "required": false, "default": ""},
+        {"name": "fixed_prompt", "type": "string", "required": false, "default": ""},
+        {"name": "target_column", "type": "string", "required": true},
+        {"name": "maximum_tokens", "type": "integer", "required": true, "minimum": 1, "maximum": 1048576, "unit": "tokens"},
+        {"name": "append_eos", "type": "boolean", "required": false, "default": true}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "sample_mapper", "name": "causal_tokens", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.sample_mapper.causal_tokens.v1",
+      "model_families": ["rwkv", "transformer"],
+      "required_capabilities": ["sample_mapper.causal_tokens.v1"],
+      "configuration": [
+        {"name": "token_column", "type": "string", "required": true},
+        {"name": "maximum_tokens", "type": "integer", "required": true, "minimum": 1, "maximum": 1048576, "unit": "tokens"}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "collator", "name": "padded", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.collator.padded.v1",
+      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
+      "required_capabilities": ["collator.padded.v1"],
+      "configuration": [
+        {"name": "pad_token_id", "type": "integer", "required": true, "minimum": 0, "maximum": 16777215},
+        {"name": "label_pad_token_id", "type": "integer", "required": false, "default": -100, "minimum": -1000000, "maximum": 16777215},
+        {"name": "pad_to_multiple", "type": "integer", "required": false, "default": 1, "minimum": 1, "maximum": 4096},
+        {"name": "maximum_sequence_length", "type": "integer", "required": true, "minimum": 1, "maximum": 1048576, "unit": "tokens"}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "sampler", "name": "deterministic", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.sampler.deterministic.v1",
+      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
+      "required_capabilities": ["sampler.deterministic.v1"],
+      "configuration": [
+        {"name": "seed", "type": "integer", "required": true, "minimum": 0, "maximum": 9223372036854775807},
+        {"name": "shuffle", "type": "boolean", "required": false, "default": true}
+      ],
+      "state": [
+        {"name": "cursor", "type": "integer", "required": true},
+        {"name": "epoch", "type": "integer", "required": true},
+        {"name": "order_digest", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "rng_state_digest", "type": "string", "required": true, "string_format": "sha256_digest"}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "batching", "name": "fixed", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.batching.fixed.v1",
+      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
+      "required_capabilities": ["batching.fixed.v1"],
+      "configuration": [
+        {"name": "batch_size", "type": "integer", "required": true, "minimum": 1, "maximum": 257, "unit": "samples"},
+        {"name": "drop_last", "type": "boolean", "required": false, "default": false},
+        {"name": "prefetch_workers", "type": "integer", "required": false, "default": 0, "minimum": 0, "maximum": 1024, "unit": "workers"}
+      ],
+      "state": [
+        {"name": "batches_emitted", "type": "integer", "required": true},
+        {"name": "pending_sample_ids", "type": "string_list", "required": true, "collection_semantics": "ordered"},
+        {"name": "bucket_assignment_digest", "type": "string", "required": true, "string_format": "sha256_digest"}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "batching", "name": "bucketed", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.batching.bucketed.v1",
+      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
+      "required_capabilities": ["batching.bucketed.v1"],
+      "configuration": [
+        {"name": "bucket_by", "type": "enumeration", "required": true, "values": ["image_area", "token_length"]},
+        {"name": "bucket_boundaries", "type": "string_list", "required": true, "collection_semantics": "ordered"},
+        {"name": "batch_sizes", "type": "string_list", "required": true, "collection_semantics": "ordered"},
+        {"name": "drop_last", "type": "boolean", "required": false, "default": false},
+        {"name": "prefetch_workers", "type": "integer", "required": false, "default": 0, "minimum": 0, "maximum": 1024, "unit": "workers"}
+      ],
+      "state": [
+        {"name": "batches_emitted", "type": "integer", "required": true},
+        {"name": "pending_sample_ids", "type": "string_list", "required": true, "collection_semantics": "ordered"},
+        {"name": "bucket_assignment_digest", "type": "string", "required": true, "string_format": "sha256_digest"}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "split_selector", "name": "deterministic_holdout", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.split_selector.deterministic_holdout.v1",
+      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
+      "required_capabilities": ["split_selector.deterministic_holdout.v1"],
+      "configuration": [
+        {"name": "seed", "type": "integer", "required": true, "minimum": 0, "maximum": 9223372036854775807},
+        {"name": "held_out_count", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000000, "unit": "samples"},
+        {"name": "selection", "type": "enumeration", "required": false, "default": "train", "values": ["held_out", "train"]}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
       "key": {
         "category": "activation",
         "name": "squared_relu",

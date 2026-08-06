@@ -439,7 +439,7 @@ void checked_in_component_catalog_matches_native_authority_contract() {
   const trainvm::TrainingComponentRegistry registry =
       trainvm::TrainingComponentRegistry::load_file(
           std::filesystem::absolute(path));
-  check(registry.document_json().at("components").size() == 28U &&
+  check(registry.document_json().at("components").size() == 39U &&
             registry.registry_digest().starts_with("sha256:") &&
             registry.registry_digest().size() == 71U,
         "checked-in cross-family component catalog is a canonical native authority document");
@@ -534,6 +534,119 @@ void checked_in_component_catalog_matches_native_authority_contract() {
                {"target_selectors", nlohmann::json::array({"["})}}));
         }),
         "malformed parameter selectors fail during component resolution");
+  const auto pipeline_composition = [&] {
+    const auto component = [](trainvm::TrainingComponentCategory category,
+                              std::string name,
+                              nlohmann::json configuration) {
+      return trainvm::TrainingComponentSelection{
+          .key = {.category = category,
+                  .name = std::move(name),
+                  .version = "1.0.0"},
+          .configuration = std::move(configuration)};
+    };
+    return trainvm::TrainingComposition{
+        .model_family = "transformer",
+        .components =
+            {{"data",
+              component(
+                  trainvm::TrainingComponentCategory::data_source,
+                  "jsonl_image_caption",
+                  {{"manifest_path",
+                    (std::filesystem::absolute(TRAINVM_SOURCE_ROOT) /
+                     "README.md")
+                        .string()},
+                   {"image_root", model_path},
+                   {"content_fingerprint",
+                    "sha256:" + std::string(64U, '1')},
+                   {"declared_columns",
+                    nlohmann::json::array({"caption", "id", "image"})},
+                   {"image_column", "image"},
+                   {"caption_columns", nlohmann::json::array({"caption"})},
+                   {"id_column", "id"}})},
+             {"processor",
+              component(
+                  trainvm::TrainingComponentCategory::sample_processor,
+                  "image_caption",
+                  {{"image_column", "image"},
+                   {"caption_columns", nlohmann::json::array({"caption"})},
+                   {"maximum_pixels", 1048576},
+                   {"maximum_edge", 2048}})},
+             {"sample_mapping",
+              component(
+                  trainvm::TrainingComponentCategory::sample_mapper,
+                  "assistant_only",
+                  {{"fixed_prompt", "Describe the image."},
+                   {"target_column", "caption"},
+                   {"maximum_tokens", 1024}})},
+             {"collation",
+              component(trainvm::TrainingComponentCategory::collator,
+                        "padded",
+                        {{"pad_token_id", 0},
+                         {"maximum_sequence_length", 1024}})},
+             {"sampler",
+              component(trainvm::TrainingComponentCategory::sampler,
+                        "deterministic", {{"seed", 17}})},
+             {"batching",
+              component(trainvm::TrainingComponentCategory::batching,
+                        "bucketed",
+                        {{"bucket_by", "image_area"},
+                         {"bucket_boundaries",
+                          nlohmann::json::array({"262144", "1048576"})},
+                         {"batch_sizes",
+                          nlohmann::json::array({"8", "4", "2"})}})},
+             {"split",
+              component(trainvm::TrainingComponentCategory::split_selector,
+                        "deterministic_holdout",
+                        {{"seed", 29}, {"held_out_count", 10}})}},
+        .topologies = std::nullopt,
+        .post_training = std::nullopt};
+  }();
+  const auto resolved_pipeline =
+      registry.resolve_composition(pipeline_composition);
+  check(resolved_pipeline.components.size() == 7U &&
+            resolved_pipeline.components.at("sampler")
+                    .descriptor.state_grade ==
+                trainvm::TrainingStateGrade::exact &&
+            resolved_pipeline.components.at("batching")
+                    .descriptor.state_grade ==
+                trainvm::TrainingStateGrade::exact &&
+            resolved_pipeline.components.at("split")
+                    .descriptor.state_grade ==
+                trainvm::TrainingStateGrade::stateless,
+        "a complete declarative image-caption pipeline resolves without trainer code");
+  registry.validate_resume_state(
+      resolved_pipeline,
+      {{"data",
+        {{"content_fingerprint", "sha256:" + std::string(64U, '1')},
+         {"cursor", 12}}},
+       {"sampler",
+        {{"cursor", 3},
+         {"epoch", 0},
+         {"order_digest", "sha256:" + std::string(64U, '2')},
+         {"rng_state_digest", "sha256:" + std::string(64U, '3')}}},
+       {"batching",
+        {{"batches_emitted", 2},
+         {"pending_sample_ids", nlohmann::json::array({"image-1"})},
+         {"bucket_assignment_digest",
+          "sha256:" + std::string(64U, '4')}}}});
+  check(rejects([&] {
+          auto incomplete = pipeline_composition;
+          incomplete.components.erase("collation");
+          (void)registry.resolve_composition(incomplete);
+        }),
+        "partial declarative data pipelines fail closed before worker launch");
+  check(rejects([&] {
+          auto incompatible = pipeline_composition;
+          incompatible.components.at("batching").configuration["bucket_by"] =
+              "token_length";
+          incompatible.components.at("processor").key.name = "token_ids";
+          incompatible.components.at("processor").configuration =
+              {{"token_column", "caption"},
+               {"maximum_tokens", 1024},
+               {"vocabulary_size", 152064}};
+          (void)registry.resolve_composition(incompatible);
+        }),
+        "incompatible source and processor modalities fail during native resolution");
   const auto optimizer = registry.resolve({
       .key = {.category = trainvm::TrainingComponentCategory::optimizer,
               .name = "fp32_master_adamw",
