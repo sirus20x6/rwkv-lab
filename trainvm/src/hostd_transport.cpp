@@ -2347,7 +2347,21 @@ HostdStatusServer::serve_one(std::int64_t absolute_monotonic_deadline_ns) {
                       absolute_monotonic_deadline_ns))
         return HostdServeResult::timed_out;
     }
+  } catch (const std::exception &error) {
+    if (limits_.rejection_observer) {
+      try {
+        limits_.rejection_observer(error.what());
+      } catch (...) {
+      }
+    }
+    return HostdServeResult::rejected;
   } catch (...) {
+    if (limits_.rejection_observer) {
+      try {
+        limits_.rejection_observer("unknown status listener rejection");
+      } catch (...) {
+      }
+    }
     return HostdServeResult::rejected;
   }
 }
@@ -2421,7 +2435,21 @@ HostdServeResult HostdStatusServer::serve_accepted(
     send_packet(connection.get(), response, session_deadline);
     (void)::shutdown(connection.get(), SHUT_RDWR);
     return HostdServeResult::served;
+  } catch (const std::exception &error) {
+    if (limits_.rejection_observer) {
+      try {
+        limits_.rejection_observer(error.what());
+      } catch (...) {
+      }
+    }
+    return HostdServeResult::rejected;
   } catch (...) {
+    if (limits_.rejection_observer) {
+      try {
+        limits_.rejection_observer("unknown accepted status rejection");
+      } catch (...) {
+      }
+    }
     return HostdServeResult::rejected;
   }
 }

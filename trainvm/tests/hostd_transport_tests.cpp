@@ -1419,8 +1419,14 @@ void authority_status_round_trips_receipt_derived_health() {
       HostdSocketAuthority::self_bind(socket_config(directory),
                                       directory.parent_fd(),
                                       std::make_shared<HeldToken>()));
-  HostdStatusServer server(authority, fixture.coordinator, peer_policy(), {},
-                           source);
+  HostdStatusServer server(
+      authority, fixture.coordinator, peer_policy(),
+      {.rejection_observer = [](const std::string_view detail) {
+         std::cerr << "authority-status exact server rejection: " << detail
+                   << '\n'
+                   << std::flush;
+       }},
+      source);
   HostdServeResult served = HostdServeResult::timed_out;
   std::cout << "BEGIN authority-status exact\n" << std::flush;
   std::jthread server_thread([&] { served = server.serve_one(deadline()); });

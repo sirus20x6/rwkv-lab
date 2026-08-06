@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -258,6 +259,9 @@ struct HostdStatusReply final {
 struct HostdStatusTransportLimits final {
   std::size_t maximum_payload_bytes{kHostdStatusMaximumPayloadBytes};
   std::int64_t per_session_timeout_ns{1'000'000'000LL};
+  // Optional diagnostic seam for tests/daemon logging. It observes a rejected
+  // session after authority checks; it cannot change the fail-closed result.
+  std::function<void(std::string_view)> rejection_observer{};
 };
 
 struct HostdStatusPeerPolicy final {
