@@ -136,6 +136,20 @@ int main() {
   metric.payload = {{"name", "eval.loss"}, {"step_domain", "optimizer_step"}};
   trainvm::validate_eval_examples_gate_provenance(manifest, resolved_training,
                                                   {checkpoint, metric});
+  trainvm::Json periodic_document = manifest_document;
+  periodic_document["optimizer_step"] = 7U;
+  periodic_document.erase("canonical_manifest_digest");
+  periodic_document["canonical_manifest_digest"] =
+      "sha256:" + trainvm::sha256_hex(periodic_document.dump());
+  const auto periodic_manifest =
+      trainvm::validate_eval_examples_manifest(periodic_document);
+  trainvm::Event periodic_checkpoint = checkpoint;
+  periodic_checkpoint.optimizer_step = 7U;
+  trainvm::Event periodic_metric = metric;
+  periodic_metric.optimizer_step = 7U;
+  trainvm::validate_eval_examples_gate_provenance(
+      periodic_manifest, resolved_training,
+      {periodic_checkpoint, periodic_metric});
   trainvm::Event examples_event{};
   examples_event.run_id = "run-1";
   examples_event.node_id = "train";

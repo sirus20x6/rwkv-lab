@@ -364,14 +364,15 @@ void validate_eval_examples_gate_provenance(
         event.payload.value("artifact_id", std::string{}) ==
             manifest.checkpoint.artifact_id &&
         event.payload.value("kind", std::string{}) == "checkpoint" &&
-        event.optimizer_step == 0U &&
+        event.optimizer_step == manifest.optimizer_step &&
         event.payload.value("complete", false) &&
         event.payload.value("fingerprint_algorithm", std::string{}) ==
             "manifest_sha256" &&
         event.payload.value("fingerprint", std::string{}) ==
             manifest.checkpoint.manifest_digest)
       checkpoint = true;
-    if (event.event_type == "metric.sampled" && event.optimizer_step == 0U &&
+    if (event.event_type == "metric.sampled" &&
+        event.optimizer_step == manifest.optimizer_step &&
         event.payload.is_object() &&
         event.payload.value("step_domain", std::string{}) == "optimizer_step" &&
         declared.contains(event.payload.value("name", std::string{})))
