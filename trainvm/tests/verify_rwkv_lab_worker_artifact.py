@@ -446,7 +446,7 @@ def main() -> int:
         profiles = deployment["host_launch_registry"]["profiles"]
         if deployment["schema"] != "trainvm.rwkv-lab-worker-deployment/v3":
             raise SystemExit("deployment inspector emitted the wrong schema")
-        if len(profiles) != 20 or any(
+        if len(profiles) != len(adapters) or any(
             profile["code_argument_index"] != 1
             or profile["public_arguments"] != ["-I", "rwkv-lab-worker.pyz"]
             or profile["code_fingerprint"] != digest(first)
