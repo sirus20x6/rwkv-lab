@@ -54,6 +54,74 @@ func TestSubmissionRequiresConfiguredAuthority(t *testing.T) {
 	}
 }
 
+func TestAuthorRunUpdateConversionPreservesCanonicalEvidence(t *testing.T) {
+	planHash := strings.Repeat("a", 64)
+	update, err := authorRunUpdateFromProto(&trainvmv1.AuthorRunUpdate{
+		Stage: trainvmv1.AuthorRunStage_AUTHOR_RUN_STAGE_COMPLETE, Detail: "preview complete",
+		PlanHash: planHash, CanonicalPlanJson: `{"api_version":"trainvm.experiment/v1"}`,
+		RecipeExpansionJson:  `{"profile_key":"generic"}`,
+		PreflightReceiptJson: `{"accepted":true}`, Terminal: true, DryRun: true,
+		Run: &trainvmv1.RunIdentity{RunId: "run-1", Revision: 4, PlanHash: planHash},
+		Diagnostics: []*trainvmv1.Diagnostic{{
+			Severity: trainvmv1.Diagnostic_SEVERITY_WARNING, Code: "preview.notice",
+			DocumentPath: "/overrides", Message: "bounded", Help: "Review it.",
+		}},
+	})
+	if err != nil || update.Stage != "complete" || update.PlanHash != planHash ||
+		update.Run == nil || update.Run.Revision != 4 || len(update.Diagnostics) != 1 ||
+		update.Diagnostics[0].Severity != "WARNING" || update.Diagnostics[0].Help != "Review it." {
+		t.Fatalf("unexpected AuthorRun conversion: %#v err=%v", update, err)
+	}
+}
+
+func TestAuthorRunUpdateConversionRejectsMalformedAuthorityEvidence(t *testing.T) {
+	planHash := strings.Repeat("b", 64)
+	valid := &trainvmv1.AuthorRunUpdate{
+		Stage:    trainvmv1.AuthorRunStage_AUTHOR_RUN_STAGE_COMPLETE,
+		PlanHash: planHash, CanonicalPlanJson: `{}`, Terminal: true,
+	}
+	for name, mutate := range map[string]func(*trainvmv1.AuthorRunUpdate){
+		"unspecified stage": func(update *trainvmv1.AuthorRunUpdate) {
+			update.Stage = trainvmv1.AuthorRunStage_AUTHOR_RUN_STAGE_UNSPECIFIED
+		},
+		"prefixed plan hash": func(update *trainvmv1.AuthorRunUpdate) {
+			update.PlanHash = "sha256:" + planHash
+		},
+		"malformed plan JSON": func(update *trainvmv1.AuthorRunUpdate) {
+			update.CanonicalPlanJson = `{`
+		},
+		"unspecified diagnostic": func(update *trainvmv1.AuthorRunUpdate) {
+			update.Diagnostics = []*trainvmv1.Diagnostic{{}}
+		},
+		"mismatched run identity": func(update *trainvmv1.AuthorRunUpdate) {
+			update.Run = &trainvmv1.RunIdentity{RunId: "run-1", PlanHash: strings.Repeat("c", 64)}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			wire := proto.Clone(valid).(*trainvmv1.AuthorRunUpdate)
+			mutate(wire)
+			if _, err := authorRunUpdateFromProto(wire); err == nil {
+				t.Fatal("malformed native AuthorRun evidence unexpectedly crossed the bridge")
+			}
+		})
+	}
+}
+
+func TestAuthorRunRequiresConfiguredAuthorityAndCanonicalFence(t *testing.T) {
+	commander := &GRPCCommander{client: nil}
+	if err := commander.AuthorRun(context.Background(), AuthorRunRequest{}, func(AuthorRunUpdate) error { return nil }); err == nil {
+		t.Fatal("AuthorRun unexpectedly succeeded without native authority")
+	}
+	for _, value := range []string{"", strings.Repeat("A", 64), "sha256:" + strings.Repeat("a", 64)} {
+		if canonicalPlanHash(value) {
+			t.Fatalf("noncanonical plan hash %q was accepted", value)
+		}
+	}
+	if !canonicalPlanHash(strings.Repeat("f", 64)) {
+		t.Fatal("canonical bare lowercase SHA-256 was rejected")
+	}
+}
+
 func TestDescriptorRequiresConfiguredAuthority(t *testing.T) {
 	commander := &GRPCCommander{client: nil}
 	_, err := commander.GetDescriptor(context.Background(), DescriptorRequest{

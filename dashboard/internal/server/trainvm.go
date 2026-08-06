@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,7 @@ import (
 
 const trainVMDraftLimit = 2 << 20
 const trainVMCommandLimit = 64 << 10
+const trainVMAuthorRunLimit = 5 << 20
 
 func (s *Server) handleTrainVMHostAuthority(w http.ResponseWriter, r *http.Request) {
 	if s.commander == nil {
@@ -361,6 +363,211 @@ type trainVMSubmissionRequest struct {
 	ForkedFromRunID                     string `json:"forked_from_run_id"`
 	ExpectedParentRunRevision           uint64 `json:"expected_parent_run_revision"`
 	ExpectedParentPlanHash              string `json:"expected_parent_plan_hash"`
+}
+
+type trainVMAuthorRunRequest struct {
+	RequestDocument  string `json:"request_document"`
+	SourceFormat     string `json:"source_format"`
+	DryRun           bool   `json:"dry_run"`
+	ExpectedPlanHash string `json:"expected_plan_hash"`
+}
+
+type trainVMDerivedContentBinding struct {
+	PathTarget        string
+	FingerprintTarget string
+	Path              string
+	TreeSHA256        string
+	Provenance        string
+}
+
+func (s *Server) handleTrainVMAuthorRun(w http.ResponseWriter, r *http.Request) {
+	if s.commander == nil {
+		http.Error(w, "TrainVM authority is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if !validateTrainVMMutation(w, r, "author run") {
+		return
+	}
+	var input trainVMAuthorRunRequest
+	if !decodeTrainVMMutation(w, r, "author run", trainVMAuthorRunLimit, &input) {
+		return
+	}
+	input.SourceFormat = strings.ToLower(strings.TrimSpace(input.SourceFormat))
+	input.ExpectedPlanHash = strings.TrimSpace(input.ExpectedPlanHash)
+	if strings.TrimSpace(input.RequestDocument) == "" || len(input.RequestDocument) > trainVMDraftLimit ||
+		input.SourceFormat != "json" && input.SourceFormat != "yaml" {
+		http.Error(w, "author run requires a bounded JSON or YAML request document", http.StatusBadRequest)
+		return
+	}
+	if input.DryRun && input.ExpectedPlanHash != "" ||
+		!input.DryRun && !canonicalHTTPPlanHash(input.ExpectedPlanHash) {
+		http.Error(w, "author run launch requires exactly one prior canonical plan hash", http.StatusBadRequest)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming responses are unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	encoder := json.NewEncoder(w)
+	terminal := false
+	writeUpdate := func(update trainvmstore.AuthorRunUpdate) error {
+		if err := r.Context().Err(); err != nil {
+			return err
+		}
+		if terminal {
+			return errors.New("native authority emitted an AuthorRun update after terminal state")
+		}
+		if update.DryRun != input.DryRun {
+			return errors.New("native authority changed the AuthorRun dry-run disposition")
+		}
+		if !input.DryRun && update.PlanHash != "" && update.PlanHash != input.ExpectedPlanHash {
+			return errors.New("native authority changed the previewed AuthorRun plan identity")
+		}
+		terminalUpdate := update.Terminal
+		terminalStage := update.Stage == "complete" || update.Stage == "failed"
+		if terminalUpdate != terminalStage {
+			return errors.New("native authority emitted an inconsistent terminal AuthorRun stage")
+		}
+		if terminalUpdate {
+			if update.Stage == "complete" && (!canonicalHTTPPlanHash(update.PlanHash) ||
+				input.DryRun && update.CanonicalPlanJSON == "" ||
+				!input.DryRun && (update.PlanHash != input.ExpectedPlanHash || update.Run == nil ||
+					update.Run.PlanHash != input.ExpectedPlanHash || update.Run.RunID == "")) {
+				return errors.New("native authority completed AuthorRun without the fenced plan identity")
+			}
+			if update.Stage == "complete" {
+				if err := validateAuthorRunCompletionEvidence(update); err != nil {
+					return err
+				}
+			}
+		}
+		if err := encoder.Encode(update); err != nil {
+			return err
+		}
+		flusher.Flush()
+		terminal = terminalUpdate
+		return nil
+	}
+	err := s.commander.AuthorRun(r.Context(), trainvmstore.AuthorRunRequest{
+		RequestDocument: input.RequestDocument, SourceFormat: input.SourceFormat,
+		DryRun: input.DryRun, ExpectedPlanHash: input.ExpectedPlanHash,
+	}, writeUpdate)
+	if err == nil && !terminal {
+		err = errors.New("native authority AuthorRun stream ended without a terminal update")
+	}
+	if err != nil && !terminal && r.Context().Err() == nil {
+		_ = writeUpdate(trainvmstore.AuthorRunUpdate{
+			Stage: "failed", Detail: "dashboard authority stream failed", Terminal: true,
+			DryRun: input.DryRun,
+			Diagnostics: []trainvmstore.ControlDiagnostic{{
+				Severity: "ERROR", Code: "dashboard.author_run_stream",
+				Path: "/", Message: err.Error(),
+				Help: "Inspect authority health and retry the exact compact request.",
+			}},
+		})
+	}
+}
+
+func validateAuthorRunCompletionEvidence(update trainvmstore.AuthorRunUpdate) error {
+	var receipt struct {
+		Passed   bool   `json:"passed"`
+		PlanHash string `json:"plan_hash"`
+	}
+	if update.PreflightReceiptJSON == "" ||
+		json.Unmarshal([]byte(update.PreflightReceiptJSON), &receipt) != nil ||
+		!receipt.Passed || !canonicalHTTPPlanHash(receipt.PlanHash) || receipt.PlanHash != update.PlanHash {
+		return errors.New("native authority completed AuthorRun without matching passed preflight evidence")
+	}
+	if update.RecipeExpansionJSON != "" {
+		var expansion struct {
+			FinalPlanHash          string            `json:"final_plan_hash"`
+			DerivedContentBindings []json.RawMessage `json:"derived_content_bindings"`
+		}
+		if json.Unmarshal([]byte(update.RecipeExpansionJSON), &expansion) != nil ||
+			!canonicalHTTPPlanHash(expansion.FinalPlanHash) || expansion.FinalPlanHash != update.PlanHash {
+			return errors.New("native authority completed AuthorRun with mismatched recipe expansion evidence")
+		}
+		if len(expansion.DerivedContentBindings) > 256 {
+			return errors.New("native authority completed AuthorRun with excessive derived content evidence")
+		}
+		seenPaths := make(map[string]bool, len(expansion.DerivedContentBindings))
+		seenFingerprints := make(map[string]bool, len(expansion.DerivedContentBindings))
+		for _, rawBinding := range expansion.DerivedContentBindings {
+			binding, err := decodeTrainVMDerivedContentBinding(rawBinding)
+			if err != nil {
+				return errors.New("native authority completed AuthorRun with malformed derived content evidence")
+			}
+			_, pathOK := canonicalDescriptorPath(binding.Path)
+			if !validRecipePointerSyntax(binding.PathTarget) ||
+				!validRecipePointerSyntax(binding.FingerprintTarget) || !pathOK ||
+				!canonicalSHA256(binding.TreeSHA256) || binding.Provenance != "authority_measured" ||
+				seenPaths[binding.PathTarget] ||
+				seenFingerprints[binding.FingerprintTarget] {
+				return errors.New("native authority completed AuthorRun with malformed derived content evidence")
+			}
+			seenPaths[binding.PathTarget], seenFingerprints[binding.FingerprintTarget] = true, true
+		}
+	}
+	return nil
+}
+
+func decodeTrainVMDerivedContentBinding(raw json.RawMessage) (trainVMDerivedContentBinding, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	value, err := decodeUniqueJSONValue(decoder)
+	if err != nil {
+		return trainVMDerivedContentBinding{}, err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err == nil {
+			err = errors.New("derived content binding contains multiple values")
+		}
+		return trainVMDerivedContentBinding{}, err
+	}
+	object, ok := value.(map[string]any)
+	if !ok || !exactObjectKeys(object,
+		[]string{"fingerprint_target", "path", "path_target", "provenance", "tree_sha256"}, nil) {
+		return trainVMDerivedContentBinding{}, errors.New("derived content binding envelope is not exact")
+	}
+	binding := trainVMDerivedContentBinding{}
+	binding.PathTarget, ok = object["path_target"].(string)
+	if !ok {
+		return trainVMDerivedContentBinding{}, errors.New("derived path target has the wrong type")
+	}
+	binding.FingerprintTarget, ok = object["fingerprint_target"].(string)
+	if !ok {
+		return trainVMDerivedContentBinding{}, errors.New("derived fingerprint target has the wrong type")
+	}
+	binding.Path, ok = object["path"].(string)
+	if !ok {
+		return trainVMDerivedContentBinding{}, errors.New("derived path has the wrong type")
+	}
+	binding.TreeSHA256, ok = object["tree_sha256"].(string)
+	if !ok {
+		return trainVMDerivedContentBinding{}, errors.New("derived tree SHA-256 has the wrong type")
+	}
+	binding.Provenance, ok = object["provenance"].(string)
+	if !ok {
+		return trainVMDerivedContentBinding{}, errors.New("derived provenance has the wrong type")
+	}
+	return binding, nil
+}
+
+func canonicalHTTPPlanHash(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 type trainVMPlanDiffRequest struct {

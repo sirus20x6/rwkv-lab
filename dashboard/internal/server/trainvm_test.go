@@ -30,8 +30,29 @@ type fakeTrainVMCommander struct {
 	planDiffResult   trainvmstore.PlanDiffResult
 	descriptor       trainvmstore.DescriptorRequest
 	descriptorResult trainvmstore.DescriptorResult
+	authorRequest    trainvmstore.AuthorRunRequest
+	authorUpdates    []trainvmstore.AuthorRunUpdate
+	authorBlock      bool
+	authorCanceled   bool
 	hostAuthority    trainvmstore.HostAuthorityStatus
 	err              error
+}
+
+func (f *fakeTrainVMCommander) AuthorRun(ctx context.Context,
+	request trainvmstore.AuthorRunRequest,
+	consume func(trainvmstore.AuthorRunUpdate) error) error {
+	f.authorRequest = request
+	if f.authorBlock {
+		<-ctx.Done()
+		f.authorCanceled = true
+		return ctx.Err()
+	}
+	for _, update := range f.authorUpdates {
+		if err := consume(update); err != nil {
+			return err
+		}
+	}
+	return f.err
 }
 
 func (f *fakeTrainVMCommander) GetHostAuthorityStatus(_ context.Context) (trainvmstore.HostAuthorityStatus, error) {
@@ -77,6 +98,224 @@ func newTrainVMControlRequest(body string) *http.Request {
 		strings.NewReader(body))
 	request.Host = "127.0.0.1:9124"
 	return request
+}
+
+func newTrainVMAuthorRunRequest(t *testing.T, document string, dryRun bool, expectedPlanHash string) *http.Request {
+	t.Helper()
+	body, err := json.Marshal(trainVMAuthorRunRequest{
+		RequestDocument: document, SourceFormat: "json", DryRun: dryRun,
+		ExpectedPlanHash: expectedPlanHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/trainvm/author-runs", strings.NewReader(string(body)))
+	request.Host = "127.0.0.1:9124"
+	request.Header.Set("Content-Type", "application/json")
+	return request
+}
+
+func decodeAuthorRunUpdates(t *testing.T, body string) []trainvmstore.AuthorRunUpdate {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(body), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return nil
+	}
+	updates := make([]trainvmstore.AuthorRunUpdate, 0, len(lines))
+	for _, line := range lines {
+		var update trainvmstore.AuthorRunUpdate
+		if err := json.Unmarshal([]byte(line), &update); err != nil {
+			t.Fatalf("malformed AuthorRun NDJSON line %q: %v", line, err)
+		}
+		updates = append(updates, update)
+	}
+	return updates
+}
+
+func TestTrainVMAuthorRunStreamsCanonicalDryRunWithoutRewritingSource(t *testing.T) {
+	planHash := strings.Repeat("a", 64)
+	document := "  {\n  \"api_version\": \"trainvm.author-run/v1\"\n}\n"
+	commander := &fakeTrainVMCommander{authorUpdates: []trainvmstore.AuthorRunUpdate{
+		{Stage: "resolving", Detail: "resolved profile", DryRun: true},
+		{
+			Stage: "complete", Detail: "preview complete", PlanHash: planHash,
+			CanonicalPlanJSON: `{"api_version":"trainvm.experiment/v1"}`,
+			RecipeExpansionJSON: fmt.Sprintf(`{"profile_key":"generic","final_plan_hash":%q,"derived_content_bindings":[{"path_target":"/model/path","fingerprint_target":"/model/fingerprint","path":"/models/base","tree_sha256":"sha256:%s","provenance":"authority_measured"}]}`,
+				planHash, strings.Repeat("1", 64)),
+			PreflightReceiptJSON: fmt.Sprintf(`{"passed":true,"plan_hash":%q}`, planHash), Terminal: true, DryRun: true,
+			Diagnostics: []trainvmstore.ControlDiagnostic{{
+				Severity: "WARNING", Code: "preview.notice", Path: "/overrides",
+				Message: "bounded override applied", Help: "Review the canonical plan.",
+			}},
+		},
+	}}
+	response := httptest.NewRecorder()
+	New(Config{Commander: commander}).Handler().ServeHTTP(response,
+		newTrainVMAuthorRunRequest(t, document, true, ""))
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/x-ndjson" {
+		t.Fatalf("status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+	if commander.authorRequest.RequestDocument != document || !commander.authorRequest.DryRun ||
+		commander.authorRequest.ExpectedPlanHash != "" {
+		t.Fatalf("authority request was rewritten: %#v", commander.authorRequest)
+	}
+	updates := decodeAuthorRunUpdates(t, response.Body.String())
+	if len(updates) != 2 || updates[0].Terminal || !updates[1].Terminal ||
+		updates[1].PlanHash != planHash || len(updates[1].Diagnostics) != 1 ||
+		updates[1].Diagnostics[0].Help != "Review the canonical plan." ||
+		!strings.Contains(updates[1].RecipeExpansionJSON, `"tree_sha256":"sha256:`+strings.Repeat("1", 64)+`"`) {
+		t.Fatalf("unexpected streamed updates: %#v", updates)
+	}
+}
+
+func TestTrainVMAuthorRunLaunchIsFencedToPreviewedPlan(t *testing.T) {
+	planHash := strings.Repeat("b", 64)
+	commander := &fakeTrainVMCommander{authorUpdates: []trainvmstore.AuthorRunUpdate{
+		{Stage: "submitting", PlanHash: planHash},
+		{Stage: "complete", PlanHash: planHash, Terminal: true,
+			PreflightReceiptJSON: fmt.Sprintf(`{"passed":true,"plan_hash":%q}`, planHash),
+			Run:                  &trainvmstore.RunIdentity{RunID: "run-1", Revision: 1, PlanHash: planHash}},
+	}}
+	response := httptest.NewRecorder()
+	New(Config{Commander: commander}).Handler().ServeHTTP(response,
+		newTrainVMAuthorRunRequest(t, `{"profile_key":"generic"}`, false, planHash))
+	updates := decodeAuthorRunUpdates(t, response.Body.String())
+	if response.Code != http.StatusOK || len(updates) != 2 || updates[1].Run == nil ||
+		updates[1].Run.RunID != "run-1" || commander.authorRequest.ExpectedPlanHash != planHash {
+		t.Fatalf("unexpected fenced launch: status=%d request=%#v updates=%#v", response.Code, commander.authorRequest, updates)
+	}
+}
+
+func TestTrainVMAuthorRunRejectsAuthorityPlanDriftLocally(t *testing.T) {
+	previewHash := strings.Repeat("c", 64)
+	commander := &fakeTrainVMCommander{authorUpdates: []trainvmstore.AuthorRunUpdate{{
+		Stage: "submitting", PlanHash: strings.Repeat("d", 64),
+	}}}
+	response := httptest.NewRecorder()
+	New(Config{Commander: commander}).Handler().ServeHTTP(response,
+		newTrainVMAuthorRunRequest(t, `{}`, false, previewHash))
+	updates := decodeAuthorRunUpdates(t, response.Body.String())
+	if len(updates) != 1 || updates[0].Stage != "failed" || !updates[0].Terminal ||
+		len(updates[0].Diagnostics) != 1 ||
+		!strings.Contains(updates[0].Diagnostics[0].Message, "previewed AuthorRun plan identity") {
+		t.Fatalf("plan drift was not converted to a terminal local failure: %#v", updates)
+	}
+}
+
+func TestTrainVMAuthorRunPreservesNativeTerminalFailureDiagnostics(t *testing.T) {
+	commander := &fakeTrainVMCommander{authorUpdates: []trainvmstore.AuthorRunUpdate{{
+		Stage: "failed", Detail: "preflight rejected", Terminal: true, DryRun: true,
+		Diagnostics: []trainvmstore.ControlDiagnostic{
+			{Severity: "ERROR", Code: "path.missing", Path: "/inputs/0", Message: "missing", Help: "Mount it."},
+			{Severity: "WARNING", Code: "resource.tight", Path: "/resources", Message: "tight", Help: "Reduce the batch."},
+		},
+	}}}
+	response := httptest.NewRecorder()
+	New(Config{Commander: commander}).Handler().ServeHTTP(response,
+		newTrainVMAuthorRunRequest(t, `{}`, true, ""))
+	updates := decodeAuthorRunUpdates(t, response.Body.String())
+	if len(updates) != 1 || len(updates[0].Diagnostics) != 2 ||
+		updates[0].Diagnostics[0].Help != "Mount it." || updates[0].Diagnostics[1].Code != "resource.tight" {
+		t.Fatalf("native diagnostics were not preserved: %#v", updates)
+	}
+}
+
+func TestTrainVMAuthorRunRejectsMissingOrMismatchedCompletionEvidence(t *testing.T) {
+	planHash := strings.Repeat("e", 64)
+	otherHash := strings.Repeat("f", 64)
+	validReceipt := fmt.Sprintf(`{"passed":true,"plan_hash":%q}`, planHash)
+	for name, evidence := range map[string]struct {
+		receipt   string
+		expansion string
+		message   string
+	}{
+		"missing receipt":      {message: "preflight evidence"},
+		"malformed receipt":    {receipt: `{`, message: "preflight evidence"},
+		"failed receipt":       {receipt: fmt.Sprintf(`{"passed":false,"plan_hash":%q}`, planHash), message: "preflight evidence"},
+		"mismatched receipt":   {receipt: fmt.Sprintf(`{"passed":true,"plan_hash":%q}`, otherHash), message: "preflight evidence"},
+		"malformed expansion":  {receipt: validReceipt, expansion: `{`, message: "recipe expansion"},
+		"mismatched expansion": {receipt: validReceipt, expansion: fmt.Sprintf(`{"final_plan_hash":%q}`, otherHash), message: "recipe expansion"},
+		"relative measured path": {
+			receipt: validReceipt,
+			expansion: fmt.Sprintf(`{"final_plan_hash":%q,"derived_content_bindings":[{"path_target":"/model/path","fingerprint_target":"/model/fingerprint","path":"relative/model","tree_sha256":"sha256:%s","provenance":"authority_measured"}]}`,
+				planHash, strings.Repeat("1", 64)),
+			message: "derived content evidence",
+		},
+		"malformed measured digest": {
+			receipt: validReceipt,
+			expansion: fmt.Sprintf(`{"final_plan_hash":%q,"derived_content_bindings":[{"path_target":"/data/path","fingerprint_target":"/data/fingerprint","path":"/datasets/train","tree_sha256":"operator-supplied","provenance":"authority_measured"}]}`,
+				planHash),
+			message: "derived content evidence",
+		},
+		"tree digest alias": {
+			receipt: validReceipt,
+			expansion: fmt.Sprintf(`{"final_plan_hash":%q,"derived_content_bindings":[{"path_target":"/data/path","fingerprint_target":"/data/fingerprint","path":"/datasets/train","tree_digest":"sha256:%s","provenance":"authority_measured"}]}`,
+				planHash, strings.Repeat("2", 64)),
+			message: "derived content evidence",
+		},
+		"operator provenance": {
+			receipt: validReceipt,
+			expansion: fmt.Sprintf(`{"final_plan_hash":%q,"derived_content_bindings":[{"path_target":"/data/path","fingerprint_target":"/data/fingerprint","path":"/datasets/train","tree_sha256":"sha256:%s","provenance":"operator_supplied"}]}`,
+				planHash, strings.Repeat("3", 64)),
+			message: "derived content evidence",
+		},
+		"unknown binding field": {
+			receipt: validReceipt,
+			expansion: fmt.Sprintf(`{"final_plan_hash":%q,"derived_content_bindings":[{"path_target":"/data/path","fingerprint_target":"/data/fingerprint","path":"/datasets/train","tree_sha256":"sha256:%s","provenance":"authority_measured","operator_digest":"unsafe"}]}`,
+				planHash, strings.Repeat("4", 64)),
+			message: "derived content evidence",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			commander := &fakeTrainVMCommander{authorUpdates: []trainvmstore.AuthorRunUpdate{{
+				Stage: "complete", PlanHash: planHash, CanonicalPlanJSON: `{}`,
+				PreflightReceiptJSON: evidence.receipt, RecipeExpansionJSON: evidence.expansion,
+				Terminal: true, DryRun: true,
+			}}}
+			response := httptest.NewRecorder()
+			New(Config{Commander: commander}).Handler().ServeHTTP(response,
+				newTrainVMAuthorRunRequest(t, `{}`, true, ""))
+			updates := decodeAuthorRunUpdates(t, response.Body.String())
+			if len(updates) != 1 || updates[0].Stage != "failed" || !updates[0].Terminal ||
+				len(updates[0].Diagnostics) != 1 ||
+				!strings.Contains(updates[0].Diagnostics[0].Message, evidence.message) {
+				t.Fatalf("invalid completion evidence crossed HTTP boundary: %#v", updates)
+			}
+		})
+	}
+}
+
+func TestTrainVMAuthorRunValidatesPreviewLaunchBoundary(t *testing.T) {
+	planHash := strings.Repeat("e", 64)
+	for name, body := range map[string]string{
+		"dry run hash":        fmt.Sprintf(`{"request_document":"{}","source_format":"json","dry_run":true,"expected_plan_hash":%q}`, planHash),
+		"launch no hash":      `{"request_document":"{}","source_format":"json","dry_run":false,"expected_plan_hash":""}`,
+		"prefixed hash":       `{"request_document":"{}","source_format":"json","dry_run":false,"expected_plan_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`,
+		"unknown outer field": `{"request_document":"{}","source_format":"json","dry_run":true,"expected_plan_hash":"","mystery":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/api/trainvm/author-runs", strings.NewReader(body))
+			request.Host = "127.0.0.1:9124"
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			New(Config{Commander: &fakeTrainVMCommander{}}).Handler().ServeHTTP(response, request)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestTrainVMAuthorRunPropagatesRequestCancellation(t *testing.T) {
+	commander := &fakeTrainVMCommander{authorBlock: true}
+	request := newTrainVMAuthorRunRequest(t, `{}`, true, "")
+	ctx, cancel := context.WithCancel(request.Context())
+	cancel()
+	response := httptest.NewRecorder()
+	New(Config{Commander: commander}).Handler().ServeHTTP(response, request.WithContext(ctx))
+	if !commander.authorCanceled {
+		t.Fatal("request cancellation did not reach the native authority bridge")
+	}
 }
 
 func TestTrainVMHostAuthorityEndpointUsesOnlyNativeCommanderEvidence(t *testing.T) {
@@ -499,6 +738,196 @@ func TestTrainVMTrainingComponentsComeFromNativeAuthority(t *testing.T) {
 	if response.Code != http.StatusBadGateway {
 		t.Fatalf("mismatched descriptor identity accepted: status=%d body=%s",
 			response.Code, response.Body.String())
+	}
+}
+
+func TestTrainVMRecipeProfilesComeFromNativeAuthority(t *testing.T) {
+	registryDocument := canonicalTestJSON(t, map[string]any{
+		"api_version": "trainvm.recipe-profiles/v1", "recipes": []any{},
+	})
+	document := canonicalTestJSON(t, map[string]any{
+		"api_version":           "trainvm.recipe-profiles/v1",
+		"recipes":               []any{},
+		"registry_path":         "/etc/trainvm/recipe-profiles.json",
+		"default_registry_path": "/etc/trainvm/recipe-profiles.json",
+		"registry_digest":       fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(registryDocument))),
+	})
+	digest := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(document)))
+	commander := &fakeTrainVMCommander{descriptorResult: trainvmstore.DescriptorResult{
+		SchemaJSON: document, SchemaHash: digest,
+	}}
+	response := httptest.NewRecorder()
+	New(Config{Commander: commander}).Handler().ServeHTTP(response,
+		httptest.NewRequest(http.MethodGet, "/api/trainvm/recipe-profiles", nil))
+	if response.Code != http.StatusOK ||
+		commander.descriptor.Provider != "trainvm.recipe-profiles" ||
+		commander.descriptor.Version != "1.0.0" ||
+		!strings.Contains(response.Body.String(), `"api_version":"trainvm.recipe-profiles/v1"`) ||
+		!strings.Contains(response.Body.String(), `"registry_path":"/etc/trainvm/recipe-profiles.json"`) {
+		t.Fatalf("recipe-profile descriptor status=%d request=%#v body=%s",
+			response.Code, commander.descriptor, response.Body.String())
+	}
+}
+
+func TestTrainVMRecipeProfileDescriptorFailsClosed(t *testing.T) {
+	profile := func() map[string]any {
+		return map[string]any{
+			"key":         map[string]any{"name": "generic_train", "version": "1"},
+			"description": "Generic training recipe.",
+			"template_document": map[string]any{
+				"api_version": "trainvm.rwkv-lab/v1alpha1",
+				"spec": map[string]any{
+					"parameters": map[string]any{
+						"precision": map[string]any{"value": "bf16"},
+					},
+					"workflow": map[string]any{"nodes": map[string]any{
+						"train": map[string]any{"invoke": map[string]any{"training": map[string]any{
+							"components": map[string]any{"model_loader": map[string]any{
+								"configuration": map[string]any{
+									"model_path":             "/models/base",
+									"checkpoint_fingerprint": "sha256:" + strings.Repeat("0", 64),
+								},
+							}},
+						}}},
+					}},
+				},
+			},
+			"overrides": []any{
+				map[string]any{
+					"domain": "model", "name": "model.path", "required": true,
+					"target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/model_path", "type": "path",
+				},
+				map[string]any{
+					"domain": "precision", "name": "precision.mode", "required": false,
+					"target": "/spec/parameters/precision/value", "type": "enumeration",
+					"values": []any{"bf16", "fp8"},
+				},
+			},
+			"content_bindings": []any{map[string]any{
+				"path_target":        "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/model_path",
+				"fingerprint_target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/checkpoint_fingerprint",
+			}},
+			"compatibility": []any{map[string]any{
+				"fields": []any{"precision.mode"}, "allowed": []any{[]any{"bf16"}, []any{"fp8"}},
+			}},
+		}
+	}
+	serve := func(document map[string]any) *httptest.ResponseRecorder {
+		encoded := canonicalTestJSON(t, document)
+		commander := &fakeTrainVMCommander{descriptorResult: trainvmstore.DescriptorResult{
+			SchemaJSON: encoded,
+			SchemaHash: fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(encoded))),
+		}}
+		response := httptest.NewRecorder()
+		New(Config{Commander: commander}).Handler().ServeHTTP(response,
+			httptest.NewRequest(http.MethodGet, "/api/trainvm/recipe-profiles", nil))
+		return response
+	}
+	registryDigest := func(recipes []any) string {
+		encoded := canonicalTestJSON(t, map[string]any{
+			"api_version": "trainvm.recipe-profiles/v1", "recipes": recipes,
+		})
+		return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(encoded)))
+	}
+	profiles := []any{profile()}
+	valid := map[string]any{
+		"api_version": "trainvm.recipe-profiles/v1", "recipes": profiles,
+		"registry_path":         "/etc/trainvm/recipe-profiles.json",
+		"default_registry_path": "/etc/trainvm/recipe-profiles.json",
+		"registry_digest":       registryDigest(profiles),
+	}
+	if response := serve(valid); response.Code != http.StatusOK {
+		t.Fatalf("valid recipe descriptor rejected: status=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, path := range []string{"/", "relative/recipes.json", "/etc//trainvm/recipes.json", "/etc/./trainvm/recipes.json", "/etc/trainvm/../recipes.json", "/etc/trainvm/recipes.json/.."} {
+		t.Run("hostile path "+strings.ReplaceAll(path, "/", "_"), func(t *testing.T) {
+			document := map[string]any{
+				"api_version": "trainvm.recipe-profiles/v1", "recipes": profiles,
+				"registry_path":         path,
+				"default_registry_path": path,
+				"registry_digest":       registryDigest(profiles),
+			}
+			if response := serve(document); response.Code != http.StatusBadGateway {
+				t.Fatalf("hostile registry path accepted: %q status=%d body=%s", path, response.Code, response.Body.String())
+			}
+		})
+	}
+	for name, document := range map[string]map[string]any{
+		"default path differs": {
+			"api_version": "trainvm.recipe-profiles/v1", "recipes": profiles,
+			"registry_path": "/etc/trainvm/recipe-profiles.json", "default_registry_path": "/etc/trainvm/other.json",
+			"registry_digest": registryDigest(profiles),
+		},
+		"digest differs": {
+			"api_version": "trainvm.recipe-profiles/v1", "recipes": profiles,
+			"registry_path": "/etc/trainvm/recipe-profiles.json", "default_registry_path": "/etc/trainvm/recipe-profiles.json",
+			"registry_digest": "sha256:" + strings.Repeat("0", 64),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if response := serve(document); response.Code != http.StatusBadGateway {
+				t.Fatalf("invalid registry metadata accepted: status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+	mutations := map[string]func(map[string]any){
+		"unknown field type": func(value map[string]any) {
+			value["overrides"].([]any)[0].(map[string]any)["type"] = "object"
+		},
+		"duplicate override": func(value map[string]any) {
+			value["overrides"] = append(value["overrides"].([]any),
+				value["overrides"].([]any)[1])
+		},
+		"unknown compatibility field": func(value map[string]any) {
+			value["compatibility"].([]any)[0].(map[string]any)["fields"] = []any{"missing.field"}
+		},
+		"wrong tuple arity": func(value map[string]any) {
+			value["compatibility"].([]any)[0].(map[string]any)["allowed"] = []any{[]any{"bf16", 80}}
+		},
+		"missing override target": func(value map[string]any) {
+			value["overrides"].([]any)[0].(map[string]any)["target"] = "/spec/parameters/missing/value"
+		},
+		"wrong target scalar type": func(value map[string]any) {
+			value["overrides"].([]any)[0].(map[string]any)["target"] = "/spec/parameters"
+		},
+		"unknown content binding field": func(value map[string]any) {
+			value["content_bindings"].([]any)[0].(map[string]any)["digest"] = "operator supplied"
+		},
+		"content path is outside training configuration": func(value map[string]any) {
+			value["content_bindings"].([]any)[0].(map[string]any)["path_target"] = "/spec/parameters/precision/value"
+		},
+		"content fingerprint is missing": func(value map[string]any) {
+			value["content_bindings"].([]any)[0].(map[string]any)["fingerprint_target"] = "/spec/parameters/missing/value"
+		},
+		"malformed content pointer": func(value map[string]any) {
+			value["content_bindings"].([]any)[0].(map[string]any)["fingerprint_target"] = "/spec/workflow/nodes/~2/invoke/training/components/model_loader/configuration/fingerprint"
+		},
+		"operator fingerprint override": func(value map[string]any) {
+			value["overrides"] = append(value["overrides"].([]any), map[string]any{
+				"domain": "model", "name": "zz.fingerprint", "required": true,
+				"target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/checkpoint_fingerprint",
+				"type":   "string",
+			})
+		},
+		"noncanonical template fingerprint": func(value map[string]any) {
+			value["template_document"].(map[string]any)["spec"].(map[string]any)["workflow"].(map[string]any)["nodes"].(map[string]any)["train"].(map[string]any)["invoke"].(map[string]any)["training"].(map[string]any)["components"].(map[string]any)["model_loader"].(map[string]any)["configuration"].(map[string]any)["checkpoint_fingerprint"] = "operator-supplied"
+		},
+		"template is not an object": func(value map[string]any) { value["template_document"] = "unsafe" },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			value := profile()
+			mutate(value)
+			mutatedProfiles := []any{value}
+			if response := serve(map[string]any{
+				"api_version": "trainvm.recipe-profiles/v1", "recipes": mutatedProfiles,
+				"registry_path":         "/etc/trainvm/recipe-profiles.json",
+				"default_registry_path": "/etc/trainvm/recipe-profiles.json",
+				"registry_digest":       registryDigest(mutatedProfiles),
+			}); response.Code != http.StatusBadGateway {
+				t.Fatalf("invalid recipe descriptor accepted: status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
 	}
 }
 
