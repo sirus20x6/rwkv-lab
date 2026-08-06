@@ -464,9 +464,13 @@ func TestTrainVMRecipeComposerUsesCanonicalAuthorRunContract(t *testing.T) {
 	}
 	for _, required := range []string{
 		`trainvm.author-run/v1`, `trainvm.recipe-instance/v1`,
+		`const PLAN_HASH = /^[0-9a-f]{64}$/`,
 		`/api/trainvm/recipe-profiles`, `/api/trainvm/author-runs`,
 		`request_document: source`, `source_format: "json"`, `dry_run: dryRun`,
-		`expected_plan_hash: dryRun ? "" : preview.planHash`,
+		`const expectedPlanHash = dryRun ? "" : preview.planHash`,
+		`expected_plan_hash: expectedPlanHash`,
+		`update.planHash !== expectedPlanHash`,
+		`launch completed without the previewed plan identity`,
 		`application/x-ndjson`, `profile.overrides || []`,
 		`profile?.compatibility || []`, `field.minimum`, `field.maximum`,
 		`recipe_expansion_json`, `effective-value provenance`,

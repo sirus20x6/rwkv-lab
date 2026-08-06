@@ -6,6 +6,7 @@
   const PROFILE_ENDPOINT = "/api/trainvm/recipe-profiles";
   const AUTHOR_ENDPOINT = "/api/trainvm/author-runs";
   const RUN_IDENTITY = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
+  const PLAN_HASH = /^[0-9a-f]{64}$/;
   const byID = (id) => document.getElementById(id);
   const escapeHTML = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -274,7 +275,7 @@
       `<div class="vm-recipe-domains">${groups || '<div class="empty">this recipe exposes no overrides</div>'}</div>` +
       `<div id="vm-recipe-local-diagnostics" class="vm-diagnostics">${renderDiagnostics(local)}</div>` +
       `<div class="vm-recipe-actions"><button class="btn sm" id="vm-recipe-preview" type="button"${local.length || requestBusy ? " disabled" : ""}>canonical dry-run</button>` +
-      `<button class="btn sm" id="vm-recipe-launch" type="button"${!preview || preview.source !== compactSource() || requestBusy ? " disabled" : ""}>launch exact preview</button>` +
+      `<button class="btn sm" id="vm-recipe-launch" type="button"${!preview || preview.source !== compactSource() || !PLAN_HASH.test(preview.planHash) || requestBusy ? " disabled" : ""}>launch exact preview</button>` +
       `<button class="btn sm" id="vm-recipe-copy" type="button">copy compact document</button>` +
       `<span id="vm-recipe-request-state" class="sub">${escapeHTML(requestMessage)}</span></div>` +
       `<details class="vm-raw-editor vm-recipe-import"><summary>compact import / export</summary><textarea id="vm-recipe-source" spellcheck="false" aria-label="Compact AuthorRun source">${escapeHTML(JSON.stringify(authorDocument(), null, 2))}</textarea><button class="btn sm" id="vm-recipe-import" type="button">import exact document</button></details>` +
@@ -356,7 +357,14 @@
       buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
-      for (const line of lines) if (line.trim()) onUpdate(normalizeUpdate(JSON.parse(line)));
+      for (const line of lines) if (line.trim()) {
+        try {
+          onUpdate(normalizeUpdate(JSON.parse(line)));
+        } catch (error) {
+          await reader.cancel(error);
+          throw error;
+        }
+      }
       if (done) break;
     }
     if (buffer.trim()) onUpdate(normalizeUpdate(JSON.parse(buffer)));
@@ -365,7 +373,8 @@
   async function authorRun(dryRun) {
     if (requestBusy || localDiagnostics().length) return;
     const source = compactSource();
-    if (!dryRun && (!preview || preview.source !== source)) return;
+    if (!dryRun && (!preview || preview.source !== source || !PLAN_HASH.test(preview.planHash))) return;
+    const expectedPlanHash = dryRun ? "" : preview.planHash;
     requestBusy = true;
     const current = { source, planHash: "", plan: null, preflight: null, recipeExpansion: null, diagnostics: [], updates: [], diff: [] };
     requestView = current;
@@ -378,7 +387,7 @@
         method: "POST", cache: "no-store", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           request_document: source, source_format: "json", dry_run: dryRun,
-          expected_plan_hash: dryRun ? "" : preview.planHash,
+          expected_plan_hash: expectedPlanHash,
         }),
       });
       if (!response.ok) throw new Error((await response.text()).trim() || `HTTP ${response.status}`);
@@ -390,6 +399,9 @@
         current.updates.push(update);
         current.diagnostics.push(...update.diagnostics);
         if (update.planHash) current.planHash = update.planHash;
+        if (!dryRun && update.planHash && update.planHash !== expectedPlanHash) {
+          throw new Error("authority launch update changed the previewed plan identity");
+        }
         if (update.plan) current.plan = update.plan;
         if (update.preflight) current.preflight = update.preflight;
         if (update.recipeExpansion) current.recipeExpansion = update.recipeExpansion;
@@ -405,11 +417,14 @@
       const failed = terminal.stage === "failed" || terminal.stage === "AUTHOR_RUN_STAGE_FAILED" || current.diagnostics.some((item) => String(item.severity || "").toLowerCase().includes("error"));
       if (failed) throw new Error(terminal.detail || "authority rejected the run");
       if (dryRun) {
-        if (!current.plan || !current.planHash) throw new Error("dry-run completed without a canonical plan identity");
+        if (!current.plan || !PLAN_HASH.test(current.planHash)) throw new Error("dry-run completed without a canonical plan identity");
         previousPlan = clone(current.plan);
         preview = current;
         setRequestState(`canonical preview ready · ${current.planHash}`);
       } else {
+        if (!current.planHash || current.planHash !== expectedPlanHash) {
+          throw new Error("authority launch completed without the previewed plan identity");
+        }
         const runID = terminal.run?.run_id || terminal.run?.runId || "";
         setRequestState(runID ? `queued · ${runID}` : "queued");
         window.dispatchEvent(new CustomEvent("trainvm-refresh", { detail: { runID } }));
