@@ -28,11 +28,34 @@ import (
 // commands to the native TrainVM authority and never receive a journal path.
 type Commander interface {
 	SubmitExperiment(context.Context, SubmissionRequest) (SubmissionResult, error)
+	AuthorRun(context.Context, AuthorRunRequest, func(AuthorRunUpdate) error) error
 	DiffPlan(context.Context, PlanDiffRequest) (PlanDiffResult, error)
 	RequestControls(context.Context, ControlRequest) (ControlResult, error)
 	RequestRunAction(context.Context, RunActionRequest) (RunActionResult, error)
 	GetDescriptor(context.Context, DescriptorRequest) (DescriptorResult, error)
 	GetHostAuthorityStatus(context.Context) (HostAuthorityStatus, error)
+}
+
+type AuthorRunRequest struct {
+	RequestDocument  string
+	SourceFormat     string
+	DryRun           bool
+	ExpectedPlanHash string
+}
+
+type AuthorRunUpdate struct {
+	Stage                string              `json:"stage"`
+	Detail               string              `json:"detail,omitempty"`
+	PlanHash             string              `json:"plan_hash,omitempty"`
+	CanonicalPlanJSON    string              `json:"canonical_plan_json,omitempty"`
+	PreflightReceiptJSON string              `json:"preflight_receipt_json,omitempty"`
+	RecipeExpansionJSON  string              `json:"recipe_expansion_json,omitempty"`
+	Diagnostics          []ControlDiagnostic `json:"diagnostics,omitempty"`
+	Run                  *RunIdentity        `json:"run,omitempty"`
+	DashboardURL         string              `json:"dashboard_url,omitempty"`
+	Terminal             bool                `json:"terminal"`
+	DryRun               bool                `json:"dry_run"`
+	ContentLockReused    bool                `json:"content_lock_reused"`
 }
 
 type DescriptorRequest struct {
@@ -549,6 +572,127 @@ func (c *GRPCCommander) SubmitExperiment(ctx context.Context, request Submission
 		})
 	}
 	return result, nil
+}
+
+func (c *GRPCCommander) AuthorRun(ctx context.Context, request AuthorRunRequest,
+	consume func(AuthorRunUpdate) error) error {
+	if c == nil || c.client == nil {
+		return fmt.Errorf("TrainVM authority client is not configured")
+	}
+	request.SourceFormat = strings.ToLower(strings.TrimSpace(request.SourceFormat))
+	request.ExpectedPlanHash = strings.TrimSpace(request.ExpectedPlanHash)
+	if strings.TrimSpace(request.RequestDocument) == "" || len(request.RequestDocument) > 2<<20 ||
+		request.SourceFormat != "json" && request.SourceFormat != "yaml" || consume == nil {
+		return &ValidationError{Message: "author run requires a bounded JSON/YAML document and update consumer"}
+	}
+	if request.DryRun && request.ExpectedPlanHash != "" ||
+		!request.DryRun && !canonicalPlanHash(request.ExpectedPlanHash) {
+		return &ValidationError{Message: "author run launch requires exactly one prior canonical plan hash"}
+	}
+	stream, err := c.client.AuthorRun(ctx, &trainvmv1.AuthorRunRequest{
+		RequestDocument: request.RequestDocument, SourceFormat: request.SourceFormat,
+		DryRun: request.DryRun, ExpectedPlanHash: request.ExpectedPlanHash,
+	})
+	if err != nil {
+		return err
+	}
+	for {
+		wire, err := stream.Recv()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		update, err := authorRunUpdateFromProto(wire)
+		if err != nil {
+			return err
+		}
+		if err := consume(update); err != nil {
+			return err
+		}
+	}
+}
+
+func authorRunUpdateFromProto(wire *trainvmv1.AuthorRunUpdate) (AuthorRunUpdate, error) {
+	if wire == nil {
+		return AuthorRunUpdate{}, fmt.Errorf("native authority emitted an invalid AuthorRun stage")
+	}
+	stage := ""
+	switch wire.GetStage() {
+	case trainvmv1.AuthorRunStage_AUTHOR_RUN_STAGE_VALIDATING:
+		stage = "validating"
+	case trainvmv1.AuthorRunStage_AUTHOR_RUN_STAGE_RESOLVING:
+		stage = "resolving"
+	case trainvmv1.AuthorRunStage_AUTHOR_RUN_STAGE_LOCKING_INPUTS:
+		stage = "locking_inputs"
+	case trainvmv1.AuthorRunStage_AUTHOR_RUN_STAGE_PREFLIGHT:
+		stage = "preflight"
+	case trainvmv1.AuthorRunStage_AUTHOR_RUN_STAGE_PROVISIONING:
+		stage = "provisioning"
+	case trainvmv1.AuthorRunStage_AUTHOR_RUN_STAGE_SUBMITTING:
+		stage = "submitting"
+	case trainvmv1.AuthorRunStage_AUTHOR_RUN_STAGE_COMPLETE:
+		stage = "complete"
+	case trainvmv1.AuthorRunStage_AUTHOR_RUN_STAGE_FAILED:
+		stage = "failed"
+	default:
+		return AuthorRunUpdate{}, fmt.Errorf("native authority emitted an invalid AuthorRun stage")
+	}
+	update := AuthorRunUpdate{
+		Stage:  stage,
+		Detail: wire.GetDetail(), PlanHash: wire.GetPlanHash(),
+		CanonicalPlanJSON:    wire.GetCanonicalPlanJson(),
+		PreflightReceiptJSON: wire.GetPreflightReceiptJson(),
+		RecipeExpansionJSON:  wire.GetRecipeExpansionJson(),
+		DashboardURL:         wire.GetDashboardUrl(), Terminal: wire.GetTerminal(),
+		DryRun: wire.GetDryRun(), ContentLockReused: wire.GetContentLockReused(),
+	}
+	if update.Terminal != (stage == "complete" || stage == "failed") {
+		return AuthorRunUpdate{}, fmt.Errorf("native authority emitted an inconsistent terminal AuthorRun stage")
+	}
+	if update.PlanHash != "" && !canonicalPlanHash(update.PlanHash) {
+		return AuthorRunUpdate{}, fmt.Errorf("native authority emitted a malformed AuthorRun plan hash")
+	}
+	for name, document := range map[string]string{
+		"canonical plan":    update.CanonicalPlanJSON,
+		"preflight receipt": update.PreflightReceiptJSON,
+		"recipe expansion":  update.RecipeExpansionJSON,
+	} {
+		if document != "" && !json.Valid([]byte(document)) {
+			return AuthorRunUpdate{}, fmt.Errorf("native authority emitted malformed AuthorRun %s JSON", name)
+		}
+	}
+	if run := wire.GetRun(); run != nil {
+		update.Run = &RunIdentity{RunID: run.GetRunId(), Revision: run.GetRevision(), PlanHash: run.GetPlanHash()}
+		if update.Run.RunID == "" || !canonicalPlanHash(update.Run.PlanHash) ||
+			update.PlanHash != "" && update.Run.PlanHash != update.PlanHash {
+			return AuthorRunUpdate{}, fmt.Errorf("native authority emitted an invalid AuthorRun identity")
+		}
+	}
+	for _, diagnostic := range wire.GetDiagnostics() {
+		if diagnostic == nil || diagnostic.GetSeverity() == trainvmv1.Diagnostic_SEVERITY_UNSPECIFIED {
+			return AuthorRunUpdate{}, fmt.Errorf("native authority emitted an invalid AuthorRun diagnostic")
+		}
+		update.Diagnostics = append(update.Diagnostics, ControlDiagnostic{
+			Severity: strings.TrimPrefix(diagnostic.GetSeverity().String(), "SEVERITY_"),
+			Code:     diagnostic.GetCode(), Path: diagnostic.GetDocumentPath(),
+			Message: diagnostic.GetMessage(), Help: diagnostic.GetHelp(),
+		})
+	}
+	return update, nil
+}
+
+func canonicalPlanHash(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *GRPCCommander) DiffPlan(ctx context.Context, request PlanDiffRequest) (PlanDiffResult, error) {

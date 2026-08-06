@@ -30,8 +30,29 @@ type fakeTrainVMCommander struct {
 	planDiffResult   trainvmstore.PlanDiffResult
 	descriptor       trainvmstore.DescriptorRequest
 	descriptorResult trainvmstore.DescriptorResult
+	authorRequest    trainvmstore.AuthorRunRequest
+	authorUpdates    []trainvmstore.AuthorRunUpdate
+	authorBlock      bool
+	authorCanceled   bool
 	hostAuthority    trainvmstore.HostAuthorityStatus
 	err              error
+}
+
+func (f *fakeTrainVMCommander) AuthorRun(ctx context.Context,
+	request trainvmstore.AuthorRunRequest,
+	consume func(trainvmstore.AuthorRunUpdate) error) error {
+	f.authorRequest = request
+	if f.authorBlock {
+		<-ctx.Done()
+		f.authorCanceled = true
+		return ctx.Err()
+	}
+	for _, update := range f.authorUpdates {
+		if err := consume(update); err != nil {
+			return err
+		}
+	}
+	return f.err
 }
 
 func (f *fakeTrainVMCommander) GetHostAuthorityStatus(_ context.Context) (trainvmstore.HostAuthorityStatus, error) {
@@ -77,6 +98,192 @@ func newTrainVMControlRequest(body string) *http.Request {
 		strings.NewReader(body))
 	request.Host = "127.0.0.1:9124"
 	return request
+}
+
+func newTrainVMAuthorRunRequest(t *testing.T, document string, dryRun bool, expectedPlanHash string) *http.Request {
+	t.Helper()
+	body, err := json.Marshal(trainVMAuthorRunRequest{
+		RequestDocument: document, SourceFormat: "json", DryRun: dryRun,
+		ExpectedPlanHash: expectedPlanHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/trainvm/author-runs", strings.NewReader(string(body)))
+	request.Host = "127.0.0.1:9124"
+	request.Header.Set("Content-Type", "application/json")
+	return request
+}
+
+func decodeAuthorRunUpdates(t *testing.T, body string) []trainvmstore.AuthorRunUpdate {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(body), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return nil
+	}
+	updates := make([]trainvmstore.AuthorRunUpdate, 0, len(lines))
+	for _, line := range lines {
+		var update trainvmstore.AuthorRunUpdate
+		if err := json.Unmarshal([]byte(line), &update); err != nil {
+			t.Fatalf("malformed AuthorRun NDJSON line %q: %v", line, err)
+		}
+		updates = append(updates, update)
+	}
+	return updates
+}
+
+func TestTrainVMAuthorRunStreamsCanonicalDryRunWithoutRewritingSource(t *testing.T) {
+	planHash := strings.Repeat("a", 64)
+	document := "  {\n  \"api_version\": \"trainvm.author-run/v1\"\n}\n"
+	commander := &fakeTrainVMCommander{authorUpdates: []trainvmstore.AuthorRunUpdate{
+		{Stage: "resolving", Detail: "resolved profile", DryRun: true},
+		{
+			Stage: "complete", Detail: "preview complete", PlanHash: planHash,
+			CanonicalPlanJSON:    `{"api_version":"trainvm.experiment/v1"}`,
+			RecipeExpansionJSON:  fmt.Sprintf(`{"profile_key":"generic","final_plan_hash":%q}`, planHash),
+			PreflightReceiptJSON: fmt.Sprintf(`{"passed":true,"plan_hash":%q}`, planHash), Terminal: true, DryRun: true,
+			Diagnostics: []trainvmstore.ControlDiagnostic{{
+				Severity: "WARNING", Code: "preview.notice", Path: "/overrides",
+				Message: "bounded override applied", Help: "Review the canonical plan.",
+			}},
+		},
+	}}
+	response := httptest.NewRecorder()
+	New(Config{Commander: commander}).Handler().ServeHTTP(response,
+		newTrainVMAuthorRunRequest(t, document, true, ""))
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/x-ndjson" {
+		t.Fatalf("status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+	if commander.authorRequest.RequestDocument != document || !commander.authorRequest.DryRun ||
+		commander.authorRequest.ExpectedPlanHash != "" {
+		t.Fatalf("authority request was rewritten: %#v", commander.authorRequest)
+	}
+	updates := decodeAuthorRunUpdates(t, response.Body.String())
+	if len(updates) != 2 || updates[0].Terminal || !updates[1].Terminal ||
+		updates[1].PlanHash != planHash || len(updates[1].Diagnostics) != 1 ||
+		updates[1].Diagnostics[0].Help != "Review the canonical plan." {
+		t.Fatalf("unexpected streamed updates: %#v", updates)
+	}
+}
+
+func TestTrainVMAuthorRunLaunchIsFencedToPreviewedPlan(t *testing.T) {
+	planHash := strings.Repeat("b", 64)
+	commander := &fakeTrainVMCommander{authorUpdates: []trainvmstore.AuthorRunUpdate{
+		{Stage: "submitting", PlanHash: planHash},
+		{Stage: "complete", PlanHash: planHash, Terminal: true,
+			PreflightReceiptJSON: fmt.Sprintf(`{"passed":true,"plan_hash":%q}`, planHash),
+			Run:                  &trainvmstore.RunIdentity{RunID: "run-1", Revision: 1, PlanHash: planHash}},
+	}}
+	response := httptest.NewRecorder()
+	New(Config{Commander: commander}).Handler().ServeHTTP(response,
+		newTrainVMAuthorRunRequest(t, `{"profile_key":"generic"}`, false, planHash))
+	updates := decodeAuthorRunUpdates(t, response.Body.String())
+	if response.Code != http.StatusOK || len(updates) != 2 || updates[1].Run == nil ||
+		updates[1].Run.RunID != "run-1" || commander.authorRequest.ExpectedPlanHash != planHash {
+		t.Fatalf("unexpected fenced launch: status=%d request=%#v updates=%#v", response.Code, commander.authorRequest, updates)
+	}
+}
+
+func TestTrainVMAuthorRunRejectsAuthorityPlanDriftLocally(t *testing.T) {
+	previewHash := strings.Repeat("c", 64)
+	commander := &fakeTrainVMCommander{authorUpdates: []trainvmstore.AuthorRunUpdate{{
+		Stage: "submitting", PlanHash: strings.Repeat("d", 64),
+	}}}
+	response := httptest.NewRecorder()
+	New(Config{Commander: commander}).Handler().ServeHTTP(response,
+		newTrainVMAuthorRunRequest(t, `{}`, false, previewHash))
+	updates := decodeAuthorRunUpdates(t, response.Body.String())
+	if len(updates) != 1 || updates[0].Stage != "failed" || !updates[0].Terminal ||
+		len(updates[0].Diagnostics) != 1 ||
+		!strings.Contains(updates[0].Diagnostics[0].Message, "previewed AuthorRun plan identity") {
+		t.Fatalf("plan drift was not converted to a terminal local failure: %#v", updates)
+	}
+}
+
+func TestTrainVMAuthorRunPreservesNativeTerminalFailureDiagnostics(t *testing.T) {
+	commander := &fakeTrainVMCommander{authorUpdates: []trainvmstore.AuthorRunUpdate{{
+		Stage: "failed", Detail: "preflight rejected", Terminal: true, DryRun: true,
+		Diagnostics: []trainvmstore.ControlDiagnostic{
+			{Severity: "ERROR", Code: "path.missing", Path: "/inputs/0", Message: "missing", Help: "Mount it."},
+			{Severity: "WARNING", Code: "resource.tight", Path: "/resources", Message: "tight", Help: "Reduce the batch."},
+		},
+	}}}
+	response := httptest.NewRecorder()
+	New(Config{Commander: commander}).Handler().ServeHTTP(response,
+		newTrainVMAuthorRunRequest(t, `{}`, true, ""))
+	updates := decodeAuthorRunUpdates(t, response.Body.String())
+	if len(updates) != 1 || len(updates[0].Diagnostics) != 2 ||
+		updates[0].Diagnostics[0].Help != "Mount it." || updates[0].Diagnostics[1].Code != "resource.tight" {
+		t.Fatalf("native diagnostics were not preserved: %#v", updates)
+	}
+}
+
+func TestTrainVMAuthorRunRejectsMissingOrMismatchedCompletionEvidence(t *testing.T) {
+	planHash := strings.Repeat("e", 64)
+	otherHash := strings.Repeat("f", 64)
+	validReceipt := fmt.Sprintf(`{"passed":true,"plan_hash":%q}`, planHash)
+	for name, evidence := range map[string]struct {
+		receipt   string
+		expansion string
+		message   string
+	}{
+		"missing receipt":      {message: "preflight evidence"},
+		"malformed receipt":    {receipt: `{`, message: "preflight evidence"},
+		"failed receipt":       {receipt: fmt.Sprintf(`{"passed":false,"plan_hash":%q}`, planHash), message: "preflight evidence"},
+		"mismatched receipt":   {receipt: fmt.Sprintf(`{"passed":true,"plan_hash":%q}`, otherHash), message: "preflight evidence"},
+		"malformed expansion":  {receipt: validReceipt, expansion: `{`, message: "recipe expansion"},
+		"mismatched expansion": {receipt: validReceipt, expansion: fmt.Sprintf(`{"final_plan_hash":%q}`, otherHash), message: "recipe expansion"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			commander := &fakeTrainVMCommander{authorUpdates: []trainvmstore.AuthorRunUpdate{{
+				Stage: "complete", PlanHash: planHash, CanonicalPlanJSON: `{}`,
+				PreflightReceiptJSON: evidence.receipt, RecipeExpansionJSON: evidence.expansion,
+				Terminal: true, DryRun: true,
+			}}}
+			response := httptest.NewRecorder()
+			New(Config{Commander: commander}).Handler().ServeHTTP(response,
+				newTrainVMAuthorRunRequest(t, `{}`, true, ""))
+			updates := decodeAuthorRunUpdates(t, response.Body.String())
+			if len(updates) != 1 || updates[0].Stage != "failed" || !updates[0].Terminal ||
+				len(updates[0].Diagnostics) != 1 ||
+				!strings.Contains(updates[0].Diagnostics[0].Message, evidence.message) {
+				t.Fatalf("invalid completion evidence crossed HTTP boundary: %#v", updates)
+			}
+		})
+	}
+}
+
+func TestTrainVMAuthorRunValidatesPreviewLaunchBoundary(t *testing.T) {
+	planHash := strings.Repeat("e", 64)
+	for name, body := range map[string]string{
+		"dry run hash":        fmt.Sprintf(`{"request_document":"{}","source_format":"json","dry_run":true,"expected_plan_hash":%q}`, planHash),
+		"launch no hash":      `{"request_document":"{}","source_format":"json","dry_run":false,"expected_plan_hash":""}`,
+		"prefixed hash":       `{"request_document":"{}","source_format":"json","dry_run":false,"expected_plan_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`,
+		"unknown outer field": `{"request_document":"{}","source_format":"json","dry_run":true,"expected_plan_hash":"","mystery":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/api/trainvm/author-runs", strings.NewReader(body))
+			request.Host = "127.0.0.1:9124"
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			New(Config{Commander: &fakeTrainVMCommander{}}).Handler().ServeHTTP(response, request)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestTrainVMAuthorRunPropagatesRequestCancellation(t *testing.T) {
+	commander := &fakeTrainVMCommander{authorBlock: true}
+	request := newTrainVMAuthorRunRequest(t, `{}`, true, "")
+	ctx, cancel := context.WithCancel(request.Context())
+	cancel()
+	response := httptest.NewRecorder()
+	New(Config{Commander: commander}).Handler().ServeHTTP(response, request.WithContext(ctx))
+	if !commander.authorCanceled {
+		t.Fatal("request cancellation did not reach the native authority bridge")
+	}
 }
 
 func TestTrainVMHostAuthorityEndpointUsesOnlyNativeCommanderEvidence(t *testing.T) {
