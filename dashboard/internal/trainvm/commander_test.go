@@ -59,8 +59,9 @@ func TestAuthorRunUpdateConversionPreservesCanonicalEvidence(t *testing.T) {
 	update, err := authorRunUpdateFromProto(&trainvmv1.AuthorRunUpdate{
 		Stage: trainvmv1.AuthorRunStage_AUTHOR_RUN_STAGE_COMPLETE, Detail: "preview complete",
 		PlanHash: planHash, CanonicalPlanJson: `{"api_version":"trainvm.experiment/v1"}`,
-		RecipeExpansionJson:  `{"profile_key":"generic"}`,
-		PreflightReceiptJson: `{"accepted":true}`, Terminal: true, DryRun: true,
+		RecipeExpansionJson:           `{"profile_key":"generic"}`,
+		ContentMeasurementReceiptJson: `{"api_version":"trainvm.input-content-measurement-receipt/v1"}`,
+		PreflightReceiptJson:          `{"accepted":true}`, Terminal: true, DryRun: true,
 		Run: &trainvmv1.RunIdentity{RunId: "run-1", Revision: 4, PlanHash: planHash},
 		Diagnostics: []*trainvmv1.Diagnostic{{
 			Severity: trainvmv1.Diagnostic_SEVERITY_WARNING, Code: "preview.notice",
@@ -69,7 +70,8 @@ func TestAuthorRunUpdateConversionPreservesCanonicalEvidence(t *testing.T) {
 	})
 	if err != nil || update.Stage != "complete" || update.PlanHash != planHash ||
 		update.Run == nil || update.Run.Revision != 4 || len(update.Diagnostics) != 1 ||
-		update.Diagnostics[0].Severity != "WARNING" || update.Diagnostics[0].Help != "Review it." {
+		update.Diagnostics[0].Severity != "WARNING" || update.Diagnostics[0].Help != "Review it." ||
+		update.ContentMeasurementReceiptJSON == "" {
 		t.Fatalf("unexpected AuthorRun conversion: %#v err=%v", update, err)
 	}
 }
@@ -89,6 +91,9 @@ func TestAuthorRunUpdateConversionRejectsMalformedAuthorityEvidence(t *testing.T
 		},
 		"malformed plan JSON": func(update *trainvmv1.AuthorRunUpdate) {
 			update.CanonicalPlanJson = `{`
+		},
+		"malformed content receipt JSON": func(update *trainvmv1.AuthorRunUpdate) {
+			update.ContentMeasurementReceiptJson = `{`
 		},
 		"unspecified diagnostic": func(update *trainvmv1.AuthorRunUpdate) {
 			update.Diagnostics = []*trainvmv1.Diagnostic{{}}

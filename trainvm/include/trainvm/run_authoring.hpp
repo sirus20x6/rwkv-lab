@@ -29,6 +29,8 @@ inline constexpr std::string_view kInstalledRecipeProfilePath =
     "/etc/trainvm/recipe-profiles.json";
 inline constexpr std::string_view kSealedStructuralPreflightCapability =
     "trainvm.passive-preflight.structural@1";
+inline constexpr std::string_view kInputContentMeasurementReceiptApiVersion =
+    "trainvm.input-content-measurement-receipt/v1";
 
 struct AuthorRunRecipeSource final {
   std::string registry_path;
@@ -86,12 +88,42 @@ struct AuthorRunStageUpdate final {
   bool operator==(const AuthorRunStageUpdate &) const = default;
 };
 
+struct InputContentRootMeasurementReceipt final {
+  std::string path;
+  std::string tree_sha256;
+  std::uint64_t file_count{};
+  std::uint64_t total_bytes{};
+  std::uint64_t cache_hits{};
+  std::uint64_t cache_misses{};
+  std::uint64_t cache_bypasses{};
+  std::uint64_t staging_saturations{};
+  std::uint64_t bytes_hashed{};
+  std::uint64_t elapsed_nanoseconds{};
+
+  bool operator==(const InputContentRootMeasurementReceipt &) const = default;
+};
+
+struct InputContentMeasurementReceipt final {
+  std::string api_version;
+  std::string cache_api_version;
+  std::string cache_policy_digest;
+  std::string request_digest;
+  std::string plan_hash;
+  std::vector<InputContentRootMeasurementReceipt> roots;
+  InputContentMeasurementCacheCommitStats cache_commit;
+  std::string receipt_digest;
+
+  bool operator==(const InputContentMeasurementReceipt &) const = default;
+};
+
 struct ResolvedAuthorRun final {
   CompiledPlan plan;
   std::optional<TrainingPreflightRecipeProvenance> recipe_provenance;
   std::optional<nlohmann::json> recipe_expansion;
   std::string request_digest;
   bool content_lock_reused{};
+  std::vector<InputContentMeasurementStats> content_measurements;
+  std::optional<InputContentMeasurementReceipt> content_measurement_receipt;
 };
 
 struct TrainingPreflightEvidenceResult final {
@@ -102,9 +134,9 @@ struct TrainingPreflightEvidenceResult final {
 class ITrainingPreflightEvidenceProvider {
 public:
   virtual ~ITrainingPreflightEvidenceProvider() = default;
-  [[nodiscard]] virtual TrainingPreflightEvidenceResult collect(
-      const CompiledPlan &plan,
-      const std::optional<TrainingPreflightRecipeProvenance> &recipe) = 0;
+  [[nodiscard]] virtual TrainingPreflightEvidenceResult
+  collect(const CompiledPlan &plan,
+          const std::optional<TrainingPreflightRecipeProvenance> &recipe) = 0;
 };
 
 using TrainingNodeProbe = std::function<TrainingNodePreflightEvidence(
@@ -117,8 +149,9 @@ struct RegisteredTrainingNodeProbe final {
 
 using PassiveHostSnapshotSource =
     std::function<TrainingPreflightEnvironment(const CompiledPlan &)>;
-using PassiveAcceleratorSnapshotSource = std::function<
-    std::vector<PassiveAcceleratorMemoryEvidence>(const CompiledPlan &)>;
+using PassiveAcceleratorSnapshotSource =
+    std::function<std::vector<PassiveAcceleratorMemoryEvidence>(
+        const CompiledPlan &)>;
 
 [[nodiscard]] PassiveHostSnapshotSource make_local_passive_host_snapshot_source(
     std::string host_id, std::string boot_id,
@@ -164,8 +197,9 @@ public:
   using std::runtime_error::runtime_error;
 };
 
-[[nodiscard]] AuthorRunDocument decode_author_run_document(
-    std::string_view source, std::string_view source_format);
+[[nodiscard]] AuthorRunDocument
+decode_author_run_document(std::string_view source,
+                           std::string_view source_format);
 [[nodiscard]] AuthoringClientConfiguration load_authoring_client_configuration(
     const std::filesystem::path &path =
         std::filesystem::path(kInstalledAuthoringClientPath));
@@ -173,8 +207,9 @@ public:
 // Pure authoring preparation: decode has already completed; this resolves an
 // ordinary experiment or recipe, reuses an exact existing content lock when
 // possible, otherwise measures the declared root set, then recompiles.
-[[nodiscard]] ResolvedAuthorRun
-resolve_and_lock_author_run(const AuthorRunDocument &document);
+[[nodiscard]] ResolvedAuthorRun resolve_and_lock_author_run(
+    const AuthorRunDocument &document,
+    InputContentMeasurementCache *content_cache = nullptr);
 
 // The authority creates only the exact final run-directory component after a
 // passing passive receipt. Existing exact directories make retry idempotent;
@@ -204,8 +239,7 @@ private:
 
 [[nodiscard]] AuthorizedRunDirectoryProvision
 provision_authorized_run_directory(
-    const CompiledPlan &plan,
-    const TrainingPreflightEnvironment &environment,
+    const CompiledPlan &plan, const TrainingPreflightEnvironment &environment,
     std::string_view request_digest,
     // Deterministic test seam after the exact mkdir is pinned and before the
     // authority marker is published. Production callers always omit it.

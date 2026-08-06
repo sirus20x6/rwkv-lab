@@ -4,6 +4,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -366,15 +367,33 @@ int main() {
           "checked-in HF recipe did not pass the production native probe");
 
     const auto preview = invoke(*stub, document, true);
+    const auto resolving = std::ranges::find_if(
+        preview, [](const v1::AuthorRunUpdate &update) {
+          return update.stage() == v1::AUTHOR_RUN_STAGE_LOCKING_INPUTS &&
+                 update.detail().contains(
+                     "trainvm.input-content-measurement-cache/v1");
+        });
     if (preview.empty() || !preview.back().terminal() ||
         preview.back().stage() != v1::AUTHOR_RUN_STAGE_COMPLETE ||
         preview.back().plan_hash().empty() ||
+        resolving == preview.end() ||
+        !resolving->detail().contains(
+            "trainvm.input-content-measurement-cache/v1 hits=") ||
+        resolving->detail().contains(" bytes_hashed=0") ||
+        !resolving->detail().contains(" elapsed_nanoseconds=") ||
+        resolving->content_measurement_receipt_json().empty() ||
+        nlohmann::json::parse(resolving->content_measurement_receipt_json())
+                .value("plan_hash", std::string{}) !=
+            preview.back().plan_hash() ||
         std::filesystem::exists(temporary.path() / "runs" / "run"))
       throw std::runtime_error(
           "dry-run mutated state or omitted frozen plan: " +
           (preview.empty()
                ? std::string("no updates")
                : preview.back().detail() + " " +
+                     (resolving == preview.end()
+                          ? std::string("no resolving update ")
+                          : resolving->detail() + " ") +
                      (preview.back().diagnostics_size() == 0
                           ? std::string{}
                           : preview.back().diagnostics(0).code() + ":" +
@@ -396,15 +415,32 @@ int main() {
 
     const auto launched =
         invoke(*stub, document, false, refreshed_preview.back().plan_hash());
+    const auto launched_lock =
+        std::ranges::find_if(launched, [](const v1::AuthorRunUpdate &update) {
+          return update.stage() == v1::AUTHOR_RUN_STAGE_LOCKING_INPUTS &&
+                 update.detail().contains(
+                     "trainvm.input-content-measurement-cache/v1");
+        });
     const std::filesystem::path launched_directory =
         nlohmann::json::parse(launched.back().canonical_plan_json())
             .at("spec")
             .at("workspace")
             .at("run_directory")
             .get<std::string>();
+    const auto launched_content_receipt =
+        launched.empty() || launched.back().content_measurement_receipt_json().empty()
+            ? nlohmann::json::object()
+            : nlohmann::json::parse(
+                  launched.back().content_measurement_receipt_json());
     if (launched.empty() ||
         launched.back().stage() != v1::AUTHOR_RUN_STAGE_COMPLETE ||
-        !launched.back().has_run() ||
+        !launched.back().has_run() || launched_lock == launched.end() ||
+        !launched_lock->detail().contains(" bytes_hashed=0") ||
+        launched.back().content_measurement_receipt_json().empty() ||
+        !launched_content_receipt.contains("roots") ||
+        launched_content_receipt.at("roots").empty() ||
+        launched_content_receipt.at("cache_commit")
+                .value("staged_entries", std::uint64_t{1U}) != 0U ||
         !std::filesystem::exists(launched_directory))
       throw std::runtime_error(
           "exact HF recipe did not become dashboard-visible: " +

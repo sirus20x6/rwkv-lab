@@ -140,6 +140,7 @@ class TrainVMService final : public v1::TrainVM::Service,
   struct AuthorRunAuthority final {
     std::string request_digest;
     TrainingPreflightReceipt receipt;
+    std::optional<InputContentMeasurementReceipt> content_measurement_receipt;
   };
 
   grpc::Status submit_experiment(
@@ -248,6 +249,7 @@ class TrainVMService final : public v1::TrainVM::Service,
 
   std::unique_ptr<AuthorityLock> authority_lock_;
   Journal journal_;
+  InputContentMeasurementCache input_content_measurement_cache_;
   std::mutex command_mutex_;
   std::shared_ptr<AuthorityClock> authority_clock_;
   LeaseRenewalCoordinator lease_renewals_;

@@ -3908,6 +3908,37 @@ grpc::Status TrainVMService::submit_experiment(
     if (authoring) {
       const AuthorityTimeSample now = authority_now();
       const auto& receipt = authoring->receipt;
+      const bool training_plan = std::ranges::any_of(
+          compiled.plan->experiment.spec.workflow.nodes, [](const auto &entry) {
+            return entry.second.invoke.training.has_value();
+          });
+      const auto &content_receipt = authoring->content_measurement_receipt;
+      bool content_receipt_sealed = true;
+      bool content_receipt_roots_match = true;
+      if (content_receipt) {
+        nlohmann::json principal = encode_json(*content_receipt);
+        principal.erase("receipt_digest");
+        content_receipt_sealed = content_receipt->receipt_digest ==
+                                 "sha256:" + sha256_hex(principal.dump());
+        const auto &locked_roots =
+            compiled.plan->experiment.spec.workspace.input_content_roots;
+        content_receipt_roots_match =
+            locked_roots &&
+            locked_roots->size() == content_receipt->roots.size();
+        if (content_receipt_roots_match) {
+          for (std::size_t index = 0U; index < locked_roots->size(); ++index) {
+            const auto &locked = locked_roots->at(index);
+            const auto &measured = content_receipt->roots[index];
+            if (locked.path != measured.path ||
+                locked.tree_sha256 != measured.tree_sha256 ||
+                locked.file_count != measured.file_count ||
+                locked.total_bytes != measured.total_bytes) {
+              content_receipt_roots_match = false;
+              break;
+            }
+          }
+        }
+      }
       if (!request->create_run() ||
           authoring->request_digest.size() != 71U ||
           !authoring->request_digest.starts_with("sha256:") ||
@@ -3916,6 +3947,19 @@ grpc::Status TrainVMService::submit_experiment(
           receipt.plan_hash != compiled.plan->plan_hash ||
           receipt.receipt_digest.size() != 71U ||
           !receipt.receipt_digest.starts_with("sha256:") ||
+          (training_plan && !content_receipt) ||
+          (content_receipt &&
+           (content_receipt->api_version !=
+                kInputContentMeasurementReceiptApiVersion ||
+            content_receipt->cache_api_version !=
+                kInputContentMeasurementCacheApiVersion ||
+            content_receipt->cache_policy_digest !=
+                input_content_measurement_cache_.policy_digest() ||
+            content_receipt->request_digest != authoring->request_digest ||
+            content_receipt->plan_hash != compiled.plan->plan_hash ||
+            content_receipt->receipt_digest.size() != 71U ||
+            !content_receipt->receipt_digest.starts_with("sha256:") ||
+            !content_receipt_sealed || !content_receipt_roots_match)) ||
           now.boot.nanoseconds < 0 ||
           static_cast<std::uint64_t>(now.boot.nanoseconds) >=
               receipt.valid_until_monotonic_ns) {
@@ -4030,6 +4074,9 @@ grpc::Status TrainVMService::submit_experiment(
             {"request_digest", authoring->request_digest},
             {"preflight_receipt", encode_json(authoring->receipt)},
         };
+        if (authoring->content_measurement_receipt)
+          expected_submission["author_run"]["content_measurement_receipt"] =
+              encode_json(*authoring->content_measurement_receipt);
       }
       if (uses_training_components) {
         expected_submission["training_component_lock_digest"] =
@@ -4055,6 +4102,8 @@ grpc::Status TrainVMService::submit_experiment(
         // the exact request/plan/registry locks, not the observation time.
         comparable_stored["author_run"].erase("preflight_receipt");
         comparable_expected["author_run"].erase("preflight_receipt");
+        comparable_stored["author_run"].erase("content_measurement_receipt");
+        comparable_expected["author_run"].erase("content_measurement_receipt");
       }
       if (comparable_stored != comparable_expected) {
         throw RunCreationConflict(
@@ -4107,6 +4156,9 @@ grpc::Status TrainVMService::submit_experiment(
           {"request_digest", authoring->request_digest},
           {"preflight_receipt", encode_json(authoring->receipt)},
       };
+      if (authoring->content_measurement_receipt)
+        submission_identity["author_run"]["content_measurement_receipt"] =
+            encode_json(*authoring->content_measurement_receipt);
     }
     if (uses_training_components) {
       submission_identity["training_component_lock_digest"] =
@@ -4222,7 +4274,7 @@ grpc::Status TrainVMService::AuthorRun(
     if (!stage(AuthorRunStage::locking_inputs,
                "locking immutable static input content"))
       return cancellation_status();
-    ResolvedAuthorRun resolved = resolve_and_lock_author_run(document);
+    ResolvedAuthorRun resolved = resolve_and_lock_author_run(document, &input_content_measurement_cache_);
     if (!request->dry_run() &&
         request->expected_plan_hash() != resolved.plan.plan_hash) {
       fail("author_run.plan_changed", "/expected_plan_hash",
@@ -4240,7 +4292,44 @@ grpc::Status TrainVMService::AuthorRun(
 
     v1::AuthorRunUpdate resolved_update;
     resolved_update.set_stage(v1::AUTHOR_RUN_STAGE_LOCKING_INPUTS);
-    resolved_update.set_detail("resolved canonical plan and provenance");
+    std::uint64_t cache_hits = 0U;
+    std::uint64_t cache_misses = 0U;
+    std::uint64_t cache_bypasses = 0U;
+    std::uint64_t staging_saturations = 0U;
+    std::uint64_t bytes_hashed = 0U;
+    std::uint64_t elapsed_nanoseconds = 0U;
+    for (const auto &measurement : resolved.content_measurements) {
+      cache_hits += measurement.cache_hits;
+      cache_misses += measurement.cache_misses;
+      cache_bypasses += measurement.cache_bypasses;
+      staging_saturations += measurement.staging_saturations;
+      bytes_hashed += measurement.bytes_hashed;
+      elapsed_nanoseconds += measurement.elapsed_nanoseconds;
+    }
+    std::string measurement_detail =
+        "resolved canonical plan and provenance; " +
+        std::string(kInputContentMeasurementCacheApiVersion) + " "
+        "hits=" +
+        std::to_string(cache_hits) + " misses=" +
+        std::to_string(cache_misses) + " bypasses=" +
+        std::to_string(cache_bypasses) + " staging_saturations=" +
+        std::to_string(staging_saturations) + " bytes_hashed=" +
+        std::to_string(bytes_hashed) + " elapsed_nanoseconds=" +
+        std::to_string(elapsed_nanoseconds);
+    if (resolved.content_measurement_receipt) {
+      const auto &commit = resolved.content_measurement_receipt->cache_commit;
+      measurement_detail +=
+          " capacity=" + std::to_string(commit.capacity) +
+          " entries_before=" + std::to_string(commit.entries_before) +
+          " entries_after=" + std::to_string(commit.entries_after) +
+          " staged=" + std::to_string(commit.staged_entries) +
+          " staging_saturations=" +
+          std::to_string(commit.staging_saturations) +
+          " evictions=" + std::to_string(commit.evictions) +
+          " saturations=" + std::to_string(commit.saturations) +
+          " corruptions=" + std::to_string(commit.corruptions);
+    }
+    resolved_update.set_detail(std::move(measurement_detail));
     resolved_update.set_plan_hash(resolved.plan.plan_hash);
     resolved_update.set_canonical_plan_json(
         resolved.plan.canonical_plan.dump());
@@ -4248,6 +4337,9 @@ grpc::Status TrainVMService::AuthorRun(
     if (resolved.recipe_expansion)
       resolved_update.set_recipe_expansion_json(
           resolved.recipe_expansion->dump());
+    if (resolved.content_measurement_receipt)
+      resolved_update.set_content_measurement_receipt_json(
+          encode_json(*resolved.content_measurement_receipt).dump());
     if (!write(resolved_update))
       return cancellation_status();
 
@@ -4285,6 +4377,9 @@ grpc::Status TrainVMService::AuthorRun(
     if (resolved.recipe_expansion)
       preflight_update.set_recipe_expansion_json(
           resolved.recipe_expansion->dump());
+    if (resolved.content_measurement_receipt)
+      preflight_update.set_content_measurement_receipt_json(
+          encode_json(*resolved.content_measurement_receipt).dump());
     for (const auto& diagnostic : receipt.diagnostics)
       add_diagnostic(preflight_update, diagnostic);
     preflight_update.set_terminal(!receipt.passed);
@@ -4304,6 +4399,9 @@ grpc::Status TrainVMService::AuthorRun(
       update.set_content_lock_reused(resolved.content_lock_reused);
       if (resolved.recipe_expansion)
         update.set_recipe_expansion_json(resolved.recipe_expansion->dump());
+      if (resolved.content_measurement_receipt)
+        update.set_content_measurement_receipt_json(
+            encode_json(*resolved.content_measurement_receipt).dump());
       update.set_terminal(true);
       (void)write(update);
       return grpc::Status::OK;
@@ -4386,7 +4484,9 @@ grpc::Status TrainVMService::AuthorRun(
     status = submit_experiment(
         context, &create, &submitted,
         AuthorRunAuthority{.request_digest = resolved.request_digest,
-                           .receipt = provisioned_receipt});
+                           .receipt = provisioned_receipt,
+                           .content_measurement_receipt =
+                               resolved.content_measurement_receipt});
     if (!status.ok())
       return status;
     if (!submitted.has_run() || submitted.run().run_id().empty() ||
@@ -4415,6 +4515,9 @@ grpc::Status TrainVMService::AuthorRun(
     complete.set_content_lock_reused(resolved.content_lock_reused);
     if (resolved.recipe_expansion)
       complete.set_recipe_expansion_json(resolved.recipe_expansion->dump());
+    if (resolved.content_measurement_receipt)
+      complete.set_content_measurement_receipt_json(
+          encode_json(*resolved.content_measurement_receipt).dump());
     complete.set_terminal(true);
     (void)write(complete);
     return grpc::Status::OK;

@@ -284,6 +284,30 @@ identities, replaces `workspace.input_content_roots`, and recompiles the complet
 emitting JSON. It never launches a worker or writes either source document. A later worker still
 remeasures every identity, so drift between authoring and dispatch fails closed.
 
+The long-lived controller may reuse file digests between a dry preview and its fenced launch. That
+cache is controller-owned, bounded LRU state: entries are keyed by a non-reusable mount identity
+plus exact inode metadata, directory membership is always re-enumerated, unknown filesystem
+semantics bypass reuse, and newly measured records publish only after the locked plan recompiles.
+Each transaction is capped at the cache capacity as well; excess measurements are rehashed safely
+but not staged, and both root telemetry and the receipt report those staging saturations.
+The resulting typed measurement receipt is excluded from the plan hash but a successful launch
+persists it in `run.created`. This optimization deliberately does **not** weaken the worker boundary:
+the Python worker still rereads and hashes every nested byte before trainer import. For very large
+models that remaining verification is substantial startup work and currently happens after resource
+acquisition. A future sealed-manifest/load-stream design may fuse verification with model loading or
+move it before accelerator acquisition, but it must preserve exact nested-object byte verification.
+
+The controller warm-commit microbenchmark is reproducible without adding it to the normal build or
+test workload:
+
+```bash
+cmake --build trainvm/build --target input_content_cache_benchmark
+trainvm/build/input_content_cache_benchmark 20000
+```
+
+It creates the requested number of temporary zero-byte files, cold-populates the authority cache,
+then reports warm measurement and transaction-commit microseconds separately.
+
 The fixed runner returns an already-completed replay without executing tensor work, publishes a
 durably receipted terminal result on success, freezes any declared checkpoint before that terminal
 result, and converts trainer exceptions to a bounded

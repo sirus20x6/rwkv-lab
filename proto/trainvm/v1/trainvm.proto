@@ -190,6 +190,9 @@ message AuthorRunUpdate {
   bool dry_run = 10;
   bool content_lock_reused = 11;
   string recipe_expansion_json = 12;
+  // Closed, content-addressed operational evidence. It is excluded from the
+  // plan hash but persisted in run.created for a successful launch.
+  string content_measurement_receipt_json = 13;
 }
 
 message PlanDiffRequest {
