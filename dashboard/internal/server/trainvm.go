@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -371,6 +372,14 @@ type trainVMAuthorRunRequest struct {
 	ExpectedPlanHash string `json:"expected_plan_hash"`
 }
 
+type trainVMDerivedContentBinding struct {
+	PathTarget        string
+	FingerprintTarget string
+	Path              string
+	TreeSHA256        string
+	Provenance        string
+}
+
 func (s *Server) handleTrainVMAuthorRun(w http.ResponseWriter, r *http.Request) {
 	if s.commander == nil {
 		http.Error(w, "TrainVM authority is not configured", http.StatusServiceUnavailable)
@@ -476,13 +485,8 @@ func validateAuthorRunCompletionEvidence(update trainvmstore.AuthorRunUpdate) er
 	}
 	if update.RecipeExpansionJSON != "" {
 		var expansion struct {
-			FinalPlanHash          string `json:"final_plan_hash"`
-			DerivedContentBindings []struct {
-				PathTarget        string `json:"path_target"`
-				FingerprintTarget string `json:"fingerprint_target"`
-				Path              string `json:"path"`
-				TreeDigest        string `json:"tree_digest"`
-			} `json:"derived_content_bindings"`
+			FinalPlanHash          string            `json:"final_plan_hash"`
+			DerivedContentBindings []json.RawMessage `json:"derived_content_bindings"`
 		}
 		if json.Unmarshal([]byte(update.RecipeExpansionJSON), &expansion) != nil ||
 			!canonicalHTTPPlanHash(expansion.FinalPlanHash) || expansion.FinalPlanHash != update.PlanHash {
@@ -493,11 +497,16 @@ func validateAuthorRunCompletionEvidence(update trainvmstore.AuthorRunUpdate) er
 		}
 		seenPaths := make(map[string]bool, len(expansion.DerivedContentBindings))
 		seenFingerprints := make(map[string]bool, len(expansion.DerivedContentBindings))
-		for _, binding := range expansion.DerivedContentBindings {
+		for _, rawBinding := range expansion.DerivedContentBindings {
+			binding, err := decodeTrainVMDerivedContentBinding(rawBinding)
+			if err != nil {
+				return errors.New("native authority completed AuthorRun with malformed derived content evidence")
+			}
 			_, pathOK := canonicalDescriptorPath(binding.Path)
 			if !validRecipePointerSyntax(binding.PathTarget) ||
 				!validRecipePointerSyntax(binding.FingerprintTarget) || !pathOK ||
-				!canonicalSHA256(binding.TreeDigest) || seenPaths[binding.PathTarget] ||
+				!canonicalSHA256(binding.TreeSHA256) || binding.Provenance != "authority_measured" ||
+				seenPaths[binding.PathTarget] ||
 				seenFingerprints[binding.FingerprintTarget] {
 				return errors.New("native authority completed AuthorRun with malformed derived content evidence")
 			}
@@ -505,6 +514,48 @@ func validateAuthorRunCompletionEvidence(update trainvmstore.AuthorRunUpdate) er
 		}
 	}
 	return nil
+}
+
+func decodeTrainVMDerivedContentBinding(raw json.RawMessage) (trainVMDerivedContentBinding, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	value, err := decodeUniqueJSONValue(decoder)
+	if err != nil {
+		return trainVMDerivedContentBinding{}, err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err == nil {
+			err = errors.New("derived content binding contains multiple values")
+		}
+		return trainVMDerivedContentBinding{}, err
+	}
+	object, ok := value.(map[string]any)
+	if !ok || !exactObjectKeys(object,
+		[]string{"fingerprint_target", "path", "path_target", "provenance", "tree_sha256"}, nil) {
+		return trainVMDerivedContentBinding{}, errors.New("derived content binding envelope is not exact")
+	}
+	binding := trainVMDerivedContentBinding{}
+	binding.PathTarget, ok = object["path_target"].(string)
+	if !ok {
+		return trainVMDerivedContentBinding{}, errors.New("derived path target has the wrong type")
+	}
+	binding.FingerprintTarget, ok = object["fingerprint_target"].(string)
+	if !ok {
+		return trainVMDerivedContentBinding{}, errors.New("derived fingerprint target has the wrong type")
+	}
+	binding.Path, ok = object["path"].(string)
+	if !ok {
+		return trainVMDerivedContentBinding{}, errors.New("derived path has the wrong type")
+	}
+	binding.TreeSHA256, ok = object["tree_sha256"].(string)
+	if !ok {
+		return trainVMDerivedContentBinding{}, errors.New("derived tree SHA-256 has the wrong type")
+	}
+	binding.Provenance, ok = object["provenance"].(string)
+	if !ok {
+		return trainVMDerivedContentBinding{}, errors.New("derived provenance has the wrong type")
+	}
+	return binding, nil
 }
 
 func canonicalHTTPPlanHash(value string) bool {

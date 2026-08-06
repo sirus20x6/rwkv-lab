@@ -316,7 +316,8 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     **binding,
                     "path": overrides[fields_by_target[binding["path_target"]]["name"]],
-                    "tree_digest": "sha256:" + str(index + 3) * 64,
+                    "tree_sha256": "sha256:" + str(index + 3) * 64,
+                    "provenance": "authority_measured",
                 }
                 for index, binding in enumerate(profile["content_bindings"])
             ]

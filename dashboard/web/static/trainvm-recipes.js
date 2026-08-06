@@ -324,11 +324,12 @@
     }
     const expansion = shown.recipeExpansion || {};
     const provenance = expansion.provenance || shown.provenance || {};
-    const measuredBindings = Array.isArray(expansion.derived_content_bindings) ? expansion.derived_content_bindings : [];
+    const measuredBindings = Array.isArray(expansion.derived_content_bindings) ?
+      expansion.derived_content_bindings.filter((binding) => binding?.provenance === "authority_measured") : [];
     const provenanceRows = Object.entries(provenance).map(([path, source]) => `<div class="vm-recipe-provenance-row"><code>${escapeHTML(path)}</code><span>${escapeHTML(source?.kind || "authority")}</span><code>${escapeHTML(source?.reference || "")}</code></div>`).join("");
     const measuredRows = measuredBindings.map((binding) => `<div class="vm-recipe-provenance-row vm-recipe-measured-binding">` +
-      `<code>${escapeHTML(binding.path_target || "")}</code><span>authority_measured</span>` +
-      `<code>${escapeHTML(binding.path || "")}</code><code>${escapeHTML(binding.tree_digest || "")}</code></div>`).join("");
+      `<code>${escapeHTML(binding.path_target || "")}</code><span>${escapeHTML(binding.provenance || "")}</span>` +
+      `<code>${escapeHTML(binding.path || "")}</code><code>${escapeHTML(binding.tree_sha256 || "")}</code></div>`).join("");
     const diffs = shown.diff || [];
     const diffRows = diffs.map((change) => `<div class="vm-diff-op"><code>change</code><code>${escapeHTML(change.path)}</code><code>${escapeHTML(JSON.stringify(change.after))}</code></div>`).join("");
     const stages = (shown.updates || []).map((update) => `<div class="vm-recipe-stage ${update.terminal ? "terminal" : ""}"><code>${escapeHTML(update.stage || "update")}</code><span>${escapeHTML(update.detail || "")}</span></div>`).join("");

@@ -140,7 +140,7 @@ func TestTrainVMAuthorRunStreamsCanonicalDryRunWithoutRewritingSource(t *testing
 		{
 			Stage: "complete", Detail: "preview complete", PlanHash: planHash,
 			CanonicalPlanJSON: `{"api_version":"trainvm.experiment/v1"}`,
-			RecipeExpansionJSON: fmt.Sprintf(`{"profile_key":"generic","final_plan_hash":%q,"derived_content_bindings":[{"path_target":"/model/path","fingerprint_target":"/model/fingerprint","path":"/models/base","tree_digest":"sha256:%s"}]}`,
+			RecipeExpansionJSON: fmt.Sprintf(`{"profile_key":"generic","final_plan_hash":%q,"derived_content_bindings":[{"path_target":"/model/path","fingerprint_target":"/model/fingerprint","path":"/models/base","tree_sha256":"sha256:%s","provenance":"authority_measured"}]}`,
 				planHash, strings.Repeat("1", 64)),
 			PreflightReceiptJSON: fmt.Sprintf(`{"passed":true,"plan_hash":%q}`, planHash), Terminal: true, DryRun: true,
 			Diagnostics: []trainvmstore.ControlDiagnostic{{
@@ -163,7 +163,7 @@ func TestTrainVMAuthorRunStreamsCanonicalDryRunWithoutRewritingSource(t *testing
 	if len(updates) != 2 || updates[0].Terminal || !updates[1].Terminal ||
 		updates[1].PlanHash != planHash || len(updates[1].Diagnostics) != 1 ||
 		updates[1].Diagnostics[0].Help != "Review the canonical plan." ||
-		!strings.Contains(updates[1].RecipeExpansionJSON, `"tree_digest":"sha256:`+strings.Repeat("1", 64)+`"`) {
+		!strings.Contains(updates[1].RecipeExpansionJSON, `"tree_sha256":"sha256:`+strings.Repeat("1", 64)+`"`) {
 		t.Fatalf("unexpected streamed updates: %#v", updates)
 	}
 }
@@ -237,14 +237,32 @@ func TestTrainVMAuthorRunRejectsMissingOrMismatchedCompletionEvidence(t *testing
 		"mismatched expansion": {receipt: validReceipt, expansion: fmt.Sprintf(`{"final_plan_hash":%q}`, otherHash), message: "recipe expansion"},
 		"relative measured path": {
 			receipt: validReceipt,
-			expansion: fmt.Sprintf(`{"final_plan_hash":%q,"derived_content_bindings":[{"path_target":"/model/path","fingerprint_target":"/model/fingerprint","path":"relative/model","tree_digest":"sha256:%s"}]}`,
+			expansion: fmt.Sprintf(`{"final_plan_hash":%q,"derived_content_bindings":[{"path_target":"/model/path","fingerprint_target":"/model/fingerprint","path":"relative/model","tree_sha256":"sha256:%s","provenance":"authority_measured"}]}`,
 				planHash, strings.Repeat("1", 64)),
 			message: "derived content evidence",
 		},
 		"malformed measured digest": {
 			receipt: validReceipt,
-			expansion: fmt.Sprintf(`{"final_plan_hash":%q,"derived_content_bindings":[{"path_target":"/data/path","fingerprint_target":"/data/fingerprint","path":"/datasets/train","tree_digest":"operator-supplied"}]}`,
+			expansion: fmt.Sprintf(`{"final_plan_hash":%q,"derived_content_bindings":[{"path_target":"/data/path","fingerprint_target":"/data/fingerprint","path":"/datasets/train","tree_sha256":"operator-supplied","provenance":"authority_measured"}]}`,
 				planHash),
+			message: "derived content evidence",
+		},
+		"tree digest alias": {
+			receipt: validReceipt,
+			expansion: fmt.Sprintf(`{"final_plan_hash":%q,"derived_content_bindings":[{"path_target":"/data/path","fingerprint_target":"/data/fingerprint","path":"/datasets/train","tree_digest":"sha256:%s","provenance":"authority_measured"}]}`,
+				planHash, strings.Repeat("2", 64)),
+			message: "derived content evidence",
+		},
+		"operator provenance": {
+			receipt: validReceipt,
+			expansion: fmt.Sprintf(`{"final_plan_hash":%q,"derived_content_bindings":[{"path_target":"/data/path","fingerprint_target":"/data/fingerprint","path":"/datasets/train","tree_sha256":"sha256:%s","provenance":"operator_supplied"}]}`,
+				planHash, strings.Repeat("3", 64)),
+			message: "derived content evidence",
+		},
+		"unknown binding field": {
+			receipt: validReceipt,
+			expansion: fmt.Sprintf(`{"final_plan_hash":%q,"derived_content_bindings":[{"path_target":"/data/path","fingerprint_target":"/data/fingerprint","path":"/datasets/train","tree_sha256":"sha256:%s","provenance":"authority_measured","operator_digest":"unsafe"}]}`,
+				planHash, strings.Repeat("4", 64)),
 			message: "derived content evidence",
 		},
 	} {
