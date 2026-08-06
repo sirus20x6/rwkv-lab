@@ -91,6 +91,21 @@ OperationAuthoringDeclaration checkpoint_authoring() {
   };
 }
 
+OperationAuthoringDeclaration rwkv_scratch_authoring() {
+  OperationAuthoringDeclaration authoring = checkpoint_authoring();
+  authoring.outputs.emplace(
+      "eval_examples",
+      OperationPortDescriptor{
+          .type = OperationPortType::artifact,
+          .required = true,
+          .artifact_type = ArtifactType::eval_examples,
+          .artifact_schema = "rwkv-lab.eval-examples.v1",
+          .description =
+              "Required same-attempt checkpoint-bound token prediction evidence.",
+      });
+  return authoring;
+}
+
 OperationAuthoringDeclaration mageflow_authoring() {
   OperationAuthoringDeclaration authoring = checkpoint_authoring();
   authoring.outputs.emplace(
@@ -893,7 +908,8 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
        .warmup = true,
        .qualify = false,
        .profile = true,
-       .resume_grade = ResumeGrade::terminal_checkpoint}));
+       .resume_grade = ResumeGrade::terminal_checkpoint},
+      rwkv_scratch_authoring()));
 
   (void)AdapterRegistry(profiles);
   return {

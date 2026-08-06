@@ -282,6 +282,57 @@ class PreparedRWKVCorpus:
     selector_digest: str
 
 
+@dataclass(frozen=True, slots=True)
+class RWKVTextEvalPolicy:
+    heldout_tokens: Mapping[str, tuple[int, ...]]
+    identity_field: str
+    identities_digest: str
+    selector_digest: str
+    evaluator_component_digest: str
+    metric_names: tuple[str, ...]
+    generation_policy_digest: str
+
+    def __post_init__(self) -> None:
+        if not self.heldout_tokens or any(
+            not isinstance(identity, str)
+            or not identity
+            or len(tokens) < 2
+            or any(
+                not isinstance(token, int)
+                or isinstance(token, bool)
+                or not 0 <= token < 65_536
+                for token in tokens
+            )
+            for identity, tokens in self.heldout_tokens.items()
+        ):
+            raise ValueError("RWKV text eval heldout tokens are invalid")
+        digests = (
+            self.identities_digest,
+            self.selector_digest,
+            self.evaluator_component_digest,
+            self.generation_policy_digest,
+        )
+        if any(
+            not isinstance(digest, str)
+            or len(digest) != 71
+            or not digest.startswith("sha256:")
+            or any(character not in "0123456789abcdef" for character in digest[7:])
+            for digest in digests
+        ):
+            raise ValueError("RWKV text eval digests are invalid")
+        if (
+            not isinstance(self.identity_field, str)
+            or not self.identity_field
+            or len(self.identity_field.encode("utf-8")) > 256
+            or self.metric_names != tuple(sorted(set(self.metric_names)))
+            or any(
+                not isinstance(metric, str) or not metric
+                for metric in self.metric_names
+            )
+        ):
+            raise ValueError("RWKV text eval identities and metrics are required")
+
+
 def prepare_registered_corpus(
     components: WorkerTrainingComponents,
     destination: Path,
@@ -314,7 +365,10 @@ def prepare_registered_corpus(
         mapped = evaluation.mapper.map(processed)
         return tuple(mapped.input_ids)
 
-    heldout = {row.sample_id: mapped_tokens(row) for row in validation_rows[:sample_count]}
+    rows_by_identity = {row.sample_id: row for row in validation_rows}
+    heldout = {
+        identity: mapped_tokens(rows_by_identity[identity]) for identity in identities
+    }
     validation_tokens = array("H")
     for row in validation_rows:
         validation_tokens.extend(mapped_tokens(row))
@@ -345,5 +399,6 @@ def prepare_registered_corpus(
 __all__ = [
     "PreparedRWKVCorpus",
     "RWKVScratchTrainConfig",
+    "RWKVTextEvalPolicy",
     "prepare_registered_corpus",
 ]

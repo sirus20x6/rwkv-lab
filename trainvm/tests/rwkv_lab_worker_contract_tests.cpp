@@ -560,6 +560,14 @@ int main() {
                 !appearance.authoring->outputs.contains("log") &&
                 !appearance.authoring->outputs.contains("metrics"),
             "MageFlow must advertise only its protocol-published checkpoint and eval gallery outputs");
+    require(rwkv.authoring && rwkv.authoring->outputs.size() == 2U &&
+                rwkv.authoring->outputs.contains("checkpoint") &&
+                rwkv.authoring->outputs.at("eval_examples").required &&
+                rwkv.authoring->outputs.at("eval_examples").artifact_type ==
+                    trainvm::ArtifactType::eval_examples &&
+                rwkv.authoring->outputs.at("eval_examples").artifact_schema ==
+                    "rwkv-lab.eval-examples.v1",
+            "RWKV scratch must require checkpoint-bound text eval examples");
     require(hf.authoring && hf.authoring->outputs.size() == 3U &&
                 hf.authoring->outputs.at("test_eval").required &&
                 hf.authoring->outputs.at("test_eval").artifact_type ==

@@ -58,6 +58,13 @@
               "immutability": "immutable",
               "fingerprint": "manifest_sha256",
               "required": true
+            },
+            "eval_examples": {
+              "type": "eval_examples",
+              "schema": "rwkv-lab.eval-examples.v1",
+              "immutability": "append_only",
+              "fingerprint": "manifest_sha256",
+              "required": true
             }
           },
           "components": {
@@ -449,7 +456,8 @@
                   }
                 },
                 "publishes": {
-                  "checkpoint": "checkpoint"
+                  "checkpoint": "checkpoint",
+                  "eval_examples": "eval_examples"
                 },
                 "idempotency": "receipt_required",
                 "effect": "process",
@@ -718,6 +726,13 @@
               "type": "checkpoint",
               "schema": "rwkv-lab.rwkv-scratch-checkpoint.v1",
               "immutability": "immutable",
+              "fingerprint": "manifest_sha256",
+              "required": true
+            },
+            "eval_examples": {
+              "type": "eval_examples",
+              "schema": "rwkv-lab.eval-examples.v1",
+              "immutability": "append_only",
               "fingerprint": "manifest_sha256",
               "required": true
             }
@@ -1113,7 +1128,8 @@
                   }
                 },
                 "publishes": {
-                  "checkpoint": "checkpoint"
+                  "checkpoint": "checkpoint",
+                  "eval_examples": "eval_examples"
                 },
                 "idempotency": "receipt_required",
                 "effect": "process",

@@ -698,6 +698,12 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
         )
 
     class Components:
+        composition = SimpleNamespace(
+            components={
+                "evaluator": SimpleNamespace(descriptor_digest="sha256:" + "e" * 64)
+            }
+        )
+
         def model_loader(self):
             return RWKVModelFactory(
                 implementation="rwkv_lab.model_loader.rwkv_scratch.v1",
@@ -744,7 +750,12 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
             )
 
         def evaluator(self):
-            return SimpleNamespace(configuration=SimpleNamespace(maximum_examples=2))
+            return SimpleNamespace(
+                configuration=SimpleNamespace(
+                    maximum_examples=2,
+                    metrics=("perplexity", "validation_loss"),
+                )
+            )
 
         def evaluation_schedule(self):
             return SimpleNamespace(
@@ -758,7 +769,7 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
             return SimpleNamespace(configuration=SimpleNamespace(modality="text"))
 
         def generation_policy(self):
-            return SimpleNamespace()
+            return SimpleNamespace(digest="sha256:" + "a" * 64)
 
         def checkpoint_policy(self):
             return SimpleNamespace(
@@ -810,6 +821,9 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
     assert arguments[arguments.index("--optimizer") + 1] == "adamw"
     assert arguments[arguments.index("--lr-schedule") + 1] == "powercool"
     assert "--compile" not in arguments
+    eval_policy = keyword_arguments.pop("worker_eval_examples")
+    assert tuple(eval_policy.heldout_tokens) == ("val-a", "val-b")
+    assert eval_policy.identity_field == "id"
     assert keyword_arguments == {
         "worker_components": components,
         "worker_step_profiler": profiler,

@@ -42,7 +42,11 @@ from .metric_decision import ScalarMetricDecisionConfig
 from .posttraining import RWKVPostTrainConfig
 from .qwen_controls import lower_initial_qwen_controls
 from .rlvr import RLVRTrainConfig
-from .rwkv_scratch import RWKVScratchTrainConfig, prepare_registered_corpus
+from .rwkv_scratch import (
+    RWKVScratchTrainConfig,
+    RWKVTextEvalPolicy,
+    prepare_registered_corpus,
+)
 from .transformer_mla import PROFILE_ADAPTERS, TransformerMLATrainConfig
 from .vision_compressor import VisionTeacherCompressorConfig
 from .vision_frozen import VisionFrozenAdapterConfig
@@ -1061,6 +1065,19 @@ def _rwkv_scratch(
         ) from error
     checkpoint = checkpoint_directory / "state.pt"
     schedule_implementation, _ = components.learning_rate_configuration()
+    evaluator = components.evaluator()
+    qualitative = components.qualitative_samples()
+    eval_policy = RWKVTextEvalPolicy(
+        heldout_tokens=prepared.heldout_tokens,
+        identity_field=qualitative.configuration.identity_field,
+        identities_digest=prepared.identities_digest,
+        selector_digest=prepared.selector_digest,
+        evaluator_component_digest=components.composition.components[
+            "evaluator"
+        ].descriptor_digest,
+        metric_names=tuple(evaluator.configuration.metrics),
+        generation_policy_digest=components.generation_policy().digest,
+    )
     try:
         result = train(
             config.trainer_arguments(
@@ -1079,6 +1096,7 @@ def _rwkv_scratch(
             worker_observability=observability,
             worker_controls=controls,
             worker_execution_phases=execution_phases,
+            worker_eval_examples=eval_policy,
         )
     except SystemExit as error:
         raise AdapterDispatchError(

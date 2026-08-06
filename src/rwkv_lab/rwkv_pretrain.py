@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 import os
@@ -24,6 +25,7 @@ import random
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -40,7 +42,14 @@ from rwkv_lab.optimizer_speedups import (
     tie_embedding_head,
 )
 from rwkv_lab.rwkv8_deltanet import RWKV8ChannelMixDeltaNet, RWKV8TimeMixDeltaNet
-from rwkv_lab.trainvm_worker import ExecutionPhase, torch_trajectory_state
+from rwkv_lab.trainvm_worker import (
+    CheckpointPublicationRequest,
+    EvalEvidencePart,
+    EvalExample,
+    EvalExamplesPublicationRequest,
+    ExecutionPhase,
+    torch_trajectory_state,
+)
 from rwkv_lab.training_components import (
     AdamWConfiguration,
     ContextLengthCurriculumConfiguration,
@@ -56,6 +65,7 @@ from rwkv_lab.training_components import (
 if TYPE_CHECKING:
     from rwkv_lab.training_components import LayerNormFactory
     from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
+    from rwkv_lab.trainvm_adapters.rwkv_scratch import RWKVTextEvalPolicy
     from rwkv_lab.trainvm_worker import (
         WorkerControlRuntime,
         WorkerExecutionPhases,
@@ -833,16 +843,102 @@ def resolved_worker_component_contract(
 def initialize_model_weights_from_checkpoint(
     model: nn.Module, checkpoint_path: str
 ) -> int:
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     if not isinstance(checkpoint, Mapping) or not isinstance(
         checkpoint.get("model"), Mapping
     ):
         raise TypeError("initial checkpoint has no model state")
-    model.load_state_dict(checkpoint["model"], strict=True)
+    model_state = checkpoint["model"]
+    if not model_state or any(
+        not isinstance(name, str) or not isinstance(value, torch.Tensor)
+        for name, value in model_state.items()
+    ):
+        raise TypeError("initial checkpoint model state is not tensor-only")
+    model.load_state_dict(model_state, strict=True)
     source_step = checkpoint.get("step", 0)
     if not isinstance(source_step, int) or isinstance(source_step, bool):
         raise TypeError("initial checkpoint step is invalid")
     return source_step
+
+
+def build_rwkv_text_eval_examples(
+    model: nn.Module,
+    policy: RWKVTextEvalPolicy,
+    *,
+    device: torch.device | str,
+    optimizer_step: int,
+) -> tuple[EvalExample, ...]:
+    if (
+        not isinstance(optimizer_step, int)
+        or isinstance(optimizer_step, bool)
+        or optimizer_step < 0
+    ):
+        raise ValueError("RWKV text eval optimizer step is invalid")
+    was_training = model.training
+    model.eval()
+    examples: list[EvalExample] = []
+    try:
+        with torch.no_grad():
+            for identity, tokens in policy.heldout_tokens.items():
+                prompt = tuple(tokens[:-1])
+                target = int(tokens[-1])
+                input_ids = torch.tensor(
+                    (prompt,), device=device, dtype=torch.long
+                )
+                logits = model(input_ids)
+                if (
+                    not isinstance(logits, torch.Tensor)
+                    or logits.ndim != 3
+                    or logits.shape[:2] != input_ids.shape
+                ):
+                    raise ValueError("RWKV text eval model emitted invalid logits")
+                prediction = int(logits[0, -1].argmax().item())
+                heldout_bytes = json.dumps(
+                    list(tokens), separators=(",", ":")
+                ).encode("utf-8")
+                examples.append(
+                    EvalExample(
+                        example_id=(
+                            "rwkv-"
+                            + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+                        ),
+                        heldout_item_id=identity,
+                        heldout_item_digest=(
+                            "sha256:" + hashlib.sha256(heldout_bytes).hexdigest()
+                        ),
+                        input=(
+                            EvalEvidencePart(
+                                kind="text",
+                                text="token_ids: " + " ".join(map(str, prompt)),
+                            ),
+                        ),
+                        target=(
+                            EvalEvidencePart(kind="text", text=f"token_id: {target}"),
+                        ),
+                        prediction=(
+                            EvalEvidencePart(
+                                kind="text", text=f"token_id: {prediction}"
+                            ),
+                        ),
+                    )
+                )
+    finally:
+        model.train(was_training)
+    return tuple(examples)
+
+
+def perform_rwkv_optimizer_step(
+    optimizer,
+    worker_controls,
+    *,
+    next_step: int,
+    control_applier,
+) -> None:
+    """Cross the authority gate immediately before mutating optimizer state."""
+
+    if worker_controls is not None:
+        worker_controls.pre_optimizer_step(next_step, control_applier)
+    optimizer.step()
 
 
 def main(
@@ -853,6 +949,7 @@ def main(
     worker_observability: WorkerObservability | None = None,
     worker_controls: WorkerControlRuntime | None = None,
     worker_execution_phases: WorkerExecutionPhases | None = None,
+    worker_eval_examples: RWKVTextEvalPolicy | None = None,
 ):
     enable_fast_matmul()
     ap = argparse.ArgumentParser()
@@ -1983,6 +2080,76 @@ def main(
         if assignments:
             raise ValueError("scratch-RWKV controls require a replacement worker")
 
+    step_zero_examples_published = False
+
+    def publish_step_zero_examples() -> None:
+        if worker_controls is None or worker_eval_examples is None:
+            raise ValueError(
+                "RWKV worker requires controls and text examples for its step-zero gate"
+            )
+        staging = Path(args.out) / "checkpoint-step-zero"
+        staging.mkdir(mode=0o750, parents=True, exist_ok=False)
+        checkpoint_state = {
+            "step": 0,
+            "config": tag,
+            "arch": arch,
+            "head_tied": head_tied,
+            "numpy_rng": rng.bit_generator.state,
+            "torch_rng": torch.get_rng_state(),
+            "model": model.state_dict(),
+            "opt": opt.state_dict(),
+            "heads": heads.state_dict() if heads is not None else None,
+        }
+        if component_digest is not None:
+            checkpoint_state["component_composition_digest"] = component_digest
+        if precision_policy is not None:
+            checkpoint_state["precision_policy"] = precision_policy.state_dict()
+        checkpoint_state.update(worker_controls.checkpoint_state())
+        if torch.cuda.is_available():
+            checkpoint_state["cuda_rng"] = torch.cuda.get_rng_state(dev).cpu()
+        torch.save(checkpoint_state, staging / "state.pt")
+        published = worker_controls.publish_policy_checkpoint(
+            CheckpointPublicationRequest(
+                source_directory=staging,
+                optimizer_step=0,
+                resume_grade="terminal_checkpoint",
+                state_components=(
+                    "component_composition",
+                    "control_revision",
+                    "model",
+                    "optimizer",
+                    "rng_accelerator",
+                    "rng_numpy",
+                    "rng_torch",
+                ),
+            )
+        )
+        examples = build_rwkv_text_eval_examples(
+            model,
+            worker_eval_examples,
+            device=dev,
+            optimizer_step=0,
+        )
+        worker_controls.publish_evaluation_examples(
+            EvalExamplesPublicationRequest(
+                output_name="eval_examples",
+                optimizer_step=0,
+                series_id="rwkv-token-predictions",
+                identity_field=worker_eval_examples.identity_field,
+                identities_digest=worker_eval_examples.identities_digest,
+                selector_digest=worker_eval_examples.selector_digest,
+                evaluator_component_digest=(
+                    worker_eval_examples.evaluator_component_digest
+                ),
+                metric_names=worker_eval_examples.metric_names,
+                checkpoint_artifact_id=published.artifact_id,
+                checkpoint_manifest_digest=published.manifest_sha256,
+                policy_digest=worker_eval_examples.generation_policy_digest,
+                examples=examples,
+                parent_artifact_ids=(published.artifact_id,),
+            )
+        )
+
     while True:
         if args.steps and step >= args.steps: break
         if not args.steps and (time.time() - t0) / 60.0 >= args.minutes: break
@@ -1991,6 +2158,9 @@ def main(
                 worker_controls.evaluation(step, reject_live_controls)
             vl = val_loss(); emit({"kind": "eval", "step": step, "loss": vl, "val_loss": vl, "ppl": math.exp(vl)})
             publish_eval(step, vl)
+            if step == 0 and not step_zero_examples_published:
+                publish_step_zero_examples()
+                step_zero_examples_published = True
             print(f"[{step}] val {vl:.4f} (ppl {math.exp(vl):.2f})  {(time.time()-t0)/60:.1f}min", flush=True)
         train_seq_len, train_batch_size = context_curriculum.for_step(
             step, context_horizon or 1
@@ -2155,9 +2325,13 @@ def main(
             )
         if weight_decay_schedule is not None:
             weight_decay_schedule.step(step)
-        opt.step(); step += 1
-        if worker_controls is not None:
-            worker_controls.optimizer_step(step, reject_live_controls)
+        perform_rwkv_optimizer_step(
+            opt,
+            worker_controls,
+            next_step=step + 1,
+            control_applier=reject_live_controls,
+        )
+        step += 1
         if worker_step_profiler is not None:
             worker_step_profiler.step(step)
         if worker_observability is not None:

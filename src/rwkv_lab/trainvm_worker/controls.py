@@ -510,6 +510,22 @@ class WorkerControlRuntime:
             ),
         )
 
+    def publish_evaluation_examples(self, request: object) -> object:
+        """Publish family-neutral checkpoint-bound examples durably."""
+
+        from .eval_examples import (
+            EvalExamplesPublicationRequest,
+            EvalExamplesPublisher,
+        )
+
+        if not isinstance(request, EvalExamplesPublicationRequest):
+            raise WorkerControlError(
+                "evaluation examples publication requires a typed request"
+            )
+        return EvalExamplesPublisher(
+            self._session, output_name=request.output_name
+        ).publish(request)
+
     def publish_artifact(self, request: object) -> object:
         """Publish an immutable non-checkpoint operation artifact immediately."""
 
