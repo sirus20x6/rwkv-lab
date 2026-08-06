@@ -58,6 +58,7 @@ enum ArtifactKind {
   ARTIFACT_KIND_METRICS = 5;
   ARTIFACT_KIND_REPORT = 6;
   ARTIFACT_KIND_OPAQUE = 7;
+  ARTIFACT_KIND_EVAL_EXAMPLES = 8;
 }
 
 message Diagnostic {
@@ -360,6 +361,14 @@ message ArtifactManifest {
   // controller durably acknowledges this sequence only after the manifest is
   // committed to the journal.
   uint64 worker_sequence = 14;
+  // The optimizer-step revision represented by this artifact. This is
+  // mandatory for checkpoints and eval-examples and absent for unstepped
+  // artifacts.
+  optional uint64 optimizer_step = 15;
+  // Exact bounded canonical JSON bytes for controller-validated semantic
+  // artifacts. rwkv-lab.eval-examples.v1 requires these bytes and binds them
+  // to fingerprint; ordinary directory artifacts leave the field empty.
+  bytes canonical_manifest_json = 16;
 }
 
 message EventEnvelope {
@@ -581,6 +590,10 @@ message WorkerWelcome {
   bytes canonical_invocation_json = 17;
   string invocation_digest = 18;
   repeated WorkerExecutionPhaseRequest execution_phase_requests = 19;
+  // Durable launch-gate state recovered from the journal. The worker uses
+  // this only as a pre-mutation defense; the controller remains authoritative.
+  bool step_zero_eval_gate_required = 20;
+  bool step_zero_eval_gate_satisfied = 21;
 }
 
 message WorkerReceipt {

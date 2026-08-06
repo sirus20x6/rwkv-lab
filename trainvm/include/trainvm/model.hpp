@@ -17,7 +17,16 @@ using Json = nlohmann::json;
 
 enum class AcceleratorVendor { nvidia, amd, intel, none };
 enum class ParameterType { string, integer, number, boolean, path, duration };
-enum class ArtifactType { path, checkpoint, dataset, image_gallery, metrics, report, opaque };
+enum class ArtifactType {
+  path,
+  checkpoint,
+  dataset,
+  image_gallery,
+  metrics,
+  report,
+  opaque,
+  eval_examples,
+};
 enum class Immutability { immutable, append_only, mutable_until_publish };
 enum class Fingerprint { sha256, manifest_sha256, adapter, none };
 enum class ComponentRuntime { builtin, python_worker, native_worker, external_worker };

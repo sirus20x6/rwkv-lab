@@ -238,6 +238,20 @@ class WorkerSession:
             )
 
     @property
+    def step_zero_eval_gate_required(self) -> bool:
+        with self._condition:
+            return bool(
+                self._welcome and self._welcome.step_zero_eval_gate_required
+            )
+
+    @property
+    def step_zero_eval_gate_satisfied(self) -> bool:
+        with self._condition:
+            return bool(
+                self._welcome and self._welcome.step_zero_eval_gate_satisfied
+            )
+
+    @property
     def execution_phase_requests(self) -> tuple[ExecutionPhaseRequest, ...]:
         with self._condition:
             if self._welcome is None:
@@ -527,9 +541,27 @@ class WorkerSession:
         fingerprint_algorithm: str,
         fingerprint: str,
         parent_artifact_ids: Iterable[str] = (),
+        optimizer_step: int | None = None,
+        canonical_manifest_json: bytes = b"",
         wait: bool = True,
     ) -> int:
         parents = tuple(parent_artifact_ids)
+        stepped_artifact = kind in {
+            wire.ARTIFACT_KIND_CHECKPOINT,
+            wire.ARTIFACT_KIND_EVAL_EXAMPLES,
+        }
+        valid_optimizer_step = (
+            isinstance(optimizer_step, int)
+            and not isinstance(optimizer_step, bool)
+            and 0 <= optimizer_step < 1 << 64
+        )
+        if (stepped_artifact and not valid_optimizer_step) or (
+            not stepped_artifact and optimizer_step is not None
+        ):
+            raise WorkerSessionError(
+                "checkpoint and eval-examples artifacts require an optimizer step; "
+                "unstepped artifacts must omit it"
+            )
         identity = (
             logical_name,
             kind,
@@ -539,6 +571,8 @@ class WorkerSession:
             fingerprint_algorithm,
             fingerprint,
             parents,
+            optimizer_step,
+            canonical_manifest_json,
         )
         with self._condition:
             previous = self._published_artifacts.get(artifact_id)
@@ -549,29 +583,44 @@ class WorkerSession:
                 )
             return previous[1]
         sequence = self._allocate_sequence()
+        manifest = wire.ArtifactManifest(
+            artifact_id=artifact_id,
+            logical_name=logical_name,
+            kind=kind,
+            schema=schema,
+            uri=uri,
+            size_bytes=size_bytes,
+            fingerprint_algorithm=fingerprint_algorithm,
+            fingerprint=fingerprint,
+            complete=True,
+            producer_node_id=self.bootstrap.node_id,
+            producer_attempt_id=self.bootstrap.attempt_id,
+            parent_artifact_ids=parents,
+            published_at=_timestamp_now(),
+            worker_sequence=sequence,
+            canonical_manifest_json=canonical_manifest_json,
+        )
+        if optimizer_step is not None:
+            manifest.optimizer_step = optimizer_step
         result = self._send(
             wire.WorkerToController(
-                artifact=wire.ArtifactManifest(
-                    artifact_id=artifact_id,
-                    logical_name=logical_name,
-                    kind=kind,
-                    schema=schema,
-                    uri=uri,
-                    size_bytes=size_bytes,
-                    fingerprint_algorithm=fingerprint_algorithm,
-                    fingerprint=fingerprint,
-                    complete=True,
-                    producer_node_id=self.bootstrap.node_id,
-                    producer_attempt_id=self.bootstrap.attempt_id,
-                    parent_artifact_ids=parents,
-                    published_at=_timestamp_now(),
-                    worker_sequence=sequence,
-                )
+                artifact=manifest
             ),
             sequence,
             wait,
         )
         with self._condition:
+            if (
+                wait
+                and kind == wire.ARTIFACT_KIND_EVAL_EXAMPLES
+                and schema == "rwkv-lab.eval-examples.v1"
+                and optimizer_step == 0
+                and self._welcome is not None
+            ):
+                # The controller ACK is emitted only after semantic validation
+                # and durable journal commit, so this local transition cannot
+                # race ahead of authority.
+                self._welcome.step_zero_eval_gate_satisfied = True
             self._published_artifacts[artifact_id] = (identity, result)
         return result
 

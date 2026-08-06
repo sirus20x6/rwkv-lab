@@ -4931,6 +4931,7 @@ void test_worker_control_service_boundary() {
     artifact.set_complete(true);
     artifact.set_producer_node_id(connection.identity.node_id);
     artifact.set_producer_attempt_id(connection.identity.attempt_id);
+    artifact.set_optimizer_step(11U);
     artifact.mutable_published_at()->set_seconds(3);
     auto undeclared_artifact = artifact;
     undeclared_artifact.set_logical_name("rogue-output");
@@ -4942,6 +4943,11 @@ void test_worker_control_service_boundary() {
     mismatched_artifact.set_kind(trainvm::v1::ARTIFACT_KIND_IMAGE_GALLERY);
     const grpc::Status mismatched_artifact_status =
         service.record_worker_artifact(mismatched_artifact, connection,
+                                       rejected_artifact_acknowledgement);
+    auto unstepped_checkpoint = artifact;
+    unstepped_checkpoint.clear_optimizer_step();
+    const grpc::Status unstepped_checkpoint_status =
+        service.record_worker_artifact(unstepped_checkpoint, connection,
                                        rejected_artifact_acknowledgement);
     auto forged_parent_artifact = artifact;
     forged_parent_artifact.add_parent_artifact_ids(
@@ -5005,6 +5011,9 @@ void test_worker_control_service_boundary() {
       const auto events = observer.events_for_run(run_id);
       const auto durable_heartbeat = observer.event(
           connection.dispatch.dispatch_id + ":heartbeat:1");
+      const auto durable_checkpoint = observer.event(
+          connection.dispatch.dispatch_id + ":artifact:" +
+          trainvm::sha256_hex("checkpoint-step-11"));
       const auto effective_controls = observer.effective_controls(run_id);
       check(open.ok() && heartbeat_status.ok() && acknowledged == 1U &&
                 heartbeat_replay.ok() && replayed_acknowledgement == 1U &&
@@ -5029,6 +5038,8 @@ void test_worker_control_service_boundary() {
                 undeclared_artifact_status.error_code() ==
                     grpc::StatusCode::PERMISSION_DENIED &&
                 mismatched_artifact_status.error_code() ==
+                    grpc::StatusCode::INVALID_ARGUMENT &&
+                unstepped_checkpoint_status.error_code() ==
                     grpc::StatusCode::INVALID_ARGUMENT &&
                 forged_parent_artifact_status.error_code() ==
                     grpc::StatusCode::INVALID_ARGUMENT &&
@@ -5055,6 +5066,8 @@ void test_worker_control_service_boundary() {
                 projection->last_heartbeat_ns == 2'200 &&
                 durable_heartbeat &&
                 durable_heartbeat->wall_time_ns == 2'200 &&
+                durable_checkpoint &&
+                durable_checkpoint->optimizer_step == 11U &&
                 durable_heartbeat->payload.value("observed_at_ns",
                                                   std::int64_t{}) ==
                     1'000'000'000LL &&
@@ -5738,6 +5751,7 @@ void test_worker_control_grpc_stream() {
     artifact->set_complete(true);
     artifact->set_producer_node_id(welcome_message.welcome().node_id());
     artifact->set_producer_attempt_id(welcome_message.welcome().attempt_id());
+    artifact->set_optimizer_step(21U);
     artifact->mutable_published_at()->set_seconds(4);
     trainvm::v1::ControllerToWorker artifact_ack;
     const bool artifact_written = primary->Write(artifact_message);
@@ -6526,7 +6540,7 @@ void test_resource_releasing_pause_lifecycle() {
          .event_version = 1U,
          .wall_time_ns = 1'180,
          .monotonic_time_ns = 1'180U,
-         .optimizer_step = std::nullopt,
+         .optimizer_step = std::uint64_t{9},
          .payload = {{"artifact_id", artifact_id},
                      {"logical_name", "checkpoint"},
                      {"kind", "checkpoint"},
@@ -13029,7 +13043,7 @@ void test_service_orders_physical_before_logical_release() {
        .event_version = 1U,
        .wall_time_ns = 10,
        .monotonic_time_ns = 10U,
-       .optimizer_step = std::nullopt,
+       .optimizer_step = std::uint64_t{9},
        .payload = {{"artifact_id", checkpoint_id},
                    {"logical_name", "checkpoint"},
                    {"kind", "checkpoint"},

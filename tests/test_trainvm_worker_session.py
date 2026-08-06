@@ -5,6 +5,8 @@ import threading
 import time
 from collections.abc import Iterable
 
+import pytest
+
 from test_trainvm_worker_documents import bootstrap_document, invocation_document
 
 from rwkv_lab.trainvm_worker import (
@@ -15,6 +17,7 @@ from rwkv_lab.trainvm_worker import (
     ExecutionPhaseDisposition,
     LifecycleDisposition,
     WorkerSession,
+    WorkerSessionError,
     load_worker_bootstrap,
     state_fingerprint,
 )
@@ -330,6 +333,7 @@ def test_identical_artifact_republication_reuses_the_durable_receipt() -> None:
         "size_bytes": 12,
         "fingerprint_algorithm": "manifest_sha256",
         "fingerprint": "a" * 64,
+        "optimizer_step": 1,
     }
     assert session.artifact(**values) == 1
     assert session.artifact(**values) == 1
@@ -339,4 +343,26 @@ def test_identical_artifact_republication_reuses_the_durable_receipt() -> None:
         "artifact",
         "event",
     ]
+    session.close()
+
+
+def test_checkpoint_artifact_requires_authoritative_optimizer_step() -> None:
+    controller = FakeController()
+    session = WorkerSession(
+        load_worker_bootstrap(bootstrap_document()), connector=controller
+    )
+    session.start()
+    values = {
+        "artifact_id": "checkpoint-unstepped",
+        "logical_name": "checkpoint",
+        "kind": wire.ARTIFACT_KIND_CHECKPOINT,
+        "schema": "test.checkpoint.v1",
+        "uri": "file:///run/checkpoint-unstepped",
+        "size_bytes": 12,
+        "fingerprint_algorithm": "manifest_sha256",
+        "fingerprint": "a" * 64,
+    }
+    with pytest.raises(WorkerSessionError, match="require an optimizer step"):
+        session.artifact(**values)
+    session.finish("node.completed", {"ok": True}, optimizer_step=0)
     session.close()

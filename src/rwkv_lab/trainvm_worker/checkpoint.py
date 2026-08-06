@@ -860,6 +860,7 @@ class CheckpointPublisher:
             fingerprint_algorithm="manifest_sha256",
             fingerprint=manifest_sha256,
             parent_artifact_ids=parents,
+            optimizer_step=optimizer_step,
             wait=True,
         )
         return PublishedCheckpoint(

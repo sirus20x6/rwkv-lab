@@ -41,6 +41,16 @@ from .controls import (
     WorkerResourcesReleasedPause,
     controls_from_invocation,
 )
+from .eval_examples import (
+    EVAL_EXAMPLES_SCHEMA,
+    EvalEvidencePart,
+    EvalExample,
+    EvalExamplesError,
+    EvalExamplesPublicationRequest,
+    EvalExamplesPublisher,
+    EvalMedia,
+    PublishedEvalExamples,
+)
 from .eval_gallery import (
     EVAL_GALLERY_SCHEMA,
     EvalGalleryError,
@@ -127,6 +137,7 @@ from .training import (
 
 __all__ = [
     "CHECKPOINT_SNAPSHOT_SCHEMA",
+    "EVAL_EXAMPLES_SCHEMA",
     "EVAL_GALLERY_SCHEMA",
     "EXTERNAL_PROFILER_AUTHORITY_DESCRIPTOR",
     "EXTERNAL_PROFILER_AUTHORITY_SCHEMA",
@@ -152,10 +163,16 @@ __all__ = [
     "ControlAssignment",
     "ControlDisposition",
     "EffectiveWorkerRuntimePolicy",
+    "EvalEvidencePart",
+    "EvalExample",
+    "EvalExamplesError",
+    "EvalExamplesPublicationRequest",
+    "EvalExamplesPublisher",
     "EvalGalleryError",
     "EvalGalleryItem",
     "EvalGalleryPublicationRequest",
     "EvalGalleryPublisher",
+    "EvalMedia",
     "ExecutionPhase",
     "ExecutionPhaseDisposition",
     "ExecutionPhaseRequest",
@@ -173,6 +190,7 @@ __all__ = [
     "ObservabilityDeclaration",
     "PublishedArtifact",
     "PublishedCheckpoint",
+    "PublishedEvalExamples",
     "PublishedEvalGallery",
     "PublishedGpuTrace",
     "ResolvedArtifactObject",

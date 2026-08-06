@@ -4,6 +4,7 @@
 
 #include "trainvm/controller.hpp"
 #include "trainvm/document.hpp"
+#include "trainvm/eval_examples_contract.hpp"
 #include "trainvm/external_profiler_artifact.hpp"
 #include "trainvm/reflection_json.hpp"
 
@@ -1150,6 +1151,8 @@ std::string artifact_kind_name(v1::ArtifactKind kind) {
       return "report";
     case v1::ARTIFACT_KIND_OPAQUE:
       return "opaque";
+    case v1::ARTIFACT_KIND_EVAL_EXAMPLES:
+      return "eval_examples";
     case v1::ARTIFACT_KIND_UNSPECIFIED:
       break;
     default:
@@ -1326,6 +1329,7 @@ nlohmann::json invocation_resume_checkpoint(
   }
   if (!checkpoint || checkpoint->node_id != node_id ||
       checkpoint->attempt_id != resume->attempt_id ||
+      checkpoint->optimizer_step != pause->optimizer_step ||
       checkpoint->payload.value("kind", std::string{}) != "checkpoint" ||
       !checkpoint->payload.value("complete", false) ||
       checkpoint->payload.value("producer_node_id", std::string{}) != node_id ||
@@ -2773,6 +2777,12 @@ grpc::Status TrainVMService::open_worker_connection(
       welcome.set_component(historical_dispatch->component);
       welcome.set_operation(historical_dispatch->operation);
       welcome.set_acknowledged_worker_sequence(result->worker_sequence);
+      welcome.set_step_zero_eval_gate_required(
+          invocation_requires_step_zero_eval_gate(invocation->publishes));
+      welcome.set_step_zero_eval_gate_satisfied(
+          durable_step_zero_eval_gate_satisfied(
+              journal_.events_for_run(hello.run_id), hello.run_id,
+              hello.node_id, hello.attempt_id));
       populate_invocation(welcome, *invocation);
       v1::WorkerReceipt receipt;
       receipt.set_event_id(result->event_id);
@@ -2878,6 +2888,12 @@ grpc::Status TrainVMService::open_worker_connection(
     welcome.set_operation(dispatch.operation);
     welcome.set_acknowledged_worker_sequence(journal_.latest_worker_sequence(
         hello.run_id, hello.node_id, hello.attempt_id));
+    welcome.set_step_zero_eval_gate_required(
+        invocation_requires_step_zero_eval_gate(invocation->publishes));
+    welcome.set_step_zero_eval_gate_satisfied(
+        durable_step_zero_eval_gate_satisfied(
+            journal_.events_for_run(hello.run_id), hello.run_id,
+            hello.node_id, hello.attempt_id));
     populate_invocation(welcome, *invocation);
     return grpc::Status::OK;
   } catch (const nlohmann::json::exception& exception) {
@@ -2929,6 +2945,15 @@ grpc::Status TrainVMService::complete_worker_connection(
     if (!plan) {
       return {grpc::StatusCode::DATA_LOSS,
               "worker run has no persisted compiled plan"};
+    }
+    if (invocation_requires_step_zero_eval_gate(connection.publishes) &&
+        envelope.has_optimizer_step() && envelope.optimizer_step() > 0U &&
+        !durable_step_zero_eval_gate_satisfied(
+            journal_.events_for_run(connection.identity.run_id),
+            connection.identity.run_id,
+            connection.identity.node_id, connection.identity.attempt_id)) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "worker result is blocked until durable step-zero scalar and eval-examples evidence"};
     }
     Controller controller(*plan, journal_, connection.identity.run_id);
     controller.recover();
@@ -3153,6 +3178,14 @@ grpc::Status TrainVMService::commit_worker_observation(
       return {grpc::StatusCode::DATA_LOSS,
               "worker run has no persisted compiled plan"};
     }
+    if (invocation_requires_step_zero_eval_gate(connection.publishes) &&
+        event.optimizer_step && *event.optimizer_step > 0U &&
+        !durable_step_zero_eval_gate_satisfied(
+            journal_.events_for_run(event.run_id), event.run_id,
+            event.node_id, event.attempt_id)) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "optimizer step is blocked until durable step-zero scalar and eval-examples evidence"};
+    }
     if (event.event_type == "metric.sampled") {
       const std::string name =
           event.payload.value("name", std::string{});
@@ -3330,6 +3363,76 @@ grpc::Status TrainVMService::record_worker_artifact(
       return {grpc::StatusCode::INVALID_ARGUMENT,
               "published artifact requires complete content identity and the active producer attempt"};
     }
+    const bool eval_examples =
+        artifact.kind() == v1::ARTIFACT_KIND_EVAL_EXAMPLES;
+    const bool checkpoint = artifact.kind() == v1::ARTIFACT_KIND_CHECKPOINT;
+    nlohmann::json eval_examples_document = nullptr;
+    std::optional<EvalExamplesManifest> eval_examples_manifest;
+    std::optional<WorkerInvocationSpec> eval_examples_invocation;
+    if (eval_examples) {
+      if (artifact.schema() != kEvalExamplesSchema ||
+          !artifact.has_optimizer_step() ||
+          artifact.fingerprint_algorithm() != "manifest_sha256" ||
+          artifact.canonical_manifest_json().empty() ||
+          artifact.canonical_manifest_json().size() > 60U * 1024U ||
+          artifact.size_bytes() != artifact.canonical_manifest_json().size()) {
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "eval-examples artifact requires stepped canonical manifest content"};
+      }
+      try {
+        eval_examples_document =
+            nlohmann::json::parse(artifact.canonical_manifest_json());
+      } catch (const nlohmann::json::exception& exception) {
+        return {grpc::StatusCode::INVALID_ARGUMENT, exception.what()};
+      }
+      if (!eval_examples_document.is_object() ||
+          eval_examples_document.dump() != artifact.canonical_manifest_json() ||
+          artifact.fingerprint() !=
+              "sha256:" + sha256_hex(artifact.canonical_manifest_json())) {
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "eval-examples manifest bytes or fingerprint are noncanonical"};
+      }
+      eval_examples_invocation =
+          journal_.worker_invocation(connection.dispatch.dispatch_id);
+      if (!eval_examples_invocation) {
+        return {grpc::StatusCode::DATA_LOSS,
+                "eval-examples publication has no immutable invocation"};
+      }
+      const std::string run_directory =
+          eval_examples_invocation->workspace.value("run_directory",
+                                                     std::string{});
+      try {
+        eval_examples_manifest =
+            validate_eval_examples_manifest(eval_examples_document);
+        validate_eval_examples_payload(
+            *eval_examples_manifest, artifact.uri(),
+            artifact.canonical_manifest_json(), artifact.fingerprint(),
+            run_directory, artifact.artifact_id());
+      } catch (const std::invalid_argument& exception) {
+        return {grpc::StatusCode::INVALID_ARGUMENT, exception.what()};
+      }
+      if (eval_examples_manifest->run_id != connection.identity.run_id ||
+          eval_examples_manifest->node_id != connection.identity.node_id ||
+          eval_examples_manifest->attempt_id !=
+              connection.identity.attempt_id ||
+          eval_examples_manifest->optimizer_step !=
+              artifact.optimizer_step()) {
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "eval-examples manifest disagrees with producer or step identity"};
+      }
+      try {
+        validate_eval_examples_gate_provenance(
+            *eval_examples_manifest, eval_examples_invocation->training,
+            journal_.events_for_run(connection.identity.run_id));
+      } catch (const std::invalid_argument& exception) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, exception.what()};
+      }
+    } else if ((checkpoint != artifact.has_optimizer_step()) ||
+               !artifact.canonical_manifest_json().empty()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "checkpoint artifacts require an optimizer step and unstepped "
+              "artifacts must omit eval contract fields"};
+    }
     const nlohmann::json* publication = nullptr;
     if (!connection.publishes.is_object()) {
       return {grpc::StatusCode::DATA_LOSS,
@@ -3375,7 +3478,29 @@ grpc::Status TrainVMService::record_worker_artifact(
       }
       parent_ids.push_back(parent);
     }
+    if (eval_examples_manifest &&
+        !parents.contains(eval_examples_manifest->checkpoint.artifact_id)) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "eval-examples checkpoint must be a declared artifact parent"};
+    }
     const std::int64_t published_at_ns = timestamp_ns(artifact.published_at());
+    nlohmann::json payload =
+        {{"artifact_id", artifact.artifact_id()},
+         {"logical_name", artifact.logical_name()},
+         {"kind", artifact_kind_name(artifact.kind())},
+         {"schema", artifact.schema()},
+         {"uri", artifact.uri()},
+         {"size_bytes", artifact.size_bytes()},
+         {"fingerprint_algorithm", artifact.fingerprint_algorithm()},
+         {"fingerprint", artifact.fingerprint()},
+         {"complete", artifact.complete()},
+         {"producer_node_id", artifact.producer_node_id()},
+         {"producer_attempt_id", artifact.producer_attempt_id()},
+         {"parent_artifact_ids", std::move(parent_ids)},
+         {"published_at_ns", published_at_ns}};
+    if (eval_examples) {
+      payload["eval_examples_manifest"] = std::move(eval_examples_document);
+    }
     const Event event{
         .event_id = connection.dispatch.dispatch_id + ":artifact:" +
                     sha256_hex(artifact.artifact_id()),
@@ -3389,20 +3514,11 @@ grpc::Status TrainVMService::record_worker_artifact(
         .event_version = 1,
         .wall_time_ns = published_at_ns,
         .monotonic_time_ns = 0,
-        .optimizer_step = std::nullopt,
-        .payload = {{"artifact_id", artifact.artifact_id()},
-                    {"logical_name", artifact.logical_name()},
-                    {"kind", artifact_kind_name(artifact.kind())},
-                    {"schema", artifact.schema()},
-                    {"uri", artifact.uri()},
-                    {"size_bytes", artifact.size_bytes()},
-                    {"fingerprint_algorithm", artifact.fingerprint_algorithm()},
-                    {"fingerprint", artifact.fingerprint()},
-                    {"complete", artifact.complete()},
-                    {"producer_node_id", artifact.producer_node_id()},
-                    {"producer_attempt_id", artifact.producer_attempt_id()},
-                    {"parent_artifact_ids", std::move(parent_ids)},
-                    {"published_at_ns", published_at_ns}},
+        .optimizer_step = (eval_examples || checkpoint)
+                              ? std::optional<std::uint64_t>{
+                                    artifact.optimizer_step()}
+                              : std::nullopt,
+        .payload = std::move(payload),
     };
     return commit_worker_observation(event, connection, acknowledged);
   } catch (const std::exception& exception) {

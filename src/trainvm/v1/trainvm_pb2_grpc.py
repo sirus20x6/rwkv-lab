@@ -39,6 +39,11 @@ class TrainVMStub(object):
                 request_serializer=trainvm_dot_v1_dot_trainvm__pb2.SubmitExperimentRequest.SerializeToString,
                 response_deserializer=trainvm_dot_v1_dot_trainvm__pb2.SubmitExperimentResponse.FromString,
                 _registered_method=True)
+        self.AuthorRun = channel.unary_stream(
+                '/trainvm.v1.TrainVM/AuthorRun',
+                request_serializer=trainvm_dot_v1_dot_trainvm__pb2.AuthorRunRequest.SerializeToString,
+                response_deserializer=trainvm_dot_v1_dot_trainvm__pb2.AuthorRunUpdate.FromString,
+                _registered_method=True)
         self.DiffPlan = channel.unary_unary(
                 '/trainvm.v1.TrainVM/DiffPlan',
                 request_serializer=trainvm_dot_v1_dot_trainvm__pb2.PlanDiffRequest.SerializeToString,
@@ -90,6 +95,12 @@ class TrainVMServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def SubmitExperiment(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def AuthorRun(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -156,6 +167,11 @@ def add_TrainVMServicer_to_server(servicer, server):
                     servicer.SubmitExperiment,
                     request_deserializer=trainvm_dot_v1_dot_trainvm__pb2.SubmitExperimentRequest.FromString,
                     response_serializer=trainvm_dot_v1_dot_trainvm__pb2.SubmitExperimentResponse.SerializeToString,
+            ),
+            'AuthorRun': grpc.unary_stream_rpc_method_handler(
+                    servicer.AuthorRun,
+                    request_deserializer=trainvm_dot_v1_dot_trainvm__pb2.AuthorRunRequest.FromString,
+                    response_serializer=trainvm_dot_v1_dot_trainvm__pb2.AuthorRunUpdate.SerializeToString,
             ),
             'DiffPlan': grpc.unary_unary_rpc_method_handler(
                     servicer.DiffPlan,
@@ -230,6 +246,33 @@ class TrainVM(object):
             '/trainvm.v1.TrainVM/SubmitExperiment',
             trainvm_dot_v1_dot_trainvm__pb2.SubmitExperimentRequest.SerializeToString,
             trainvm_dot_v1_dot_trainvm__pb2.SubmitExperimentResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def AuthorRun(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/trainvm.v1.TrainVM/AuthorRun',
+            trainvm_dot_v1_dot_trainvm__pb2.AuthorRunRequest.SerializeToString,
+            trainvm_dot_v1_dot_trainvm__pb2.AuthorRunUpdate.FromString,
             options,
             channel_credentials,
             insecure,

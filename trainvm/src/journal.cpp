@@ -5395,7 +5395,7 @@ CheckpointCommand Journal::acknowledge_checkpoint_command(
   }
   if (status == CheckpointCommandStatus::applied) {
     Statement artifact(database_, R"sql(
-      SELECT worker_sequence, payload_json FROM events
+      SELECT worker_sequence, payload_json, optimizer_step FROM events
       WHERE run_id=? AND node_id=? AND attempt_id=?
         AND event_type='artifact.published'
         AND json_extract(payload_json, '$.artifact_id')=?
@@ -5407,7 +5407,11 @@ CheckpointCommand Journal::acknowledge_checkpoint_command(
     bind_text(artifact.get(), 4, artifact_id);
     if (sqlite3_step(artifact.get()) != SQLITE_ROW ||
         static_cast<std::uint64_t>(sqlite3_column_int64(artifact.get(), 0)) >=
-            identity.worker_sequence) {
+            identity.worker_sequence ||
+        !optimizer_step ||
+        sqlite3_column_type(artifact.get(), 2) != SQLITE_INTEGER ||
+        static_cast<std::uint64_t>(sqlite3_column_int64(artifact.get(), 2)) !=
+            *optimizer_step) {
       throw std::invalid_argument(
           "checkpoint acknowledgement has no prior published artifact");
     }
@@ -5662,7 +5666,7 @@ LifecycleCommand Journal::acknowledge_lifecycle_command(
   }
   if (status == LifecycleCommandStatus::applied && pause_checkpoint) {
     Statement artifact(database_, R"sql(
-      SELECT worker_sequence, payload_json FROM events
+      SELECT worker_sequence, payload_json, optimizer_step FROM events
       WHERE run_id=? AND node_id=? AND attempt_id=?
         AND event_type='artifact.published'
         AND json_extract(payload_json, '$.artifact_id')=?
@@ -5675,6 +5679,10 @@ LifecycleCommand Journal::acknowledge_lifecycle_command(
     if (sqlite3_step(artifact.get()) != SQLITE_ROW ||
         static_cast<std::uint64_t>(sqlite3_column_int64(artifact.get(), 0)) >=
             identity.worker_sequence ||
+        !optimizer_step ||
+        sqlite3_column_type(artifact.get(), 2) != SQLITE_INTEGER ||
+        static_cast<std::uint64_t>(sqlite3_column_int64(artifact.get(), 2)) !=
+            *optimizer_step ||
         nlohmann::json::parse(column_text(artifact.get(), 1))
                 .value("kind", std::string{}) != "checkpoint") {
       throw std::invalid_argument(
@@ -6025,7 +6033,7 @@ LifecycleCommand Journal::apply_released_resource_resume(
   }
 
   Statement checkpoint(database_, R"sql(
-    SELECT payload_json FROM events
+    SELECT payload_json, optimizer_step FROM events
     WHERE run_id=? AND node_id=? AND attempt_id=?
       AND event_type='artifact.published'
       AND json_extract(payload_json, '$.artifact_id')=?
@@ -6041,7 +6049,10 @@ LifecycleCommand Journal::apply_released_resource_resume(
   }
   const nlohmann::json checkpoint_manifest =
       nlohmann::json::parse(column_text(checkpoint.get(), 0));
-  if (sqlite3_step(checkpoint.get()) == SQLITE_ROW ||
+  if (sqlite3_column_type(checkpoint.get(), 1) != SQLITE_INTEGER ||
+      static_cast<std::uint64_t>(sqlite3_column_int64(checkpoint.get(), 1)) !=
+          *pause->optimizer_step ||
+      sqlite3_step(checkpoint.get()) == SQLITE_ROW ||
       checkpoint_manifest.value("kind", std::string{}) != "checkpoint" ||
       !checkpoint_manifest.value("complete", false) ||
       checkpoint_manifest.value("producer_node_id", std::string{}) !=
