@@ -535,28 +535,29 @@ struct HostdDaemonRuntime::Implementation final {
           "hostd runtime used outside its authority owner thread");
   }
 
+  // The authority socket is already self-bound by the constructor, which must
+  // happen before NVML loads the CUDA driver.  This step only assembles
+  // request serving over that bound socket, which the constructor deliberately
+  // deferred until the inventory, ledger, and recovery authorities were
+  // admitted.
   void bind_transport() {
     if (unified_server)
       return;
-    if (socket || status_server || mutation_server)
+    if (status_server || mutation_server)
       throw HostdDaemonRuntimeError(
           "hostd transport assembly is partially initialized");
-    CloseDescriptor parent(
-        open_socket_parent(configuration.document().socket.path));
-    auto bound = HostdSocketAuthority::self_bind(configuration.socket(),
-                                                 parent.get(), singleton);
-    auto candidate_socket =
-        std::make_shared<HostdSocketAuthority>(std::move(bound));
+    if (!socket)
+      throw HostdDaemonRuntimeError(
+          "hostd transport assembly requires the bound authority socket");
     auto candidate_status = std::make_unique<HostdStatusServer>(
-        candidate_socket, coordinator, configuration.status_peer(),
+        socket, coordinator, configuration.status_peer(),
         configuration.status_transport(), authority_status_source);
     auto candidate_mutation = std::make_unique<HostdMutationServer>(
-        candidate_socket, coordinator, challenge_verifier, session_kernel,
+        socket, coordinator, challenge_verifier, session_kernel,
         service_identity, ledger_time, configuration.mutation_transport(),
         launch_capable ? process_supervisor : nullptr);
     auto candidate_unified = std::make_unique<HostdUnifiedServer>(
-        candidate_socket, *candidate_status, *candidate_mutation);
-    socket = std::move(candidate_socket);
+        socket, *candidate_status, *candidate_mutation);
     status_server = std::move(candidate_status);
     mutation_server = std::move(candidate_mutation);
     unified_server = std::move(candidate_unified);
