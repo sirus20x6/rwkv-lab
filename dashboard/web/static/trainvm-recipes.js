@@ -376,7 +376,10 @@
     try {
       const response = await fetch(AUTHOR_ENDPOINT, {
         method: "POST", cache: "no-store", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ request_document: source, source_format: "json", dry_run: dryRun }),
+        body: JSON.stringify({
+          request_document: source, source_format: "json", dry_run: dryRun,
+          expected_plan_hash: dryRun ? "" : preview.planHash,
+        }),
       });
       if (!response.ok) throw new Error((await response.text()).trim() || `HTTP ${response.status}`);
       if (!String(response.headers.get("Content-Type") || "").toLowerCase().startsWith("application/x-ndjson")) {
@@ -528,6 +531,7 @@
   if (authoring) authoring.addEventListener("toggle", () => { if (authoring.open) loadProfiles(); });
   byID("vm-recipe-composer")?.addEventListener("change", (event) => {
     if (!instance) return;
+    if (event.target.id === "vm-recipe-source") return;
     if (event.target.id === "vm-recipe-select") {
       selectedIdentity = event.target.value;
       instance = null;
@@ -547,7 +551,13 @@
     captureIdentityInputs();
     captureField(event.target);
     invalidatePreview();
-    renderComposer();
+    const source = byID("vm-recipe-source");
+    if (source) source.value = JSON.stringify(authorDocument(), null, 2);
+    const compatibilityField = event.target.dataset.vmRecipeField &&
+      (selectedProfile()?.compatibility || []).some((rule) =>
+        (rule.fields || []).includes(event.target.dataset.vmRecipeField));
+    if (compatibilityField) renderComposer();
+    else refreshLocalState();
   });
   byID("vm-recipe-composer")?.addEventListener("input", (event) => {
     if (!instance || event.target.id === "vm-recipe-source") return;

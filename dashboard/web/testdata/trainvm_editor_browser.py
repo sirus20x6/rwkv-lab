@@ -354,7 +354,9 @@ def main() -> None:
                 page.locator("#vm-recipe-author").fill("browser-agent")
                 page.locator("#vm-recipe-reason").fill(f"author {family}")
                 page.locator("#vm-recipe-reason").blur()
-                page.wait_for_function("!document.querySelector('#vm-recipe-preview').disabled")
+                assert not page.locator("#vm-recipe-preview").is_disabled(), (
+                    family, page.locator("#vm-recipe-local-diagnostics").inner_text()
+                )
                 page.click("#vm-recipe-preview")
                 page.wait_for_function(
                     "document.querySelector('#vm-recipe-request-state').textContent.includes('ready')"
@@ -382,14 +384,16 @@ def main() -> None:
                     )
                     diff_summary = page.locator("#vm-recipe-preview-panel details").nth(2).locator("summary").inner_text()
                     assert not diff_summary.endswith("· 0")
+                    page.locator(".vm-recipe-import").evaluate("node => node.open = true")
                     original = page.locator("#vm-recipe-source").input_value()
                     page.click("#vm-recipe-import")
                     assert json.loads(page.locator("#vm-recipe-source").input_value()) == json.loads(original)
+                    page.locator(".vm-recipe-import").evaluate("node => node.open = true")
                     rejected = json.loads(original)
                     rejected["unknown"] = True
                     page.locator("#vm-recipe-source").fill(json.dumps(rejected))
                     page.click("#vm-recipe-import")
-                    assert "import rejected" in page.locator("#vm-recipe-request-state").inner_text()
+                    assert "import rejected" in page.locator("#vm-recipe-request-state").inner_text(), page.locator("#vm-recipe-request-state").inner_text()
                     page.locator("#vm-recipe-source").fill(original)
                     page.click("#vm-recipe-import")
                     page.click("#vm-recipe-preview")
@@ -403,6 +407,7 @@ def main() -> None:
                 "document.querySelector('#vm-recipe-request-state').textContent.includes('queued')"
             )
             assert Handler.authored[-1]["dry_run"] is False
+            assert Handler.authored[-1]["expected_plan_hash"] == "sha256:recipe-browser"
             assert "submitting" in page.locator("#vm-recipe-preview-panel").inner_text()
 
             page.locator("#vm-recipe-reason").fill("fail launch")

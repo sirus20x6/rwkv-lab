@@ -466,6 +466,7 @@ func TestTrainVMRecipeComposerUsesCanonicalAuthorRunContract(t *testing.T) {
 		`trainvm.author-run/v1`, `trainvm.recipe-instance/v1`,
 		`/api/trainvm/recipe-profiles`, `/api/trainvm/author-runs`,
 		`request_document: source`, `source_format: "json"`, `dry_run: dryRun`,
+		`expected_plan_hash: dryRun ? "" : preview.planHash`,
 		`application/x-ndjson`, `profile.overrides || []`,
 		`profile?.compatibility || []`, `field.minimum`, `field.maximum`,
 		`recipe_expansion_json`, `effective-value provenance`,
