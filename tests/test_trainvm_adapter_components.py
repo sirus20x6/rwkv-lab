@@ -88,18 +88,71 @@ def composition():
                 "gradient_scaling": False,
             },
         ),
+        "split": (
+            "deterministic_holdout",
+            {"seed": 7, "held_out_count": 2, "selection": "train"},
+        ),
+        "evaluation_split": (
+            "deterministic_holdout",
+            {"seed": 7, "held_out_count": 2, "selection": "held_out"},
+        ),
+        "evaluator": (
+            "scalar_loss",
+            {
+                "split_slot": "evaluation_split",
+                "metrics": ["loss"],
+                "reduction": "mean",
+                "maximum_examples": 0,
+            },
+        ),
+        "evaluation_schedule": (
+            "launch_gate_periodic",
+            {
+                "launch_gate_examples": 2,
+                "full_step_zero": True,
+                "qualitative_every_steps": 25,
+                "full_every_steps": 100,
+                "defer_full_scalar": True,
+                "final": True,
+            },
+        ),
+        "qualitative_samples": (
+            "fixed_held_out",
+            {
+                "identity_field": "sample_id",
+                "identities_digest": "sha256:" + "a" * 64,
+                "selector_digest": "sha256:" + "b" * 64,
+                "sample_count": 2,
+            },
+        ),
+        "artifact_renderer": (
+            "evidence_envelope",
+            {"modality": "text", "schema": "trainvm.eval-evidence.v1"},
+        ),
+        "checkpoint_policy": (
+            "atomic_retained",
+            {
+                "every_steps": 100,
+                "keep_last": 2,
+                "keep_best": 0,
+                "publish_final": True,
+                "resume_grade": "exact",
+            },
+        ),
     }
     components = {}
     for slot, (name, configuration) in requested.items():
         category = {
+            "evaluation_split": "split_selector",
             "learning_rate": "learning_rate_schedule",
+            "qualitative_samples": "qualitative_sample",
+            "split": "split_selector",
             "weight_decay": "weight_decay_schedule",
         }.get(slot, slot)
         descriptor = next(
             item
             for item in registry["components"]
-            if item["key"]["category"] == category
-            and item["key"]["name"] == name
+            if item["key"]["category"] == category and item["key"]["name"] == name
         )
         components[slot] = {
             "configuration": configuration,
@@ -131,6 +184,11 @@ def test_worker_component_bridge_builds_optimizer_and_schedule() -> None:
     activation = runtime.activation()
     curriculum = runtime.curriculum()
     normalization = runtime.normalization()
+    evaluator = runtime.evaluator()
+    evaluation_schedule = runtime.evaluation_schedule()
+    qualitative_samples = runtime.qualitative_samples()
+    artifact_renderer = runtime.artifact_renderer()
+    checkpoint_policy = runtime.checkpoint_policy()
 
     assert isinstance(optimizer, torch.optim.AdamW)
     assert optimizer.param_groups[0]["weight_decay"] == pytest.approx(0.01)
@@ -158,12 +216,20 @@ def test_worker_component_bridge_builds_optimizer_and_schedule() -> None:
     assert normalization(3).eps == pytest.approx(1e-5)
     assert curriculum.for_step(0, 100) == (128, 64)
     assert curriculum.for_step(50, 100) == (512, 16)
+    assert evaluator.reduce((2.0, 4.0)) == pytest.approx(3.0)
+    assert evaluation_schedule.for_step(0).launch_gate
+    assert qualitative_samples.configuration.sample_count == 2
+    assert artifact_renderer.configuration.modality == "text"
+    assert checkpoint_policy.due(100)
     assert runtime.evidence()["optimizer"]["category"] == "optimizer"
-    assert runtime.require_implementation(
-        "optimizer",
-        category="optimizer",
-        allowed=frozenset({"rwkv_lab.optimizer.torch_adamw_no_decay.v2"}),
-    ) == "rwkv_lab.optimizer.torch_adamw_no_decay.v2"
+    assert (
+        runtime.require_implementation(
+            "optimizer",
+            category="optimizer",
+            allowed=frozenset({"rwkv_lab.optimizer.torch_adamw_no_decay.v2"}),
+        )
+        == "rwkv_lab.optimizer.torch_adamw_no_decay.v2"
+    )
     with pytest.raises(AdapterComponentError, match="outside the adapter allowlist"):
         runtime.require_implementation(
             "optimizer",

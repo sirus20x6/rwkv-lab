@@ -439,7 +439,7 @@ void checked_in_component_catalog_matches_native_authority_contract() {
   const trainvm::TrainingComponentRegistry registry =
       trainvm::TrainingComponentRegistry::load_file(
           std::filesystem::absolute(path));
-  check(registry.document_json().at("components").size() == 39U &&
+  check(registry.document_json().at("components").size() == 45U &&
             registry.registry_digest().starts_with("sha256:") &&
             registry.registry_digest().size() == 71U,
         "checked-in cross-family component catalog is a canonical native authority document");
@@ -463,7 +463,15 @@ void checked_in_component_catalog_matches_native_authority_contract() {
                            trainvm::TrainingComponentCategory::trainability,
                        .name = std::move(policy),
                        .version = "1.0.0"},
-               .configuration = std::move(policy_configuration)}}},
+               .configuration = std::move(policy_configuration)}},
+             {"checkpoint_policy",
+              {.key = {.category =
+                           trainvm::TrainingComponentCategory::checkpoint_policy,
+                       .name = "atomic_retained",
+                       .version = "1.0.0"},
+               .configuration = {{"every_steps", 100},
+                                 {"keep_last", 2},
+                                 {"resume_grade", "exact"}}}}},
         .topologies = std::nullopt,
         .post_training = std::nullopt,
     };
@@ -493,7 +501,11 @@ void checked_in_component_catalog_matches_native_authority_contract() {
         {{"adapter_state_manifest", "sha256:" + std::string(64U, 'c')},
          {"merged", false},
          {"trainable_parameter_manifest",
-          "sha256:" + std::string(64U, 'd')}}}});
+          "sha256:" + std::string(64U, 'd')}}},
+       {"checkpoint_policy",
+        {{"last_published_step", 0},
+         {"publication_manifest", "sha256:" + std::string(64U, 'e')},
+         {"retention_manifest", "sha256:" + std::string(64U, 'f')}}}});
   check(rejects([&] {
           registry.validate_resume_state(
               lora_composition,
@@ -508,6 +520,30 @@ void checked_in_component_catalog_matches_native_authority_contract() {
                   "sha256:" + std::string(64U, 'd')}}}});
         }),
         "incomplete component resume state fails before tensor restoration");
+  for (const auto& [policy, configuration] :
+       std::vector<std::pair<std::string, nlohmann::json>>{
+           {"full", nlohmann::json::object()},
+           {"named_rules", {{"unfreeze_patterns",
+                              nlohmann::json::array({"language_model.*"})}}},
+           {"lora", {{"rank", 256},
+                     {"alpha", 512},
+                     {"target_selectors",
+                      nlohmann::json::array({"language_model.*"})}}}}) {
+    auto missing_checkpoint =
+        composition_for(policy, loader_configuration, configuration);
+    missing_checkpoint.components.erase("checkpoint_policy");
+    check(rejects([&] {
+            (void)registry.resolve_composition(missing_checkpoint);
+          }),
+          "every trainable model policy requires an explicit checkpoint policy");
+  }
+  auto frozen_without_checkpoint = composition_for(
+      "frozen", loader_configuration, nlohmann::json::object());
+  frozen_without_checkpoint.components.erase("checkpoint_policy");
+  check(!rejects([&] {
+          (void)registry.resolve_composition(frozen_without_checkpoint);
+        }),
+        "frozen evaluation-only model compositions may omit checkpoints");
   nlohmann::json quantized = loader_configuration;
   quantized["quantization"] = "4bit";
   check(rejects([&] {
@@ -647,6 +683,99 @@ void checked_in_component_catalog_matches_native_authority_contract() {
           (void)registry.resolve_composition(incompatible);
         }),
         "incompatible source and processor modalities fail during native resolution");
+  auto evaluation_composition = pipeline_composition;
+  const auto selection = [](trainvm::TrainingComponentCategory category,
+                            std::string name,
+                            nlohmann::json configuration) {
+    return trainvm::TrainingComponentSelection{
+        .key = {.category = category,
+                .name = std::move(name),
+                .version = "1.0.0"},
+        .configuration = std::move(configuration)};
+  };
+  evaluation_composition.components.emplace(
+      "evaluation_split",
+      selection(trainvm::TrainingComponentCategory::split_selector,
+                "deterministic_holdout",
+                {{"seed", 29},
+                 {"held_out_count", 10},
+                 {"selection", "held_out"}}));
+  evaluation_composition.components.emplace(
+      "evaluator",
+      selection(trainvm::TrainingComponentCategory::evaluator,
+                "scalar_loss", {{"metrics", nlohmann::json::array({"loss"})}}));
+  evaluation_composition.components.emplace(
+      "evaluation_schedule",
+      selection(trainvm::TrainingComponentCategory::evaluation_schedule,
+                "launch_gate_periodic",
+                {{"launch_gate_examples", 10}, {"full_every_steps", 250}}));
+  evaluation_composition.components.emplace(
+      "qualitative_samples",
+      selection(trainvm::TrainingComponentCategory::qualitative_sample,
+                "fixed_held_out",
+                {{"identity_field", "id"},
+                 {"identities_digest", "sha256:" + std::string(64U, 'e')},
+                 {"selector_digest", "sha256:" + std::string(64U, 'f')},
+                 {"sample_count", 10}}));
+  evaluation_composition.components.emplace(
+      "artifact_renderer",
+      selection(trainvm::TrainingComponentCategory::artifact_renderer,
+                "caption_triplet", nlohmann::json::object()));
+  evaluation_composition.components.emplace(
+      "checkpoint_policy",
+      selection(trainvm::TrainingComponentCategory::checkpoint_policy,
+                "atomic_retained",
+                {{"every_steps", 250},
+                 {"keep_last", 3},
+                 {"resume_grade", "exact"}}));
+  const auto evaluation = registry.resolve_composition(evaluation_composition);
+  check(evaluation.components.at("evaluator")
+                .configuration.at("split_slot") == "evaluation_split" &&
+            evaluation.components.at("evaluation_schedule")
+                .configuration.at("full_step_zero") == true &&
+            evaluation.components.at("checkpoint_policy")
+                .descriptor.state_grade == trainvm::TrainingStateGrade::exact,
+        "evaluation and checkpoint policies resolve against one deterministic held-out split");
+  check(rejects([&] {
+          auto incomplete = evaluation_composition;
+          incomplete.components.erase("artifact_renderer");
+          (void)registry.resolve_composition(incomplete);
+        }),
+        "partial evaluation suites fail before worker launch");
+  check(rejects([&] {
+          auto training_view = evaluation_composition;
+          training_view.components.at("evaluation_split")
+              .configuration["selection"] = "train";
+          (void)registry.resolve_composition(training_view);
+        }),
+        "an evaluator cannot consume the training split view");
+  check(rejects([&] {
+          auto changed_partition = evaluation_composition;
+          changed_partition.components.at("evaluation_split")
+              .configuration["seed"] = 30;
+          (void)registry.resolve_composition(changed_partition);
+        }),
+        "training and evaluation views cannot name different deterministic partitions");
+  check(rejects([&] {
+          auto too_small = evaluation_composition;
+          too_small.components.at("qualitative_samples")
+              .configuration["sample_count"] = 9;
+          (void)registry.resolve_composition(too_small);
+        }),
+        "step-zero launch evidence cannot exceed the fixed held-out identity set");
+  auto exact_plan_result = trainvm::compile_document(experiment_fixture());
+  if (exact_plan_result.plan) {
+    auto exact_plan = *exact_plan_result.plan;
+    auto weaker = evaluation_composition;
+    weaker.components.at("checkpoint_policy")
+        .configuration["resume_grade"] = "compatible";
+    exact_plan.experiment.spec.workflow.nodes.at("train_to_boundary")
+        .invoke.training = std::move(weaker);
+    check(rejects([&] { registry.validate_plan(exact_plan); }),
+          "exact-resume plans reject a checkpoint policy that declares a weaker grade");
+  } else {
+    check(false, "exact-resume checkpoint policy fixture compiles");
+  }
   const auto optimizer = registry.resolve({
       .key = {.category = trainvm::TrainingComponentCategory::optimizer,
               .name = "fp32_master_adamw",

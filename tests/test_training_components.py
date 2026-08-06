@@ -72,7 +72,12 @@ def test_runtime_categories_have_one_way_dependency_boundaries():
     runtime = root / "src/rwkv_lab/training_runtime"
     category_names = {
         "activations",
+        "artifact_renderers",
+        "checkpoint_policies",
         "curricula",
+        "data_pipeline",
+        "evaluation_schedules",
+        "evaluators",
         "gradient_accumulation",
         "gradient_clipping",
         "normalizations",
@@ -80,6 +85,7 @@ def test_runtime_categories_have_one_way_dependency_boundaries():
         "objectives",
         "routers",
         "precision",
+        "qualitative_samples",
         "schedules",
         "weight_decay_schedules",
     }
@@ -288,8 +294,17 @@ def test_component_catalog_and_runtime_dispatch_are_exactly_aligned():
     assert grades["optimizer"] == "exact"
     assert grades["model_loader"] == "exact"
     assert grades["trainability"] == "exact"
+    assert grades["checkpoint_policy"] == "exact"
+    assert grades["data_source"] == "exact"
+    assert grades["sampler"] == "exact"
+    assert grades["batching"] == "exact"
     assert grades["learning_rate_schedule"] == "exact"
     assert grades["objective"] == "stateless"
+    assert grades["evaluator"] == "stateless"
+    assert grades["evaluation_schedule"] == "stateless"
+    assert grades["qualitative_sample"] == "stateless"
+    assert grades["artifact_renderer"] == "stateless"
+    assert grades["split_selector"] == "stateless"
     assert grades["activation"] == "stateless"
     assert grades["normalization"] == "stateless"
     assert grades["precision"] == "stateless"

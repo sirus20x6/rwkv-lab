@@ -287,9 +287,11 @@ The dashboard generates its editor and live controls from descriptors.
 
 Trainer families do not own private copies of common algorithm switches. A workflow process node
 may select a bounded `training` composition whose slots point to exact versioned entries in the
-independent `trainvm.training-components/v1` authority registry. Categories cover optimizer,
-parameter router, learning-rate and weight-decay schedule, activation, normalization, objective,
-precision/scaling, gradient clipping and accumulation, curriculum, and metric reducer. Slot names
+independent `trainvm.training-components/v1` authority registry. Categories cover model loading,
+trainability, data boundaries, optimizer, parameter router, learning-rate and weight-decay
+schedule, activation, normalization, objective, precision/scaling, gradient clipping and
+accumulation, curriculum, metric reducer, evaluation, qualitative evidence rendering, and
+checkpoint policy. Slot names
 remain explicit so a topology can use several optimizers or schedules without hiding ownership in
 positional conventions.
 
@@ -330,9 +332,12 @@ closure policy from the same C++ catalog that owns adapter identity;
 resolved-launch replay and cache authority require that same digest rather than trusting a probe to
 choose its own closure. Components may only attach to external process
 operations, and an exact-resume plan rejects any selected stateful component whose state grade is
-merely compatible. Optimizer state, schedule/curriculum cursors, parameter-routing identity, and
-precision/scaler state become part of the later checkpoint manifest contract rather than ad hoc
-trainer files.
+merely compatible or any checkpoint policy declaring a weaker resume grade. Optimizer state,
+schedule/curriculum cursors, parameter-routing identity, precision/scaler state, and atomic
+publication/retention manifests become part of the later checkpoint manifest contract rather than
+ad hoc trainer files. Evaluation suites similarly close scalar semantics, independent launch/full
+cadences, fixed held-out identity digests, and modality/schema renderers; a partial suite or one
+without nonempty step-zero evidence is rejected before worker launch.
 
 The immutable registry is exposed as the exact descriptor provider
 `trainvm.training-components@1.0.0`. `GetDescriptor` returns the canonical registry document and its

@@ -23,11 +23,15 @@ from rwkv_lab.training_components import (
     RegisteredActivation,
     ScheduleImplementation,
     activation_from_resolved_component,
+    artifact_renderer_from_resolved_component,
     batching_from_resolved_component,
     build_data_pipeline,
+    checkpoint_policy_from_resolved_component,
     collator_from_resolved_component,
     curriculum_from_resolved_component,
     data_source_from_resolved_component,
+    evaluation_schedule_from_resolved_component,
+    evaluator_from_resolved_component,
     gradient_accumulation_from_resolved_component,
     gradient_clipping_from_resolved_component,
     model_loader_from_resolved_component,
@@ -36,6 +40,7 @@ from rwkv_lab.training_components import (
     optimizer_from_resolved_component,
     parameter_routing_from_resolved_component,
     precision_policy_from_resolved_component,
+    qualitative_sample_from_resolved_component,
     sample_mapper_from_resolved_component,
     sample_processor_from_resolved_component,
     sampler_from_resolved_component,
@@ -89,6 +94,34 @@ class WorkerTrainingComponents:
     def trainability(self, *, slot: str = "trainability"):
         component = self.composition.require(slot, category="trainability")
         return trainability_from_resolved_component(component.runtime_envelope())
+
+    def evaluator(self, *, slot: str = "evaluator"):
+        component = self.composition.require(slot, category="evaluator")
+        evaluator = evaluator_from_resolved_component(component.runtime_envelope())
+        split = self.composition.require(
+            evaluator.configuration.split_slot, category="split_selector"
+        )
+        if split.configuration["selection"] != "held_out":
+            raise AdapterComponentError(
+                "evaluator split slot does not select the held-out partition"
+            )
+        return evaluator
+
+    def evaluation_schedule(self, *, slot: str = "evaluation_schedule"):
+        component = self.composition.require(slot, category="evaluation_schedule")
+        return evaluation_schedule_from_resolved_component(component.runtime_envelope())
+
+    def qualitative_samples(self, *, slot: str = "qualitative_samples"):
+        component = self.composition.require(slot, category="qualitative_sample")
+        return qualitative_sample_from_resolved_component(component.runtime_envelope())
+
+    def artifact_renderer(self, *, slot: str = "artifact_renderer"):
+        component = self.composition.require(slot, category="artifact_renderer")
+        return artifact_renderer_from_resolved_component(component.runtime_envelope())
+
+    def checkpoint_policy(self, *, slot: str = "checkpoint_policy"):
+        component = self.composition.require(slot, category="checkpoint_policy")
+        return checkpoint_policy_from_resolved_component(component.runtime_envelope())
 
     def data_pipeline(
         self,

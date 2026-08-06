@@ -158,7 +158,9 @@ bool scheduled(TrainingComponentCategory category) {
   return category == TrainingComponentCategory::learning_rate_schedule ||
          category == TrainingComponentCategory::weight_decay_schedule ||
          category == TrainingComponentCategory::gradient_accumulation ||
-         category == TrainingComponentCategory::curriculum;
+         category == TrainingComponentCategory::curriculum ||
+         category == TrainingComponentCategory::evaluation_schedule ||
+         category == TrainingComponentCategory::checkpoint_policy;
 }
 
 std::vector<std::string> canonical_strings(
@@ -377,7 +379,6 @@ void validate_data_pipeline_relationships(
       TrainingComponentCategory::collator,
       TrainingComponentCategory::sampler,
       TrainingComponentCategory::batching,
-      TrainingComponentCategory::split_selector,
   };
   std::size_t selected = 0U;
   for (const auto category : categories) {
@@ -388,8 +389,13 @@ void validate_data_pipeline_relationships(
       reject("training composition may select only one component per data-pipeline category");
     selected += count;
   }
-  if (selected == 0U) return;
-  if (selected != categories.size())
+  const auto splits = grouped.find(TrainingComponentCategory::split_selector);
+  const std::size_t split_count =
+      splits == grouped.end() ? 0U : splits->second.size();
+  if (split_count > 8U)
+    reject("training composition selects too many split-selector views");
+  if (selected == 0U && split_count == 0U) return;
+  if (selected != categories.size() || split_count == 0U)
     reject("training composition must select the complete declarative data pipeline");
 
   const auto& source =
@@ -443,6 +449,83 @@ void validate_data_pipeline_relationships(
   referenced.push_back(source.configuration.at("id_column"));
   if (!std::ranges::all_of(referenced, has_column))
     reject("data pipeline references a column absent from declared_columns");
+}
+
+const ResolvedTrainingComponent* unique_component(
+    const std::map<TrainingComponentCategory,
+                   std::vector<const ResolvedTrainingComponent*>>& grouped,
+    TrainingComponentCategory category, std::string_view label) {
+  const auto found = grouped.find(category);
+  if (found == grouped.end()) return nullptr;
+  if (found->second.size() != 1U)
+    reject("training composition may select only one " + std::string(label));
+  return found->second.front();
+}
+
+void validate_evaluation_checkpoint_relationships(
+    const ResolvedTrainingComposition& composition) {
+  const auto grouped = components_by_category(composition);
+  const auto* evaluator = unique_component(
+      grouped, TrainingComponentCategory::evaluator, "evaluator");
+  const auto* schedule = unique_component(
+      grouped, TrainingComponentCategory::evaluation_schedule,
+      "evaluation schedule");
+  const auto* samples = unique_component(
+      grouped, TrainingComponentCategory::qualitative_sample,
+      "qualitative sample selector");
+  const auto* renderer = unique_component(
+      grouped, TrainingComponentCategory::artifact_renderer,
+      "artifact renderer");
+  const std::size_t selected = static_cast<std::size_t>(evaluator != nullptr) +
+                               static_cast<std::size_t>(schedule != nullptr) +
+                               static_cast<std::size_t>(samples != nullptr) +
+                               static_cast<std::size_t>(renderer != nullptr);
+  if (selected != 0U && selected != 4U)
+    reject("training evaluation suite requires evaluator, schedule, fixed samples, and renderer together");
+  if (selected == 4U) {
+    if (!schedule->configuration.at("full_step_zero").get<bool>() ||
+        schedule->configuration.at("launch_gate_examples").get<std::int64_t>() <= 0)
+      reject("training evaluation suite requires nonempty true step-zero evidence");
+    if (samples->configuration.at("sample_count").get<std::int64_t>() <
+        schedule->configuration.at("launch_gate_examples").get<std::int64_t>())
+      reject("fixed held-out sample set is smaller than the step-zero launch gate");
+    if (!symbolic_identity(
+            samples->configuration.at("identity_field").get_ref<const std::string&>()))
+      reject("fixed held-out identity field must be a symbolic field name");
+    const auto& metrics = evaluator->configuration.at("metrics");
+    if (metrics.empty() || std::ranges::any_of(metrics, [](const Json& metric) {
+          return !symbolic_identity(metric.get_ref<const std::string&>());
+        }))
+      reject("scalar evaluator metrics must be nonempty symbolic identities");
+
+    const std::string split_slot =
+        evaluator->configuration.at("split_slot").get<std::string>();
+    const auto split = composition.components.find(split_slot);
+    if (split == composition.components.end() ||
+        split->second.descriptor.key.category !=
+            TrainingComponentCategory::split_selector ||
+        split->second.configuration.at("selection") != "held_out")
+      reject("training evaluator must reference a deterministic held-out split-selector slot");
+    const auto training_split = composition.components.find("split");
+    if (training_split == composition.components.end() ||
+        training_split->second.descriptor.key.category !=
+            TrainingComponentCategory::split_selector ||
+        training_split->second.configuration.at("selection") != "train" ||
+        training_split->second.configuration.at("seed") !=
+            split->second.configuration.at("seed") ||
+        training_split->second.configuration.at("held_out_count") !=
+            split->second.configuration.at("held_out_count"))
+      reject("training and evaluation split-selector views must name one deterministic partition");
+  }
+  const auto* checkpoint = unique_component(
+      grouped, TrainingComponentCategory::checkpoint_policy,
+      "checkpoint policy");
+  const auto trainability = grouped.find(TrainingComponentCategory::trainability);
+  if (trainability != grouped.end() &&
+      trainability->second.front()->descriptor.implementation !=
+          "rwkv_lab.trainability.frozen.v1" &&
+      checkpoint == nullptr)
+    reject("trainable model composition requires an explicit checkpoint policy");
 }
 
 Json composition_body(const ResolvedTrainingComposition& composition) {
@@ -614,6 +697,7 @@ ResolvedTrainingComposition TrainingComponentRegistry::resolve_composition(
   }
   validate_model_trainability_relationships(resolved);
   validate_data_pipeline_relationships(resolved);
+  validate_evaluation_checkpoint_relationships(resolved);
   const std::string canonical_composition = composition_body(resolved).dump();
   if (canonical_composition.size() > kMaximumCompositionBytes)
     reject("resolved training composition exceeds its canonical byte bound");
@@ -718,6 +802,16 @@ void TrainingComponentRegistry::validate_plan(const CompiledPlan& plan) const {
             }))
       reject("workflow node " + node_name +
              " requests exact resume with a compatibility-grade training component");
+    if (plan.experiment.spec.recovery.exact_resume) {
+      const auto grouped = components_by_category(resolved);
+      if (const auto* checkpoint = unique_component(
+              grouped, TrainingComponentCategory::checkpoint_policy,
+              "checkpoint policy");
+          checkpoint != nullptr &&
+          checkpoint->configuration.at("resume_grade") != "exact")
+        reject("workflow node " + node_name +
+               " requests exact resume with a weaker checkpoint policy");
+    }
   }
 }
 
