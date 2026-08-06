@@ -10,12 +10,16 @@
         "overrides": {
           "model.path": "/thearray/git/ob/text-generation-webui/models/Qwen3.6-35B-A3B-heretic",
           "data.manifest": "/thearray/git/datasets/captiontest/qwen36-caption-finetune.jsonl",
+          "data.image_root": "/thearray/git/datasets/captiontest",
+          "data.batch_size": 1,
           "trainability.lora_rank": 256,
           "trainability.lora_alpha": 512,
           "hyperparameters.learning_rate": 0.00002,
+          "hyperparameters.gradient_accumulation": 1,
           "hyperparameters.maximum_steps": 1000,
-          "evaluation.step_zero_examples": 10,
-          "controls.eval_every": 100,
+          "evaluation.qualitative_sample_count": 10,
+          "evaluation.qualitative_every_steps": 100,
+          "evaluation.full_every_steps": 100,
           "checkpointing.every_steps": 250
         }
       }
