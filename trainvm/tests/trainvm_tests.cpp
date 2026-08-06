@@ -4793,6 +4793,19 @@ void test_worker_control_service_boundary() {
   }
 
   {
+    nlohmann::json required_output_fixture = load_fixture();
+    required_output_fixture["spec"]["artifacts"]["checkpoint"]["required"] =
+        true;
+    const auto required_output_compiled =
+        trainvm::compile_document(required_output_fixture);
+    check(required_output_compiled.valid(),
+          "required-output WorkerControl fixture compiles");
+    if (!required_output_compiled.valid()) {
+      std::filesystem::remove_all(directory);
+      return;
+    }
+    const nlohmann::json required_output_submission_identity =
+        fixture_adapter_locked_submission(*required_output_compiled.plan);
     const auto database_path = directory / "telemetry.db";
     const std::string run_id = "worker-control-telemetry-run";
     trainvm::WorkerLaunchTicket launch;
@@ -4800,15 +4813,17 @@ void test_worker_control_service_boundary() {
       trainvm::Journal journal(
           database_path, std::nullopt,
           trainvm::HostGrantEnforcement::legacy_process_free_test);
-      trainvm::Controller controller(*compiled.plan, journal, run_id);
-      controller.create_queued(submission_identity);
+      trainvm::Controller controller(*required_output_compiled.plan, journal,
+                                     run_id);
+      controller.create_queued(required_output_submission_identity);
       (void)controller.begin_acquisition(test_time(2'000));
       launch = controller.prepare_worker_launch(launch_request, test_time(2'100));
       (void)bind_test_worker_launch(controller, launch, 2'150);
     }
     trainvm::TrainVMService service(
         database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
-        fixture_test_host_launch_registry(*compiled.plan, launch),
+        fixture_test_host_launch_registry(*required_output_compiled.plan,
+                                          launch),
         fixture_test_host_identity(), [] { return test_time(2'200); },
         trainvm::HostGrantEnforcement::legacy_process_free_test);
     prime_test_service_launch(service, launch);
@@ -4891,6 +4906,18 @@ void test_worker_control_service_boundary() {
     const grpc::Status metric_status = service.record_worker_metric(
         metric, connection, metric_acknowledgement);
 
+    auto missing_required_output = wire_result(connection);
+    missing_required_output.set_worker_sequence(4U);
+    trainvm::v1::WorkerReceipt missing_required_output_receipt;
+    const std::size_t before_missing_required_output =
+        trainvm::Journal(database_path).event_count();
+    const grpc::Status missing_required_output_status =
+        service.complete_worker_connection(
+            missing_required_output, connection,
+            missing_required_output_receipt);
+    const std::size_t after_missing_required_output =
+        trainvm::Journal(database_path).event_count();
+
     trainvm::v1::ArtifactManifest artifact;
     artifact.set_worker_sequence(4);
     artifact.set_artifact_id("checkpoint-step-11");
@@ -4916,12 +4943,18 @@ void test_worker_control_service_boundary() {
     const grpc::Status mismatched_artifact_status =
         service.record_worker_artifact(mismatched_artifact, connection,
                                        rejected_artifact_acknowledgement);
+    auto forged_parent_artifact = artifact;
+    forged_parent_artifact.add_parent_artifact_ids(
+        "missing-parent-artifact");
+    const grpc::Status forged_parent_artifact_status =
+        service.record_worker_artifact(forged_parent_artifact, connection,
+                                       rejected_artifact_acknowledgement);
     std::uint64_t artifact_acknowledgement = 0;
     const grpc::Status artifact_status = service.record_worker_artifact(
         artifact, connection, artifact_acknowledgement);
 
-    trainvm::Controller control_controller(*compiled.plan, service.journal_,
-                                           run_id);
+    trainvm::Controller control_controller(*required_output_compiled.plan,
+                                           service.journal_, run_id);
     control_controller.recover();
     const auto control_request = control_controller.request_controls(
         "telemetry-control", 5, 0, {{"caption_dropout", 0.2}}, "operator",
@@ -4989,9 +5022,15 @@ void test_worker_control_service_boundary() {
                     grpc::StatusCode::INVALID_ARGUMENT &&
                 rejected_metric_acknowledgement == 0U &&
                 metric_status.ok() && metric_acknowledgement == 3U &&
+                missing_required_output_status.error_code() ==
+                    grpc::StatusCode::FAILED_PRECONDITION &&
+                before_missing_required_output ==
+                    after_missing_required_output &&
                 undeclared_artifact_status.error_code() ==
                     grpc::StatusCode::PERMISSION_DENIED &&
                 mismatched_artifact_status.error_code() ==
+                    grpc::StatusCode::INVALID_ARGUMENT &&
+                forged_parent_artifact_status.error_code() ==
                     grpc::StatusCode::INVALID_ARGUMENT &&
                 artifact_status.ok() && artifact_acknowledgement == 4U &&
                 control_request.command && control_status.ok() &&
@@ -12605,6 +12644,14 @@ void test_service_reconciliation_supervisor() {
 
 void test_service_orders_physical_before_logical_release() {
   auto source = load_fixture();
+  source["spec"]["artifacts"]["checkpoint"]["required"] = true;
+  source["spec"]["artifacts"]["eval_gallery"]["required"] = true;
+  source["spec"]["artifacts"]["test_eval"] = {
+      {"type", "report"},
+      {"schema", "rwkv-lab.hf-test-caption-evidence-bundle.v1"},
+      {"immutability", "immutable"},
+      {"fingerprint", "manifest_sha256"},
+      {"required", true}};
   auto& nodes = source["spec"]["workflow"]["nodes"];
   const auto acquire = nodes.at("acquire_gpu");
   const auto train = nodes.at("train_to_boundary");
@@ -12614,6 +12661,7 @@ void test_service_orders_physical_before_logical_release() {
            {"release_gpu", release}};
   nodes["train_to_boundary"]["transitions"] = nlohmann::json::array(
       {train.at("transitions").at(1), train.at("transitions").at(2)});
+  nodes["train_to_boundary"]["publishes"]["test_eval"] = "test_eval";
   const auto compiled = trainvm::compile_document(source);
   check(compiled.valid(),
         "terminal release fixture compiles a builtin-only lifecycle");
@@ -12680,7 +12728,21 @@ void test_service_orders_physical_before_logical_release() {
   auto process = std::make_shared<SagaProcessClient>(ledger);
   const trainvm::HostIdentity host_identity{.host_id = inventory.host_id,
                                              .boot_id = inventory.boot_id};
-  const auto profiles = fixture_adapter_profiles();
+  auto profiles = fixture_adapter_profiles();
+  const auto train_profile = std::ranges::find_if(
+      profiles, [](const trainvm::AdapterProfile& profile) {
+        return profile.key.operation == "train";
+      });
+  if (train_profile != profiles.end()) {
+    train_profile->authoring->outputs.at("checkpoint").required = true;
+    train_profile->authoring->outputs.at("eval_gallery").required = true;
+    train_profile->authoring->outputs.emplace(
+        "test_eval",
+        operation_port(
+            trainvm::OperationPortType::artifact, true,
+            trainvm::ArtifactType::report,
+            "rwkv-lab.hf-test-caption-evidence-bundle.v1"));
+  }
   std::int64_t service_now_ns = 10;
   trainvm::WorkerLaunchTicket registry_ticket;
   registry_ticket.node_id = "train_to_boundary";
@@ -13095,6 +13157,92 @@ void test_service_orders_physical_before_logical_release() {
             invocation.at("resume").at("resume_command_id") ==
                 resume_command.command.command_id,
         "replacement worker welcome is bound to the exact pause checkpoint and command lineage");
+
+  const auto publish_resume_child =
+      [&](std::uint64_t worker_sequence, std::string artifact_id,
+          std::string logical_name, trainvm::v1::ArtifactKind kind,
+          std::string schema) {
+        trainvm::v1::ArtifactManifest artifact;
+        artifact.set_worker_sequence(worker_sequence);
+        artifact.set_artifact_id(std::move(artifact_id));
+        artifact.set_logical_name(std::move(logical_name));
+        artifact.set_kind(kind);
+        artifact.set_schema(std::move(schema));
+        artifact.set_uri("file:///sealed/resume-finalization/" +
+                         artifact.artifact_id());
+        artifact.set_size_bytes(4096U);
+        artifact.set_fingerprint_algorithm("manifest_sha256");
+        artifact.set_fingerprint(std::string(64U, 'e'));
+        artifact.set_complete(true);
+        artifact.set_producer_node_id(replacement_connection.identity.node_id);
+        artifact.set_producer_attempt_id(
+            replacement_connection.identity.attempt_id);
+        artifact.add_parent_artifact_ids(checkpoint_id);
+        artifact.mutable_published_at()->set_seconds(11);
+        std::uint64_t acknowledged = 0U;
+        return service.record_worker_artifact(
+            artifact, replacement_connection, acknowledged);
+      };
+  const grpc::Status gallery_status = publish_resume_child(
+      1U, "service-resume-gallery", "eval_gallery",
+      trainvm::v1::ARTIFACT_KIND_IMAGE_GALLERY,
+      "rwkv-lab.eval-gallery.v2");
+
+  trainvm::v1::EventEnvelope resumed_completion;
+  resumed_completion.set_event_id(
+      replacement_connection.dispatch.dispatch_id + ":result");
+  resumed_completion.set_run_id(replacement_connection.identity.run_id);
+  resumed_completion.set_run_revision(
+      replacement_connection.dispatch.run_revision);
+  resumed_completion.set_plan_revision(
+      replacement_connection.dispatch.plan_revision);
+  resumed_completion.set_node_id(replacement_connection.identity.node_id);
+  resumed_completion.set_attempt_id(
+      replacement_connection.identity.attempt_id);
+  resumed_completion.set_worker_sequence(2U);
+  resumed_completion.set_event_type("worker.completed");
+  resumed_completion.set_event_version(1U);
+  resumed_completion.mutable_wall_time()->set_seconds(11);
+  resumed_completion.set_monotonic_time_ns(11U);
+  resumed_completion.set_optimizer_step(9U);
+  resumed_completion.set_canonical_json_payload(
+      R"({"reason":"training_complete"})");
+  const std::size_t before_missing_report =
+      service.journal_.event_count();
+  trainvm::v1::WorkerReceipt rejected_receipt;
+  const grpc::Status missing_report = service.complete_worker_connection(
+      resumed_completion, replacement_connection, rejected_receipt);
+  const std::size_t after_missing_report = service.journal_.event_count();
+
+  const grpc::Status report_status = publish_resume_child(
+      2U, "service-resume-test-eval", "test_eval",
+      trainvm::v1::ARTIFACT_KIND_REPORT,
+      "rwkv-lab.hf-test-caption-evidence-bundle.v1");
+  resumed_completion.set_worker_sequence(3U);
+  trainvm::v1::WorkerReceipt resumed_receipt;
+  const std::size_t before_undeclared_terminal =
+      service.journal_.event_count();
+  const grpc::Status resumed_complete = service.complete_worker_connection(
+      resumed_completion, replacement_connection, resumed_receipt);
+  const std::size_t after_undeclared_terminal =
+      service.journal_.event_count();
+  const auto resumed_events = service.journal_.events_for_run(pause_run_id);
+  const bool replacement_republished_checkpoint = std::ranges::any_of(
+      resumed_events, [&](const trainvm::Event& event) {
+        return event.event_type == "artifact.published" &&
+               event.attempt_id == replacement_launch.attempt_id &&
+               event.payload.value("kind", std::string{}) == "checkpoint";
+      });
+  check(gallery_status.ok() &&
+            missing_report.error_code() ==
+                grpc::StatusCode::FAILED_PRECONDITION &&
+            before_missing_report == after_missing_report &&
+            report_status.ok() &&
+            resumed_complete.error_code() ==
+                grpc::StatusCode::FAILED_PRECONDITION &&
+            before_undeclared_terminal == after_undeclared_terminal &&
+            !replacement_republished_checkpoint,
+        "resume checkpoint reuse cannot bypass an undeclared terminal training step");
   std::filesystem::remove_all(directory);
 }
 

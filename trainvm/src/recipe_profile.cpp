@@ -163,7 +163,8 @@ bool authorized_target(RecipeOverrideDomain domain, std::string_view target) {
       return parameter_value_target(target) ||
              training_configuration_target(target);
     case RecipeOverrideDomain::data:
-      return parameter_value_target(target);
+      return parameter_value_target(target) ||
+             training_configuration_target(target);
     case RecipeOverrideDomain::trainability:
     case RecipeOverrideDomain::hyperparameters:
       return parameter_value_target(target) ||
@@ -171,7 +172,9 @@ bool authorized_target(RecipeOverrideDomain domain, std::string_view target) {
              control_default_target(target);
     case RecipeOverrideDomain::evaluation:
     case RecipeOverrideDomain::checkpointing:
-      return parameter_value_target(target) || control_default_target(target);
+      return parameter_value_target(target) ||
+             training_configuration_target(target) ||
+             control_default_target(target);
     case RecipeOverrideDomain::resources:
       return resource_target(target);
     case RecipeOverrideDomain::controls:
@@ -183,9 +186,12 @@ bool authorized_target(RecipeOverrideDomain domain, std::string_view target) {
 bool authorized_type(RecipeOverrideDomain domain, RecipeValueType type) {
   switch (domain) {
     case RecipeOverrideDomain::model:
-    case RecipeOverrideDomain::data:
       return type == RecipeValueType::string || type == RecipeValueType::path ||
              type == RecipeValueType::enumeration;
+    case RecipeOverrideDomain::data:
+      return type == RecipeValueType::string || type == RecipeValueType::path ||
+             type == RecipeValueType::enumeration ||
+             type == RecipeValueType::integer || type == RecipeValueType::number;
     case RecipeOverrideDomain::checkpointing:
       return type != RecipeValueType::string;
     case RecipeOverrideDomain::trainability:

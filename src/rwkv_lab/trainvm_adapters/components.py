@@ -23,6 +23,7 @@ from rwkv_lab.training_components import (
     RegisteredActivation,
     ScheduleImplementation,
     activation_from_resolved_component,
+    activation_memory_from_resolved_component,
     artifact_renderer_from_resolved_component,
     batching_from_resolved_component,
     build_data_pipeline,
@@ -32,6 +33,7 @@ from rwkv_lab.training_components import (
     data_source_from_resolved_component,
     evaluation_schedule_from_resolved_component,
     evaluator_from_resolved_component,
+    generation_policy_from_resolved_component,
     gradient_accumulation_from_resolved_component,
     gradient_clipping_from_resolved_component,
     model_loader_from_resolved_component,
@@ -95,21 +97,38 @@ class WorkerTrainingComponents:
         component = self.composition.require(slot, category="trainability")
         return trainability_from_resolved_component(component.runtime_envelope())
 
+    def activation_memory(self, *, slot: str = "activation_memory"):
+        component = self.composition.require(slot, category="activation_memory")
+        return activation_memory_from_resolved_component(
+            component.runtime_envelope()
+        )
+
     def evaluator(self, *, slot: str = "evaluator"):
         component = self.composition.require(slot, category="evaluator")
         evaluator = evaluator_from_resolved_component(component.runtime_envelope())
         split = self.composition.require(
             evaluator.configuration.split_slot, category="split_selector"
         )
-        if split.configuration["selection"] != "held_out":
+        expected_selection = {
+            "rwkv_lab.split_selector.deterministic_holdout.v1": "held_out",
+            "rwkv_lab.split_selector.frozen_named.v1": "validation",
+        }.get(split.implementation)
+        if (
+            expected_selection is None
+            or split.configuration["selection"] != expected_selection
+        ):
             raise AdapterComponentError(
-                "evaluator split slot does not select the held-out partition"
+                "evaluator split slot does not select its validation partition"
             )
         return evaluator
 
     def evaluation_schedule(self, *, slot: str = "evaluation_schedule"):
         component = self.composition.require(slot, category="evaluation_schedule")
         return evaluation_schedule_from_resolved_component(component.runtime_envelope())
+
+    def generation_policy(self, *, slot: str = "generation_policy"):
+        component = self.composition.require(slot, category="generation_policy")
+        return generation_policy_from_resolved_component(component.runtime_envelope())
 
     def qualitative_samples(self, *, slot: str = "qualitative_samples"):
         component = self.composition.require(slot, category="qualitative_sample")

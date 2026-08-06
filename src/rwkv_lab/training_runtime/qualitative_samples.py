@@ -12,6 +12,7 @@ from .resolved import resolved_component_parts
 
 class QualitativeSampleImplementation(str, Enum):
     FIXED_HELD_OUT_V1 = "rwkv_lab.qualitative_sample.fixed_held_out.v1"
+    FIXED_HELD_OUT_V2 = "rwkv_lab.qualitative_sample.fixed_held_out.v2"
 
 
 def _digest(value: object) -> str:
@@ -96,22 +97,89 @@ class FixedHeldOutSamples:
         return bound
 
 
+@dataclass(frozen=True, slots=True)
+class DerivedFixedHeldOutConfiguration:
+    """Operator policy whose integrity receipts are measured at binding time."""
+
+    identity_field: str
+    sample_count: int
+
+    def __post_init__(self) -> None:
+        FixedHeldOutConfiguration(
+            identity_field=self.identity_field,
+            identities_digest="sha256:" + "0" * 64,
+            selector_digest="sha256:" + "0" * 64,
+            sample_count=self.sample_count,
+        )
+
+    @classmethod
+    def from_resolved(
+        cls, configuration: Mapping[str, Any]
+    ) -> DerivedFixedHeldOutConfiguration:
+        if set(configuration) != {"identity_field", "sample_count"}:
+            raise ValueError("resolved derived held-out configuration is inexact")
+        return cls(**configuration)
+
+
+@dataclass(frozen=True, slots=True)
+class HeldOutSampleBinding:
+    identities: tuple[str, ...]
+    identities_digest: str
+    selector_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class DerivedFixedHeldOutSamples:
+    configuration: DerivedFixedHeldOutConfiguration
+
+    def bind(
+        self, identities: Sequence[str], *, selector_digest: str
+    ) -> HeldOutSampleBinding:
+        bound = tuple(identities)
+        if len(bound) != self.configuration.sample_count:
+            raise ValueError("held-out sample count differs from declared policy")
+        if any(not isinstance(identity, str) or not identity for identity in bound):
+            raise ValueError("held-out sample identities must be nonempty strings")
+        if len(set(bound)) != len(bound):
+            raise ValueError("held-out sample identities must be unique")
+        if (
+            len(selector_digest) != 71
+            or not selector_digest.startswith("sha256:")
+            or any(
+                character not in "0123456789abcdef"
+                for character in selector_digest[7:]
+            )
+        ):
+            raise ValueError("selector_digest must be a lowercase sha256 digest")
+        return HeldOutSampleBinding(bound, _digest(bound), selector_digest)
+
+
 def qualitative_sample_from_resolved_component(
     component: Mapping[str, Any],
-) -> FixedHeldOutSamples:
+) -> FixedHeldOutSamples | DerivedFixedHeldOutSamples:
     implementation, configuration = resolved_component_parts(
         component, "qualitative_sample"
     )
-    if implementation != QualitativeSampleImplementation.FIXED_HELD_OUT_V1:
+    if implementation == QualitativeSampleImplementation.FIXED_HELD_OUT_V1:
+        return FixedHeldOutSamples(
+            FixedHeldOutConfiguration.from_resolved(configuration)
+        )
+    if implementation == QualitativeSampleImplementation.FIXED_HELD_OUT_V2:
+        return DerivedFixedHeldOutSamples(
+            DerivedFixedHeldOutConfiguration.from_resolved(configuration)
+        )
+    else:
         raise ValueError(
             "resolved qualitative sample implementation is not allowlisted"
         )
-    return FixedHeldOutSamples(FixedHeldOutConfiguration.from_resolved(configuration))
 
 
 __all__ = [
+    "DerivedFixedHeldOutConfiguration",
+    "DerivedFixedHeldOutSamples",
     "FixedHeldOutConfiguration",
     "FixedHeldOutSamples",
+    "HeldOutSampleBinding",
     "QualitativeSampleImplementation",
     "qualitative_sample_from_resolved_component",
 ]

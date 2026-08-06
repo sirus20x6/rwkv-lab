@@ -18,6 +18,7 @@ from rwkv_lab.training_components import (
     evaluator_from_resolved_component,
     qualitative_sample_from_resolved_component,
 )
+from rwkv_lab.training_runtime.qualitative_samples import DerivedFixedHeldOutSamples
 
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG = json.loads(
@@ -25,16 +26,24 @@ CATALOG = json.loads(
 )
 
 
-def _descriptor(category: str, name: str) -> dict[str, object]:
+def _descriptor(
+    category: str, name: str, version: str = "1.0.0"
+) -> dict[str, object]:
     return next(
         component
         for component in CATALOG["components"]
         if component["key"]["category"] == category and component["key"]["name"] == name
+        and component["key"]["version"] == version
     )
 
 
-def _envelope(category: str, name: str, configuration: dict[str, object]):
-    descriptor = _descriptor(category, name)
+def _envelope(
+    category: str,
+    name: str,
+    configuration: dict[str, object],
+    version: str = "1.0.0",
+):
+    descriptor = _descriptor(category, name, version)
     encoded = json.dumps(descriptor, separators=(",", ":"), sort_keys=True).encode()
     return {
         "descriptor": descriptor,
@@ -117,6 +126,23 @@ def test_fixed_held_out_identities_are_content_locked() -> None:
             ("image-001", "image-001", "image-042"),
             selector_digest="sha256:" + "a" * 64,
         )
+
+
+def test_derived_fixed_held_out_receipts_authority_selected_identities() -> None:
+    identities = ("image-001", "image-017", "image-042")
+    samples = qualitative_sample_from_resolved_component(
+        _envelope(
+            "qualitative_sample",
+            "fixed_held_out",
+            {"identity_field": "sample_id", "sample_count": 3},
+            "2.0.0",
+        )
+    )
+    assert isinstance(samples, DerivedFixedHeldOutSamples)
+    binding = samples.bind(identities, selector_digest="sha256:" + "a" * 64)
+    assert binding.identities == identities
+    assert binding.identities_digest == _identity_digest(identities)
+    assert binding.selector_digest == "sha256:" + "a" * 64
 
 
 def test_caption_renderer_requires_aligned_target_baseline_current_triplet() -> None:

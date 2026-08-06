@@ -2932,6 +2932,155 @@ grpc::Status TrainVMService::complete_worker_connection(
     }
     Controller controller(*plan, journal_, connection.identity.run_id);
     controller.recover();
+    if (envelope.event_type() == "worker.completed") {
+      const auto invocation =
+          journal_.worker_invocation(connection.dispatch.dispatch_id);
+      if (!invocation) {
+        return {grpc::StatusCode::DATA_LOSS,
+                "worker completion has no immutable invocation"};
+      }
+      const std::vector<Event> durable =
+          journal_.events_for_run(connection.identity.run_id);
+      const auto matches_declaration =
+          [](const nlohmann::json& artifact,
+             const nlohmann::json& publication) {
+            const auto& declaration = publication.at("declaration");
+            const auto schema = declaration.find("schema");
+            return artifact.is_object() &&
+                   artifact.value("complete", false) &&
+                   artifact.value("logical_name", std::string{}) ==
+                       publication.value("logical_name", std::string{}) &&
+                   artifact.value("kind", std::string{}) ==
+                       declaration.value("type", std::string{}) &&
+                   artifact.value("fingerprint_algorithm", std::string{}) ==
+                       declaration.value("fingerprint", std::string{}) &&
+                   (schema == declaration.end() || schema->is_null() ||
+                    (schema->is_string() &&
+                     artifact.value("schema", std::string{}) ==
+                         schema->get<std::string>()));
+          };
+      const auto current_artifact =
+          [&](const nlohmann::json& publication,
+              const std::optional<std::string>& required_parent =
+                  std::nullopt) -> const Event* {
+        const auto match = std::ranges::find_if(
+            durable, [&](const Event& candidate) {
+              if (candidate.event_type != "artifact.published" ||
+                  candidate.node_id != connection.identity.node_id ||
+                  candidate.attempt_id != connection.identity.attempt_id ||
+                  !matches_declaration(candidate.payload, publication)) {
+                return false;
+              }
+              if (!required_parent) return true;
+              const auto parents =
+                  candidate.payload.find("parent_artifact_ids");
+              return parents != candidate.payload.end() &&
+                     parents->is_array() &&
+                     std::ranges::any_of(
+                         *parents, [&](const nlohmann::json& parent) {
+                           return parent.is_string() &&
+                                  parent.get_ref<const std::string&>() ==
+                                      *required_parent;
+                         });
+            });
+        return match == durable.end() ? nullptr : &*match;
+      };
+
+      const nlohmann::json* selected_resume_checkpoint = nullptr;
+      std::string selected_resume_artifact_id;
+      std::optional<std::uint64_t> declared_terminal_step;
+      if (invocation->training.is_object()) {
+        const auto components = invocation->training.find("components");
+        if (components != invocation->training.end() &&
+            components->is_object()) {
+          const auto learning_rate = components->find("learning_rate");
+          if (learning_rate != components->end() &&
+              learning_rate->is_object()) {
+            const auto configuration = learning_rate->find("configuration");
+            if (configuration != learning_rate->end() &&
+                configuration->is_object()) {
+              const auto maximum = configuration->find("max_steps");
+              if (maximum != configuration->end() &&
+                  maximum->is_number_unsigned())
+                declared_terminal_step = maximum->get<std::uint64_t>();
+            }
+          }
+        }
+      }
+      bool terminal_resume_checkpoint_reuse = false;
+      if (invocation->resume.is_object() &&
+          invocation->resume.value("api_version", std::string{}) ==
+              "trainvm.resume-checkpoint/v1" &&
+          invocation->resume.contains("checkpoint") &&
+          invocation->resume.at("checkpoint").is_object() &&
+          invocation->resume.contains("optimizer_step") &&
+          invocation->resume.at("optimizer_step").is_number_unsigned() &&
+          envelope.has_optimizer_step() &&
+          envelope.optimizer_step() ==
+              invocation->resume.at("optimizer_step").get<std::uint64_t>() &&
+          declared_terminal_step &&
+          envelope.optimizer_step() == *declared_terminal_step) {
+        selected_resume_checkpoint = &invocation->resume.at("checkpoint");
+        selected_resume_artifact_id =
+            selected_resume_checkpoint->value("artifact_id", std::string{});
+        terminal_resume_checkpoint_reuse =
+            !selected_resume_artifact_id.empty();
+      }
+
+      std::size_t required_noncheckpoint_outputs = 0U;
+      bool resume_children_are_current_and_bound =
+          terminal_resume_checkpoint_reuse;
+      for (const auto& [output_name, publication] :
+           invocation->publishes.items()) {
+        (void)output_name;
+        const auto declaration = publication.find("declaration");
+        if (declaration == publication.end() || !declaration->is_object() ||
+            !declaration->value("required", false) ||
+            declaration->value("type", std::string{}) == "checkpoint") {
+          continue;
+        }
+        ++required_noncheckpoint_outputs;
+        if (!current_artifact(publication, selected_resume_artifact_id)) {
+          resume_children_are_current_and_bound = false;
+        }
+      }
+      terminal_resume_checkpoint_reuse =
+          terminal_resume_checkpoint_reuse &&
+          required_noncheckpoint_outputs > 0U &&
+          resume_children_are_current_and_bound;
+
+      for (const auto& [output_name, publication] :
+           invocation->publishes.items()) {
+        (void)output_name;
+        const auto& declaration =
+            publication.contains("declaration")
+                ? publication.at("declaration")
+                : nlohmann::json{};
+        if (!declaration.is_object() ||
+            !declaration.value("required", false)) {
+          continue;
+        }
+        const std::string logical_name =
+            publication.value("logical_name", std::string{});
+        const std::string required_type =
+            declaration.value("type", std::string{});
+        const std::string required_fingerprint =
+            declaration.value("fingerprint", std::string{});
+        const bool published = current_artifact(publication) != nullptr;
+        const bool selected_resume_satisfies_checkpoint =
+            !published && terminal_resume_checkpoint_reuse &&
+            required_type == "checkpoint" &&
+            selected_resume_checkpoint != nullptr &&
+            matches_declaration(*selected_resume_checkpoint, publication);
+        if (logical_name.empty() || required_type.empty() ||
+            required_fingerprint.empty() ||
+            (!published && !selected_resume_satisfies_checkpoint)) {
+          throw OperationPreconditionError(
+              "worker completion is missing required operation output " +
+              logical_name);
+        }
+      }
+    }
     Event event{
         .event_id = envelope.event_id(),
         .run_id = envelope.run_id(),
@@ -3024,6 +3173,25 @@ grpc::Status TrainVMService::commit_worker_observation(
               event.payload.value("step_domain", std::string{})) {
         throw std::invalid_argument(
             "worker metric unit or step domain disagrees with the sealed observability declaration");
+      }
+    }
+    if (event.event_type == "artifact.published") {
+      const auto& parents = event.payload.at("parent_artifact_ids");
+      const std::vector<Event> durable = journal_.events_for_run(event.run_id);
+      for (const nlohmann::json& parent : parents) {
+        const std::string parent_id = parent.get<std::string>();
+        const auto matches = std::ranges::count_if(
+            durable, [&](const Event& candidate) {
+              return candidate.event_type == "artifact.published" &&
+                     candidate.payload.is_object() &&
+                     candidate.payload.value("complete", false) &&
+                     candidate.payload.value("artifact_id", std::string{}) ==
+                         parent_id;
+            });
+        if (matches != 1) {
+          throw std::invalid_argument(
+              "artifact parent identity is not one prior durable artifact in the current run");
+        }
       }
     }
     const std::uint64_t latest = journal_.latest_worker_sequence(

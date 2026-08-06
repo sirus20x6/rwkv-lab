@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import json
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
@@ -15,6 +17,7 @@ class TrainabilityImplementation(str, Enum):
     FROZEN_V1 = "rwkv_lab.trainability.frozen.v1"
     NAMED_RULES_V1 = "rwkv_lab.trainability.named_rules.v1"
     LORA_V1 = "rwkv_lab.trainability.lora.v1"
+    LORA_TARGET_MANIFEST_V2 = "rwkv_lab.trainability.lora_target_manifest.v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,11 +127,194 @@ class LoraTrainabilityConfiguration:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class LoraTargetManifestConfiguration:
+    rank: int
+    alpha: int
+    dropout: float
+    target_manifest_path: str
+    manifest_schema: str
+    required_policy_digest: str
+    bias: str
+    merge_on_completion: bool
+
+    def __post_init__(self) -> None:
+        LoraTrainabilityConfiguration(
+            self.rank,
+            self.alpha,
+            self.dropout,
+            ("manifest-placeholder",),
+            (),
+            self.bias,
+            self.merge_on_completion,
+        )
+        if not Path(self.target_manifest_path).is_file():
+            raise ValueError("LoRA target manifest must be an existing file")
+        if not isinstance(self.manifest_schema, str) or not self.manifest_schema:
+            raise ValueError("LoRA target manifest schema must be nonempty")
+        if not (
+            isinstance(self.required_policy_digest, str)
+            and len(self.required_policy_digest) == 71
+            and self.required_policy_digest.startswith("sha256:")
+            and all(
+                character in "0123456789abcdef"
+                for character in self.required_policy_digest[7:]
+            )
+        ):
+            raise ValueError("LoRA target policy digest must be a lowercase sha256")
+
+    @classmethod
+    def from_resolved(
+        cls, value: dict[str, Any]
+    ) -> LoraTargetManifestConfiguration:
+        if set(value) != {
+            "rank",
+            "alpha",
+            "dropout",
+            "target_manifest_path",
+            "manifest_schema",
+            "required_policy_digest",
+            "bias",
+            "merge_on_completion",
+        }:
+            raise ValueError("LoRA target-manifest configuration is inexact")
+        return cls(**value)
+
+
+@dataclass(frozen=True, slots=True)
+class LoraTargetReceipt:
+    targets: tuple[str, ...]
+    manifest_file_digest: str
+    producer_target_digest: str
+    policy_digest: str
+    model_config_sha256: str
+    weight_index_sha256: str
+
+
+def load_lora_target_receipt(
+    path: Path,
+    *,
+    manifest_schema: str | None = None,
+    required_policy_digest: str | None = None,
+) -> LoraTargetReceipt:
+    encoded = path.read_bytes()
+    document = json.loads(encoded)
+    expected = {
+        "architecture",
+        "model_config_sha256",
+        "model_type",
+        "policy",
+        "schema",
+        "target_count",
+        "target_digest",
+        "targets",
+        "weight_index_sha256",
+    }
+    if not isinstance(document, dict) or set(document) != expected:
+        raise ValueError("LoRA target manifest is inexact")
+    raw_targets = document["targets"]
+    targets = tuple(raw_targets) if isinstance(raw_targets, list) else ()
+    policy = document["policy"]
+    lowercase_sha256 = lambda value: (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+    policy_digest = "sha256:" + hashlib.sha256(
+        json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if (
+        not isinstance(document["schema"], str)
+        or not document["schema"]
+        or not isinstance(document["architecture"], list)
+        or not document["architecture"]
+        or any(
+            not isinstance(item, str) or not item
+            for item in document["architecture"]
+        )
+        or not isinstance(document["model_type"], str)
+        or not document["model_type"]
+        or not lowercase_sha256(document["model_config_sha256"])
+        or not lowercase_sha256(document["weight_index_sha256"])
+        or not lowercase_sha256(document["target_digest"])
+        or not isinstance(raw_targets, list)
+        or isinstance(document["target_count"], bool)
+        or not isinstance(document["target_count"], int)
+        or document["target_count"] != len(targets)
+        or not targets
+        or any(not isinstance(target, str) or not target for target in targets)
+        or tuple(sorted(set(targets))) != targets
+        or not isinstance(policy, dict)
+        or not policy
+        or any(
+            not isinstance(key, str)
+            or not key
+            or not isinstance(value, str)
+            or not value
+            for key, value in policy.items()
+        )
+        or (
+            manifest_schema is not None
+            and document["schema"] != manifest_schema
+        )
+        or (
+            required_policy_digest is not None
+            and policy_digest != required_policy_digest
+        )
+    ):
+        raise ValueError("LoRA target manifest receipt is invalid")
+    return LoraTargetReceipt(
+        targets,
+        "sha256:" + hashlib.sha256(encoded).hexdigest(),
+        "sha256:" + document["target_digest"],
+        policy_digest,
+        document["model_config_sha256"],
+        document["weight_index_sha256"],
+    )
+
+
+def preflight_lora_target_manifest(
+    model_path: Path,
+    manifest_path: Path,
+    *,
+    manifest_schema: str | None = None,
+    required_policy_digest: str | None = None,
+) -> LoraTargetReceipt:
+    receipt = load_lora_target_receipt(
+        manifest_path,
+        manifest_schema=manifest_schema,
+        required_policy_digest=required_policy_digest,
+    )
+    config = model_path / "config.json"
+    index = model_path / "model.safetensors.index.json"
+    if (
+        hashlib.sha256(config.read_bytes()).hexdigest()
+        != receipt.model_config_sha256
+        or hashlib.sha256(index.read_bytes()).hexdigest()
+        != receipt.weight_index_sha256
+    ):
+        raise ValueError("LoRA target manifest names a different model snapshot")
+    index_document = json.loads(index.read_text(encoding="utf-8"))
+    weight_map = index_document.get("weight_map")
+    if not isinstance(weight_map, dict):
+        raise TypeError("HF safetensor index has an invalid weight map")
+    modules = {
+        name.rsplit(".", 1)[0]
+        for name in weight_map
+        if name.endswith((".weight", ".bias"))
+    }
+    missing = tuple(target for target in receipt.targets if target not in modules)
+    if missing:
+        raise ValueError("LoRA target manifest names missing snapshot modules")
+    return receipt
+
+
 TrainabilityConfiguration = (
     FullTrainabilityConfiguration
     | FrozenTrainabilityConfiguration
     | NamedRulesTrainabilityConfiguration
     | LoraTrainabilityConfiguration
+    | LoraTargetManifestConfiguration
 )
 
 
@@ -159,12 +345,52 @@ def resolve_lora_targets(
     return tuple(sorted(_matches(module_names, selectors, "LoRA target")))
 
 
+def preflight_lora_targets_from_snapshot(
+    model_path: Path, selectors: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Resolve LoRA selectors from safetensor metadata without loading weights."""
+
+    index_path = model_path / "model.safetensors.index.json"
+    single_path = model_path / "model.safetensors"
+    if index_path.is_file():
+        document = json.loads(index_path.read_text(encoding="utf-8"))
+        weight_map = document.get("weight_map") if isinstance(document, dict) else None
+        if not isinstance(weight_map, dict) or any(
+            not isinstance(name, str) or not isinstance(shard, str)
+            for name, shard in weight_map.items()
+        ):
+            raise ValueError("HF safetensor index has an invalid weight map")
+        tensor_names = tuple(weight_map)
+    elif single_path.is_file():
+        from safetensors import safe_open
+
+        with safe_open(single_path, framework="pt", device="cpu") as payload:
+            tensor_names = tuple(payload.keys())
+    else:
+        raise ValueError(
+            "LoRA preflight requires model.safetensors or its sharded index"
+        )
+    module_names = tuple(
+        sorted(
+            {
+                name.rsplit(".", 1)[0]
+                for name in tensor_names
+                if name.endswith((".weight", ".bias")) and "." in name
+            }
+        )
+    )
+    if not module_names:
+        raise ValueError("HF safetensor metadata exposes no module candidates")
+    return tuple(sorted(_matches(module_names, selectors, "LoRA target")))
+
+
 @dataclass(frozen=True, slots=True)
 class TrainabilityResult:
     model: torch.nn.Module
     trainable_parameter_names: tuple[str, ...]
     trainable_parameter_manifest: str
     adapter_backed: bool = False
+    target_receipt: LoraTargetReceipt | None = None
 
     def component_state(
         self,
@@ -190,6 +416,15 @@ class TrainabilityResult:
                 )
             state["adapter_state_manifest"] = adapter_state_manifest
             state["merged"] = merged
+            if self.target_receipt is not None:
+                state.update(
+                    {
+                        "target_manifest_file_digest": self.target_receipt.manifest_file_digest,
+                        "producer_target_digest": self.target_receipt.producer_target_digest,
+                        "producer_digest_status": "producer_claim_unrecomputed",
+                        "target_policy_digest": self.target_receipt.policy_digest,
+                    }
+                )
         elif adapter_state_manifest is not None or merged:
             raise ValueError("non-adapter trainability has no adapter checkpoint state")
         return MappingProxyType(state)
@@ -224,8 +459,29 @@ class RegisteredTrainability:
                 parameter.requires_grad_(trainable)
         else:
             configuration = self.configuration
-            assert isinstance(configuration, LoraTrainabilityConfiguration)
-            targets = resolve_lora_targets(model, configuration.target_selectors)
+            assert isinstance(
+                configuration,
+                (LoraTargetManifestConfiguration, LoraTrainabilityConfiguration),
+            )
+            target_receipt = (
+                load_lora_target_receipt(
+                    Path(configuration.target_manifest_path),
+                    manifest_schema=configuration.manifest_schema,
+                    required_policy_digest=configuration.required_policy_digest,
+                )
+                if isinstance(configuration, LoraTargetManifestConfiguration)
+                else None
+            )
+            if target_receipt is not None:
+                module_names = frozenset(name for name, _ in model.named_modules() if name)
+                missing = tuple(
+                    target for target in target_receipt.targets if target not in module_names
+                )
+                if missing:
+                    raise ValueError("LoRA target manifest names missing model modules")
+                targets = target_receipt.targets
+            else:
+                targets = resolve_lora_targets(model, configuration.target_selectors)
             modules_to_save = (
                 tuple(
                     sorted(
@@ -240,7 +496,8 @@ class RegisteredTrainability:
                         )
                     )
                 )
-                if configuration.modules_to_save
+                if isinstance(configuration, LoraTrainabilityConfiguration)
+                and configuration.modules_to_save
                 else None
             )
             from peft import LoraConfig, get_peft_model
@@ -265,12 +522,20 @@ class RegisteredTrainability:
             model=model,
             trainable_parameter_names=trainable,
             trainable_parameter_manifest=manifest,
-            adapter_backed=self.implementation is TrainabilityImplementation.LORA_V1,
+            adapter_backed=self.implementation
+            in {
+                TrainabilityImplementation.LORA_V1,
+                TrainabilityImplementation.LORA_TARGET_MANIFEST_V2,
+            },
+            target_receipt=(target_receipt if "target_receipt" in locals() else None),
         )
 
     def merge_for_export(self, result: TrainabilityResult) -> torch.nn.Module:
         configuration = self.configuration
-        if not isinstance(configuration, LoraTrainabilityConfiguration):
+        if not isinstance(
+            configuration,
+            (LoraTargetManifestConfiguration, LoraTrainabilityConfiguration),
+        ):
             return result.model
         if not configuration.merge_on_completion:
             return result.model
@@ -289,6 +554,7 @@ def build_registered_trainability(
         TrainabilityImplementation.FROZEN_V1: FrozenTrainabilityConfiguration,
         TrainabilityImplementation.NAMED_RULES_V1: NamedRulesTrainabilityConfiguration,
         TrainabilityImplementation.LORA_V1: LoraTrainabilityConfiguration,
+        TrainabilityImplementation.LORA_TARGET_MANIFEST_V2: LoraTargetManifestConfiguration,
     }[implementation]
     if not isinstance(configuration, expected):
         raise TypeError("trainability implementation and configuration disagree")
@@ -309,6 +575,7 @@ def trainability_from_resolved_component(
         TrainabilityImplementation.FROZEN_V1: FrozenTrainabilityConfiguration,
         TrainabilityImplementation.NAMED_RULES_V1: NamedRulesTrainabilityConfiguration,
         TrainabilityImplementation.LORA_V1: LoraTrainabilityConfiguration,
+        TrainabilityImplementation.LORA_TARGET_MANIFEST_V2: LoraTargetManifestConfiguration,
     }[implementation]
     configuration = configuration_type.from_resolved(dict(component["configuration"]))
     return build_registered_trainability(implementation, configuration)

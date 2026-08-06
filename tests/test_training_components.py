@@ -302,7 +302,7 @@ def test_component_catalog_and_runtime_dispatch_are_exactly_aligned():
     assert grades["objective"] == "stateless"
     assert grades["evaluator"] == "stateless"
     assert grades["evaluation_schedule"] == "stateless"
-    assert grades["qualitative_sample"] == "stateless"
+    assert grades["qualitative_sample"] == "exact"
     assert grades["artifact_renderer"] == "stateless"
     assert grades["split_selector"] == "stateless"
     assert grades["activation"] == "stateless"

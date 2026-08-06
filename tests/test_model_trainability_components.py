@@ -76,7 +76,10 @@ class _AutoFactory:
 class _AuxiliaryFactory:
     @classmethod
     def from_pretrained(cls, *_args, **_kwargs):
-        return object()
+        return SimpleNamespace(
+            chat_template="{{ messages }}",
+            special_tokens_map={"eos_token": "<eos>"},
+        )
 
 
 def _model_configuration(model_path: Path) -> HuggingFaceModelConfiguration:
@@ -116,10 +119,62 @@ def test_hugging_face_loaders_produce_exact_checkpoint_receipts(
 
     assert loaded.receipt.exact
     assert loaded.receipt.checkpoint_tensor_count == len(loaded.model.state_dict())
+    assert loaded.receipt.auxiliary_fingerprint.startswith("sha256:")
     assert loaded.component_state() == {
         "base_checkpoint_fingerprint": "sha256:" + "a" * 64,
         "load_receipt_digest": loaded.receipt.digest,
     }
+
+
+def test_hugging_face_load_receipt_binds_processor_template_identity(
+    tmp_path: Path,
+) -> None:
+    class ChangedAuxiliaryFactory:
+        template = "first"
+
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return SimpleNamespace(
+                chat_template=cls.template,
+                special_tokens_map={"eos_token": "<eos>"},
+            )
+
+    facade = SimpleNamespace(
+        AutoModelForImageTextToText=_AutoFactory,
+        AutoProcessor=ChangedAuxiliaryFactory,
+    )
+    loader = build_registered_model_loader(
+        ModelLoaderImplementation.HF_MULTIMODAL_V1,
+        _model_configuration(tmp_path),
+    )
+    first = loader.load(transformers_module=facade)
+    ChangedAuxiliaryFactory.template = "changed"
+    second = loader.load(transformers_module=facade)
+    assert first.receipt.auxiliary_fingerprint != second.receipt.auxiliary_fingerprint
+    assert first.receipt.digest != second.receipt.digest
+
+
+def test_hugging_face_auxiliary_identity_rejects_process_local_object_repr(
+    tmp_path: Path,
+) -> None:
+    class UnstableAuxiliaryFactory:
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return SimpleNamespace(
+                chat_template="stable",
+                special_tokens_map={"eos_token": object()},
+            )
+
+    facade = SimpleNamespace(
+        AutoModelForImageTextToText=_AutoFactory,
+        AutoProcessor=UnstableAuxiliaryFactory,
+    )
+    loader = build_registered_model_loader(
+        ModelLoaderImplementation.HF_MULTIMODAL_V1,
+        _model_configuration(tmp_path),
+    )
+    with pytest.raises(ValueError, match="noncanonical object"):
+        loader.load(transformers_module=facade)
 
 
 def test_exact_checkpoint_loader_rejects_loading_drift(tmp_path: Path) -> None:

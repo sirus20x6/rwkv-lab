@@ -353,11 +353,11 @@ void checked_in_qwen_example_expands_without_source_changes() {
       "configuration/model_path")] = std::filesystem::canonical(root).string();
   locally_resolvable[nlohmann::json::json_pointer(
       "/spec/workflow/nodes/train/invoke/training/components/data/"
-      "configuration/manifest_path")] =
-      std::filesystem::canonical(root / "README.md").string();
+      "configuration/dataset_root")] = std::filesystem::canonical(root).string();
   locally_resolvable[nlohmann::json::json_pointer(
-      "/spec/workflow/nodes/train/invoke/training/components/data/"
-      "configuration/image_root")] = std::filesystem::canonical(root).string();
+      "/spec/workflow/nodes/train/invoke/training/components/trainability/"
+      "configuration/target_manifest_path")] =
+      std::filesystem::canonical(root / "README.md").string();
   const auto local_plan = trainvm::compile_document(locally_resolvable);
   if (!local_plan.valid())
     throw std::runtime_error("locally resolvable recipe plan did not compile");

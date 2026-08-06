@@ -42,6 +42,12 @@ OperationLifecycleCapabilities receipted_training_lifecycle() {
   return lifecycle;
 }
 
+OperationLifecycleCapabilities exact_training_lifecycle() {
+  OperationLifecycleCapabilities lifecycle = receipted_training_lifecycle();
+  lifecycle.resume_grade = ResumeGrade::exact;
+  return lifecycle;
+}
+
 OperationLifecycleCapabilities restart_only_training_lifecycle() {
   return {
       .stateful = true,
@@ -97,6 +103,41 @@ OperationAuthoringDeclaration mageflow_authoring() {
           .description =
               "Optional checkpoint-bound generated/original held-out gallery.",
       });
+  return authoring;
+}
+
+OperationAuthoringDeclaration hf_multimodal_sft_authoring() {
+  OperationAuthoringDeclaration authoring;
+  authoring.outputs = {
+      {"checkpoint",
+       OperationPortDescriptor{
+           .type = OperationPortType::artifact,
+           .required = true,
+           .artifact_type = ArtifactType::checkpoint,
+           .artifact_schema = "hf.multimodal-sft.v1",
+           .description =
+               "Required exact-resume Hugging Face model, optimizer, data and RNG state.",
+       }},
+      {"eval_gallery",
+       OperationPortDescriptor{
+           .type = OperationPortType::artifact,
+           .required = true,
+           .artifact_type = ArtifactType::image_gallery,
+           .artifact_schema = "rwkv-lab.eval-gallery.v2",
+           .description =
+               "Required checkpoint-bound step-zero and periodic held-out evidence.",
+       }},
+      {"test_eval",
+       OperationPortDescriptor{
+           .type = OperationPortType::artifact,
+           .required = true,
+           .artifact_type = ArtifactType::report,
+           .artifact_schema =
+               "rwkv-lab.hf-test-caption-evidence-bundle.v1",
+           .description =
+               "Required immutable baseline/final test-caption evidence bundle.",
+       }},
+  };
   return authoring;
 }
 
@@ -380,6 +421,145 @@ TrainingCompositionContract transformer_mla_engram_composition() {
   return composition;
 }
 
+TrainingCompositionContract hf_multimodal_sft_composition() {
+  TrainingCompositionContract composition{
+      .model_family = "transformer",
+      .slots = {
+          {"activation_memory", TrainingComponentCategory::activation_memory},
+          {"artifact_renderer", TrainingComponentCategory::artifact_renderer},
+          {"batching", TrainingComponentCategory::batching},
+          {"checkpoint_policy", TrainingComponentCategory::checkpoint_policy},
+          {"collation", TrainingComponentCategory::collator},
+          {"data", TrainingComponentCategory::data_source},
+          {"evaluation_schedule",
+           TrainingComponentCategory::evaluation_schedule},
+          {"evaluation_split", TrainingComponentCategory::split_selector},
+          {"evaluator", TrainingComponentCategory::evaluator},
+          {"gradient_accumulation",
+           TrainingComponentCategory::gradient_accumulation},
+          {"gradient_clipping", TrainingComponentCategory::gradient_clipping},
+          {"generation_policy", TrainingComponentCategory::generation_policy},
+          {"learning_rate", TrainingComponentCategory::learning_rate_schedule},
+          {"model_loader", TrainingComponentCategory::model_loader},
+          {"objective", TrainingComponentCategory::objective},
+          {"optimizer", TrainingComponentCategory::optimizer},
+          {"precision", TrainingComponentCategory::precision},
+          {"processor", TrainingComponentCategory::sample_processor},
+          {"qualitative_samples",
+           TrainingComponentCategory::qualitative_sample},
+          {"sample_mapping", TrainingComponentCategory::sample_mapper},
+          {"sampler", TrainingComponentCategory::sampler},
+          {"split", TrainingComponentCategory::split_selector},
+          {"test_split", TrainingComponentCategory::split_selector},
+          {"trainability", TrainingComponentCategory::trainability},
+          {"weight_decay", TrainingComponentCategory::weight_decay_schedule},
+      },
+  };
+  composition.allowed_components =
+      std::map<std::string, std::vector<TrainingComponentKey>>{
+          {"activation_memory",
+           {{TrainingComponentCategory::activation_memory,
+             "hf_gradient_checkpointing", "1.0.0"}}},
+          {"artifact_renderer",
+           {{TrainingComponentCategory::artifact_renderer, "caption_triplet",
+             "1.0.0"},
+            {TrainingComponentCategory::artifact_renderer, "evidence_envelope",
+             "1.0.0"}}},
+          {"batching",
+           {{TrainingComponentCategory::batching, "bucketed", "1.0.0"},
+            {TrainingComponentCategory::batching, "fixed", "1.0.0"}}},
+          {"checkpoint_policy",
+           {{TrainingComponentCategory::checkpoint_policy, "atomic_retained",
+             "1.0.0"}}},
+          {"collation",
+           {{TrainingComponentCategory::collator, "padded", "1.0.0"}}},
+          {"data",
+           {{TrainingComponentCategory::data_source, "jsonl_image_caption",
+             "1.0.0"},
+            {TrainingComponentCategory::data_source, "jsonl_token_corpus",
+             "1.0.0"},
+            {TrainingComponentCategory::data_source,
+             "manifested_jsonl_image_splits", "1.0.0"}}},
+          {"evaluation_schedule",
+           {{TrainingComponentCategory::evaluation_schedule,
+             "launch_gate_periodic", "1.0.0"},
+            {TrainingComponentCategory::evaluation_schedule,
+             "launch_gate_periodic", "2.0.0"}}},
+          {"evaluation_split",
+           {{TrainingComponentCategory::split_selector, "deterministic_holdout",
+             "1.0.0"},
+            {TrainingComponentCategory::split_selector, "frozen_named",
+             "1.0.0"}}},
+          {"evaluator",
+           {{TrainingComponentCategory::evaluator, "scalar_loss", "1.0.0"}}},
+          {"gradient_accumulation",
+           {{TrainingComponentCategory::gradient_accumulation, "fixed",
+             "1.0.0"}}},
+          {"gradient_clipping",
+           {{TrainingComponentCategory::gradient_clipping, "global_norm",
+             "1.0.0"}}},
+          {"generation_policy",
+           {{TrainingComponentCategory::generation_policy, "greedy", "1.0.0"}}},
+          {"learning_rate",
+           {{TrainingComponentCategory::learning_rate_schedule,
+             "linear_warmup_cosine", "1.0.0"}}},
+          {"model_loader",
+           {{TrainingComponentCategory::model_loader, "hf_causal", "1.0.0"},
+            {TrainingComponentCategory::model_loader, "hf_multimodal",
+             "1.0.0"}}},
+          {"objective",
+           {{TrainingComponentCategory::objective, "linear_head_cross_entropy",
+             "1.0.0"}}},
+          {"optimizer",
+           {{TrainingComponentCategory::optimizer, "torch_adamw", "1.0.0"},
+            {TrainingComponentCategory::optimizer, "torch_adamw_no_decay",
+             "2.0.0"}}},
+          {"precision",
+           {{TrainingComponentCategory::precision,
+             "bf16_parameters_fp32_reductions", "1.0.0"},
+            {TrainingComponentCategory::precision,
+             "fp32_parameters_bf16_compute", "1.0.0"}}},
+          {"processor",
+           {{TrainingComponentCategory::sample_processor, "image_caption",
+             "1.0.0"},
+            {TrainingComponentCategory::sample_processor, "token_ids",
+             "1.0.0"}}},
+          {"qualitative_samples",
+           {{TrainingComponentCategory::qualitative_sample, "fixed_held_out",
+             "1.0.0"},
+            {TrainingComponentCategory::qualitative_sample, "fixed_held_out",
+             "2.0.0"}}},
+          {"sample_mapping",
+           {{TrainingComponentCategory::sample_mapper,
+             "assistant_conversation", "2.0.0"},
+            {TrainingComponentCategory::sample_mapper, "assistant_only",
+             "1.0.0"},
+            {TrainingComponentCategory::sample_mapper, "causal_tokens",
+             "1.0.0"}}},
+          {"sampler",
+           {{TrainingComponentCategory::sampler, "deterministic", "1.0.0"}}},
+          {"split",
+           {{TrainingComponentCategory::split_selector, "deterministic_holdout",
+             "1.0.0"},
+            {TrainingComponentCategory::split_selector, "frozen_named",
+             "1.0.0"}}},
+          {"test_split",
+           {{TrainingComponentCategory::split_selector, "frozen_named",
+             "1.0.0"}}},
+          {"trainability",
+           {{TrainingComponentCategory::trainability, "full", "1.0.0"},
+            {TrainingComponentCategory::trainability, "lora", "1.0.0"},
+            {TrainingComponentCategory::trainability,
+             "lora_target_manifest", "2.0.0"},
+            {TrainingComponentCategory::trainability, "named_rules",
+             "1.0.0"}}},
+          {"weight_decay",
+           {{TrainingComponentCategory::weight_decay_schedule, "constant",
+             "1.0.0"}}},
+      };
+  return composition;
+}
+
 std::vector<std::string> canonical_distributions(
     std::initializer_list<std::string_view> values) {
   std::vector<std::string> result;
@@ -511,6 +691,11 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
             TrainingComponentCategory::weight_decay_schedule},
       }},
       resumable_training_lifecycle()));
+  profiles.push_back(profile(
+      key("rwkv-lab.hf-multimodal-sft",
+          "rwkv_lab.hf_multimodal_sft.v1.Train"),
+      code_fingerprint, hf_multimodal_sft_composition(),
+      exact_training_lifecycle(), hf_multimodal_sft_authoring()));
   for (const auto& [adapter, contract] :
        std::initializer_list<std::pair<std::string, std::string>>{
            {"rwkv-lab.transformer-mla", "rwkv_lab.transformer_mla.v1.Train"},
@@ -608,6 +793,7 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
       .provided_capabilities = {
           "activation.silu.v1",
           "activation.squared_relu.v1",
+          "activation_memory.hf_gradient_checkpointing.v1",
           "artifact_renderer.caption_triplet.v1",
           "artifact_renderer.evidence_envelope.v1",
           "batching.bucketed.v1",
@@ -615,10 +801,13 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
           "checkpoint_policy.atomic_retained.v1",
           "collator.padded.v1",
           "curriculum.context_length.v1",
+          "data_source.jsonl_frozen_image_splits.v1",
           "data_source.jsonl_image_caption.v1",
           "data_source.jsonl_token_corpus.v1",
           "evaluation_schedule.launch_gate_periodic.v1",
+          "evaluation_schedule.launch_gate_periodic.v2",
           "evaluator.scalar_loss.v1",
+          "generation_policy.greedy.v1",
           "gradient_accumulation.fixed.v1",
           "gradient_clipping.global_norm.v1",
           "model_loader.hf_causal.v1",
@@ -636,6 +825,8 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
           "precision.bf16_parameters_fp32_reductions.v1",
           "precision.fp32_parameters_bf16_compute.v1",
           "qualitative_sample.fixed_held_out.v1",
+          "qualitative_sample.fixed_held_out.v2",
+          "sample_mapper.assistant_conversation.v2",
           "sample_mapper.assistant_only.v1",
           "sample_mapper.causal_tokens.v1",
           "sample_processor.image_caption.v1",
@@ -646,9 +837,11 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
           "schedule.linear_warmup_cosine.v1",
           "schedule.powercool.v1",
           "split_selector.deterministic_holdout.v1",
+          "split_selector.frozen_named.v1",
           "trainability.frozen.v1",
           "trainability.full.v1",
           "trainability.lora.v1",
+          "trainability.lora_target_manifest.v2",
           "trainability.named_rules.v1",
           "weight_decay_schedule.constant.v1",
           "worker.controls",
@@ -662,6 +855,10 @@ rwkv_lab_worker_runtime_requirements() {
   const std::vector<std::string> shared = canonical_distributions(
       {"grpcio", "pillow", "protobuf", "torch"});
   std::map<std::string, std::vector<std::string>> requirements{
+      {"rwkv-lab.hf-multimodal-sft",
+       canonical_distributions(
+           {"accelerate", "grpcio", "numpy", "peft", "pillow", "protobuf",
+            "safetensors", "torch", "transformers"})},
       {"rwkv-lab.mageflow-appearance-expert",
        canonical_distributions(
            {"accelerate", "deepspeed", "diffusers", "einops", "flash-attn",
