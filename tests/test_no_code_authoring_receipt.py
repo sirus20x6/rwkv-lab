@@ -61,6 +61,12 @@ def receipt(matrix) -> dict:
                         "id": variant["id"],
                         "authoring_duration_ms": 10,
                         "plan_hash": PLAN_HASH,
+                        "plan_identity": {
+                            "dry_run_preview_plan_hash": PLAN_HASH,
+                            "launch_expected_plan_hash": PLAN_HASH,
+                            "preflight_plan_hash": PLAN_HASH,
+                            "queued_run_plan_hash": PLAN_HASH,
+                        },
                         "recipe_expansion_sha256": SHA,
                         "override_bindings": [
                             {
@@ -78,11 +84,23 @@ def receipt(matrix) -> dict:
                             "passed": True,
                             "before_submission": True,
                             "accelerator_leases_created": 0,
+                            "receipt_sha256": SHA,
                         },
                         "run": {
                             "run_id": f"run-{scenario['id']}-{variant['id']}",
                             "dashboard_registered_at_optimizer_step": 0,
                             "step_zero_examples": 1,
+                            "step_zero_evidence": {
+                                "artifact_id": "artifact-step-zero",
+                                "baseline_present": True,
+                                "checkpoint_artifact_id": "checkpoint-step-zero",
+                                "checkpoint_manifest_sha256": SHA,
+                                "current_present": True,
+                                "example_count": 1,
+                                "modality": scenario["step_zero_modality"],
+                                "optimizer_step": 0,
+                                "target_present": True,
+                            },
                             "optimizer_steps": 1,
                             "checkpoint_artifact_id": "artifact-checkpoint",
                             "pause_resume_proven": True,
@@ -152,6 +170,44 @@ def test_step_zero_examples_are_not_optional(tmp_path, receipt):
     result = run_validator(write_receipt(tmp_path, receipt))
     assert result.returncode == 1
     assert "step-zero examples are missing" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "dry_run_preview_plan_hash",
+        "launch_expected_plan_hash",
+        "preflight_plan_hash",
+        "queued_run_plan_hash",
+    ],
+)
+def test_every_authoring_phase_must_share_one_plan_hash(
+    tmp_path, receipt, field
+):
+    variant = receipt["scenarios"][0]["variants"][0]
+    variant["plan_identity"][field] = "b" * 64
+    result = run_validator(write_receipt(tmp_path, receipt))
+    assert result.returncode == 1
+    assert "do not share one plan identity" in result.stdout
+
+
+@pytest.mark.parametrize("role", ["target", "baseline", "current"])
+def test_step_zero_artifact_requires_all_user_visible_views(
+    tmp_path, receipt, role
+):
+    variant = receipt["scenarios"][0]["variants"][0]
+    variant["run"]["step_zero_evidence"][f"{role}_present"] = False
+    result = run_validator(write_receipt(tmp_path, receipt))
+    assert result.returncode == 1
+    assert f"omit the {role} view" in result.stdout
+
+
+def test_step_zero_artifact_must_be_checkpoint_bound(tmp_path, receipt):
+    variant = receipt["scenarios"][0]["variants"][0]
+    variant["run"]["step_zero_evidence"]["checkpoint_manifest_sha256"] = "bad"
+    result = run_validator(write_receipt(tmp_path, receipt))
+    assert result.returncode == 1
+    assert "step-zero examples are not checkpoint-bound" in result.stdout
 
 
 @pytest.mark.parametrize("field", IDENTITY_FIELDS)
