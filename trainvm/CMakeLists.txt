@@ -81,6 +81,7 @@ add_library(trainvm_core
   src/control.cpp
   src/controller.cpp
   src/document.cpp
+  src/eval_examples_contract.cpp
   src/external_profiler_artifact.cpp
   src/fake_worker.cpp
   src/fsm.cpp
@@ -285,6 +286,14 @@ target_compile_options(worker_bootstrap_tests PRIVATE
 )
 target_link_libraries(worker_bootstrap_tests PRIVATE trainvm_core)
 add_test(NAME worker_bootstrap_tests COMMAND worker_bootstrap_tests)
+add_executable(eval_examples_contract_tests
+  tests/eval_examples_contract_tests.cpp
+)
+target_compile_options(eval_examples_contract_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(eval_examples_contract_tests PRIVATE trainvm_core)
+add_test(NAME eval_examples_contract_tests COMMAND eval_examples_contract_tests)
 add_executable(training_component_registry_tests
   tests/training_component_registry_tests.cpp
 )

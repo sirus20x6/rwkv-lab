@@ -196,6 +196,24 @@ def test_control_patch_applies_atomically_at_its_safe_point() -> None:
         )
 
 
+def test_pre_optimizer_step_blocks_mutation_until_durable_eval_gate() -> None:
+    session = FakeSession()
+    session.step_zero_eval_gate_required = True
+    session.step_zero_eval_gate_satisfied = False
+    runtime = WorkerControlRuntime(session, {}, 0)
+    mutated: list[bool] = []
+
+    with pytest.raises(WorkerControlError, match="optimizer mutation is blocked"):
+        runtime.pre_optimizer_step(1, lambda *_: mutated.append(True))
+    assert mutated == []
+
+    session.step_zero_eval_gate_satisfied = True
+    assert runtime.pre_optimizer_step(1, lambda *_: mutated.append(True)) == ()
+    # The control applier is only called when a patch exists. Reaching this
+    # line without an exception is the pre-mutation permit.
+    assert mutated == []
+
+
 def test_pending_commands_remain_revision_ordered_across_safe_points() -> None:
     session = FakeSession(
         control_command(

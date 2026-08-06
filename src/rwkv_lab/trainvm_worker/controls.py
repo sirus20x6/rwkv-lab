@@ -610,9 +610,24 @@ class WorkerControlRuntime:
     def optimizer_step(
         self, step: int, applier: ControlApplier
     ) -> tuple[AppliedControlPatch, ...]:
+        if (
+            step > 0
+            and getattr(self._session, "step_zero_eval_gate_required", False)
+            and not getattr(self._session, "step_zero_eval_gate_satisfied", False)
+        ):
+            raise WorkerControlError(
+                "optimizer mutation is blocked until durable step-zero scalar and eval-examples evidence"
+            )
         return self.apply(
             SafePoint.NEXT_OPTIMIZER_STEP, effective_step=step, applier=applier
         )
+
+    def pre_optimizer_step(
+        self, next_step: int, applier: ControlApplier
+    ) -> tuple[AppliedControlPatch, ...]:
+        """Mandatory safe point immediately before optimizer mutation."""
+
+        return self.optimizer_step(next_step, applier)
 
     def evaluation(
         self, step: int, applier: ControlApplier

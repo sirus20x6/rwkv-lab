@@ -1,6 +1,7 @@
 #include "trainvm/controller.hpp"
 
 #include "trainvm/reflection_json.hpp"
+#include "trainvm/eval_examples_contract.hpp"
 
 #include <algorithm>
 #include <array>
@@ -239,7 +240,14 @@ void require_worker_observation_shape(const Event& event,
                parent_ids.insert(parent.get_ref<const std::string&>()).second;
       });
   const std::string kind = event.payload.value("kind", std::string{});
-  if (event.optimizer_step || event.payload.size() != fields.size() ||
+  const bool eval_examples = kind == "eval_examples";
+  const bool fields_match =
+      event.payload.size() == fields.size() + (eval_examples ? 1U : 0U) &&
+      (!eval_examples ||
+       (event.payload.contains("eval_examples_manifest") &&
+        event.payload.at("eval_examples_manifest").is_object()));
+  if (!fields_match ||
+      (eval_examples ? !event.optimizer_step : event.optimizer_step.has_value()) ||
       !std::ranges::all_of(fields, [&](std::string_view field) {
         return event.payload.contains(std::string(field));
       }) ||
@@ -266,11 +274,23 @@ void require_worker_observation_shape(const Event& event,
       !canonical_parents ||
       (kind != "path" && kind != "checkpoint" && kind != "dataset" &&
        kind != "image_gallery" && kind != "metrics" && kind != "report" &&
-       kind != "opaque") ||
+       kind != "opaque" && kind != "eval_examples") ||
       !event.payload.at("published_at_ns").is_number_integer() ||
       event.payload.at("published_at_ns").get<std::int64_t>() !=
           event.wall_time_ns) {
     throw std::invalid_argument("worker artifact manifest is not canonical");
+  }
+  if (eval_examples) {
+    const EvalExamplesManifest manifest = validate_eval_examples_manifest(
+        event.payload.at("eval_examples_manifest"));
+    if (manifest.optimizer_step != *event.optimizer_step ||
+        manifest.run_id != event.run_id || manifest.node_id != event.node_id ||
+        manifest.attempt_id != event.attempt_id ||
+        event.payload.value("schema", std::string{}) != kEvalExamplesSchema ||
+        event.payload.value("fingerprint_algorithm", std::string{}) !=
+            "manifest_sha256")
+      throw std::invalid_argument(
+          "worker eval-examples artifact identity is not canonical");
   }
 }
 
