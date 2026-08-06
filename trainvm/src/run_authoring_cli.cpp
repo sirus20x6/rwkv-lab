@@ -169,6 +169,10 @@ nlohmann::json author_run_update_json(
   if (!update.recipe_expansion_json().empty())
     output["recipe_expansion"] = parsed_authority_object(
         update.recipe_expansion_json(), "authority recipe expansion");
+  if (!update.content_measurement_receipt_json().empty())
+    output["content_measurement_receipt"] =
+        parsed_authority_object(update.content_measurement_receipt_json(),
+                                "authority content measurement receipt");
   if (!update.canonical_plan_json().empty())
     output["canonical_plan"] = parsed_authority_object(
         update.canonical_plan_json(), "authority canonical plan");

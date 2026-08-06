@@ -129,8 +129,9 @@ void passive_lora_selector_matches_python_module_semantics() {
 void resolves_locks_and_reuses_exact_lock() {
   TemporaryDirectory temporary;
   const AuthorRunDocument authored = author_document(temporary);
+  InputContentMeasurementCache cache;
   const ResolvedAuthorRun first =
-      resolve_and_lock_author_run(authored);
+      resolve_and_lock_author_run(authored, &cache);
   check(first.plan.experiment.spec.workspace.input_content_roots.has_value(),
         "authoring measures and injects immutable input roots");
   check(!first.content_lock_reused &&
@@ -138,15 +139,28 @@ void resolves_locks_and_reuses_exact_lock() {
         "newly measured authoring identifies the exact request");
   check(first.content_measurements.size() == 1U &&
             first.content_measurements[0].cache_misses == 1U &&
-            first.content_measurements[0].cache_hits == 0U,
-        "first author preview reports a cold authority measurement");
+            first.content_measurements[0].cache_hits == 0U &&
+            first.content_measurement_receipt &&
+            first.content_measurement_receipt->request_digest ==
+                first.request_digest &&
+            first.content_measurement_receipt->plan_hash ==
+                first.plan.plan_hash &&
+            first.content_measurement_receipt->roots.size() == 1U &&
+            first.content_measurement_receipt->cache_commit.entries_before ==
+                0U &&
+            first.content_measurement_receipt->cache_commit.entries_after == 1U,
+        "first author preview reports bound cold authority evidence");
 
-  const ResolvedAuthorRun warm = resolve_and_lock_author_run(authored);
+  const ResolvedAuthorRun warm = resolve_and_lock_author_run(authored, &cache);
   check(warm.plan.plan_hash == first.plan.plan_hash &&
             warm.request_digest == first.request_digest &&
             warm.content_measurements.size() == 1U &&
             warm.content_measurements[0].cache_hits == 1U &&
-            warm.content_measurements[0].bytes_hashed == 0U,
+            warm.content_measurements[0].bytes_hashed == 0U &&
+            warm.content_measurement_receipt &&
+            warm.content_measurement_receipt->request_digest ==
+                first.request_digest &&
+            warm.content_measurement_receipt->cache_commit.staged_entries == 0U,
         "fenced launch preserves plan identity while reporting warm reuse");
 
   AuthorRunDocument retry{
@@ -165,6 +179,36 @@ void resolves_locks_and_reuses_exact_lock() {
         "trusted non-training lock reuse does not invent cache telemetry");
   check(second.plan.plan_hash == first.plan.plan_hash,
         "reusing an exact content lock preserves the compiled plan");
+}
+
+void rejected_paths_never_publish_cache_entries() {
+  TemporaryDirectory temporary;
+  const auto outside = temporary.path() / "outside.bin";
+  std::ofstream(outside) << "outside";
+  AuthorRunDocument authored = author_document(temporary);
+  authored.input_content->paths = {outside.string()};
+  std::uint64_t filesystem_probes = 0U;
+  InputContentMeasurementCache cache(
+      4U, [&](int) -> std::optional<InputContentFilesystemIdentity> {
+        ++filesystem_probes;
+        return InputContentFilesystemIdentity{.filesystem_type = 1U,
+                                              .unique_mount_id = 1U};
+      });
+  bool rejected = false;
+  try {
+    (void)resolve_and_lock_author_run(authored, &cache);
+  } catch (const RunAuthoringError &) {
+    rejected = true;
+  }
+  check(rejected && filesystem_probes == 0U,
+        "outside direct content is rejected before opening or cache staging");
+
+  auto transaction = cache.begin_transaction();
+  InputContentMeasurementStats stats;
+  (void)measure_input_content_root(outside, &stats, &transaction);
+  const auto committed = transaction.commit();
+  check(stats.cache_misses == 1U && committed.entries_before == 0U,
+        "a rejected author path cannot poison the service cache");
 }
 
 TrainingPreflightEnvironment worker_environment(std::uint32_t uid,
@@ -332,9 +376,13 @@ void cli_preserves_authority_preview_evidence() {
   update.set_dry_run(true);
   update.set_canonical_plan_json(R"({"plan":"frozen"})");
   update.set_preflight_receipt_json(R"({"passed":true})");
+  update.set_content_measurement_receipt_json(
+      R"({"api_version":"trainvm.input-content-measurement-receipt/v1"})");
   const auto output = author_run_update_json(update, "http://dashboard");
   check(output.at("canonical_plan").at("plan") == "frozen" &&
-            output.at("preflight_receipt").at("passed") == true,
+            output.at("preflight_receipt").at("passed") == true &&
+            output.at("content_measurement_receipt").at("api_version") ==
+                kInputContentMeasurementReceiptApiVersion,
         "CLI NDJSON retains inspectable canonical plan and preflight receipt");
   update.set_canonical_plan_json("[]");
   bool rejected = false;
@@ -469,6 +517,7 @@ int main() {
     rejects_duplicate_keys_recursively();
     passive_lora_selector_matches_python_module_semantics();
     resolves_locks_and_reuses_exact_lock();
+    rejected_paths_never_publish_cache_entries();
     provisioning_rolls_back_then_retries();
     direct_training_rejects_forged_content_lock();
     cli_preserves_authority_preview_evidence();

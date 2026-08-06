@@ -196,6 +196,24 @@ std::vector<std::string> normalized_root_set_paths(
   return result;
 }
 
+bool path_within_root(const std::filesystem::path &child,
+                      const std::filesystem::path &root);
+
+void require_authorized_content_paths(const CompiledPlan &plan,
+                                      const InputContentRootSet &root_set) {
+  const auto paths = normalized_root_set_paths(root_set);
+  const auto &allowed = plan.experiment.spec.workspace.allowed_read_roots;
+  if (!allowed)
+    reject("input_content cannot be measured without allowed_read_roots");
+  for (const auto &path : paths) {
+    if (!std::ranges::any_of(*allowed, [&](const std::string &root) {
+          return path_within_root(path, root);
+        })) {
+      reject("input_content path is outside every allowed_read_root");
+    }
+  }
+}
+
 TrainingPreflightDiagnostic diagnostic(std::string code, std::string path,
                                        std::string message,
                                        std::string help) {
@@ -492,7 +510,8 @@ AuthoringClientConfiguration load_authoring_client_configuration(
 }
 
 ResolvedAuthorRun resolve_and_lock_author_run(
-    const AuthorRunDocument &document) {
+    const AuthorRunDocument &document,
+    InputContentMeasurementCache *content_cache) {
   CompiledPlan plan;
   std::optional<TrainingPreflightRecipeProvenance> recipe_provenance;
   std::optional<nlohmann::json> base_recipe_expansion;
@@ -522,6 +541,16 @@ ResolvedAuthorRun resolve_and_lock_author_run(
 
   bool reused = false;
   std::vector<InputContentMeasurementStats> content_measurements;
+  std::vector<InputContentRootIdentity> measured_identities;
+  std::optional<InputContentMeasurementTransaction> cache_transaction;
+  const auto measure = [&](const InputContentRootSet &roots) {
+    require_authorized_content_paths(plan, roots);
+    if (content_cache != nullptr && !cache_transaction)
+      cache_transaction.emplace(content_cache->begin_transaction());
+    return measure_input_content_root_set(
+        roots, &content_measurements,
+        cache_transaction ? &*cache_transaction : nullptr);
+  };
   nlohmann::json locked_document = plan.canonical_plan;
   const std::vector<std::string> existing_paths = locked_paths(plan);
   nlohmann::json derived_content = nlohmann::json::array();
@@ -542,17 +571,16 @@ ResolvedAuthorRun resolve_and_lock_author_run(
     roots.paths = normalized_root_set_paths(roots);
     if (roots.paths.size() != recipe_content_bindings.size())
       reject("recipe content bindings resolve to ambiguous duplicate roots");
-    const auto identities =
-        measure_input_content_root_set(roots, &content_measurements);
+    measured_identities = measure(roots);
     locked_document["spec"]["workspace"]["input_content_roots"] =
-        encode_json(identities);
+        encode_json(measured_identities);
     for (const auto &binding : recipe_content_bindings) {
       const nlohmann::json::json_pointer path_pointer(binding.path_target);
       const std::string path =
           locked_document.at(path_pointer).get<std::string>();
       const auto identity = std::ranges::find(
-          identities, path, &InputContentRootIdentity::path);
-      if (identity == identities.end())
+          measured_identities, path, &InputContentRootIdentity::path);
+      if (identity == measured_identities.end())
         reject("recipe content binding has no exact measured root identity");
       locked_document[nlohmann::json::json_pointer(
           binding.fingerprint_target)] = identity->tree_sha256;
@@ -565,17 +593,22 @@ ResolvedAuthorRun resolve_and_lock_author_run(
       });
     }
   } else if (document.input_content) {
-    const std::vector<std::string> requested =
-        normalized_root_set_paths(*document.input_content);
-    (void)requested;
-    const auto identities = measure_input_content_root_set(
-        *document.input_content, &content_measurements);
+    measured_identities = measure(*document.input_content);
     locked_document["spec"]["workspace"]["input_content_roots"] =
-        encode_json(identities);
+        encode_json(measured_identities);
   } else if (!existing_paths.empty()) {
-    if (document.source.recipe)
-      reused = true;
-    else if (has_training_node(plan))
+    if (document.source.recipe) {
+      InputContentRootSet roots{
+          .api_version = std::string(kInputContentRootSetApiVersion),
+          .paths = existing_paths,
+      };
+      measured_identities = measure(roots);
+      const auto &declared =
+          *plan.experiment.spec.workspace.input_content_roots;
+      reused = measured_identities == declared;
+      locked_document["spec"]["workspace"]["input_content_roots"] =
+          encode_json(measured_identities);
+    } else if (has_training_node(plan))
       reject("direct training author-runs must remeasure input_content; "
              "document-supplied workspace locks are not authority provenance");
     else
@@ -589,6 +622,9 @@ ResolvedAuthorRun resolve_and_lock_author_run(
   if (!locked.valid() || !locked.plan)
     reject("content locking produced an invalid compiled experiment");
   plan = *locked.plan;
+  std::optional<InputContentMeasurementCacheCommitStats> cache_commit;
+  if (cache_transaction)
+    cache_commit = cache_transaction->commit();
   if (recipe_provenance)
     recipe_provenance->expanded_plan_digest = "sha256:" + plan.plan_hash;
   std::optional<nlohmann::json> recipe_expansion;
@@ -610,12 +646,51 @@ ResolvedAuthorRun resolve_and_lock_author_run(
                                  {"plan_hash", plan.plan_hash},
                              }
                                  .dump());
+  std::optional<InputContentMeasurementReceipt> content_receipt;
+  if (cache_commit) {
+    if (measured_identities.size() != content_measurements.size())
+      throw std::logic_error(
+          "content measurement identities and telemetry diverged");
+    std::vector<InputContentRootMeasurementReceipt> roots;
+    roots.reserve(measured_identities.size());
+    for (std::size_t index = 0U; index < measured_identities.size(); ++index) {
+      const auto &identity = measured_identities[index];
+      const auto &stats = content_measurements[index];
+      roots.push_back({
+          .path = identity.path,
+          .tree_sha256 = identity.tree_sha256,
+          .file_count = identity.file_count,
+          .total_bytes = identity.total_bytes,
+          .cache_hits = stats.cache_hits,
+          .cache_misses = stats.cache_misses,
+          .cache_bypasses = stats.cache_bypasses,
+          .staging_saturations = stats.staging_saturations,
+          .bytes_hashed = stats.bytes_hashed,
+          .elapsed_nanoseconds = stats.elapsed_nanoseconds,
+      });
+    }
+    content_receipt = InputContentMeasurementReceipt{
+        .api_version = std::string(kInputContentMeasurementReceiptApiVersion),
+        .cache_api_version =
+            std::string(kInputContentMeasurementCacheApiVersion),
+        .cache_policy_digest = content_cache->policy_digest(),
+        .request_digest = request_digest,
+        .plan_hash = plan.plan_hash,
+        .roots = std::move(roots),
+        .cache_commit = *cache_commit,
+        .receipt_digest = {},
+    };
+    nlohmann::json principal = encode_json(*content_receipt);
+    principal.erase("receipt_digest");
+    content_receipt->receipt_digest = "sha256:" + sha256_hex(principal.dump());
+  }
   return {.plan = std::move(plan),
           .recipe_provenance = std::move(recipe_provenance),
           .recipe_expansion = std::move(recipe_expansion),
           .request_digest = request_digest,
           .content_lock_reused = reused,
-          .content_measurements = std::move(content_measurements)};
+          .content_measurements = std::move(content_measurements),
+          .content_measurement_receipt = std::move(content_receipt)};
 }
 
 PassiveHostSnapshotSource make_local_passive_host_snapshot_source(

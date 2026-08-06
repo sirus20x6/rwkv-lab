@@ -44,18 +44,19 @@ type AuthorRunRequest struct {
 }
 
 type AuthorRunUpdate struct {
-	Stage                string              `json:"stage"`
-	Detail               string              `json:"detail,omitempty"`
-	PlanHash             string              `json:"plan_hash,omitempty"`
-	CanonicalPlanJSON    string              `json:"canonical_plan_json,omitempty"`
-	PreflightReceiptJSON string              `json:"preflight_receipt_json,omitempty"`
-	RecipeExpansionJSON  string              `json:"recipe_expansion_json,omitempty"`
-	Diagnostics          []ControlDiagnostic `json:"diagnostics,omitempty"`
-	Run                  *RunIdentity        `json:"run,omitempty"`
-	DashboardURL         string              `json:"dashboard_url,omitempty"`
-	Terminal             bool                `json:"terminal"`
-	DryRun               bool                `json:"dry_run"`
-	ContentLockReused    bool                `json:"content_lock_reused"`
+	Stage                         string              `json:"stage"`
+	Detail                        string              `json:"detail,omitempty"`
+	PlanHash                      string              `json:"plan_hash,omitempty"`
+	CanonicalPlanJSON             string              `json:"canonical_plan_json,omitempty"`
+	PreflightReceiptJSON          string              `json:"preflight_receipt_json,omitempty"`
+	RecipeExpansionJSON           string              `json:"recipe_expansion_json,omitempty"`
+	ContentMeasurementReceiptJSON string              `json:"content_measurement_receipt_json,omitempty"`
+	Diagnostics                   []ControlDiagnostic `json:"diagnostics,omitempty"`
+	Run                           *RunIdentity        `json:"run,omitempty"`
+	DashboardURL                  string              `json:"dashboard_url,omitempty"`
+	Terminal                      bool                `json:"terminal"`
+	DryRun                        bool                `json:"dry_run"`
+	ContentLockReused             bool                `json:"content_lock_reused"`
 }
 
 type DescriptorRequest struct {
@@ -642,10 +643,11 @@ func authorRunUpdateFromProto(wire *trainvmv1.AuthorRunUpdate) (AuthorRunUpdate,
 	update := AuthorRunUpdate{
 		Stage:  stage,
 		Detail: wire.GetDetail(), PlanHash: wire.GetPlanHash(),
-		CanonicalPlanJSON:    wire.GetCanonicalPlanJson(),
-		PreflightReceiptJSON: wire.GetPreflightReceiptJson(),
-		RecipeExpansionJSON:  wire.GetRecipeExpansionJson(),
-		DashboardURL:         wire.GetDashboardUrl(), Terminal: wire.GetTerminal(),
+		CanonicalPlanJSON:             wire.GetCanonicalPlanJson(),
+		PreflightReceiptJSON:          wire.GetPreflightReceiptJson(),
+		RecipeExpansionJSON:           wire.GetRecipeExpansionJson(),
+		ContentMeasurementReceiptJSON: wire.GetContentMeasurementReceiptJson(),
+		DashboardURL:                  wire.GetDashboardUrl(), Terminal: wire.GetTerminal(),
 		DryRun: wire.GetDryRun(), ContentLockReused: wire.GetContentLockReused(),
 	}
 	if update.Terminal != (stage == "complete" || stage == "failed") {
@@ -655,9 +657,10 @@ func authorRunUpdateFromProto(wire *trainvmv1.AuthorRunUpdate) (AuthorRunUpdate,
 		return AuthorRunUpdate{}, fmt.Errorf("native authority emitted a malformed AuthorRun plan hash")
 	}
 	for name, document := range map[string]string{
-		"canonical plan":    update.CanonicalPlanJSON,
-		"preflight receipt": update.PreflightReceiptJSON,
-		"recipe expansion":  update.RecipeExpansionJSON,
+		"canonical plan":              update.CanonicalPlanJSON,
+		"preflight receipt":           update.PreflightReceiptJSON,
+		"recipe expansion":            update.RecipeExpansionJSON,
+		"content measurement receipt": update.ContentMeasurementReceiptJSON,
 	} {
 		if document != "" && !json.Valid([]byte(document)) {
 			return AuthorRunUpdate{}, fmt.Errorf("native authority emitted malformed AuthorRun %s JSON", name)

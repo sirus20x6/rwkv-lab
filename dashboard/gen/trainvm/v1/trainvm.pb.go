@@ -2147,8 +2147,11 @@ type AuthorRunUpdate struct {
 	DryRun               bool                   `protobuf:"varint,10,opt,name=dry_run,json=dryRun,proto3" json:"dry_run,omitempty"`
 	ContentLockReused    bool                   `protobuf:"varint,11,opt,name=content_lock_reused,json=contentLockReused,proto3" json:"content_lock_reused,omitempty"`
 	RecipeExpansionJson  string                 `protobuf:"bytes,12,opt,name=recipe_expansion_json,json=recipeExpansionJson,proto3" json:"recipe_expansion_json,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// Closed, content-addressed operational evidence. It is excluded from the
+	// plan hash but persisted in run.created for a successful launch.
+	ContentMeasurementReceiptJson string `protobuf:"bytes,13,opt,name=content_measurement_receipt_json,json=contentMeasurementReceiptJson,proto3" json:"content_measurement_receipt_json,omitempty"`
+	unknownFields                 protoimpl.UnknownFields
+	sizeCache                     protoimpl.SizeCache
 }
 
 func (x *AuthorRunUpdate) Reset() {
@@ -2261,6 +2264,13 @@ func (x *AuthorRunUpdate) GetContentLockReused() bool {
 func (x *AuthorRunUpdate) GetRecipeExpansionJson() string {
 	if x != nil {
 		return x.RecipeExpansionJson
+	}
+	return ""
+}
+
+func (x *AuthorRunUpdate) GetContentMeasurementReceiptJson() string {
+	if x != nil {
+		return x.ContentMeasurementReceiptJson
 	}
 	return ""
 }
@@ -7009,7 +7019,7 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x10request_document\x18\x01 \x01(\tR\x0frequestDocument\x12#\n" +
 	"\rsource_format\x18\x02 \x01(\tR\fsourceFormat\x12\x17\n" +
 	"\adry_run\x18\x03 \x01(\bR\x06dryRun\x12,\n" +
-	"\x12expected_plan_hash\x18\x04 \x01(\tR\x10expectedPlanHash\"\x81\x04\n" +
+	"\x12expected_plan_hash\x18\x04 \x01(\tR\x10expectedPlanHash\"\xca\x04\n" +
 	"\x0fAuthorRunUpdate\x120\n" +
 	"\x05stage\x18\x01 \x01(\x0e2\x1a.trainvm.v1.AuthorRunStageR\x05stage\x12\x16\n" +
 	"\x06detail\x18\x02 \x01(\tR\x06detail\x12\x1b\n" +
@@ -7023,7 +7033,8 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\adry_run\x18\n" +
 	" \x01(\bR\x06dryRun\x12.\n" +
 	"\x13content_lock_reused\x18\v \x01(\bR\x11contentLockReused\x122\n" +
-	"\x15recipe_expansion_json\x18\f \x01(\tR\x13recipeExpansionJson\"\xe0\x02\n" +
+	"\x15recipe_expansion_json\x18\f \x01(\tR\x13recipeExpansionJson\x12G\n" +
+	" content_measurement_receipt_json\x18\r \x01(\tR\x1dcontentMeasurementReceiptJson\"\xe0\x02\n" +
 	"\x0fPlanDiffRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12+\n" +
 	"\x11expected_revision\x18\x02 \x01(\x04R\x10expectedRevision\x128\n" +
