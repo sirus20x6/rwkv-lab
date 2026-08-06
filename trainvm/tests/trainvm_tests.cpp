@@ -5606,6 +5606,25 @@ void test_service_blocks_674_failed_final_members() {
           std::move(value);
       return evidence;
     };
+    auto resumed_invocation = invocation;
+    auto resumed_evidence = durable_evidence;
+    const std::size_t checkpoint_index = static_cast<std::size_t>(
+        std::distance(durable_evidence.begin(), checkpoint_event));
+    resumed_evidence.at(checkpoint_index).attempt_id = "train_to_boundary@0";
+    resumed_evidence.at(checkpoint_index).worker_sequence = 99U;
+    resumed_evidence.at(checkpoint_index)
+        .payload["producer_attempt_id"] = "train_to_boundary@0";
+    resumed_invocation.resume =
+        {{"api_version", "trainvm.resume-checkpoint/v1"},
+         {"checkpoint", resumed_evidence.at(checkpoint_index).payload},
+         {"optimizer_step", 5'500U},
+         {"pause_command_id", "pause-final"},
+         {"resume_command_id", "resume-final"}};
+    check(trainvm::resolve_final_evaluation_receipts(
+              resumed_invocation, expectation, resumed_evidence)
+                  .size() == 1U,
+          "replacement finalization resolves its exact selected resume "
+          "checkpoint across attempt-local worker sequences");
     check(resolver_rejects(mutate_closure("complete", false), expectation) &&
               resolver_rejects(mutate_closure("kind", "checkpoint"),
                                expectation) &&
@@ -5622,8 +5641,6 @@ void test_service_blocks_674_failed_final_members() {
     duplicate.event_id += ":duplicate";
     duplicate_parent.push_back(std::move(duplicate));
     auto late_parent = durable_evidence;
-    const std::size_t checkpoint_index = static_cast<std::size_t>(
-        std::distance(durable_evidence.begin(), checkpoint_event));
     late_parent.at(checkpoint_index).worker_sequence =
         closure_event->worker_sequence;
     auto self_parent = durable_evidence;

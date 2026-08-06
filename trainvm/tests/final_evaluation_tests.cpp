@@ -440,6 +440,29 @@ int main() {
                 !authority_expectation.terminal_optimizer_fingerprint,
             "HF authority freezes test membership and evaluator metrics while "
             "ignoring worker-only observable extras and closure self-parents");
+    auto resume_invocation = authority_invocation;
+    resume_invocation.attempt_id = "train@2";
+    auto resume_checkpoint_event = terminal_checkpoint;
+    resume_checkpoint_event.attempt_id = "train@1";
+    resume_checkpoint_event.payload["fingerprint_algorithm"] =
+        "manifest_sha256";
+    resume_checkpoint_event.payload["producer_node_id"] = "train";
+    resume_checkpoint_event.payload["producer_attempt_id"] = "train@1";
+    resume_invocation.resume =
+        {{"api_version", "trainvm.resume-checkpoint/v1"},
+         {"checkpoint", resume_checkpoint_event.payload},
+         {"optimizer_step", 745U},
+         {"pause_command_id", "pause-1"},
+         {"resume_command_id", "resume-1"}};
+    const auto resumed_expectation =
+        trainvm::derive_hf_final_evaluation_expectation(
+            hf, resume_invocation, 745U, {resume_checkpoint_event});
+    require(resumed_expectation.checkpoint_artifact_id ==
+                    authority_expectation.checkpoint_artifact_id &&
+                resumed_expectation.checkpoint_fingerprint ==
+                    authority_expectation.checkpoint_fingerprint,
+            "terminal replacement attempts inherit only the controller-selected "
+            "exact resume checkpoint");
     const auto authority_rejects = [&](const std::string& test_bytes,
                                        std::optional<std::string>
                                            receipt_override = std::nullopt) {

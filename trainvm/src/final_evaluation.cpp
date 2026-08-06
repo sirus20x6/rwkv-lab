@@ -995,6 +995,49 @@ FinalEvaluationExpectation derive_hf_final_evaluation_expectation(
           "HF finalization has ambiguous terminal checkpoints");
     checkpoint = &event;
   }
+  if (checkpoint == nullptr && invocation.resume.is_object() &&
+      invocation.resume.value("api_version", std::string{}) ==
+          "trainvm.resume-checkpoint/v1" &&
+      invocation.resume.value("optimizer_step", std::uint64_t{}) ==
+          terminal_step &&
+      invocation.resume.contains("checkpoint") &&
+      invocation.resume.at("checkpoint").is_object()) {
+    const nlohmann::json &selected = invocation.resume.at("checkpoint");
+    const std::string selected_id =
+        selected.value("artifact_id", std::string{});
+    const std::string selected_attempt =
+        selected.value("producer_attempt_id", std::string{});
+    const auto matches_selected = [&](const Event &event) {
+      return event.event_type == "artifact.published" &&
+             event.payload.value("artifact_id", std::string{}) == selected_id;
+    };
+    if (!bounded_identity(selected_id) ||
+        !bounded_identity(selected_attempt) ||
+        selected_attempt == invocation.attempt_id ||
+        selected.value("producer_node_id", std::string{}) !=
+            invocation.node_id ||
+        selected.value("logical_name", std::string{}) !=
+            invocation.publishes.at("checkpoint")
+                .value("logical_name", std::string{}) ||
+        selected.value("kind", std::string{}) != "checkpoint" ||
+        selected.value("fingerprint_algorithm", std::string{}) !=
+            "manifest_sha256" ||
+        !selected.value("complete", false) ||
+        !valid_digest(selected.value("fingerprint", std::string{})) ||
+        std::ranges::count_if(durable_events, matches_selected) != 1)
+      throw std::invalid_argument(
+          "HF finalization selected resume checkpoint is invalid");
+    const auto durable_selected =
+        std::ranges::find_if(durable_events, matches_selected);
+    if (durable_selected == durable_events.end() ||
+        durable_selected->node_id != invocation.node_id ||
+        durable_selected->attempt_id != selected_attempt ||
+        durable_selected->optimizer_step != terminal_step ||
+        durable_selected->payload != selected)
+      throw std::invalid_argument(
+          "HF finalization selected resume checkpoint lacks exact durability");
+    checkpoint = &*durable_selected;
+  }
   if (checkpoint == nullptr)
     throw std::invalid_argument(
         "HF finalization has no exact terminal checkpoint");
@@ -1255,10 +1298,30 @@ std::vector<FinalEvaluationReceipt> resolve_final_evaluation_receipts(
       if (!declared_parents.contains(claimed.artifact_id))
         throw std::invalid_argument(
             "final evaluation output is not a durable closure parent");
+      if (!invocation.publishes.contains(claimed.output_name) ||
+          !invocation.publishes.at(claimed.output_name).is_object())
+        throw std::invalid_argument(
+            "final evaluation output is not declared by the invocation");
+      const nlohmann::json *resume_checkpoint = nullptr;
+      if (claimed.output_name == "checkpoint" &&
+          invocation.resume.is_object() &&
+          invocation.resume.value("api_version", std::string{}) ==
+              "trainvm.resume-checkpoint/v1" &&
+          invocation.resume.contains("checkpoint") &&
+          invocation.resume.at("checkpoint").is_object() &&
+          invocation.resume.at("checkpoint")
+                  .value("artifact_id", std::string{}) ==
+              claimed.artifact_id)
+        resume_checkpoint = &invocation.resume.at("checkpoint");
+      const std::string parent_attempt =
+          resume_checkpoint == nullptr
+              ? invocation.attempt_id
+              : resume_checkpoint->value("producer_attempt_id",
+                                         std::string{});
       const auto matches_parent = [&](const Event &event) {
             return event.event_type == "artifact.published" &&
                    event.node_id == invocation.node_id &&
-                   event.attempt_id == invocation.attempt_id &&
+                   event.attempt_id == parent_attempt &&
                    event.payload.value("artifact_id", std::string{}) ==
                        claimed.artifact_id;
           };
@@ -1268,7 +1331,8 @@ std::vector<FinalEvaluationReceipt> resolve_final_evaluation_receipts(
       const auto parent = std::ranges::find_if(durable_events, matches_parent);
       if (parent == durable_events.end() ||
           parent->worker_sequence == 0U ||
-          parent->worker_sequence >= closure.worker_sequence ||
+          (resume_checkpoint == nullptr &&
+           parent->worker_sequence >= closure.worker_sequence) ||
           !parent->payload.value("complete", false) ||
           parent->payload.value("fingerprint_algorithm", std::string{}) !=
               "manifest_sha256" ||
@@ -1277,6 +1341,8 @@ std::vector<FinalEvaluationReceipt> resolve_final_evaluation_receipts(
                   .value("logical_name", std::string{}) ||
           parent->payload.value("fingerprint", std::string{}) !=
               claimed.artifact_fingerprint ||
+          (resume_checkpoint != nullptr &&
+           parent->payload != *resume_checkpoint) ||
           parent->optimizer_step != expectation.optimizer_step)
         throw std::invalid_argument(
             "final evaluation output receipt disagrees with durable parent");
