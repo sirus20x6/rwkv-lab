@@ -537,13 +537,48 @@ int main() {
                 !appearance.authoring->outputs.contains("log") &&
                 !appearance.authoring->outputs.contains("metrics"),
             "MageFlow must advertise only its protocol-published checkpoint and eval gallery outputs");
-    require(hf.authoring && hf.authoring->outputs.size() == 3U &&
+    require(hf.authoring && hf.authoring->outputs.size() == 4U &&
                 hf.authoring->outputs.at("test_eval").required &&
                 hf.authoring->outputs.at("test_eval").artifact_type ==
                     trainvm::ArtifactType::report &&
                 hf.authoring->outputs.at("test_eval").artifact_schema ==
-                    "rwkv-lab.hf-test-caption-evidence-bundle.v1",
-            "HF multimodal SFT discovery must expose its required sealed test-evaluation output");
+                    "rwkv-lab.hf-test-caption-evidence-bundle.v1" &&
+                hf.authoring->outputs.at("final_evaluation").required &&
+                hf.authoring->outputs.at("final_evaluation").artifact_type ==
+                    trainvm::ArtifactType::report &&
+                hf.authoring->outputs.at("final_evaluation").artifact_schema ==
+                    "rwkv-lab.final-evaluation.v1",
+            "HF multimodal SFT discovery must expose required test and final closure outputs");
+    const auto hf_recipe_path =
+        std::filesystem::path(TRAINVM_SOURCE_ROOT) /
+        "docs/experiment-vm/examples/"
+        "hf-multimodal-sft.recipe-profiles.v1.json";
+    nlohmann::json hf_recipe_document;
+    {
+      std::ifstream input(hf_recipe_path);
+      input >> hf_recipe_document;
+    }
+    const auto hf_recipe_plan = trainvm::compile_document(
+        hf_recipe_document.at("recipes").at(0).at("template_document"));
+    bool hf_recipe_registry_valid = false;
+    if (hf_recipe_plan.valid()) {
+      const auto &recipe_train =
+          hf_recipe_plan.plan->experiment.spec.workflow.nodes.at("train");
+      std::set<std::string> recipe_outputs;
+      for (const auto &[name, logical_name] : *recipe_train.publishes) {
+        (void)logical_name;
+        recipe_outputs.insert(name);
+      }
+      std::set<std::string> operation_outputs;
+      for (const auto &[name, descriptor] : hf.authoring->outputs) {
+        (void)descriptor;
+        operation_outputs.insert(name);
+      }
+      hf_recipe_registry_valid = recipe_outputs == operation_outputs;
+    }
+    require(hf_recipe_registry_valid,
+            "checked-in HF recipe outputs must exactly match the production "
+            "worker operation registry");
 
     nlohmann::json exact_source = load_mageflow_fixture();
     exact_source["spec"].erase("execution");

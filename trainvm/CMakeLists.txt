@@ -84,6 +84,7 @@ add_library(trainvm_core
   src/eval_examples_contract.cpp
   src/external_profiler_artifact.cpp
   src/fake_worker.cpp
+  src/final_evaluation.cpp
   src/fsm.cpp
   src/host_ledger.cpp
   src/sqlite_filesystem_authority.cpp
@@ -331,6 +332,15 @@ target_link_libraries(rwkv_lab_worker_contract_tests PRIVATE trainvm_core)
 add_test(NAME rwkv_lab_worker_contract_tests
   COMMAND rwkv_lab_worker_contract_tests
 )
+add_executable(final_evaluation_tests tests/final_evaluation_tests.cpp)
+target_compile_options(final_evaluation_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_compile_definitions(final_evaluation_tests PRIVATE
+  TRAINVM_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+target_link_libraries(final_evaluation_tests PRIVATE trainvm_core)
+add_test(NAME final_evaluation_tests COMMAND final_evaluation_tests)
 if(TRAINVM_PYTHON_EXECUTABLE)
   add_test(NAME rwkv_lab_worker_contract_python_parity
     COMMAND ${CMAKE_COMMAND} -E env

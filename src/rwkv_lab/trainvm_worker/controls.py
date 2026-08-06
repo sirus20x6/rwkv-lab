@@ -522,7 +522,24 @@ class WorkerControlRuntime:
         ).publish(
             request.source_directory,
             parent_artifact_ids=request.parent_artifact_ids,
+            optimizer_step=request.optimizer_step,
         )
+
+    def publish_final_evaluation(self, request: object) -> object:
+        """Publish the canonical terminal closure after every parent is durable."""
+
+        from .final_evaluation import (
+            FinalEvaluationPublicationRequest,
+            FinalEvaluationPublisher,
+        )
+
+        if not isinstance(request, FinalEvaluationPublicationRequest):
+            raise WorkerControlError(
+                "final evaluation publication requires a typed request"
+            )
+        return FinalEvaluationPublisher(
+            self._session, output_name=request.output_name
+        ).publish(request)
 
     def _wait_for_resume(self, optimizer_step: int) -> None:
         import time

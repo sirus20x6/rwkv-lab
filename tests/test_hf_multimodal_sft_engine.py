@@ -1017,6 +1017,16 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
                 "artifact_renderer": SimpleNamespace(
                     descriptor_digest="sha256:" + "3" * 64
                 ),
+                **{
+                    slot: SimpleNamespace(descriptor_digest="sha256:" + "6" * 64)
+                    for slot in (
+                        "data",
+                        "generation_policy",
+                        "processor",
+                        "sample_mapping",
+                        "test_split",
+                    )
+                },
             }
 
         def validate_resume_state(self, state):
@@ -1121,7 +1131,9 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
 
         def evaluator(self):
             return SimpleNamespace(
-                configuration=SimpleNamespace(maximum_examples=0),
+                configuration=SimpleNamespace(
+                    maximum_examples=0, metrics=("test_loss",)
+                ),
                 reduce=lambda values, weights: sum(
                     v * w for v, w in zip(values, weights, strict=True)
                 )
@@ -1212,7 +1224,9 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
             if self.fail_gallery:
                 self.fail_gallery = False
                 raise RuntimeError("simulated crash after launch checkpoint")
-            return SimpleNamespace(artifact_id="gallery")
+            return SimpleNamespace(
+                artifact_id="gallery", manifest_sha256="sha256:" + "7" * 64
+            )
 
         def publish_artifact(self, request):
             if self.fail_artifact:
@@ -1220,7 +1234,14 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
                 raise RuntimeError("simulated crash after final checkpoint")
             timeline.append("test_artifact")
             self.events.append(("artifact", request, model.head.weight.detach().clone()))
-            return SimpleNamespace(artifact_id="test-eval")
+            return SimpleNamespace(
+                artifact_id="test-eval", manifest_sha256="sha256:" + "8" * 64
+            )
+
+        def publish_final_evaluation(self, request):
+            self.events.append(
+                ("final_evaluation", request, model.head.weight.detach().clone())
+            )
 
         def publish_requested_checkpoint(self, request):
             raise AssertionError(request)
@@ -1283,7 +1304,14 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
     final_controls = Controls()
     final_observability = Observability()
     step = run_hf_multimodal_sft(
-        invocation=SimpleNamespace(attempt_id="attempt-finalize"),
+        invocation=SimpleNamespace(
+            attempt_id="attempt-finalize",
+            observability={
+                "metrics": (
+                    {"name": "eval.test_loss", "step_domain": "optimizer_step"},
+                )
+            },
+        ),
         components=Components(),
         run_directory=tmp_path / "run",
         controls=final_controls,
@@ -1304,7 +1332,28 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
     assert [event[0] for event in final_controls.events] == [
         "artifact",
         "gallery",
+        "final_evaluation",
     ]
+    closure_request = final_controls.events[2][1]
+    expected_context = {
+        "api_version": "rwkv-lab.hf-final-member-context/v1",
+        "components": {
+            "artifact_renderer": "sha256:" + "3" * 64,
+            "data": "sha256:" + "6" * 64,
+            "evaluator": "sha256:" + "2" * 64,
+            "generation_policy": "sha256:" + "6" * 64,
+            "processor": "sha256:" + "6" * 64,
+            "sample_mapping": "sha256:" + "6" * 64,
+            "test_split": "sha256:" + "6" * 64,
+        },
+        "member_id": "test",
+    }
+    expected_context_digest = "sha256:" + hashlib.sha256(
+        json.dumps(expected_context, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert closure_request.member_context_digests == {
+        "test": expected_context_digest
+    }
     assert not torch.equal(generation_weights[0], generation_weights[1])
     assert torch.equal(failed_controls.events[0][2], generation_weights[1])
     assert torch.equal(controls.events[0][2], generation_weights[2])

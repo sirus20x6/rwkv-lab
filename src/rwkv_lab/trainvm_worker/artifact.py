@@ -101,6 +101,7 @@ class ArtifactPublicationRequest:
     source_directory: str | os.PathLike[str]
     output_name: str
     parent_artifact_ids: tuple[str, ...] = ()
+    optimizer_step: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -759,6 +760,7 @@ class ImmutableArtifactPublisher:
         *,
         parent_artifact_ids: Iterable[str] = (),
         progress: Callable[[], None] | None = None,
+        optimizer_step: int | None = None,
     ) -> PublishedArtifact:
         source = Path(source_directory)
         if not source.is_absolute():
@@ -911,6 +913,7 @@ class ImmutableArtifactPublisher:
             fingerprint_algorithm="manifest_sha256",
             fingerprint=manifest_sha256,
             parent_artifact_ids=parents,
+            optimizer_step=optimizer_step,
             wait=True,
         )
         return PublishedArtifact(
@@ -942,6 +945,7 @@ def publish_artifact_requests(
             publisher.publish(
                 request.source_directory,
                 parent_artifact_ids=request.parent_artifact_ids,
+                optimizer_step=request.optimizer_step,
                 progress=progress,
             )
         )

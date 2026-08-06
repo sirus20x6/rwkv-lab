@@ -549,7 +549,14 @@ class WorkerSession:
         stepped_artifact = kind in {
             wire.ARTIFACT_KIND_CHECKPOINT,
             wire.ARTIFACT_KIND_EVAL_EXAMPLES,
-        }
+            wire.ARTIFACT_KIND_IMAGE_GALLERY,
+        } or (
+            kind == wire.ARTIFACT_KIND_REPORT
+            and schema in {
+                "rwkv-lab.final-evaluation.v1",
+                "rwkv-lab.hf-test-caption-evidence-bundle.v1",
+            }
+        )
         valid_optimizer_step = (
             isinstance(optimizer_step, int)
             and not isinstance(optimizer_step, bool)
@@ -559,7 +566,7 @@ class WorkerSession:
             not stepped_artifact and optimizer_step is not None
         ):
             raise WorkerSessionError(
-                "checkpoint and eval-examples artifacts require an optimizer step; "
+                "checkpoint, final-evaluation, strict-test, gallery, and eval-examples artifacts require an optimizer step; "
                 "unstepped artifacts must omit it"
             )
         identity = (
