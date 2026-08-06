@@ -368,6 +368,38 @@ void checked_in_qwen_example_expands_without_source_changes() {
         "Qwen graph resolves registered model, data, evaluation, and checkpoint slots");
 }
 
+void checked_in_qwen_dpo_example_resolves_exact_preference_graph() {
+  const std::filesystem::path root(TRAINVM_SOURCE_ROOT);
+  const auto registry = trainvm::RecipeProfileRegistry::load_file(
+      root / "docs/experiment-vm/examples/"
+             "hf-multimodal-sft.recipe-profiles.v1.json");
+  std::ifstream input(
+      root / "docs/experiment-vm/examples/"
+             "qwen36-caption-dpo-lora-r256.recipe-instance.v1.json");
+  if (!input) throw std::runtime_error("could not open DPO recipe instance fixture");
+  const auto expanded = registry.expand_json(nlohmann::json::parse(input));
+  const auto &components = expanded.plan.canonical_plan.at("spec")
+                               .at("workflow")
+                               .at("nodes")
+                               .at("train")
+                               .at("invoke")
+                               .at("training")
+                               .at("components");
+  check(expanded.recipe == trainvm::RecipeKey{
+                               .name = "hf_multimodal_cached_dpo", .version = "1"} &&
+            components.at("objective").at("key").at("name") ==
+                "cached_reference_dpo" &&
+            components.at("trainability").at("configuration").at("rank") == 256 &&
+            components.at("sample_mapping").at("configuration").at(
+                "enable_thinking") == false,
+        "compact DPO instance selects the exact cached-reference policy and token template");
+  const auto catalog = trainvm::TrainingComponentRegistry::load_file(
+      root / "docs/experiment-vm/examples/training-components.v1.json");
+  catalog.validate_plan(expanded.plan);
+  check(true,
+        "DPO graph resolves its model-bound LoRA, preference columns, and evaluation policies");
+}
+
 }  // namespace
 
 int main() {
@@ -376,6 +408,7 @@ int main() {
   invalid_and_ambiguous_authoring_fails_closed();
   expanded_instances_have_source_aware_diffs();
   checked_in_qwen_example_expands_without_source_changes();
+  checked_in_qwen_dpo_example_resolves_exact_preference_graph();
   if (failures == 0) {
     std::cout << "recipe profile tests passed\n";
     return 0;

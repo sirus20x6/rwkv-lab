@@ -418,7 +418,9 @@ void validate_data_pipeline_relationships(
                                      "rwkv_lab.sample_mapper.assistant_only.v1";
   const bool assistant_conversation_mapper =
       mapper.descriptor.implementation ==
-      "rwkv_lab.sample_mapper.assistant_conversation.v2";
+          "rwkv_lab.sample_mapper.assistant_conversation.v2" ||
+      mapper.descriptor.implementation ==
+          "rwkv_lab.sample_mapper.assistant_conversation.v3";
   const bool assistant_mapper =
       assistant_only_mapper || assistant_conversation_mapper;
   if (image_source != image_processor || image_processor != assistant_mapper)
@@ -462,6 +464,27 @@ void validate_data_pipeline_relationships(
           !mapper.configuration.at("fixed_prompt").get<std::string>().empty();
       if (has_prompt_column == has_fixed_prompt)
         reject("assistant-only mapping must select exactly one prompt source");
+    }
+    const auto objectives = grouped.find(TrainingComponentCategory::objective);
+    if (objectives != grouped.end() && objectives->second.size() == 1U) {
+      const auto& objective = *objectives->second.front();
+      if (objective.descriptor.implementation ==
+          "rwkv_lab.objective.cached_reference_dpo.v1") {
+        constexpr std::array preference_columns{
+            "chosen_column",
+            "rejected_column",
+            "reference_chosen_logp_column",
+            "reference_rejected_logp_column",
+            "reference_chosen_token_ids_column",
+            "reference_rejected_token_ids_column",
+        };
+        for (const auto field : preference_columns)
+          referenced.push_back(objective.configuration.at(field));
+        if (batching.descriptor.implementation !=
+                "rwkv_lab.batching.fixed.v1" ||
+            batching.configuration.value("batch_size", 0) != 1)
+          reject("cached-reference DPO requires fixed batch_size=1");
+      }
     }
   } else {
     referenced.push_back(source.configuration.at("token_column"));

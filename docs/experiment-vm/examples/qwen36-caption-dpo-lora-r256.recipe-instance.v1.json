@@ -1,0 +1,27 @@
+{
+  "api_version": "trainvm.recipe-instance/v1",
+  "recipe": {"name": "hf_multimodal_cached_dpo", "version": "1"},
+  "run_identity": "qwen36-caption-dpo-lora-r256-v1",
+  "overrides": {
+    "model.path": "/thearray/git/ob/text-generation-webui/models/Qwen3.6-35B-A3B-heretic-caption-step000745-merged-bf16",
+    "data.root": "/thearray/git/datasets/captiontest/qwen36-caption-dpo-r256-v1",
+    "model.target_manifest": "/thearray/git/datasets/captiontest/qwen36-caption-dpo-r256-v1/lora-targets.json",
+    "data.batch_size": 1,
+    "trainability.lora_rank": 256,
+    "trainability.lora_alpha": 512,
+    "hyperparameters.learning_rate": 0.000005,
+    "hyperparameters.gradient_accumulation": 16,
+    "hyperparameters.maximum_steps": 745,
+    "preference.beta": 0.1,
+    "preference.label_smoothing": 0.0,
+    "preference.launch_audit_examples": 16,
+    "preference.reference_drift_tolerance": 2.0,
+    "evaluation.qualitative_sample_count": 10,
+    "data.qualitative_manifest_name": "validation-fixed-100.jsonl",
+    "data.qualitative_manifest_sha256": "sha256:e5cfb9fc5edac6cb890409efb02db477060603b8f87a42b401e6235da49a8fdc",
+    "evaluation.qualitative_every_steps": 100,
+    "evaluation.full_every_steps": 100,
+    "checkpointing.every_steps": 250,
+    "resources.gpu_memory_gib": 90
+  }
+}

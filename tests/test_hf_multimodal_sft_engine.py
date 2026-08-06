@@ -4,6 +4,7 @@ import hashlib
 import json
 import random
 from contextlib import nullcontext
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,8 @@ import torch.nn.functional as F
 
 from rwkv_lab.training_components import (
     AssistantOnlyMapperConfiguration,
+    CachedReferenceDPOConfiguration,
+    CachedReferenceDPOObjective,
     CausalTokensMapperConfiguration,
     ImageCaptionProcessorConfiguration,
     JsonlFrozenImageSplitsConfiguration,
@@ -36,6 +39,8 @@ from rwkv_lab.trainvm_adapters.hf_multimodal_sft import (
     HFEngineState,
     HFForwardBatchCodec,
     HFMultimodalSFTError,
+    backward_cached_dpo_pair,
+    component_cached_dpo_loss,
     component_causal_loss,
     initialize_training_stack,
     normalize_token_mean_gradients,
@@ -244,6 +249,64 @@ def test_registered_objective_matches_hf_causal_shift_and_is_image_sensitive() -
         model, objective, changed.tensors, ignore_index=-100
     )
     assert float(changed_loss.detach()) != pytest.approx(float(actual.detach()))
+
+
+def test_cached_reference_dpo_binds_exact_frozen_suffixes_and_updates_policy() -> None:
+    chosen = "specific red subject"
+    rejected = "generic subject"
+    values = {
+        "image": "sample-1.png",
+        "caption": chosen,
+        "chosen": chosen,
+        "rejected": rejected,
+        "reference_chosen_logp_sum": -9.0,
+        "reference_rejected_logp_sum": -7.0,
+        "reference_chosen_token_ids": [
+            *(ord(character) for character in chosen),
+            2,
+        ],
+        "reference_rejected_token_ids": [
+            *(ord(character) for character in rejected),
+            2,
+        ],
+    }
+    sample = ProcessedSample("sample-1", 0, values, image=1.0, image_size=(1, 1))
+    configuration = CachedReferenceDPOConfiguration(
+        evaluation_chunk_size=32,
+        evaluation_prefer_fused=False,
+    )
+    objective = CachedReferenceDPOObjective(configuration)
+    batch = _codec().encode_preference((sample,), configuration)
+    assert batch.chosen.targets == (chosen,)
+    assert batch.rejected.targets == (rejected,)
+    assert batch.reference_chosen.tolist() == [-9.0]
+    model = TinyCausalModel()
+    low_memory_model = deepcopy(model)
+    loss, margin, policy_chosen, policy_rejected = component_cached_dpo_loss(
+        model, objective, batch, ignore_index=-100
+    )
+    assert loss.ndim == margin.ndim == 0 or margin.shape == (1,)
+    assert policy_chosen.shape == policy_rejected.shape == (1,)
+    loss.backward()
+    assert model.embedding.weight.grad is not None
+    assert torch.isfinite(model.embedding.weight.grad).all()
+    low_memory_loss, low_memory_margin, *_ = backward_cached_dpo_pair(
+        low_memory_model, objective, batch, ignore_index=-100
+    )
+    assert low_memory_loss == pytest.approx(loss.detach())
+    assert torch.equal(low_memory_margin, margin)
+    for expected, actual in zip(
+        model.parameters(), low_memory_model.parameters(), strict=True
+    ):
+        assert actual.grad is not None
+        assert expected.grad is not None
+        assert torch.allclose(actual.grad, expected.grad, rtol=2e-5, atol=2e-6)
+
+    bad_values = dict(values)
+    bad_values["reference_chosen_token_ids"] = [123]
+    bad = ProcessedSample("sample-1", 0, bad_values, image=1.0, image_size=(1, 1))
+    with pytest.raises(HFMultimodalSFTError, match="frozen reference ledger"):
+        _codec().encode_preference((bad,), configuration)
 
 
 def test_unequal_microbatches_match_one_concatenated_token_mean_gradient() -> None:

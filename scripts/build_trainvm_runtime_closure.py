@@ -117,7 +117,7 @@ def _stdlib_files() -> list[Path]:
             directory
             for directory in directories
             if root_path / directory not in excluded
-            and directory != "__pycache__"
+            and directory not in {"__pycache__", "site-packages", "dist-packages"}
         )
         for name in sorted(names):
             if name.endswith((".pyc", ".pyo")):

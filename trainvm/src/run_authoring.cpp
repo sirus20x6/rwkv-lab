@@ -1015,7 +1015,11 @@ TrainingNodeProbe make_hf_multimodal_sft_training_node_probe(
           (expected_category == "model_loader" &&
            expected_name == "hf_multimodal" &&
            expected_version == "1.0.0" &&
-           selected_version == "2.0.0");
+           selected_version == "2.0.0") ||
+          (expected_category == "sample_mapper" &&
+           expected_name == "assistant_conversation" &&
+           expected_version == "2.0.0" &&
+           selected_version == "3.0.0");
       if (found == components.end() || !found->is_object() ||
           !found->contains("key") || !found->at("key").is_object() ||
           found->at("key").value("category", "") != expected_category ||
@@ -1197,8 +1201,19 @@ TrainingNodeProbe make_hf_multimodal_sft_training_node_probe(
             caption_columns)
       throw std::runtime_error(
           "HF processor schema does not match the data component");
-    (void)component("sample_mapping", "sample_mapper",
-                    "assistant_conversation", "2.0.0");
+    const auto &sample_mapping = component(
+        "sample_mapping", "sample_mapper", "assistant_conversation", "2.0.0");
+    if (sample_mapping.at("key").at("version") == "3.0.0") {
+      const auto &mapping_configuration = sample_mapping.at("configuration");
+      if (!mapping_configuration.contains("enable_thinking") ||
+          !mapping_configuration.at("enable_thinking").is_boolean() ||
+          mapping_configuration.at("enable_thinking").get<bool>() ||
+          !mapping_configuration.contains(
+              "maximum_trailing_tokens_after_eos"))
+        throw std::runtime_error(
+            "HF assistant-conversation v3 must explicitly disable thinking "
+            "and bound post-EOS template tokens");
+    }
     (void)component("activation_memory", "activation_memory",
                     "hf_gradient_checkpointing");
     (void)component("generation_policy", "generation_policy", "greedy");
