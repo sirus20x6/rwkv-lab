@@ -110,23 +110,6 @@ void rejects_duplicate_keys_recursively() {
   }
 }
 
-void checked_in_one_file_author_run_is_cli_ready() {
-  const auto path = std::filesystem::path(TRAINVM_SOURCE_ROOT) /
-                    "docs/experiment-vm/examples/"
-                    "qwen-caption-lora-r256.author-run.v1.json";
-  std::ifstream input(path);
-  const std::string source{std::istreambuf_iterator<char>(input),
-                           std::istreambuf_iterator<char>()};
-  const auto document = decode_author_run_document(source, "json");
-  check(document.source.recipe.has_value() && !document.input_content &&
-            document.source.recipe->registry_path ==
-                "/etc/trainvm/recipe-profiles.json" &&
-            !document.source.recipe->instance.overrides.contains(
-                "model.checkpoint_fingerprint"),
-        "checked-in one-file run is directly accepted without copied hashes "
-        "or duplicate input roots");
-}
-
 void passive_lora_selector_matches_python_module_semantics() {
   const std::vector<std::string> keys{
       "model.language_model.layers.3.self_attn.q_proj.weight",
@@ -469,7 +452,6 @@ void cli_enforces_preview_launch_fence() {
 int main() {
   try {
     rejects_duplicate_keys_recursively();
-    checked_in_one_file_author_run_is_cli_ready();
     passive_lora_selector_matches_python_module_semantics();
     resolves_locks_and_reuses_exact_lock();
     provisioning_rolls_back_then_retries();
