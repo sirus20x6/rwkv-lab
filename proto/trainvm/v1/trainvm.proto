@@ -153,6 +153,45 @@ message SubmitExperimentResponse {
   string canonical_training_component_lock = 9;
 }
 
+// One closed authoring document drives validation, recipe expansion, static
+// input locking, passive preflight, authority-side workspace provisioning and
+// idempotent submission. The service streams bounded stage transitions so a
+// CLI or dashboard never has to infer whether a long content lock is active.
+message AuthorRunRequest {
+  string request_document = 1;
+  string source_format = 2; // json or yaml
+  bool dry_run = 3;
+  // Optional compare-and-submit fence supplied by a prior dry-run preview.
+  string expected_plan_hash = 4;
+}
+
+enum AuthorRunStage {
+  AUTHOR_RUN_STAGE_UNSPECIFIED = 0;
+  AUTHOR_RUN_STAGE_VALIDATING = 1;
+  AUTHOR_RUN_STAGE_RESOLVING = 2;
+  AUTHOR_RUN_STAGE_LOCKING_INPUTS = 3;
+  AUTHOR_RUN_STAGE_PREFLIGHT = 4;
+  AUTHOR_RUN_STAGE_PROVISIONING = 5;
+  AUTHOR_RUN_STAGE_SUBMITTING = 6;
+  AUTHOR_RUN_STAGE_COMPLETE = 7;
+  AUTHOR_RUN_STAGE_FAILED = 8;
+}
+
+message AuthorRunUpdate {
+  AuthorRunStage stage = 1;
+  string detail = 2;
+  string plan_hash = 3;
+  string canonical_plan_json = 4;
+  string preflight_receipt_json = 5;
+  repeated Diagnostic diagnostics = 6;
+  RunIdentity run = 7;
+  string dashboard_url = 8;
+  bool terminal = 9;
+  bool dry_run = 10;
+  bool content_lock_reused = 11;
+  string recipe_expansion_json = 12;
+}
+
 message PlanDiffRequest {
   string run_id = 1;
   uint64 expected_revision = 2;
@@ -790,6 +829,7 @@ message GetHostAuthorityStatusResponse {
 
 service TrainVM {
   rpc SubmitExperiment(SubmitExperimentRequest) returns (SubmitExperimentResponse);
+  rpc AuthorRun(AuthorRunRequest) returns (stream AuthorRunUpdate);
   rpc DiffPlan(PlanDiffRequest) returns (PlanDiffResponse);
   rpc CommandRun(RunCommandRequest) returns (RunCommandResponse);
   rpc GetRun(GetRunRequest) returns (RunSummary);
