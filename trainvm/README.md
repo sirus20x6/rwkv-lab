@@ -396,6 +396,7 @@ trainvm/build/trainvm plan \
   docs/experiment-vm/examples/mageflow-cache-resume.json
 trainvm/build/trainvm compile < \
   docs/experiment-vm/examples/mageflow-cache-resume.json
+trainvm/build/trainvm preflight experiment.json passive-environment.json
 trainvm/build/trainvm validate-catalog \
   "$PWD/docs/experiment-vm/compatibility-workflows.v1.json" "$PWD"
 trainvm/build/trainvm inspect-training-components \
@@ -435,6 +436,19 @@ to the reference fixture. Any further deliberate canonical
 format change must update the golden test and supply a plan-schema migration rationale.
 `compile` is the bounded dashboard authoring boundary: it reads one JSON document from stdin and
 returns either structured diagnostics or the native compiler's canonical plan and content hash.
+`preflight` is the read-only launch gate. It compiles the ordinary experiment, consumes a closed
+`trainvm.training-preflight-environment/v1` receipt from the registered family/host probes, and
+emits a digest-bound `trainvm.training-preflight-receipt/v1`. It checks the complete effective
+worker credential set against every input/output ancestor, including output create/write/atomic
+rename permissions; distinguishes the scheduler's total-VRAM selector from a trainer's free-VRAM
+policy; and requires explicit model, data, selection, runtime, checkpoint, step-zero, and dashboard
+example evidence for every training node. The native gate never infers missing adapter evidence.
+It does not create a directory, run, journal record, lease, process, or accelerator context. GPU
+qualification is non-passive only when the environment includes a successful receipt bounded to
+at most 60 seconds. Volatile passive snapshots use the authority monotonic clock and cannot claim
+more than 60 seconds of validity. Optional recipe provenance binds the expansion's registry,
+profile, instance, and expanded-plan identities into the environment identity; the expanded-plan
+identity must name the ordinary `CompiledPlan` consumed by the gate.
 `serve` is the stateful mutation boundary. The dashboard connects to its Unix socket through gRPC;
 it never opens the journal writable. Startup requires bounded `trainvm.adapters/v2` and
 `trainvm.host-launches/v4` registry documents, decoded strictly and retained immutably for the
