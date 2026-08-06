@@ -58,8 +58,19 @@ not opened as semantic authority. The closure contains:
 
 The closure does not assert its own artifact identity, fingerprint, journal
 sequence, or durability. Those would be circular and worker-controlled. The
-controller derives them from the accepted `artifact.published` event and adds
-them only to the reducer input.
+controller derives them from the accepted `artifact.published` event and wraps
+the strictly decoded `FinalEvaluationManifest` in a separate
+`FinalEvaluationReceipt`. Both reflected documents round-trip independently;
+the semantic manifest rejects controller-owned envelope fields.
+
+The reducer receives a controller-derived `OperationFinalizationPolicy` and a
+`FinalEvaluationExpectation`. The latter fixes the exact policy digest,
+terminal checkpoint and optimizer fingerprints, canonical member list/digest/
+count, and canonical scalar requirements before worker evidence is inspected.
+The first worker receipt cannot shrink or otherwise establish any of these
+sets. An optional closure port remains migration-pending; only a required
+closure producer clears that state, and migration-pending operations can never
+reduce to complete.
 
 Each member ledger row binds a member ID and context digest to a monotonically
 increasing attempt. A success carries a nonempty result digest; an error carries
@@ -83,6 +94,12 @@ context-poisoned closures fail closed. A recovery receipt must:
 3. append records without rewriting prior rows; and
 4. prove identical optimizer-state fingerprints before and after evaluation.
 
+The before and after fingerprints must both equal the terminal optimizer
+fingerprint already held by the controller. Equality between two worker-chosen
+values is not evidence of immutability. Every retry appends exactly one record
+for every and only currently unresolved member, in canonical member order, and
+one new receipt for the selected evaluation output.
+
 No training loop or optimizer update is permitted in recovery. Completion is
 allowed only after the reducer finds every frozen member resolved, every
 required output receipted, every required scalar durably sampled at the exact
@@ -91,3 +108,8 @@ terminal step, and the declared zero-unresolved-error policy satisfied.
 The reducer emits a bounded `trainvm.finalization-verdict/v1` document. Its
 `cause` and unresolved member list are the dashboard-facing explanation; a
 generic worker exit code is not an adequate substitute.
+
+Receipt count, per-receipt collections, aggregate records, aggregate collection
+entries, and aggregate identity bytes all have hard limits. Canonical member,
+scalar, initial-record, and initial-output ordering prevents distinct wire
+encodings from representing the same semantic closure.

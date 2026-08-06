@@ -47,7 +47,7 @@ struct FinalOutputPolicy final {
   FinalErrorPolicy errors{};
   std::optional<std::string> artifact_schema;
 
-  auto operator<=>(const FinalOutputPolicy&) const = default;
+  auto operator<=>(const FinalOutputPolicy &) const = default;
 };
 
 struct OperationFinalizationPolicy final {
@@ -55,26 +55,27 @@ struct OperationFinalizationPolicy final {
   std::vector<FinalOutputPolicy> outputs;
   bool eval_only_recovery{};
   std::optional<std::string> closure_output_name;
+  bool closure_required{};
   bool migration_pending{};
 
-  auto operator<=>(const OperationFinalizationPolicy&) const = default;
+  auto operator<=>(const OperationFinalizationPolicy &) const = default;
 };
 
 // Builds a closed policy inventory from the registered operation descriptors.
 // Every stateful profile must resolve exactly once; adding a profile or output
 // without a known semantic classification fails construction.
 class FinalizationPolicyRegistry final {
- public:
+public:
   explicit FinalizationPolicyRegistry(
-      const std::vector<AdapterProfile>& profiles);
+      const std::vector<AdapterProfile> &profiles);
 
-  [[nodiscard]] const OperationFinalizationPolicy& resolve(
-      const AdapterKey& key) const;
-  [[nodiscard]] const std::map<AdapterKey, OperationFinalizationPolicy>&
+  [[nodiscard]] const OperationFinalizationPolicy &
+  resolve(const AdapterKey &key) const;
+  [[nodiscard]] const std::map<AdapterKey, OperationFinalizationPolicy> &
   policies() const;
   [[nodiscard]] nlohmann::json inventory_json() const;
 
- private:
+private:
   std::map<AdapterKey, OperationFinalizationPolicy> policies_;
 };
 
@@ -90,7 +91,7 @@ struct FinalMemberRecord final {
   std::optional<std::string> result_digest;
   std::optional<std::string> error_code;
 
-  auto operator<=>(const FinalMemberRecord&) const = default;
+  auto operator<=>(const FinalMemberRecord &) const = default;
 };
 
 struct FinalOutputReceipt final {
@@ -98,14 +99,14 @@ struct FinalOutputReceipt final {
   std::string artifact_id;
   std::string artifact_fingerprint;
 
-  auto operator<=>(const FinalOutputReceipt&) const = default;
+  auto operator<=>(const FinalOutputReceipt &) const = default;
 };
 
 struct FinalScalarRequirement final {
   std::string metric_name;
   std::string step_domain;
 
-  auto operator<=>(const FinalScalarRequirement&) const = default;
+  auto operator<=>(const FinalScalarRequirement &) const = default;
 };
 
 struct EvalOnlyRecoveryReceipt final {
@@ -113,15 +114,14 @@ struct EvalOnlyRecoveryReceipt final {
   std::string optimizer_state_before;
   std::string optimizer_state_after;
 
-  auto operator<=>(const EvalOnlyRecoveryReceipt&) const = default;
+  auto operator<=>(const EvalOnlyRecoveryReceipt &) const = default;
 };
 
-// One immutable, cumulative evidence receipt. Later receipts may append retry
-// records but may never rewrite or delete history from an earlier receipt.
-struct FinalEvaluationReceipt final {
-  std::string artifact_id;
-  std::string artifact_fingerprint;
-  std::uint64_t durable_sequence{};
+// Worker-authored semantic bytes. This is deliberately separate from the
+// controller receipt below so strict reflection can round-trip the artifact
+// without making controller-owned durability fields worker assertions.
+struct FinalEvaluationManifest final {
+  std::string api_version;
   std::string policy_digest;
   std::uint64_t optimizer_step{};
   std::string checkpoint_artifact_id;
@@ -137,6 +137,38 @@ struct FinalEvaluationReceipt final {
   std::vector<FinalScalarRequirement> required_scalars;
   std::vector<FinalMemberRecord> records;
   std::optional<EvalOnlyRecoveryReceipt> recovery;
+
+  auto operator<=>(const FinalEvaluationManifest &) const = default;
+};
+
+// Controller-owned durable envelope around one strictly decoded manifest.
+// Later receipts may append retry records but may never rewrite or delete
+// history from an earlier receipt.
+struct FinalEvaluationReceipt final {
+  std::string artifact_id;
+  std::string artifact_fingerprint;
+  std::uint64_t durable_sequence{};
+  FinalEvaluationManifest manifest;
+
+  auto operator<=>(const FinalEvaluationReceipt &) const = default;
+};
+
+// Immutable controller authority derived from the invocation, terminal
+// checkpoint, metric composition, and frozen evaluation membership. None of
+// these values may be learned from a worker closure.
+struct FinalEvaluationExpectation final {
+  std::string output_name;
+  std::string policy_digest;
+  std::uint64_t optimizer_step{};
+  std::string checkpoint_artifact_id;
+  std::string checkpoint_fingerprint;
+  std::vector<std::string> required_members;
+  std::string membership_digest;
+  std::uint64_t membership_count{};
+  std::vector<FinalScalarRequirement> required_scalars;
+  std::string terminal_optimizer_fingerprint;
+
+  auto operator<=>(const FinalEvaluationExpectation &) const = default;
 };
 
 enum class FinalizationDisposition { complete, pending, failed };
@@ -152,22 +184,24 @@ struct FinalizationVerdict final {
 // Reduces append-only evaluation history at one exact terminal checkpoint.
 // Invalid/stale/context-poisoned evidence fails; valid but incomplete evidence
 // stays pending so an eval-only attempt can retry only unresolved members.
-[[nodiscard]] FinalizationVerdict reduce_final_evaluation(
-    const FinalOutputPolicy& policy, std::uint64_t terminal_optimizer_step,
-    std::string checkpoint_artifact_id,
-    std::string checkpoint_fingerprint,
-    const std::vector<FinalEvaluationReceipt>& history);
+[[nodiscard]] FinalizationVerdict
+reduce_final_evaluation(const OperationFinalizationPolicy &operation_policy,
+                        const FinalEvaluationExpectation &expectation,
+                        const std::vector<FinalEvaluationReceipt> &history);
 
-[[nodiscard]] std::string final_membership_digest(
-    const std::vector<std::string>& canonical_members);
+[[nodiscard]] std::string
+finalization_policy_digest(const OperationFinalizationPolicy &policy);
 
-[[nodiscard]] nlohmann::json finalization_verdict_json(
-    const FinalizationVerdict& verdict);
+[[nodiscard]] std::string
+final_membership_digest(const std::vector<std::string> &canonical_members);
+
+[[nodiscard]] nlohmann::json
+finalization_verdict_json(const FinalizationVerdict &verdict);
 
 // Emits worker-owned semantic fields only. Artifact identity, fingerprint,
 // durable sequence, and durable parent checks are controller-derived inputs to
 // the reducer and are intentionally absent from these canonical bytes.
-[[nodiscard]] nlohmann::json final_evaluation_manifest_json(
-    const FinalEvaluationReceipt& receipt);
+[[nodiscard]] nlohmann::json
+final_evaluation_manifest_json(const FinalEvaluationManifest &manifest);
 
-}  // namespace trainvm
+} // namespace trainvm
