@@ -16,6 +16,7 @@ from rwkv_lab.training_components import (
     ModelLoaderImplementation,
     NamedRulesTrainabilityConfiguration,
     TrainabilityImplementation,
+    TrainabilityResult,
     build_registered_model_loader,
     build_registered_trainability,
     model_loader_from_resolved_component,
@@ -186,6 +187,22 @@ def test_qwen_lora_target_selection_is_exact_and_unmatched_patterns_fail() -> No
                 "merge_on_completion": False,
             }
         )
+
+
+def test_lora_checkpoint_contract_requires_persisted_adapter_manifest() -> None:
+    result = TrainabilityResult(
+        model=TinyQwen(),
+        trainable_parameter_names=("adapter.weight",),
+        trainable_parameter_manifest="sha256:" + "a" * 64,
+        adapter_backed=True,
+    )
+    with pytest.raises(ValueError, match="persisted adapter manifest"):
+        result.component_state()
+    assert result.component_state(adapter_state_manifest="sha256:" + "b" * 64) == {
+        "adapter_state_manifest": "sha256:" + "b" * 64,
+        "merged": False,
+        "trainable_parameter_manifest": "sha256:" + "a" * 64,
+    }
 
 
 def test_resolved_component_string_lists_and_resume_state_are_exact(

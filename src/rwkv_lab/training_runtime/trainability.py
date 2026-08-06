@@ -164,16 +164,34 @@ class TrainabilityResult:
     model: torch.nn.Module
     trainable_parameter_names: tuple[str, ...]
     trainable_parameter_manifest: str
-    adapter_state_manifest: str | None = None
-    merged: bool = False
+    adapter_backed: bool = False
 
-    def component_state(self) -> MappingProxyType[str, str | bool]:
+    def component_state(
+        self,
+        *,
+        adapter_state_manifest: str | None = None,
+        merged: bool = False,
+    ) -> MappingProxyType[str, str | bool]:
         state: dict[str, str | bool] = {
             "trainable_parameter_manifest": self.trainable_parameter_manifest,
         }
-        if self.adapter_state_manifest is not None:
-            state["adapter_state_manifest"] = self.adapter_state_manifest
-            state["merged"] = self.merged
+        if self.adapter_backed:
+            if not (
+                isinstance(adapter_state_manifest, str)
+                and len(adapter_state_manifest) == 71
+                and adapter_state_manifest.startswith("sha256:")
+                and all(
+                    character in "0123456789abcdef"
+                    for character in adapter_state_manifest[7:]
+                )
+            ):
+                raise ValueError(
+                    "LoRA checkpoint state requires the persisted adapter manifest digest"
+                )
+            state["adapter_state_manifest"] = adapter_state_manifest
+            state["merged"] = merged
+        elif adapter_state_manifest is not None or merged:
+            raise ValueError("non-adapter trainability has no adapter checkpoint state")
         return MappingProxyType(state)
 
 
@@ -243,16 +261,11 @@ class RegisteredTrainability:
             if parameter.requires_grad
         )
         manifest = _manifest(model)
-        adapter_manifest = (
-            manifest
-            if self.implementation is TrainabilityImplementation.LORA_V1
-            else None
-        )
         return TrainabilityResult(
             model=model,
             trainable_parameter_names=trainable,
             trainable_parameter_manifest=manifest,
-            adapter_state_manifest=adapter_manifest,
+            adapter_backed=self.implementation is TrainabilityImplementation.LORA_V1,
         )
 
     def merge_for_export(self, result: TrainabilityResult) -> torch.nn.Module:
