@@ -139,6 +139,77 @@ bool training_configuration_target(std::string_view target) {
   return std::regex_match(target.begin(), target.end(), pattern);
 }
 
+bool training_component_name_target(std::string_view target) {
+  static const std::regex pattern(
+      "^/spec/workflow/nodes/[^/~]+/invoke/training/components/[^/~]+/"
+      "key/name$");
+  return std::regex_match(target.begin(), target.end(), pattern);
+}
+
+std::optional<TrainingComponentCategory> component_category_at_target(
+    const Json& template_document, std::string_view target) {
+  if (!training_component_name_target(target)) return std::nullopt;
+  const std::string category_target =
+      std::string(target.substr(0U, target.size() - 4U)) + "category";
+  try {
+    const Json& value =
+        template_document.at(Json::json_pointer(category_target));
+    if (!value.is_string()) return std::nullopt;
+    TrainingComponentCategory category{};
+    std::vector<Diagnostic> diagnostics;
+    if (!decode_json(value, category, category_target, diagnostics) ||
+        !diagnostics.empty())
+      return std::nullopt;
+    return category;
+  } catch (const Json::exception&) {
+    return std::nullopt;
+  }
+}
+
+bool domain_owns_component_category(RecipeOverrideDomain domain,
+                                    TrainingComponentCategory category) {
+  switch (domain) {
+    case RecipeOverrideDomain::model:
+      return category == TrainingComponentCategory::model_loader ||
+             category == TrainingComponentCategory::activation ||
+             category == TrainingComponentCategory::normalization;
+    case RecipeOverrideDomain::data:
+      return category == TrainingComponentCategory::data_source ||
+             category == TrainingComponentCategory::sample_processor ||
+             category == TrainingComponentCategory::sample_mapper ||
+             category == TrainingComponentCategory::collator ||
+             category == TrainingComponentCategory::sampler ||
+             category == TrainingComponentCategory::batching ||
+             category == TrainingComponentCategory::split_selector;
+    case RecipeOverrideDomain::trainability:
+      return category == TrainingComponentCategory::trainability ||
+             category == TrainingComponentCategory::activation_memory ||
+             category == TrainingComponentCategory::parameter_router;
+    case RecipeOverrideDomain::hyperparameters:
+      return category == TrainingComponentCategory::optimizer ||
+             category == TrainingComponentCategory::learning_rate_schedule ||
+             category == TrainingComponentCategory::weight_decay_schedule ||
+             category == TrainingComponentCategory::objective ||
+             category == TrainingComponentCategory::precision ||
+             category == TrainingComponentCategory::gradient_clipping ||
+             category == TrainingComponentCategory::gradient_accumulation ||
+             category == TrainingComponentCategory::curriculum;
+    case RecipeOverrideDomain::evaluation:
+      return category == TrainingComponentCategory::metric_reducer ||
+             category == TrainingComponentCategory::evaluator ||
+             category == TrainingComponentCategory::evaluation_schedule ||
+             category == TrainingComponentCategory::qualitative_sample ||
+             category == TrainingComponentCategory::artifact_renderer ||
+             category == TrainingComponentCategory::generation_policy;
+    case RecipeOverrideDomain::checkpointing:
+      return category == TrainingComponentCategory::checkpoint_policy;
+    case RecipeOverrideDomain::resources:
+    case RecipeOverrideDomain::controls:
+      return false;
+  }
+  return false;
+}
+
 bool resource_target(std::string_view target) {
   static const std::set<std::string, std::less<>> allowed{
       "/spec/resources/accelerators/count",
@@ -161,19 +232,23 @@ bool authorized_target(RecipeOverrideDomain domain, std::string_view target) {
   switch (domain) {
     case RecipeOverrideDomain::model:
       return parameter_value_target(target) ||
-             training_configuration_target(target);
+             training_configuration_target(target) ||
+             training_component_name_target(target);
     case RecipeOverrideDomain::data:
       return parameter_value_target(target) ||
-             training_configuration_target(target);
+             training_configuration_target(target) ||
+             training_component_name_target(target);
     case RecipeOverrideDomain::trainability:
     case RecipeOverrideDomain::hyperparameters:
       return parameter_value_target(target) ||
              training_configuration_target(target) ||
+             training_component_name_target(target) ||
              control_default_target(target);
     case RecipeOverrideDomain::evaluation:
     case RecipeOverrideDomain::checkpointing:
       return parameter_value_target(target) ||
              training_configuration_target(target) ||
+             training_component_name_target(target) ||
              control_default_target(target);
     case RecipeOverrideDomain::resources:
       return resource_target(target);
@@ -333,6 +408,16 @@ void validate_field(RecipeOverrideField& field, const Json& template_document) {
       executable_authoring_identity(field.name, field.target)) {
     reject("recipe override exposes executable or unbounded authoring material: " +
            field.name);
+  }
+  if (training_component_name_target(field.target)) {
+    const auto category =
+        component_category_at_target(template_document, field.target);
+    if (field.type != RecipeValueType::enumeration || !field.values ||
+        !category || !domain_owns_component_category(field.domain, *category)) {
+      reject("recipe component selection must be a finite enumeration in its "
+             "owning override domain: " +
+             field.name);
+    }
   }
   if (field.minimum &&
       (!std::isfinite(*field.minimum) ||
