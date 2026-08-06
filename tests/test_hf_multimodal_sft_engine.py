@@ -14,7 +14,7 @@ from rwkv_lab.training_components import (
     AssistantOnlyMapperConfiguration,
     CausalTokensMapperConfiguration,
     ImageCaptionProcessorConfiguration,
-    JsonlFrozenImageSplitsConfiguration,
+    JsonlFrozenTokenSplitsConfiguration,
     LinearHeadCrossEntropyConfiguration,
     LinearHeadCrossEntropyObjective,
     PaddedCollatorConfiguration,
@@ -860,12 +860,11 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
     dataset_root.mkdir()
     for name in ("manifest.json", "train.jsonl", "validation.jsonl", "test.jsonl"):
         (dataset_root / name).write_text("{}\n", encoding="utf-8")
-    frozen_configuration = JsonlFrozenImageSplitsConfiguration(
+    frozen_configuration = JsonlFrozenTokenSplitsConfiguration(
         dataset_root=str(dataset_root),
         content_fingerprint="sha256:" + "d" * 64,
-        declared_columns=("caption", "id", "image", "split"),
-        image_column="image",
-        caption_columns=("caption",),
+        declared_columns=("id", "split", "tokens"),
+        token_column="tokens",
         id_column="id",
     )
 
@@ -890,7 +889,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         configuration = object()
 
         def process(self, sample, *, image_root):
-            assert image_root == dataset_root
+            assert image_root is None
             return ProcessedSample(
                 sample.sample_id,
                 sample.ordinal,

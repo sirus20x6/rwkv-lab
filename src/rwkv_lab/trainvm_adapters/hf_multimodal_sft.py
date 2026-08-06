@@ -32,6 +32,7 @@ from rwkv_lab.training_components import (
     CausalTokensMapperConfiguration,
     ImageCaptionProcessorConfiguration,
     JsonlFrozenImageSplitsConfiguration,
+    JsonlFrozenTokenSplitsConfiguration,
     JsonlImageCaptionConfiguration,
     MappedSample,
     PaddedCollatorConfiguration,
@@ -604,7 +605,8 @@ class HFDataRuntime:
         # checked against workspace.input_content_roots by the operation
         # handler. The component state carries that same fingerprint.
         frozen = isinstance(
-            training.source.configuration, JsonlFrozenImageSplitsConfiguration
+            training.source.configuration,
+            (JsonlFrozenImageSplitsConfiguration, JsonlFrozenTokenSplitsConfiguration),
         )
         if frozen:
             test = components.data_pipeline(split_slot="test_split")

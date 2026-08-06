@@ -26,6 +26,9 @@ class DataSourceImplementation(str, Enum):
         "rwkv_lab.data_source.jsonl_frozen_image_splits.v1"
     )
     JSONL_TOKEN_CORPUS_V1 = "rwkv_lab.data_source.jsonl_token_corpus.v1"
+    JSONL_FROZEN_TOKEN_SPLITS_V1 = (
+        "rwkv_lab.data_source.jsonl_frozen_token_splits.v1"
+    )
 
 
 class SampleProcessorImplementation(str, Enum):
@@ -291,10 +294,70 @@ class JsonlFrozenImageSplitsConfiguration:
         return str(Path(self.dataset_root) / "manifest.json")
 
 
+@dataclass(frozen=True, slots=True)
+class JsonlFrozenTokenSplitsConfiguration:
+    dataset_root: str
+    content_fingerprint: str
+    declared_columns: tuple[str, ...]
+    token_column: str
+    id_column: str
+
+    def __post_init__(self) -> None:
+        root = _require_path(self.dataset_root, "dataset_root", directory=True)
+        _require_digest(self.content_fingerprint, "content_fingerprint")
+        for name in ("manifest.json", "train.jsonl", "validation.jsonl", "test.jsonl"):
+            _require_path(str(root / name), name)
+        declared = _columns(self.declared_columns, "declared_columns")
+        token = _column(self.token_column, "token_column")
+        identifier = _column(self.id_column, "id_column")
+        if not {identifier, token}.issubset(declared):
+            raise DataPipelineError(
+                "frozen token-split columns are absent from declared_columns"
+            )
+
+    @classmethod
+    def from_resolved(
+        cls, value: Mapping[str, Any]
+    ) -> JsonlFrozenTokenSplitsConfiguration:
+        value = _exact(
+            value,
+            {
+                "dataset_root",
+                "content_fingerprint",
+                "declared_columns",
+                "token_column",
+                "id_column",
+            },
+            "JSONL frozen token-splits source",
+        )
+        return cls(
+            **{
+                **value,
+                "declared_columns": _columns(
+                    value["declared_columns"], "declared_columns"
+                ),
+            }
+        )
+
+    @property
+    def manifest_path(self) -> str:
+        return str(Path(self.dataset_root) / "train.jsonl")
+
+    @property
+    def split_manifest(self) -> str:
+        return str(Path(self.dataset_root) / "manifest.json")
+
+
 DataSourceConfiguration: TypeAlias = (
     JsonlFrozenImageSplitsConfiguration
+    | JsonlFrozenTokenSplitsConfiguration
     | JsonlImageCaptionConfiguration
     | JsonlTokenCorpusConfiguration
+)
+
+
+FrozenSplitConfiguration: TypeAlias = (
+    JsonlFrozenImageSplitsConfiguration | JsonlFrozenTokenSplitsConfiguration
 )
 
 
@@ -318,7 +381,7 @@ class RegisteredDataSource:
     def verify_content(
         self, *, authority_content_fingerprint: str | None = None
     ) -> None:
-        if isinstance(self.configuration, JsonlFrozenImageSplitsConfiguration):
+        if isinstance(self.configuration, FrozenSplitConfiguration):
             configuration = self.configuration
             if authority_content_fingerprint != configuration.content_fingerprint:
                 raise DataPipelineError(
@@ -365,8 +428,6 @@ class RegisteredDataSource:
                                 f"frozen {split} row has wrong split identity"
                             )
                         sample_id = row.get(configuration.id_column)
-                        caption = row.get(configuration.caption_columns[0])
-                        image_value = row.get(configuration.image_column)
                         if (
                             not isinstance(sample_id, str)
                             or not sample_id
@@ -375,27 +436,45 @@ class RegisteredDataSource:
                             raise DataPipelineError(
                                 "frozen manifests contain an empty or duplicate ID"
                             )
-                        if not isinstance(caption, str) or not caption.strip():
-                            raise DataPipelineError(
-                                "frozen manifest contains an empty caption"
-                            )
-                        if not isinstance(image_value, str) or not image_value:
-                            raise DataPipelineError(
-                                "frozen manifest contains an invalid image path"
-                            )
-                        image = Path(image_value)
-                        if not image.is_absolute():
-                            image = Path(configuration.dataset_root) / image
-                        try:
-                            image.resolve(strict=True).relative_to(
-                                Path(configuration.dataset_root).resolve(strict=True)
-                            )
-                        except (OSError, ValueError) as error:
-                            raise DataPipelineError(
-                                "frozen manifest image is absent or outside dataset root"
-                            ) from error
-                        if not image.is_file():
-                            raise DataPipelineError("frozen manifest image is not a file")
+                        if isinstance(
+                            configuration, JsonlFrozenImageSplitsConfiguration
+                        ):
+                            caption = row.get(configuration.caption_columns[0])
+                            image_value = row.get(configuration.image_column)
+                            if not isinstance(caption, str) or not caption.strip():
+                                raise DataPipelineError(
+                                    "frozen manifest contains an empty caption"
+                                )
+                            if not isinstance(image_value, str) or not image_value:
+                                raise DataPipelineError(
+                                    "frozen manifest contains an invalid image path"
+                                )
+                            image = Path(image_value)
+                            if not image.is_absolute():
+                                image = Path(configuration.dataset_root) / image
+                            try:
+                                image.resolve(strict=True).relative_to(
+                                    Path(configuration.dataset_root).resolve(strict=True)
+                                )
+                            except (OSError, ValueError) as error:
+                                raise DataPipelineError(
+                                    "frozen manifest image is absent or outside dataset root"
+                                ) from error
+                            if not image.is_file():
+                                raise DataPipelineError(
+                                    "frozen manifest image is not a file"
+                                )
+                        else:
+                            tokens = row.get(configuration.token_column)
+                            if not isinstance(tokens, list) or not tokens or any(
+                                not isinstance(token, int)
+                                or isinstance(token, bool)
+                                or token < 0
+                                for token in tokens
+                            ):
+                                raise DataPipelineError(
+                                    "frozen manifest contains invalid token IDs"
+                                )
                         seen_ids.add(sample_id)
                         rows += 1
                 if rows != counts[split] or rows != entry["rows"]:
@@ -416,7 +495,7 @@ class RegisteredDataSource:
 
     def _split_paths(self) -> Mapping[str, Path]:
         configuration = self.configuration
-        if not isinstance(configuration, JsonlFrozenImageSplitsConfiguration):
+        if not isinstance(configuration, FrozenSplitConfiguration):
             raise DataPipelineError("data source has no frozen named splits")
         return MappingProxyType(
             {
@@ -440,7 +519,7 @@ class RegisteredDataSource:
         configuration = self.configuration
         path = (
             self._split_paths().get(split)
-            if isinstance(configuration, JsonlFrozenImageSplitsConfiguration)
+            if isinstance(configuration, FrozenSplitConfiguration)
             else Path(configuration.manifest_path)
         )
         if path is None:
@@ -472,9 +551,9 @@ class RegisteredDataSource:
                 sample_id = str(value[id_column]) if id_column else f"line:{ordinal}"
                 if not sample_id:
                     raise DataPipelineError("data source produced an empty sample id")
-                if isinstance(
-                    configuration, JsonlFrozenImageSplitsConfiguration
-                ) and value.get("split") != split:
+                if isinstance(configuration, FrozenSplitConfiguration) and value.get(
+                    "split"
+                ) != split:
                     raise DataPipelineError(
                         f"frozen {split} manifest contains a cross-split row"
                     )
@@ -486,7 +565,7 @@ class RegisteredDataSource:
                 emitted += 1
 
     def records_for_split(self, split: str) -> tuple[RawSample, ...]:
-        if not isinstance(self.configuration, JsonlFrozenImageSplitsConfiguration):
+        if not isinstance(self.configuration, FrozenSplitConfiguration):
             raise DataPipelineError("data source has no frozen named splits")
         return tuple(self.records(split=split))
 
@@ -1749,8 +1828,10 @@ def data_source_from_resolved_component(
         configuration = JsonlImageCaptionConfiguration.from_resolved(value)
     elif implementation is DataSourceImplementation.JSONL_TOKEN_CORPUS_V1:
         configuration = JsonlTokenCorpusConfiguration.from_resolved(value)
-    else:
+    elif implementation is DataSourceImplementation.JSONL_FROZEN_IMAGE_SPLITS_V1:
         configuration = JsonlFrozenImageSplitsConfiguration.from_resolved(value)
+    else:
+        configuration = JsonlFrozenTokenSplitsConfiguration.from_resolved(value)
     return RegisteredDataSource(implementation, configuration)
 
 

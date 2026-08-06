@@ -81,6 +81,7 @@ def supported_worker_capabilities() -> frozenset[str]:
             "checkpoint_policy.atomic_retained.v1",
             "data_source.jsonl_image_caption.v1",
             "data_source.jsonl_frozen_image_splits.v1",
+            "data_source.jsonl_frozen_token_splits.v1",
             "data_source.jsonl_token_corpus.v1",
             "sample_processor.image_caption.v1",
             "sample_processor.token_ids.v1",
