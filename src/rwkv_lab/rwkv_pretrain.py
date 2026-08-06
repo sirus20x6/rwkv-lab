@@ -717,9 +717,7 @@ def resolved_worker_component_contract(
     if worker_components is None:
         return powercool_configuration, None, None
     if args.optimizer != "adamw":
-        raise ValueError("RWKV worker composition currently requires AdamW")
-    if args.lr_schedule != "powercool" or powercool_configuration is None:
-        raise ValueError("RWKV worker composition currently requires PowerCool")
+        raise ValueError("RWKV worker composition currently requires AdamW lowering")
     if args.u_mup_base_width:
         raise ValueError("RWKV worker composition does not yet encode u-muP routing")
     if args.distributed != "none":
@@ -733,16 +731,7 @@ def resolved_worker_component_contract(
     optimizer_configuration = dict(
         worker_components.configuration("optimizer", category="optimizer")
     )
-    expected_optimizer = {
-        "learning_rate": args.lr,
-        "beta1": 0.9,
-        "beta2": 0.95,
-        "epsilon": 1.0e-8,
-    }
-    if any(
-        optimizer_configuration.get(name) != value
-        for name, value in expected_optimizer.items()
-    ):
+    if optimizer_configuration.get("learning_rate") != args.lr:
         raise ValueError(
             "authority optimizer composition disagrees with RWKV configuration"
         )
@@ -792,12 +781,7 @@ def resolved_worker_component_contract(
         raise ValueError(
             "authority precision composition disagrees with RWKV configuration"
         )
-    if dict(
-        worker_components.configuration("normalization", category="normalization")
-    ) != {"epsilon": 1.0e-5}:
-        raise ValueError(
-            "authority normalization composition disagrees with RWKV configuration"
-        )
+    worker_components.normalization()
     if dict(
         worker_components.configuration("curriculum", category="curriculum")
     ) != {
@@ -821,10 +805,21 @@ def resolved_worker_component_contract(
     implementation, resolved_schedule = (
         worker_components.learning_rate_configuration()
     )
-    if (
-        implementation is not ScheduleImplementation.POWERCOOL_V1
-        or resolved_schedule != powercool_configuration
-    ):
+    if implementation is ScheduleImplementation.POWERCOOL_V1:
+        schedule_matches = (
+            args.lr_schedule == "powercool"
+            and resolved_schedule == powercool_configuration
+        )
+    elif implementation is ScheduleImplementation.LINEAR_WARMUP_COSINE_V1:
+        schedule_matches = (
+            args.lr_schedule == "cosine"
+            and resolved_schedule.warmup_steps == args.warmup
+            and resolved_schedule.max_steps == (args.decay_steps or args.steps)
+            and resolved_schedule.minimum_ratio == args.cosine_min_ratio
+        )
+    else:
+        schedule_matches = False
+    if not schedule_matches:
         raise ValueError(
             "authority LR-schedule composition disagrees with RWKV configuration"
         )
@@ -907,6 +902,7 @@ def main(
     ap.add_argument("--powercool-cooldown-fraction", type=float, default=0.20)
     ap.add_argument("--powercool-power", type=float, default=2.0)
     ap.add_argument("--powercool-min-lr", type=float, default=0.0)
+    ap.add_argument("--cosine-min-ratio", type=float, default=0.1)
     ap.add_argument("--decay-steps", type=int, default=0)   # cosine horizon; 0 => use --steps
     ap.add_argument("--save", default=""); ap.add_argument("--resume", default="")
     ap.add_argument("--init-g1g", default="", help="continue-train from a pretrained g1g .pth (dims forced to g1g)")
@@ -1998,8 +1994,11 @@ def main(
             if powercool_schedule is None:
                 raise RuntimeError("PowerCool schedule was not initialized")
             lr = args.lr * powercool_multiplier(step, powercool_schedule)
-        elif args.lr_schedule == "cosine" and horizon:                 # then cosine decay to 0.1x
-            lr *= 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(step, horizon) / horizon))
+        elif args.lr_schedule == "cosine" and horizon:
+            ratio = args.cosine_min_ratio
+            lr *= ratio + (1.0 - ratio) * 0.5 * (
+                1 + math.cos(math.pi * min(step, horizon) / horizon)
+            )
         for g in opt.param_groups:
             g["lr"] = lr * g.get("u_mup_lr_mult", 1.0)
         if lmb is not None:                  # ramp Engram injection in (gates learn on live recall)

@@ -99,6 +99,8 @@ def supported_worker_capabilities() -> frozenset[str]:
             "evaluator.scalar_loss.v1",
             "model_loader.hf_causal.v1",
             "model_loader.hf_multimodal.v1",
+            "model_loader.rwkv_checkpoint.v1",
+            "model_loader.rwkv_scratch.v1",
             "trainability.full.v1",
             "trainability.frozen.v1",
             "trainability.named_rules.v1",

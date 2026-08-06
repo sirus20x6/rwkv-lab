@@ -42,7 +42,7 @@ from .metric_decision import ScalarMetricDecisionConfig
 from .posttraining import RWKVPostTrainConfig
 from .qwen_controls import lower_initial_qwen_controls
 from .rlvr import RLVRTrainConfig
-from .rwkv_scratch import RWKVScratchTrainConfig
+from .rwkv_scratch import RWKVScratchTrainConfig, prepare_registered_corpus
 from .transformer_mla import PROFILE_ADAPTERS, TransformerMLATrainConfig
 from .vision_compressor import VisionTeacherCompressorConfig
 from .vision_frozen import VisionFrozenAdapterConfig
@@ -969,22 +969,51 @@ def _rwkv_scratch(
         invocation.workspace, require_content=True
     )
     raw_config = read_inline_config(invocation.inputs)
-    data = paths.read_path(
-        _raw_config_path(raw_config, "data", required=True) or "",
-        label="data",
-        kind="file",
-    )
+    if raw_config:
+        raise AdapterDispatchError(
+            "scratch-RWKV has no unregistered inline training configuration"
+        )
     from rwkv_lab.rwkv_pretrain import main as train
 
-    config = RWKVScratchTrainConfig(**raw_config)
+    try:
+        config = RWKVScratchTrainConfig.from_components(components)
+    except (TypeError, ValueError) as error:
+        raise AdapterDispatchError(
+            "scratch-RWKV registered component graph is not lowerable"
+        ) from error
+    pipeline = components.data_pipeline(split_slot="split")
+    dataset_root = paths.read_path(
+        str(pipeline.source.configuration.dataset_root),
+        label="RWKV frozen token dataset",
+        kind="directory",
+    )
+    matching_data_locks = tuple(
+        identity
+        for identity in paths.input_content_roots
+        if Path(identity.path) == dataset_root
+    )
+    if (
+        len(matching_data_locks) != 1
+        or matching_data_locks[0].kind != "directory"
+        or matching_data_locks[0].tree_sha256
+        != pipeline.source.configuration.content_fingerprint
+    ):
+        raise AdapterDispatchError(
+            "RWKV token data fingerprint disagrees with workspace content authority"
+        )
     resume_payload = _resume_payload(
         invocation,
         paths,
         required_state=frozenset({"model", "optimizer", "rng_torch"}),
     )
-    run_directory = paths.exact_run_directory(config.output_dir)
+    run_directory = paths.run_directory
+    run_directory.mkdir(mode=0o750, parents=True, exist_ok=True)
     resume = None
     if resume_payload is not None:
+        if config.resume is not None:
+            raise AdapterDispatchError(
+                "controller resume and model-factory continuation are mutually exclusive"
+            )
         resume = paths.read_path(
             str(resume_payload / "state.pt"),
             label="controller resume checkpoint state",
@@ -993,6 +1022,33 @@ def _rwkv_scratch(
         )
     elif config.resume:
         resume = paths.read_path(config.resume, label="resume", kind="file")
+        model_factory = components.model_loader()
+        matching_checkpoint_locks = tuple(
+            identity
+            for identity in paths.input_content_roots
+            if Path(identity.path) == resume
+        )
+        if (
+            len(matching_checkpoint_locks) != 1
+            or matching_checkpoint_locks[0].kind != "file"
+            or matching_checkpoint_locks[0].tree_sha256
+            != model_factory.configuration.checkpoint_fingerprint
+        ):
+            raise AdapterDispatchError(
+                "RWKV continuation checkpoint disagrees with content authority"
+            )
+    try:
+        prepared = prepare_registered_corpus(
+            components,
+            run_directory / "registered-corpus.uint16",
+            authority_content_fingerprint=matching_data_locks[0].tree_sha256,
+            validation_windows=config.validation_windows,
+            sequence_length=config.sequence_length,
+        )
+    except (OSError, TypeError, ValueError) as error:
+        raise AdapterDispatchError(
+            "RWKV frozen token pipeline failed deterministic materialization"
+        ) from error
     checkpoint_directory = run_directory / "checkpoint-final"
     try:
         checkpoint_directory.mkdir(mode=0o750, parents=True, exist_ok=False)
@@ -1001,13 +1057,15 @@ def _rwkv_scratch(
             "scratch-RWKV checkpoint staging already exists"
         ) from error
     checkpoint = checkpoint_directory / "state.pt"
+    schedule_implementation, _ = components.learning_rate_configuration()
     try:
         result = train(
             config.trainer_arguments(
-                data=str(data),
+                data=str(prepared.path),
                 output_dir=str(run_directory),
                 checkpoint=str(checkpoint),
                 resume=(str(resume) if resume is not None else None),
+                schedule=schedule_implementation,
             ),
             worker_components=components,
             worker_step_profiler=step_profiler or NullStepProfiler(),
@@ -1027,6 +1085,10 @@ def _rwkv_scratch(
     if result.get("checkpoint") != str(checkpoint) or not checkpoint.is_file():
         raise AdapterDispatchError(
             "scratch-RWKV omitted its authority-selected terminal checkpoint"
+        )
+    if not components.checkpoint_policy().due(step, final=True):
+        raise AdapterDispatchError(
+            "RWKV checkpoint policy omitted the required final checkpoint"
         )
     requests: tuple[CheckpointPublicationRequest, ...] = ()
     if declares_checkpoint(invocation):

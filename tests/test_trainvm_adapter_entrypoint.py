@@ -558,14 +558,208 @@ def test_appearance_handler_returns_declared_immutable_checkpoint_request(
 def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoint(
     tmp_path, monkeypatch
 ) -> None:
+    import hashlib
+
     from rwkv_lab import rwkv_pretrain
+    from rwkv_lab.training_components import (
+        CausalTokensMapperConfiguration,
+        CollatorImplementation,
+        DataSourceImplementation,
+        DeclarativeDataPipeline,
+        DerivedFixedHeldOutConfiguration,
+        DerivedFixedHeldOutSamples,
+        DeterministicSamplerConfiguration,
+        FixedBatchingConfiguration,
+        FixedGradientAccumulation,
+        FixedGradientAccumulationConfiguration,
+        FrozenNamedSplitConfiguration,
+        JsonlFrozenTokenSplitsConfiguration,
+        PaddedCollatorConfiguration,
+        PowerCoolConfiguration,
+        RegisteredBatching,
+        RegisteredCollator,
+        RegisteredDataSource,
+        RegisteredSampleMapper,
+        RegisteredSampleProcessor,
+        RegisteredSampler,
+        RegisteredSplitSelector,
+        RWKVModelFactory,
+        RWKVModelFactoryConfiguration,
+        SampleMapperImplementation,
+        SampleProcessorImplementation,
+        SamplerImplementation,
+        ScheduleImplementation,
+        SplitSelectorImplementation,
+        TokenIdsProcessorConfiguration,
+    )
 
     read_root = tmp_path / "read"
     run_directory = tmp_path / "write" / "run"
     read_root.mkdir()
     run_directory.parent.mkdir()
-    corpus = read_root / "tokens.bin"
-    corpus.write_bytes(b"\x00\x00" * 1024)
+    rows = {
+        "train": [
+            {"id": "train-a", "split": "train", "tokens": list(range(1, 17))},
+            {"id": "train-b", "split": "train", "tokens": list(range(17, 33))},
+        ],
+        "validation": [
+            {"id": "val-a", "split": "validation", "tokens": list(range(33, 49))},
+            {"id": "val-b", "split": "validation", "tokens": list(range(49, 65))},
+        ],
+        "test": [{"id": "test-a", "split": "test", "tokens": [65, 66]}],
+    }
+    files = {}
+    counts = {}
+    for split, values in rows.items():
+        path = read_root / f"{split}.jsonl"
+        path.write_text(
+            "".join(json.dumps(value) + "\n" for value in values), encoding="utf-8"
+        )
+        encoded = path.read_bytes()
+        counts[split] = len(values)
+        files[path.name] = {
+            "rows": len(values),
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+        }
+    (read_root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "fixture.manifested-token-splits.v1",
+                "dataset_digest": "fixture",
+                "counts": counts,
+                "files": files,
+                "unique_content_hashes": sum(counts.values()),
+            }
+        ),
+        encoding="utf-8",
+    )
+    data_fingerprint = measure_input_content_root(read_root).tree_sha256
+    source = RegisteredDataSource(
+        DataSourceImplementation.JSONL_FROZEN_TOKEN_SPLITS_V1,
+        JsonlFrozenTokenSplitsConfiguration(
+            dataset_root=str(read_root),
+            content_fingerprint=data_fingerprint,
+            declared_columns=("id", "split", "tokens"),
+            token_column="tokens",
+            id_column="id",
+        ),
+    )
+
+    def pipeline(selection):
+        return DeclarativeDataPipeline(
+            source=source,
+            processor=RegisteredSampleProcessor(
+                SampleProcessorImplementation.TOKEN_IDS_V1,
+                TokenIdsProcessorConfiguration(
+                    token_column="tokens",
+                    vocabulary_size=65_536,
+                    minimum_tokens=2,
+                    maximum_tokens=128,
+                ),
+            ),
+            mapper=RegisteredSampleMapper(
+                SampleMapperImplementation.CAUSAL_TOKENS_V1,
+                CausalTokensMapperConfiguration(
+                    token_column="tokens", maximum_tokens=128
+                ),
+            ),
+            collator=RegisteredCollator(
+                CollatorImplementation.PADDED_V1,
+                PaddedCollatorConfiguration(
+                    pad_token_id=0,
+                    label_pad_token_id=-100,
+                    pad_to_multiple=1,
+                    maximum_sequence_length=4,
+                ),
+            ),
+            sampler=RegisteredSampler(
+                SamplerImplementation.DETERMINISTIC_V1,
+                DeterministicSamplerConfiguration(seed=7, shuffle=True),
+            ),
+            batching=RegisteredBatching(
+                implementation="rwkv_lab.batching.fixed.v1",
+                configuration=FixedBatchingConfiguration(
+                    batch_size=2, drop_last=False, prefetch_workers=0
+                ),
+            ),
+            split_selector=RegisteredSplitSelector(
+                SplitSelectorImplementation.FROZEN_NAMED_V1,
+                FrozenNamedSplitConfiguration(selection=selection),
+            ),
+        )
+
+    class Components:
+        def model_loader(self):
+            return RWKVModelFactory(
+                implementation="rwkv_lab.model_loader.rwkv_scratch.v1",
+                configuration=RWKVModelFactoryConfiguration(65_536, 64, 1, 16, 7),
+            )
+
+        def learning_rate_configuration(self):
+            return ScheduleImplementation.POWERCOOL_V1, PowerCoolConfiguration(
+                warmup_steps=2,
+                max_steps=120,
+                minimum_ratio=0.1,
+                cooldown_fraction=0.2,
+                power=2.0,
+            )
+
+        def configuration(self, slot, *, category):
+            del category
+            return {
+                "optimizer": {"learning_rate": 3.0e-4},
+                "weight_decay": {"weight_decay": 0.1},
+                "gradient_clipping": {"max_norm": 1.0},
+                "sampler": {"seed": 7},
+                "batching": {"batch_size": 2},
+                "collation": {"maximum_sequence_length": 4},
+                "processor": {"vocabulary_size": 65_536},
+            }[slot]
+
+        def gradient_accumulation(self):
+            return FixedGradientAccumulation(
+                FixedGradientAccumulationConfiguration(1)
+            )
+
+        def curriculum(self):
+            return SimpleNamespace(
+                configuration=SimpleNamespace(
+                    maximum_sequence_length=4, base_batch_size=2
+                )
+            )
+
+        def evaluator(self):
+            return SimpleNamespace(configuration=SimpleNamespace(maximum_examples=2))
+
+        def evaluation_schedule(self):
+            return SimpleNamespace(
+                configuration=SimpleNamespace(
+                    full_every_steps=20,
+                    qualitative_every_steps=20,
+                )
+            )
+
+        def artifact_renderer(self):
+            return SimpleNamespace(configuration=SimpleNamespace(modality="text"))
+
+        def generation_policy(self):
+            return SimpleNamespace()
+
+        def checkpoint_policy(self):
+            return SimpleNamespace(
+                configuration=SimpleNamespace(publish_final=True),
+                due=lambda step, final=False: final and step >= 0,
+            )
+
+        def data_pipeline(self, *, split_slot):
+            return pipeline("train" if split_slot == "split" else "validation")
+
+        def qualitative_samples(self):
+            return DerivedFixedHeldOutSamples(
+                DerivedFixedHeldOutConfiguration("id", 2)
+            )
+
+    components = Components()
     observed = []
 
     def train(arguments, **kwargs):
@@ -576,17 +770,10 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
 
     monkeypatch.setattr(rwkv_pretrain, "main", train)
     invocation = SimpleNamespace(
-        inputs={
-            "config": {
-                "data": str(corpus),
-                "output_dir": str(run_directory),
-                "steps": 120,
-            }
-        },
+        inputs={"config": {}},
         workspace=_sealed_workspace(read_root, run_directory),
         publishes={"checkpoint": {}},
     )
-    components = SimpleNamespace()
     profiler = SimpleNamespace()
     observability = SimpleNamespace()
     controls = SimpleNamespace()
@@ -601,7 +788,9 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
         execution_phases=execution_phases,
     )
     arguments, keyword_arguments = observed[0]
-    assert arguments[arguments.index("--data") + 1] == str(corpus.resolve())
+    assert arguments[arguments.index("--data") + 1] == str(
+        run_directory / "registered-corpus.uint16"
+    )
     assert arguments[arguments.index("--out") + 1] == str(run_directory.resolve())
     assert arguments[arguments.index("--optimizer") + 1] == "adamw"
     assert arguments[arguments.index("--lr-schedule") + 1] == "powercool"

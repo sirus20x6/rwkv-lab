@@ -187,7 +187,13 @@ int main() {
                 hf.training_composition->slots.size() == 25U &&
                 rwkv.training_composition &&
                 rwkv.training_composition->model_family == "rwkv" &&
-                rwkv.training_composition->slots.size() == 10U &&
+                rwkv.training_composition->slots.size() == 25U &&
+                rwkv.training_composition->allowed_components->at("data")
+                        .front()
+                        .name == "manifested_jsonl_token_splits" &&
+                rwkv.training_composition->allowed_components
+                        ->at("model_loader")
+                        .size() == 2U &&
                 posttraining.training_composition &&
                 posttraining.training_composition->model_family == "rwkv" &&
                 posttraining.training_composition->slots.size() == 4U &&

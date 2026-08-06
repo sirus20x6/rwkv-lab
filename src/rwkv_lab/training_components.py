@@ -127,6 +127,8 @@ from rwkv_lab.training_runtime.model_loaders import (
     ModelLoaderImplementation,
     ModelLoadReceipt,
     RegisteredModelLoader,
+    RWKVModelFactory,
+    RWKVModelFactoryConfiguration,
     build_registered_model_loader,
     model_loader_from_resolved_component,
 )
@@ -315,6 +317,8 @@ __all__ = [
     "PrecisionUnavailableError",
     "ProcessedSample",
     "QualitativeSampleImplementation",
+    "RWKVModelFactory",
+    "RWKVModelFactoryConfiguration",
     "RawSample",
     "RegisteredActivation",
     "RegisteredBatching",

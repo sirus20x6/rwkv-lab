@@ -15,6 +15,86 @@ _MAXIMUM_AUXILIARY_IDENTITY_BYTES = 1024 * 1024
 class ModelLoaderImplementation(str, Enum):
     HF_CAUSAL_V1 = "rwkv_lab.model_loader.hf_causal.v1"
     HF_MULTIMODAL_V1 = "rwkv_lab.model_loader.hf_multimodal.v1"
+    RWKV_CHECKPOINT_V1 = "rwkv_lab.model_loader.rwkv_checkpoint.v1"
+    RWKV_SCRATCH_V1 = "rwkv_lab.model_loader.rwkv_scratch.v1"
+
+
+def _digest(value: str, label: str) -> str:
+    if not (
+        isinstance(value, str)
+        and len(value) == 71
+        and value.startswith("sha256:")
+        and all(character in "0123456789abcdef" for character in value[7:])
+    ):
+        raise ValueError(f"{label} must be a lowercase sha256 digest")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class RWKVModelFactoryConfiguration:
+    vocabulary_size: int
+    d_model: int
+    n_layers: int
+    head_size: int
+    seed: int
+    checkpoint_path: str = ""
+    checkpoint_fingerprint: str = ""
+
+    def __post_init__(self) -> None:
+        for value, label, minimum, maximum in (
+            (self.vocabulary_size, "vocabulary_size", 2, 16_777_216),
+            (self.d_model, "d_model", 64, 65_536),
+            (self.n_layers, "n_layers", 1, 4_096),
+            (self.head_size, "head_size", 16, 1_024),
+            (self.seed, "seed", 0, (1 << 63) - 1),
+        ):
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or not minimum <= value <= maximum
+            ):
+                raise ValueError(f"{label} must be an integer in range")
+        if self.d_model % self.head_size:
+            raise ValueError("d_model must be divisible by head_size")
+        if bool(self.checkpoint_path) != bool(self.checkpoint_fingerprint):
+            raise ValueError(
+                "RWKV continuation requires both checkpoint path and fingerprint"
+            )
+        if self.checkpoint_path:
+            path = Path(self.checkpoint_path)
+            if not path.is_absolute() or not path.is_file():
+                raise ValueError("checkpoint_path must name an existing absolute file")
+            _digest(self.checkpoint_fingerprint, "checkpoint_fingerprint")
+
+    @classmethod
+    def from_resolved(
+        cls, value: Mapping[str, Any], *, continuation: bool
+    ) -> RWKVModelFactoryConfiguration:
+        expected = {
+            "vocabulary_size",
+            "d_model",
+            "n_layers",
+            "head_size",
+            "seed",
+        }
+        if continuation:
+            expected |= {"checkpoint_path", "checkpoint_fingerprint"}
+        if set(value) != expected:
+            raise ValueError("resolved RWKV model-factory configuration is inexact")
+        resolved = dict(value)
+        if not continuation:
+            resolved.update(checkpoint_path="", checkpoint_fingerprint="")
+        return cls(**resolved)
+
+
+@dataclass(frozen=True, slots=True)
+class RWKVModelFactory:
+    implementation: ModelLoaderImplementation
+    configuration: RWKVModelFactoryConfiguration
+
+    @property
+    def continuation(self) -> bool:
+        return self.implementation is ModelLoaderImplementation.RWKV_CHECKPOINT_V1
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,13 +384,26 @@ def build_registered_model_loader(
 
 def model_loader_from_resolved_component(
     component: dict[str, Any],
-) -> RegisteredModelLoader:
+) -> RegisteredModelLoader | RWKVModelFactory:
     if set(component) != {"configuration", "descriptor", "descriptor_digest"}:
         raise ValueError("resolved model-loader envelope has unknown fields")
     descriptor = component["descriptor"]
     implementation = ModelLoaderImplementation(descriptor["implementation"])
     if descriptor["key"]["category"] != "model_loader":
         raise ValueError("resolved component is not a model loader")
+    if implementation in {
+        ModelLoaderImplementation.RWKV_CHECKPOINT_V1,
+        ModelLoaderImplementation.RWKV_SCRATCH_V1,
+    }:
+        return RWKVModelFactory(
+            implementation,
+            RWKVModelFactoryConfiguration.from_resolved(
+                dict(component["configuration"]),
+                continuation=(
+                    implementation is ModelLoaderImplementation.RWKV_CHECKPOINT_V1
+                ),
+            ),
+        )
     configuration = HuggingFaceModelConfiguration.from_resolved(
         dict(component["configuration"])
     )

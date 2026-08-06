@@ -5,15 +5,13 @@ from rwkv_lab.trainvm_adapters.rwkv_scratch import RWKVScratchTrainConfig
 
 def test_rwkv_scratch_config_has_closed_baseline_training_surface() -> None:
     config = RWKVScratchTrainConfig(
-        data="/data/tokens.bin",
-        output_dir="/runs/one",
         steps=200,
         learning_rate=3.0e-4,
         minimum_learning_rate=3.0e-5,
     )
     arguments = config.trainer_arguments(
-        data=config.data,
-        output_dir=config.output_dir,
+        data="/data/tokens.bin",
+        output_dir="/runs/one",
         checkpoint="/runs/one/checkpoint-final/state.pt",
         resume=None,
     )
@@ -37,8 +35,6 @@ def test_rwkv_scratch_config_rejects_unrepresented_or_invalid_semantics(
     updates, message
 ) -> None:
     values = {
-        "data": "/data/tokens.bin",
-        "output_dir": "/runs/one",
         "steps": 200,
     }
     values.update(updates)
@@ -49,8 +45,6 @@ def test_rwkv_scratch_config_rejects_unrepresented_or_invalid_semantics(
 def test_rwkv_scratch_config_constructor_rejects_unknown_research_switches() -> None:
     with pytest.raises(TypeError, match="unexpected keyword"):
         RWKVScratchTrainConfig(
-            data="/data/tokens.bin",
-            output_dir="/runs/one",
             steps=200,
             arbitrary_module="user.code",
         )
