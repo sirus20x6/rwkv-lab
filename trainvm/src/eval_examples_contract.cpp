@@ -358,7 +358,8 @@ void validate_eval_examples_gate_provenance(
   bool checkpoint = false;
   bool scalar = false;
   for (const Event &event : prior_events) {
-    if (event.run_id != manifest.run_id || event.node_id != manifest.node_id)
+    if (event.run_id != manifest.run_id || event.node_id != manifest.node_id ||
+        event.attempt_id != manifest.attempt_id)
       continue;
     if (event.event_type == "artifact.published" && event.payload.is_object() &&
         event.payload.value("artifact_id", std::string{}) ==
@@ -383,7 +384,7 @@ void validate_eval_examples_gate_provenance(
                                 "durable matching checkpoint artifact");
   if (!scalar)
     throw std::invalid_argument("eval-examples has no prior durable declared "
-                                "evaluator scalar at step zero");
+                                "evaluator scalar at its optimizer step");
 }
 
 bool invocation_requires_step_zero_eval_gate(const nlohmann::json &publishes) {
@@ -401,10 +402,13 @@ bool invocation_requires_step_zero_eval_gate(const nlohmann::json &publishes) {
 
 bool durable_step_zero_eval_gate_satisfied(const std::vector<Event> &events,
                                            std::string_view run_id,
-                                           std::string_view node_id) {
+                                           std::string_view node_id,
+                                           std::string_view attempt_id) {
   std::set<std::string> step_zero_metrics;
+  std::set<std::pair<std::string, std::string>> step_zero_checkpoints;
   for (const Event &event : events) {
-    if (event.run_id != run_id || event.node_id != node_id)
+    if (event.run_id != run_id || event.node_id != node_id ||
+        event.attempt_id != attempt_id)
       continue;
     if (event.event_type == "metric.sampled" && event.optimizer_step == 0U &&
         event.payload.is_object() &&
@@ -412,6 +416,20 @@ bool durable_step_zero_eval_gate_satisfied(const std::vector<Event> &events,
       const std::string name = event.payload.value("name", std::string{});
       if (!name.empty())
         step_zero_metrics.insert(name);
+      continue;
+    }
+    if (event.event_type == "artifact.published" &&
+        event.optimizer_step == 0U && event.payload.is_object() &&
+        event.payload.value("kind", std::string{}) == "checkpoint" &&
+        event.payload.value("complete", false) &&
+        event.payload.value("fingerprint_algorithm", std::string{}) ==
+            "manifest_sha256") {
+      const std::string artifact_id =
+          event.payload.value("artifact_id", std::string{});
+      const std::string manifest_digest =
+          event.payload.value("fingerprint", std::string{});
+      if (!artifact_id.empty() && !manifest_digest.empty())
+        step_zero_checkpoints.emplace(artifact_id, manifest_digest);
       continue;
     }
     if (event.event_type != "artifact.published" ||
@@ -426,7 +444,10 @@ bool durable_step_zero_eval_gate_satisfied(const std::vector<Event> &events,
       const EvalExamplesManifest manifest = validate_eval_examples_manifest(
           event.payload.at("eval_examples_manifest"));
       if (manifest.run_id != run_id || manifest.node_id != node_id ||
-          manifest.optimizer_step != 0U)
+          manifest.attempt_id != attempt_id || manifest.optimizer_step != 0U ||
+          !step_zero_checkpoints.contains(
+              {manifest.checkpoint.artifact_id,
+               manifest.checkpoint.manifest_digest}))
         continue;
       if (std::ranges::any_of(manifest.evaluator.metric_names,
                               [&](const std::string &name) {

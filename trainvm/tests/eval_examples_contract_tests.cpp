@@ -121,6 +121,7 @@ int main() {
   trainvm::Event checkpoint{};
   checkpoint.run_id = "run-1";
   checkpoint.node_id = "train";
+  checkpoint.attempt_id = "train@1";
   checkpoint.event_type = "artifact.published";
   checkpoint.optimizer_step = 0U;
   checkpoint.payload = {{"artifact_id", "checkpoint-0"},
@@ -131,6 +132,7 @@ int main() {
   trainvm::Event metric{};
   metric.run_id = "run-1";
   metric.node_id = "train";
+  metric.attempt_id = "train@1";
   metric.event_type = "metric.sampled";
   metric.optimizer_step = 0U;
   metric.payload = {{"name", "eval.loss"}, {"step_domain", "optimizer_step"}};
@@ -153,7 +155,7 @@ int main() {
   trainvm::Event examples_event{};
   examples_event.run_id = "run-1";
   examples_event.node_id = "train";
-  examples_event.attempt_id = "train@2";
+  examples_event.attempt_id = "train@1";
   examples_event.event_type = "artifact.published";
   examples_event.optimizer_step = 0U;
   examples_event.payload = {
@@ -162,23 +164,39 @@ int main() {
       {"complete", true},
       {"eval_examples_manifest", manifest_document},
   };
-  check(!trainvm::durable_step_zero_eval_gate_satisfied({examples_event},
-                                                        "run-1", "train"),
+  check(!trainvm::durable_step_zero_eval_gate_satisfied(
+            {checkpoint, examples_event}, "run-1", "train", "train@1"),
         "examples without prior scalar do not satisfy replayed gate");
-  check(trainvm::durable_step_zero_eval_gate_satisfied({metric, examples_event},
-                                                       "run-1", "train"),
-        "ordered durable scalar and examples satisfy replayed gate across "
-        "attempts");
+  check(!trainvm::durable_step_zero_eval_gate_satisfied(
+            {metric, examples_event}, "run-1", "train", "train@1"),
+        "examples without a same-attempt checkpoint do not satisfy replayed "
+        "gate");
+  check(trainvm::durable_step_zero_eval_gate_satisfied(
+            {checkpoint, metric, examples_event}, "run-1", "train",
+            "train@1"),
+        "ordered same-attempt durable provenance and examples satisfy replayed "
+        "gate");
+  check(!trainvm::durable_step_zero_eval_gate_satisfied(
+            {checkpoint, metric, examples_event}, "run-1", "train",
+            "train@2"),
+        "step-zero evidence from a prior attempt does not carry into a resumed "
+        "attempt");
+  trainvm::Event mismatched_attempt = examples_event;
+  mismatched_attempt.attempt_id = "train@2";
+  check(!trainvm::durable_step_zero_eval_gate_satisfied(
+            {checkpoint, metric, mismatched_attempt}, "run-1", "train",
+            "train@2"),
+        "artifact and embedded manifest attempt identities must agree");
   trainvm::Event wrong_step = examples_event;
   wrong_step.optimizer_step = 1U;
-  check(!trainvm::durable_step_zero_eval_gate_satisfied({metric, wrong_step},
-                                                        "run-1", "train"),
+  check(!trainvm::durable_step_zero_eval_gate_satisfied(
+            {checkpoint, metric, wrong_step}, "run-1", "train", "train@1"),
         "wrong-step examples do not satisfy replayed gate");
   trainvm::Event malformed = examples_event;
   malformed.payload["eval_examples_manifest"]["examples"] =
       trainvm::Json::array();
-  check(!trainvm::durable_step_zero_eval_gate_satisfied({metric, malformed},
-                                                        "run-1", "train"),
+  check(!trainvm::durable_step_zero_eval_gate_satisfied(
+            {checkpoint, metric, malformed}, "run-1", "train", "train@1"),
         "malformed examples do not satisfy replayed gate");
   const trainvm::Json gated_publication{
       {"eval_examples",
@@ -229,6 +247,22 @@ int main() {
             manifest, resolved_training, {wrong_checkpoint_step, metric});
       },
       "post-mutation checkpoint parent provenance is rejected");
+  trainvm::Event wrong_checkpoint_attempt = checkpoint;
+  wrong_checkpoint_attempt.attempt_id = "train@2";
+  rejects(
+      [&] {
+        trainvm::validate_eval_examples_gate_provenance(
+            manifest, resolved_training, {wrong_checkpoint_attempt, metric});
+      },
+      "checkpoint provenance from another attempt is rejected");
+  trainvm::Event wrong_metric_attempt = metric;
+  wrong_metric_attempt.attempt_id = "train@2";
+  rejects(
+      [&] {
+        trainvm::validate_eval_examples_gate_provenance(
+            manifest, resolved_training, {checkpoint, wrong_metric_attempt});
+      },
+      "scalar provenance from another attempt is rejected");
   rejects(
       [&] {
         trainvm::validate_eval_examples_gate_provenance(

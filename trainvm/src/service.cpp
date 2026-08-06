@@ -2782,7 +2782,7 @@ grpc::Status TrainVMService::open_worker_connection(
       welcome.set_step_zero_eval_gate_satisfied(
           durable_step_zero_eval_gate_satisfied(
               journal_.events_for_run(hello.run_id), hello.run_id,
-              hello.node_id));
+              hello.node_id, hello.attempt_id));
       populate_invocation(welcome, *invocation);
       v1::WorkerReceipt receipt;
       receipt.set_event_id(result->event_id);
@@ -2893,7 +2893,7 @@ grpc::Status TrainVMService::open_worker_connection(
     welcome.set_step_zero_eval_gate_satisfied(
         durable_step_zero_eval_gate_satisfied(
             journal_.events_for_run(hello.run_id), hello.run_id,
-            hello.node_id));
+            hello.node_id, hello.attempt_id));
     populate_invocation(welcome, *invocation);
     return grpc::Status::OK;
   } catch (const nlohmann::json::exception& exception) {
@@ -2951,7 +2951,7 @@ grpc::Status TrainVMService::complete_worker_connection(
         !durable_step_zero_eval_gate_satisfied(
             journal_.events_for_run(connection.identity.run_id),
             connection.identity.run_id,
-            connection.identity.node_id)) {
+            connection.identity.node_id, connection.identity.attempt_id)) {
       return {grpc::StatusCode::FAILED_PRECONDITION,
               "worker result is blocked until durable step-zero scalar and eval-examples evidence"};
     }
@@ -3182,7 +3182,7 @@ grpc::Status TrainVMService::commit_worker_observation(
         event.optimizer_step && *event.optimizer_step > 0U &&
         !durable_step_zero_eval_gate_satisfied(
             journal_.events_for_run(event.run_id), event.run_id,
-            event.node_id)) {
+            event.node_id, event.attempt_id)) {
       return {grpc::StatusCode::FAILED_PRECONDITION,
               "optimizer step is blocked until durable step-zero scalar and eval-examples evidence"};
     }
