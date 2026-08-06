@@ -669,6 +669,12 @@ run_training_preflight(const CompiledPlan &plan,
         !accelerator_ids.insert(accelerator.stable_id).second ||
         accelerator.total_memory_bytes == 0U ||
         accelerator.free_memory_bytes > accelerator.total_memory_bytes ||
+        accelerator.selector_labels.size() > 32U ||
+        !std::ranges::all_of(
+            accelerator.selector_labels, [](const auto &label) {
+              return !label.first.empty() && label.first.size() <= 128U &&
+                     !label.second.empty() && label.second.size() <= 512U;
+            }) ||
         !digest_valid(accelerator.observation_digest)) {
       fail(diagnostics, "resource.passive_observation", path,
            "passive accelerator memory observation is malformed or duplicated",
@@ -683,10 +689,21 @@ run_training_preflight(const CompiledPlan &plan,
                                  : 0U;
   const std::uint64_t minimum_free =
       maximum_free_policy ? gib_to_bytes(*maximum_free_policy) : 0U;
+  const auto matches_selector = [&](const auto &accelerator) {
+    if (!request.selector)
+      return true;
+    return std::ranges::all_of(
+        *request.selector, [&](const auto &required) {
+          const auto observed = accelerator.selector_labels.find(required.first);
+          return observed != accelerator.selector_labels.end() &&
+                 observed->second == required.second;
+        });
+  };
   std::size_t suitable = 0U;
   for (const auto &accelerator : environment.accelerators) {
     if (accelerator.vendor != request.vendor ||
-        accelerator.total_memory_bytes < minimum_total) {
+        accelerator.total_memory_bytes < minimum_total ||
+        !matches_selector(accelerator)) {
       continue;
     }
     if (accelerator.free_memory_bytes < minimum_free)
@@ -698,7 +715,8 @@ run_training_preflight(const CompiledPlan &plan,
         std::ranges::count_if(
             environment.accelerators, [&](const auto &accelerator) {
               return accelerator.vendor == request.vendor &&
-                     accelerator.total_memory_bytes >= minimum_total;
+                     accelerator.total_memory_bytes >= minimum_total &&
+                     matches_selector(accelerator);
             }) >= request.count;
     if (enough_total && minimum_free > 0U) {
       fail(diagnostics, "resource.free_vram_insufficient",

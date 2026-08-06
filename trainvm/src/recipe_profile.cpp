@@ -20,6 +20,7 @@ using Json = nlohmann::json;
 constexpr std::size_t kMaximumRegistryBytes = 16U << 20U;
 constexpr std::size_t kMaximumProfiles = 256U;
 constexpr std::size_t kMaximumOverrides = 256U;
+constexpr std::size_t kMaximumContentBindings = 64U;
 constexpr std::size_t kMaximumRules = 128U;
 constexpr std::size_t kMaximumTuples = 512U;
 constexpr std::size_t kMaximumIdentityBytes = 192U;
@@ -200,6 +201,69 @@ bool authorized_type(RecipeOverrideDomain domain, RecipeValueType type) {
 bool pointer_ancestor(std::string_view left, std::string_view right) {
   return right.size() > left.size() && right.starts_with(left) &&
          right[left.size()] == '/';
+}
+
+bool canonical_sha256(std::string_view value) {
+  return value.size() == 71U && value.starts_with("sha256:") &&
+         std::ranges::all_of(value.substr(7U), [](char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f');
+         });
+}
+
+void validate_content_bindings(
+    std::vector<RecipeContentBinding> &bindings,
+    const Json &template_document,
+    const std::vector<RecipeOverrideField> &overrides) {
+  if (bindings.empty() || bindings.size() > kMaximumContentBindings)
+    reject("recipe content bindings are empty or exceed their bound");
+  for (const auto &binding : bindings) {
+    if (binding.path_target.empty() || binding.fingerprint_target.empty() ||
+        binding.path_target.size() > kMaximumStringBytes ||
+        binding.fingerprint_target.size() > kMaximumStringBytes ||
+        !training_configuration_target(binding.path_target) ||
+        !training_configuration_target(binding.fingerprint_target) ||
+        binding.path_target == binding.fingerprint_target)
+      reject("recipe content binding targets are outside the closed training "
+             "configuration surface");
+    try {
+      const Json::json_pointer path_pointer(binding.path_target);
+      const Json::json_pointer fingerprint_pointer(binding.fingerprint_target);
+      if (!template_document.contains(path_pointer) ||
+          !template_document.contains(fingerprint_pointer) ||
+          !template_document.at(path_pointer).is_string() ||
+          !absolute_normalized_path(
+              template_document.at(path_pointer).get_ref<const std::string &>()) ||
+          !template_document.at(fingerprint_pointer).is_string() ||
+          !canonical_sha256(template_document.at(fingerprint_pointer)
+                                .get_ref<const std::string &>()))
+        reject("recipe content binding does not name an existing absolute "
+               "path and canonical fingerprint scalar");
+    } catch (const Json::exception &error) {
+      reject("recipe content binding contains an invalid JSON pointer: " +
+             std::string(error.what()));
+    }
+    if (std::ranges::any_of(overrides, [&](const auto &field) {
+          return field.target == binding.fingerprint_target ||
+                 pointer_ancestor(field.target, binding.fingerprint_target) ||
+                 pointer_ancestor(binding.fingerprint_target, field.target);
+        }))
+      reject("authority-derived content fingerprint cannot also be an "
+             "operator override");
+  }
+  std::ranges::sort(bindings, [](const auto &left, const auto &right) {
+    return std::tie(left.path_target, left.fingerprint_target) <
+           std::tie(right.path_target, right.fingerprint_target);
+  });
+  for (std::size_t left = 0U; left < bindings.size(); ++left) {
+    for (std::size_t right = left + 1U; right < bindings.size(); ++right) {
+      if (bindings[left].path_target == bindings[right].path_target ||
+          bindings[left].fingerprint_target ==
+              bindings[right].fingerprint_target)
+        reject("recipe content bindings have ambiguous root or fingerprint "
+               "ownership");
+    }
+  }
 }
 
 void validate_value(const RecipeOverrideField& field, const Json& value,
@@ -392,6 +456,9 @@ void canonicalize_profile(RecipeProfile& profile) {
       }
     }
   }
+  if (profile.content_bindings)
+    validate_content_bindings(*profile.content_bindings,
+                              profile.template_document, profile.overrides);
   std::map<std::string, const RecipeOverrideField*, std::less<>> fields;
   for (const RecipeOverrideField& field : profile.overrides)
     fields.emplace(field.name, &field);

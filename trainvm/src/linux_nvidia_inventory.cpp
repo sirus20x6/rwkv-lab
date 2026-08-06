@@ -543,8 +543,19 @@ struct NvmlSample final {
   std::string driver;
   std::vector<HostDeviceNodeCapability> shared_device_nodes;
   std::vector<LinuxNvidiaRawDevice> devices;
+  std::vector<PassiveHostAcceleratorMemory> passive_accelerator_memory;
 
-  bool operator==(const NvmlSample &) const = default;
+  bool operator==(const NvmlSample &other) const {
+    // Free memory is intentionally a volatile point-in-time observation. It
+    // is receipt-bound below, but must not turn an otherwise coherent double
+    // inventory capture into a false topology tear.
+    return loaded == other.loaded && complete == other.complete &&
+           contexts_complete == other.contexts_complete &&
+           loader_attested == other.loader_attested &&
+           loader_detail == other.loader_detail && driver == other.driver &&
+           shared_device_nodes == other.shared_device_nodes &&
+           devices == other.devices;
+  }
 };
 
 class NvmlLibrary final {
@@ -665,6 +676,12 @@ public:
                                                      sizeof(pci.bus_id_legacy)),
                                     pci.domain, pci.bus, pci.device);
       device.total_memory_bytes = memory.total;
+      result.passive_accelerator_memory.push_back({
+          .vendor = HostAcceleratorVendor::nvidia,
+          .stable_id = device.uuid,
+          .total_memory_bytes = memory.total,
+          .free_memory_bytes = memory.free,
+      });
       device.device_minor = minor_number;
       unsigned int display_active = 0U;
       unsigned int display_mode = 0U;
@@ -739,6 +756,12 @@ public:
             }
             partition.uuid = *mig_uuid_value;
             partition.total_memory_bytes = mig_memory.total;
+            result.passive_accelerator_memory.push_back({
+                .vendor = HostAcceleratorVendor::nvidia,
+                .stable_id = partition.uuid,
+                .total_memory_bytes = mig_memory.total,
+                .free_memory_bytes = mig_memory.free,
+            });
             partition.gpu_instance_id = gpu_instance_id;
             partition.compute_instance_id = compute_instance_id;
             const InstanceOnly instance{gpu_instance_id, compute_instance_id};
@@ -1062,6 +1085,7 @@ public:
     result.capture_finished_monotonic_ns = monotonic_now_ns();
     result.shared_device_nodes = first.shared_device_nodes;
     result.devices = first.devices;
+    result.passive_accelerator_memory = second.passive_accelerator_memory;
     result.structural_pci_bdfs =
         structural_begin.value_or(std::vector<std::string>{});
     result.structural_complete = host && host_end && boot_begin && boot_end &&
@@ -1307,6 +1331,7 @@ bool pinned_pci_device_mapping(std::string_view pci_uevent,
 struct LinuxNvidiaInventoryCollector::Implementation final {
   LinuxNvidiaInventoryConfig config;
   std::shared_ptr<ILinuxNvidiaReadOnlyKernel> kernel;
+  std::optional<PassiveHostMemorySnapshot> passive_memory;
 };
 
 LinuxNvidiaInventoryCollector::LinuxNvidiaInventoryCollector(
@@ -1628,7 +1653,41 @@ HostKernelSnapshot LinuxNvidiaInventoryCollector::capture_inventory() {
   });
   if (snapshot.resources.size() > HostResourceBounds::maximum_resources)
     snapshot.resources.clear();
+  implementation_->passive_memory.reset();
+  if (complete && raw.passive_accelerator_memory.size() <=
+                      HostResourceBounds::maximum_resources) {
+    auto rows = raw.passive_accelerator_memory;
+    std::ranges::sort(rows, [](const auto &left, const auto &right) {
+      return std::tie(left.vendor, left.stable_id) <
+             std::tie(right.vendor, right.stable_id);
+    });
+    const bool valid = std::ranges::all_of(
+        rows, [](const auto &memory) {
+          return memory.vendor != HostAcceleratorVendor::other &&
+                 bounded_identifier(memory.stable_id) &&
+                 memory.total_memory_bytes > 0U &&
+                 memory.free_memory_bytes <= memory.total_memory_bytes;
+        });
+    const bool unique =
+        std::ranges::adjacent_find(
+            rows, [](const auto &left, const auto &right) {
+              return left.stable_id == right.stable_id;
+            }) == rows.end();
+    if (valid && unique) {
+      implementation_->passive_memory = {
+          .host_id = raw.host_id,
+          .boot_id = raw.boot_id,
+          .observed_monotonic_ns = raw.capture_finished_monotonic_ns,
+          .accelerators = std::move(rows),
+      };
+    }
+  }
   return snapshot;
+}
+
+std::optional<PassiveHostMemorySnapshot>
+LinuxNvidiaInventoryCollector::passive_memory_snapshot() const {
+  return implementation_->passive_memory;
 }
 
 } // namespace trainvm

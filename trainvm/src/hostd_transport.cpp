@@ -1,4 +1,5 @@
 #include "trainvm/hostd_transport.hpp"
+#include "trainvm/document.hpp"
 
 #include <fcntl.h>
 #include <linux/openat2.h>
@@ -593,15 +594,25 @@ std::optional<std::string> vendor_name(
   throw HostdTransportError("hostd resource vendor is invalid");
 }
 
+nlohmann::json nullable_string_json(
+    const std::optional<std::string> &value) {
+  return value ? nlohmann::json(*value) : nlohmann::json(nullptr);
+}
+
+nlohmann::json nullable_vendor_json(
+    const std::optional<HostAcceleratorVendor> &vendor) {
+  return nullable_string_json(vendor_name(vendor));
+}
+
 nlohmann::json fence_status_json(const ResourceFence &fence) {
   return {
       {"generation", fence.generation},
       {"inventory_digest", fence.inventory_digest},
       {"resource",
        {{"kind", resource_kind_name(fence.resource.kind)},
-        {"parent_id", fence.resource.parent_id},
+        {"parent_id", nullable_string_json(fence.resource.parent_id)},
         {"stable_id", fence.resource.stable_id},
-        {"vendor", vendor_name(fence.resource.vendor)}}},
+        {"vendor", nullable_vendor_json(fence.resource.vendor)}}},
       {"topology_digest", fence.topology_digest},
   };
 }
@@ -636,6 +647,39 @@ nlohmann::json process_status_json(
   };
 }
 
+nlohmann::json passive_memory_identity_json(
+    const HostdAuthorityStatus &status) {
+  nlohmann::json rows = nlohmann::json::array();
+  for (const auto &memory : status.passive_accelerator_memory) {
+    rows.push_back({
+        {"resource_kind", resource_kind_name(memory.resource_kind)},
+        {"vendor", nullable_vendor_json(memory.vendor)},
+        {"stable_id", memory.stable_id},
+        {"parent_id", nullable_string_json(memory.parent_id)},
+        {"audited_eligible", memory.audited_eligible},
+        {"total_memory_bytes", memory.total_memory_bytes},
+        {"free_memory_bytes", memory.free_memory_bytes},
+        {"selector_labels", memory.selector_labels},
+    });
+  }
+  return {{"api_version", "trainvm.hostd-passive-memory/v1"},
+          {"host_id", status.passive_memory_host_id},
+          {"boot_id", status.passive_memory_boot_id},
+          {"inventory_digest", status.passive_memory_inventory_digest},
+          {"inventory_receipt_digest",
+           status.passive_memory_inventory_receipt_digest},
+          {"observed_monotonic_ns",
+           status.passive_memory_observed_monotonic_ns},
+          {"accelerator_count", status.passive_accelerator_memory_count},
+          {"accelerators_truncated",
+           status.passive_accelerator_memory_truncated},
+          {"accelerators", std::move(rows)}};
+}
+
+std::string plain_sha256(std::string_view bytes) {
+  return "sha256:" + sha256_hex(bytes);
+}
+
 nlohmann::json authority_status_json(const HostdAuthorityStatus &status) {
   nlohmann::json fences = nlohmann::json::array();
   for (const ResourceFence &fence : status.active_fences)
@@ -643,6 +687,19 @@ nlohmann::json authority_status_json(const HostdAuthorityStatus &status) {
   nlohmann::json processes = nlohmann::json::array();
   for (const HostdProcessAuthorityStatus &process : status.active_processes)
     processes.push_back(process_status_json(process));
+  nlohmann::json passive_memory = nlohmann::json::array();
+  for (const auto &memory : status.passive_accelerator_memory) {
+    passive_memory.push_back({
+        {"resource_kind", resource_kind_name(memory.resource_kind)},
+        {"vendor", nullable_vendor_json(memory.vendor)},
+        {"stable_id", memory.stable_id},
+        {"parent_id", nullable_string_json(memory.parent_id)},
+        {"audited_eligible", memory.audited_eligible},
+        {"total_memory_bytes", memory.total_memory_bytes},
+        {"free_memory_bytes", memory.free_memory_bytes},
+        {"selector_labels", memory.selector_labels},
+    });
+  }
   return {
       {"active_fence_count", status.active_fence_count},
       {"active_fences", std::move(fences)},
@@ -660,6 +717,21 @@ nlohmann::json authority_status_json(const HostdAuthorityStatus &status) {
       {"current_inventory_digest", status.current_inventory_digest},
       {"current_inventory_receipt_digest",
        status.current_inventory_receipt_digest},
+      {"passive_memory_host_id", status.passive_memory_host_id},
+      {"passive_memory_boot_id", status.passive_memory_boot_id},
+      {"passive_memory_inventory_digest",
+       status.passive_memory_inventory_digest},
+      {"passive_memory_inventory_receipt_digest",
+       status.passive_memory_inventory_receipt_digest},
+      {"passive_memory_observed_monotonic_ns",
+       status.passive_memory_observed_monotonic_ns},
+      {"passive_memory_observation_digest",
+       status.passive_memory_observation_digest},
+      {"passive_accelerator_memory_count",
+       status.passive_accelerator_memory_count},
+      {"passive_accelerator_memory", std::move(passive_memory)},
+      {"passive_accelerator_memory_truncated",
+       status.passive_accelerator_memory_truncated},
       {"degraded_resource_count", status.degraded_resource_count},
       {"occupancy_digest", status.occupancy_digest},
       {"occupancy_ledger_sequence", status.occupancy_ledger_sequence},
@@ -908,6 +980,14 @@ HostdAuthorityStatus parse_authority_status(const nlohmann::json &value) {
        "ledger_record_count", "ledger_verification_reason",
        "ledger_verified", "mutation_disabled_reason", "mutation_enabled",
        "current_inventory_digest", "current_inventory_receipt_digest",
+       "passive_memory_host_id", "passive_memory_boot_id",
+       "passive_memory_inventory_digest",
+       "passive_memory_inventory_receipt_digest",
+       "passive_memory_observed_monotonic_ns",
+       "passive_memory_observation_digest",
+       "passive_accelerator_memory_count",
+       "passive_accelerator_memory",
+       "passive_accelerator_memory_truncated",
        "degraded_resource_count",
        "occupancy_digest", "occupancy_ledger_sequence",
        "process_launch_enabled", "resource_degradation_reason",
@@ -916,7 +996,8 @@ HostdAuthorityStatus parse_authority_status(const nlohmann::json &value) {
        "remaining_unclosed_process_records", "startup_phase",
        "startup_recovery_steps"});
   if (!value.at("active_fences").is_array() ||
-      !value.at("active_processes").is_array())
+      !value.at("active_processes").is_array() ||
+      !value.at("passive_accelerator_memory").is_array())
     throw HostdTransportError("hostd authority rows are not arrays");
   HostdAuthorityStatus status{
       .api_version = value.at("api_version").get<std::string>(),
@@ -949,6 +1030,26 @@ HostdAuthorityStatus parse_authority_status(const nlohmann::json &value) {
           value.at("current_inventory_digest").get<std::string>(),
       .current_inventory_receipt_digest =
           value.at("current_inventory_receipt_digest").get<std::string>(),
+      .passive_memory_host_id =
+          value.at("passive_memory_host_id").get<std::string>(),
+      .passive_memory_boot_id =
+          value.at("passive_memory_boot_id").get<std::string>(),
+      .passive_memory_inventory_digest =
+          value.at("passive_memory_inventory_digest").get<std::string>(),
+      .passive_memory_inventory_receipt_digest =
+          value.at("passive_memory_inventory_receipt_digest")
+              .get<std::string>(),
+      .passive_memory_observed_monotonic_ns = parse_unsigned_integer(
+          value.at("passive_memory_observed_monotonic_ns"),
+          "passive_memory_observed_monotonic_ns"),
+      .passive_memory_observation_digest =
+          value.at("passive_memory_observation_digest").get<std::string>(),
+      .passive_accelerator_memory_count = parse_size(
+          value.at("passive_accelerator_memory_count"),
+          "passive_accelerator_memory_count"),
+      .passive_accelerator_memory = {},
+      .passive_accelerator_memory_truncated =
+          value.at("passive_accelerator_memory_truncated").get<bool>(),
       .degraded_resource_count = parse_size(
           value.at("degraded_resource_count"), "degraded_resource_count"),
       .resource_degradation_reason =
@@ -973,6 +1074,31 @@ HostdAuthorityStatus parse_authority_status(const nlohmann::json &value) {
     status.active_fences.push_back(parse_fence_status(fence));
   for (const auto &process : value.at("active_processes"))
     status.active_processes.push_back(parse_process_status(process));
+  for (const auto &memory : value.at("passive_accelerator_memory")) {
+    require_fields(memory, {"audited_eligible", "free_memory_bytes",
+                            "parent_id", "resource_kind", "selector_labels",
+                            "stable_id", "total_memory_bytes", "vendor"});
+    const auto vendor = parse_resource_vendor(memory.at("vendor"));
+    if (!vendor)
+      throw HostdTransportError(
+          "passive accelerator memory vendor is absent");
+    status.passive_accelerator_memory.push_back({
+        .resource_kind = parse_resource_kind(
+            memory.at("resource_kind").get<std::string>()),
+        .vendor = *vendor,
+        .stable_id = memory.at("stable_id").get<std::string>(),
+        .parent_id = parse_optional_string(memory.at("parent_id"),
+                                           "passive memory parent_id"),
+        .audited_eligible = memory.at("audited_eligible").get<bool>(),
+        .total_memory_bytes = parse_unsigned_integer(
+            memory.at("total_memory_bytes"), "total_memory_bytes"),
+        .free_memory_bytes = parse_unsigned_integer(
+            memory.at("free_memory_bytes"), "free_memory_bytes"),
+        .selector_labels =
+            memory.at("selector_labels")
+                .get<std::map<std::string, std::string>>(),
+    });
+  }
   return status;
 }
 
@@ -1266,6 +1392,18 @@ void validate_authority_status_semantics(
           HostdAuthorityStatus::maximum_reported_rows ||
       status.active_processes.size() >
           HostdAuthorityStatus::maximum_reported_rows ||
+      status.passive_accelerator_memory_count >
+          HostResourceBounds::maximum_resources ||
+      status.passive_accelerator_memory.size() >
+          HostdAuthorityStatus::maximum_passive_memory_rows ||
+      status.passive_accelerator_memory.size() >
+          status.passive_accelerator_memory_count ||
+      status.passive_accelerator_memory_truncated !=
+          (status.passive_accelerator_memory.size() <
+           status.passive_accelerator_memory_count) ||
+      (!status.passive_accelerator_memory.empty() &&
+       passive_memory_identity_json(status).dump().size() >
+           HostdAuthorityStatus::maximum_passive_memory_identity_bytes) ||
       status.active_fences.size() > status.active_fence_count ||
       status.active_processes.size() > status.active_process_count ||
       status.active_fences_truncated !=
@@ -1305,6 +1443,73 @@ void validate_authority_status_semantics(
         coordinator.lifecycle != HostdLifecycle::admitting))) {
     throw HostdTransportError("hostd authority status semantics are invalid");
   }
+  std::set<std::string> passive_ids;
+  for (const auto &memory : status.passive_accelerator_memory) {
+    if ((memory.resource_kind != HostResourceKind::accelerator &&
+         memory.resource_kind != HostResourceKind::accelerator_partition) ||
+        !valid_identifier(memory.stable_id) ||
+        (memory.parent_id && !valid_identifier(*memory.parent_id)) ||
+        memory.total_memory_bytes == 0U ||
+        memory.free_memory_bytes > memory.total_memory_bytes ||
+        memory.selector_labels.size() >
+            HostResourceBounds::maximum_labels_per_resource ||
+        !std::ranges::all_of(memory.selector_labels, [](const auto &label) {
+          return valid_identifier(label.first) &&
+                 valid_bounded_text(label.second, 512U, false);
+        }) ||
+        !passive_ids.insert(memory.stable_id).second ||
+        !status.resource_inventory_observed)
+      throw HostdTransportError(
+          "hostd passive accelerator memory semantics are invalid");
+  }
+  for (const auto &memory : status.passive_accelerator_memory) {
+    if (!memory.audited_eligible || !memory.parent_id)
+      continue;
+    const auto parent = std::ranges::find(
+        status.passive_accelerator_memory, *memory.parent_id,
+        &HostdPassiveAcceleratorMemory::stable_id);
+    if (parent != status.passive_accelerator_memory.end() &&
+        parent->audited_eligible)
+      throw HostdTransportError(
+          "hostd passive memory cannot make parent and child both eligible");
+  }
+  const bool has_passive =
+      !status.passive_memory_observation_digest.empty() ||
+      status.passive_accelerator_memory_count != 0U ||
+      !status.passive_accelerator_memory.empty() ||
+      status.passive_accelerator_memory_truncated ||
+      status.passive_memory_observed_monotonic_ns != 0U;
+  if (has_passive &&
+      (status.passive_memory_host_id != coordinator.host_id ||
+       status.passive_memory_boot_id != coordinator.boot_id ||
+       status.passive_memory_inventory_digest !=
+           status.current_inventory_digest ||
+       status.passive_memory_inventory_receipt_digest !=
+           status.current_inventory_receipt_digest))
+    throw HostdTransportError(
+        "hostd passive memory is not bound to host/boot/inventory identity");
+  if (has_passive &&
+      (status.passive_memory_observed_monotonic_ns == 0U ||
+       status.passive_accelerator_memory_count == 0U ||
+       (status.passive_accelerator_memory.empty() &&
+        !status.passive_accelerator_memory_truncated)))
+    throw HostdTransportError(
+        "hostd passive memory observation is structurally incomplete");
+  if (has_passive) {
+    const std::string expected_passive_digest =
+        plain_sha256(passive_memory_identity_json(status).dump());
+    if (status.passive_memory_observation_digest != expected_passive_digest)
+      throw HostdTransportError(
+          "hostd passive memory observation digest does not match its "
+          "evidence");
+  }
+  if (!has_passive &&
+      (!status.passive_memory_host_id.empty() ||
+       !status.passive_memory_boot_id.empty() ||
+       !status.passive_memory_inventory_digest.empty() ||
+       !status.passive_memory_inventory_receipt_digest.empty()))
+    throw HostdTransportError(
+        "hostd empty passive memory observation carries partial identity");
   std::set<std::string> resource_ids;
   for (const ResourceFence &fence : status.active_fences) {
     validate_fence_status(fence);
@@ -2152,7 +2357,21 @@ HostdStatusServer::serve_one(std::int64_t absolute_monotonic_deadline_ns) {
                       absolute_monotonic_deadline_ns))
         return HostdServeResult::timed_out;
     }
+  } catch (const std::exception &error) {
+    if (limits_.rejection_observer) {
+      try {
+        limits_.rejection_observer(error.what());
+      } catch (...) {
+      }
+    }
+    return HostdServeResult::rejected;
   } catch (...) {
+    if (limits_.rejection_observer) {
+      try {
+        limits_.rejection_observer("unknown status listener rejection");
+      } catch (...) {
+      }
+    }
     return HostdServeResult::rejected;
   }
 }
@@ -2166,8 +2385,19 @@ HostdServeResult HostdStatusServer::serve_accepted(
     enable_passcred(connection.get());
     const ucred peer = peer_credentials(connection.get());
     if (peer.uid != peer_policy_.allowed_uid ||
-        peer.gid != peer_policy_.allowed_gid)
+        peer.gid != peer_policy_.allowed_gid) {
+      if (limits_.rejection_observer) {
+        try {
+          limits_.rejection_observer(
+              "peer credential mismatch: observed uid=" +
+              std::to_string(peer.uid) + " gid=" + std::to_string(peer.gid) +
+              ", allowed uid=" + std::to_string(peer_policy_.allowed_uid) +
+              " gid=" + std::to_string(peer_policy_.allowed_gid));
+        } catch (...) {
+        }
+      }
       return HostdServeResult::rejected;
+    }
     const std::int64_t now = hostd_monotonic_now_ns();
     const std::int64_t relative_deadline =
         limits_.per_session_timeout_ns >
@@ -2226,7 +2456,21 @@ HostdServeResult HostdStatusServer::serve_accepted(
     send_packet(connection.get(), response, session_deadline);
     (void)::shutdown(connection.get(), SHUT_RDWR);
     return HostdServeResult::served;
+  } catch (const std::exception &error) {
+    if (limits_.rejection_observer) {
+      try {
+        limits_.rejection_observer(error.what());
+      } catch (...) {
+      }
+    }
+    return HostdServeResult::rejected;
   } catch (...) {
+    if (limits_.rejection_observer) {
+      try {
+        limits_.rejection_observer("unknown accepted status rejection");
+      } catch (...) {
+      }
+    }
     return HostdServeResult::rejected;
   }
 }

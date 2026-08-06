@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -74,6 +75,7 @@ struct PassiveAcceleratorMemoryEvidence final {
   std::string stable_id;
   std::uint64_t total_memory_bytes{};
   std::uint64_t free_memory_bytes{};
+  std::map<std::string, std::string> selector_labels;
   std::string observation_digest;
 
   bool operator==(const PassiveAcceleratorMemoryEvidence &) const = default;

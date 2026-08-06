@@ -6,6 +6,8 @@
 #include "trainvm/journal.hpp"
 #include "trainvm/reflection_json.hpp"
 #include "trainvm/recipe_profile.hpp"
+#include "trainvm/run_authoring.hpp"
+#include "trainvm/run_authoring_cli.hpp"
 #include "trainvm/rwkv_lab_worker_contract.hpp"
 #include "trainvm/input_content_authority.hpp"
 #include "trainvm/service.hpp"
@@ -34,6 +36,7 @@ void usage() {
       << "  trainvm validate <experiment.json>\n"
       << "  trainvm plan <experiment.json> [--canonical]\n"
       << "  trainvm preflight <experiment.json> <passive-environment.json>\n"
+      << "  trainvm run <author-run.json|yaml> [--dry-run]\n"
       << "  trainvm compile  # read JSON from stdin; emit canonical preview JSON\n"
       << "  trainvm validate-catalog <compatibility.json> <repository-root>\n"
       << "  trainvm print-catalog-digests <compatibility.json> <repository-root>"
@@ -129,6 +132,87 @@ int preflight_command(const std::filesystem::path& experiment_path,
       trainvm::run_training_preflight(*compiled.plan, environment);
   std::cout << trainvm::encode_json(receipt).dump(2) << '\n';
   return receipt.passed ? 0 : 3;
+}
+
+std::string read_bounded_author_run(const std::filesystem::path& path) {
+  constexpr std::uintmax_t maximum = 2U * 1024U * 1024U;
+  std::error_code error;
+  const auto size = std::filesystem::file_size(path, error);
+  if (error || size == 0U || size > maximum) {
+    throw std::runtime_error(
+        "author-run document must be a readable nonempty file at most 2 MiB");
+  }
+  std::ifstream input(path, std::ios::binary);
+  std::string source(static_cast<std::size_t>(size), '\0');
+  input.read(source.data(), static_cast<std::streamsize>(source.size()));
+  if (!input || input.gcount() != static_cast<std::streamsize>(source.size()))
+    throw std::runtime_error("author-run document could not be read exactly");
+  return source;
+}
+
+std::string author_run_source_format(const std::filesystem::path& path) {
+  const std::string extension = path.extension().string();
+  if (extension == ".json")
+    return "json";
+  if (extension == ".yaml" || extension == ".yml")
+    return "yaml";
+  throw std::runtime_error(
+      "author-run document extension must be .json, .yaml, or .yml");
+}
+
+int author_run_command(int argc, char** argv) {
+  const bool dry_run = argc == 4 && std::string_view(argv[3]) == "--dry-run";
+  if ((argc != 3 && argc != 4) || (argc == 4 && !dry_run)) {
+    usage();
+    return 64;
+  }
+  const std::filesystem::path path(argv[2]);
+  const trainvm::AuthoringClientConfiguration configuration =
+      trainvm::load_authoring_client_configuration();
+  trainvm::v1::AuthorRunRequest request;
+  request.set_request_document(read_bounded_author_run(path));
+  request.set_source_format(author_run_source_format(path));
+
+  auto channel = grpc::CreateChannel(configuration.controller_target,
+                                     grpc::InsecureChannelCredentials());
+  auto stub = trainvm::v1::TrainVM::NewStub(channel);
+  const auto invoke = [&](const trainvm::v1::AuthorRunRequest &invocation) {
+    grpc::ClientContext context;
+    auto stream = stub->AuthorRun(&context, invocation);
+    trainvm::AuthorRunStreamValidator validator(
+        invocation.dry_run(),
+        invocation.expected_plan_hash().empty()
+            ? std::nullopt
+            : std::optional<std::string>(invocation.expected_plan_hash()));
+    trainvm::v1::AuthorRunUpdate update;
+    while (stream->Read(&update)) {
+      validator.observe(update);
+      const nlohmann::json output = trainvm::author_run_update_json(
+          update, configuration.dashboard_base_url);
+      std::cout << output.dump() << '\n';
+    }
+    const grpc::Status status = stream->Finish();
+    if (!status.ok())
+      throw std::runtime_error("controller RPC failed: " +
+                               status.error_message());
+    return validator.finish();
+  };
+
+  // An ordinary launch is deliberately two authority calls. The first is a
+  // non-mutating, complete preview; the second is fenced to that exact plan.
+  // Static inputs are remeasured on both calls as the fail-closed fallback
+  // until the authority-owned Merkle cache can prove a reusable lock.
+  request.set_dry_run(true);
+  const trainvm::AuthorRunStreamSummary preview = invoke(request);
+  if (preview.failed)
+    return 3;
+  if (dry_run)
+    return 0;
+
+  request.set_dry_run(false);
+  request.set_expected_plan_hash(preview.plan_hash);
+  const trainvm::AuthorRunStreamSummary launch = invoke(request);
+  return launch.failed ? 3 : 0;
 }
 
 int compile_command() {
@@ -652,6 +736,9 @@ int main(int argc, char** argv) {
     }
     if (argc == 4 && std::string_view(argv[1]) == "preflight") {
       return preflight_command(argv[2], argv[3]);
+    }
+    if (argc >= 3 && std::string_view(argv[1]) == "run") {
+      return author_run_command(argc, argv);
     }
     if (argc == 2 && std::string_view(argv[1]) == "compile") {
       return compile_command();

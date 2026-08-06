@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -169,11 +171,29 @@ struct HostdProcessAuthorityStatus final {
   bool operator==(const HostdProcessAuthorityStatus &) const = default;
 };
 
+struct HostdPassiveAcceleratorMemory final {
+  HostResourceKind resource_kind{};
+  HostAcceleratorVendor vendor{};
+  std::string stable_id;
+  std::optional<std::string> parent_id;
+  bool audited_eligible{};
+  std::uint64_t total_memory_bytes{};
+  std::uint64_t free_memory_bytes{};
+  std::map<std::string, std::string> selector_labels;
+
+  bool operator==(const HostdPassiveAcceleratorMemory &) const = default;
+};
+
 struct HostdAuthorityStatus final {
   // Eight worst-case rows (4 KiB cgroup paths plus bounded identifiers and
   // digests) still fit the 64 KiB status packet. Complete counts and state
   // digests remain present when the human-readable prefix is truncated.
   static constexpr std::size_t maximum_reported_rows = 8U;
+  // Exact identity and memory fields only. This bounded prefix remains safe
+  // beside worst-case process/fence prefixes in the 64 KiB status packet.
+  static constexpr std::size_t maximum_passive_memory_rows = 32U;
+  static constexpr std::size_t maximum_passive_memory_identity_bytes =
+      12U * 1024U;
 
   std::string api_version;
   HostdStartupPhase startup_phase{};
@@ -190,6 +210,16 @@ struct HostdAuthorityStatus final {
   std::uint64_t resource_inventory_observation_age_ns{};
   std::string current_inventory_digest;
   std::string current_inventory_receipt_digest;
+  // Separate volatile observation: never part of inventory/topology identity.
+  std::string passive_memory_host_id;
+  std::string passive_memory_boot_id;
+  std::string passive_memory_inventory_digest;
+  std::string passive_memory_inventory_receipt_digest;
+  std::uint64_t passive_memory_observed_monotonic_ns{};
+  std::string passive_memory_observation_digest;
+  std::size_t passive_accelerator_memory_count{};
+  std::vector<HostdPassiveAcceleratorMemory> passive_accelerator_memory;
+  bool passive_accelerator_memory_truncated{};
   std::size_t degraded_resource_count{};
   std::string resource_degradation_reason;
   std::size_t active_fence_count{};
@@ -229,6 +259,9 @@ struct HostdStatusReply final {
 struct HostdStatusTransportLimits final {
   std::size_t maximum_payload_bytes{kHostdStatusMaximumPayloadBytes};
   std::int64_t per_session_timeout_ns{1'000'000'000LL};
+  // Optional diagnostic seam for tests/daemon logging. It observes a rejected
+  // session after authority checks; it cannot change the fail-closed result.
+  std::function<void(std::string_view)> rejection_observer{};
 };
 
 struct HostdStatusPeerPolicy final {

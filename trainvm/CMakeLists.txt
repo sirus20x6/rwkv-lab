@@ -112,6 +112,7 @@ add_library(trainvm_core
   src/linux_nvidia_inventory.cpp
   src/reconciler.cpp
   src/resource_request_builder.cpp
+  src/run_authoring.cpp
   src/rwkv_lab_worker_contract.cpp
   src/conversion_publication.cpp
   src/post_training_authority.cpp
@@ -167,7 +168,7 @@ target_compile_options(trainvm_training_schedules PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
 )
 
-add_library(trainvm_service src/service.cpp)
+add_library(trainvm_service src/service.cpp src/run_authoring_cli.cpp)
 target_include_directories(trainvm_service PUBLIC include)
 target_compile_options(trainvm_service PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
 target_link_libraries(trainvm_service PUBLIC trainvm_core trainvm_protocol)
@@ -446,6 +447,24 @@ target_compile_definitions(training_preflight_tests PRIVATE
 )
 target_link_libraries(training_preflight_tests PRIVATE trainvm_core)
 add_test(NAME training_preflight_tests COMMAND training_preflight_tests)
+add_executable(run_authoring_tests tests/run_authoring_tests.cpp)
+target_compile_options(run_authoring_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_compile_definitions(run_authoring_tests PRIVATE
+  TRAINVM_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+target_link_libraries(run_authoring_tests PRIVATE trainvm_service)
+add_test(NAME run_authoring_tests COMMAND run_authoring_tests)
+add_executable(author_run_service_tests tests/author_run_service_tests.cpp)
+target_compile_options(author_run_service_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_compile_definitions(author_run_service_tests PRIVATE
+  TRAINVM_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+target_link_libraries(author_run_service_tests PRIVATE trainvm_service)
+add_test(NAME author_run_service_tests COMMAND author_run_service_tests)
 add_executable(lifecycle_equivalence_tests
   tests/lifecycle_equivalence_tests.cpp
 )

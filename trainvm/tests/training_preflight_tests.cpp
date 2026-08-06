@@ -23,6 +23,15 @@ using namespace trainvm;
 constexpr std::uint64_t kGib = 1ULL << 30U;
 int failures = 0;
 
+mode_t passing_run_directory_mode() {
+  // Hosted native CI deliberately builds/tests as root, while the evidence
+  // fixture substitutes uid/gid 1000 so a passing preflight never blesses a
+  // privileged worker. Give that synthetic principal write+search through
+  // the "other" bits in that one environment; non-root tests retain the
+  // tighter owner/group fixture used by the permission regressions below.
+  return ::geteuid() == 0U ? 0773 : 0770;
+}
+
 void check(bool condition, std::string_view message) {
   if (!condition) {
     std::cerr << "FAIL: " << message << '\n';
@@ -72,7 +81,8 @@ nlohmann::json load_fixture() {
 }
 
 CompiledPlan compiled_fixture(const TemporaryDirectory &temporary,
-                              bool create_run_directory = true) {
+                              bool create_run_directory = true,
+                              bool require_matching_label = false) {
   const auto root = temporary.path();
   const auto input_root = root / "input";
   const auto run_directory = root / "run";
@@ -83,7 +93,7 @@ CompiledPlan compiled_fixture(const TemporaryDirectory &temporary,
   std::ofstream(input_root / "config.json") << "{}\n";
   (void)::chmod(input_root.c_str(), 0755);
   if (create_run_directory)
-    (void)::chmod(run_directory.c_str(), 0770);
+    (void)::chmod(run_directory.c_str(), passing_run_directory_mode());
 
   auto source = load_fixture();
   auto &spec = source["spec"];
@@ -109,6 +119,8 @@ CompiledPlan compiled_fixture(const TemporaryDirectory &temporary,
       {"minimum_memory_gib", 90.0},
       {"exclusive", false},
   };
+  if (require_matching_label)
+    spec["resources"]["accelerators"]["selector"] = {{"pool", "training"}};
   spec["parameters"]["source_config"]["value"] =
       (input_root / "config.json").string();
 
@@ -190,6 +202,7 @@ TrainingPreflightEnvironment environment(const CompiledPlan &plan) {
           .stable_id = "GPU-passive-test",
           .total_memory_bytes = 96U * kGib,
           .free_memory_bytes = 90U * kGib,
+          .selector_labels = {},
           .observation_digest = "sha256:" + std::string(64U, '6'),
       }},
       .training_nodes = {{
@@ -274,6 +287,20 @@ void qwen_total_and_free_vram_policies_are_distinct() {
         "failure");
 }
 
+void passive_memory_obeys_the_declared_selector() {
+  TemporaryDirectory temporary;
+  const auto plan = compiled_fixture(temporary, true, true);
+  auto evidence = environment(plan);
+  evidence.accelerators.front().selector_labels = {{"pool", "display"}};
+  const auto rejected = run_training_preflight(plan, evidence);
+  check(!rejected.passed &&
+            has_code(rejected, "resource.total_vram_insufficient"),
+        "same-VRAM GPU with mismatched labels is rejected before a lease");
+  evidence.accelerators.front().selector_labels = {{"pool", "training"}};
+  check(run_training_preflight(plan, evidence).passed,
+        "matching passive selector labels satisfy the same plan");
+}
+
 void worker_permission_failure_precedes_run_creation() {
   TemporaryDirectory temporary;
   const auto plan = compiled_fixture(temporary);
@@ -352,7 +379,7 @@ void credential_sets_and_gpu_qualification_are_bounded() {
         "the complete effective supplementary group set participates in "
         "POSIX output authority");
 
-  (void)::chmod(run_directory.c_str(), 0770);
+  (void)::chmod(run_directory.c_str(), passing_run_directory_mode());
   auto qualified = environment(plan);
   qualified.gpu_qualification = BoundedGpuQualificationEvidence{
       .maximum_duration_milliseconds = 1'000U,
@@ -376,6 +403,7 @@ int main() {
   try {
     passing_preflight_is_passive_and_deterministic();
     qwen_total_and_free_vram_policies_are_distinct();
+    passive_memory_obeys_the_declared_selector();
     worker_permission_failure_precedes_run_creation();
     missing_adapter_evidence_fails_closed();
     credential_sets_and_gpu_qualification_are_bounded();

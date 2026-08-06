@@ -323,6 +323,28 @@ v1::Diagnostic::Severity wire_severity(Diagnostic::Severity severity) {
   return v1::Diagnostic::SEVERITY_UNSPECIFIED;
 }
 
+v1::AuthorRunStage wire_author_run_stage(AuthorRunStage stage) {
+  switch (stage) {
+    case AuthorRunStage::validating:
+      return v1::AUTHOR_RUN_STAGE_VALIDATING;
+    case AuthorRunStage::resolving:
+      return v1::AUTHOR_RUN_STAGE_RESOLVING;
+    case AuthorRunStage::locking_inputs:
+      return v1::AUTHOR_RUN_STAGE_LOCKING_INPUTS;
+    case AuthorRunStage::preflight:
+      return v1::AUTHOR_RUN_STAGE_PREFLIGHT;
+    case AuthorRunStage::provisioning:
+      return v1::AUTHOR_RUN_STAGE_PROVISIONING;
+    case AuthorRunStage::submitting:
+      return v1::AUTHOR_RUN_STAGE_SUBMITTING;
+    case AuthorRunStage::complete:
+      return v1::AUTHOR_RUN_STAGE_COMPLETE;
+    case AuthorRunStage::failed:
+      return v1::AUTHOR_RUN_STAGE_FAILED;
+  }
+  return v1::AUTHOR_RUN_STAGE_FAILED;
+}
+
 void add_diagnostic(v1::RunCommandResponse& response, const Diagnostic& diagnostic) {
   auto* output = response.add_diagnostics();
   output->set_severity(wire_severity(diagnostic.severity));
@@ -337,6 +359,16 @@ void add_diagnostic(v1::SubmitExperimentResponse& response, const Diagnostic& di
   output->set_code(diagnostic.code);
   output->set_document_path(diagnostic.path);
   output->set_message(diagnostic.message);
+}
+
+void add_diagnostic(v1::AuthorRunUpdate& response,
+                    const TrainingPreflightDiagnostic& diagnostic) {
+  auto* output = response.add_diagnostics();
+  output->set_severity(wire_severity(diagnostic.severity));
+  output->set_code(diagnostic.code);
+  output->set_document_path(diagnostic.path);
+  output->set_message(diagnostic.message);
+  output->set_help(diagnostic.help);
 }
 
 void add_diagnostic(v1::PlanDiffResponse& response,
@@ -1358,14 +1390,18 @@ TrainVMService::TrainVMService(
     std::optional<HostdClientConfiguration> hostd_configuration,
     std::string controller_target,
     ICacheQualificationEvidenceResolver* cache_qualification,
-    SqliteAuthorityEnforcementGrade filesystem_enforcement_grade)
+    SqliteAuthorityEnforcementGrade filesystem_enforcement_grade,
+    std::shared_ptr<ITrainingPreflightEvidenceProvider> preflight_evidence,
+    std::filesystem::path recipe_registry_path)
     : TrainVMService(journal_path, std::move(adapter_registry),
                      std::move(host_launch_registry),
                      HostLaunchResolver::local_host_identity(),
                      std::move(authority_clock),
                      HostGrantEnforcement::required,
                      std::move(training_components), {}, {}, {},
-                     cache_qualification, filesystem_enforcement_grade) {
+                     cache_qualification, filesystem_enforcement_grade,
+                     std::move(preflight_evidence),
+                     std::move(recipe_registry_path)) {
   if (hostd_configuration) {
     configure_hostd(*hostd_configuration, std::move(controller_target));
   }
@@ -1387,7 +1423,9 @@ TrainVMService::TrainVMService(
     std::shared_ptr<IHostProcessClient> host_process_client,
     std::string controller_target,
     ICacheQualificationEvidenceResolver* cache_qualification,
-    SqliteAuthorityEnforcementGrade filesystem_enforcement_grade)
+    SqliteAuthorityEnforcementGrade filesystem_enforcement_grade,
+    std::shared_ptr<ITrainingPreflightEvidenceProvider> preflight_evidence,
+    std::filesystem::path recipe_registry_path)
     : authority_lock_(std::make_unique<AuthorityLock>(
           journal_path, filesystem_enforcement_grade)),
       journal_(authority_lock_->journal_path(),
@@ -1402,6 +1440,8 @@ TrainVMService::TrainVMService(
       adapter_registry_(std::move(adapter_registry)),
       host_launch_registry_(std::move(host_launch_registry)),
       training_components_(std::move(training_components)),
+      preflight_evidence_(std::move(preflight_evidence)),
+      recipe_registry_path_(std::move(recipe_registry_path)),
       authority_host_(std::move(authority_host)),
       host_launch_resolver_(host_launch_registry_, authority_host_),
       host_grant_client_(std::move(host_grant_client)),
@@ -1420,6 +1460,132 @@ TrainVMService::TrainVMService(
       reconciler_(journal_, adapter_registry_, training_components_,
                   command_mutex_,
                   [this] { return authority_now(); }, cache_qualification) {
+  if (!recipe_registry_path_.is_absolute() ||
+      recipe_registry_path_.lexically_normal() != recipe_registry_path_ ||
+      recipe_registry_path_.native().size() > 4'096U) {
+    throw std::invalid_argument(
+        "recipe registry path must be canonical, absolute, and bounded");
+  }
+  if (!preflight_evidence_) {
+    PassiveAcceleratorSnapshotSource hostd_accelerators =
+        [this](const CompiledPlan &) {
+          if (!hostd_status_client_ || hostd_status_timeout_ns_ <= 0)
+            throw std::runtime_error(
+                "canonical GPU authoring requires configured hostd passive "
+                "inventory evidence");
+          const std::int64_t now = hostd_monotonic_now_ns();
+          if (now <= 0 || hostd_status_timeout_ns_ >
+              std::numeric_limits<std::int64_t>::max() - now)
+            throw std::runtime_error(
+                "hostd passive inventory deadline overflowed");
+          std::uint64_t correlation = hostd_status_correlation_.fetch_add(
+              1U, std::memory_order_relaxed);
+          if (correlation == 0U)
+            correlation = hostd_status_correlation_.fetch_add(
+                1U, std::memory_order_relaxed);
+          const HostdStatusReply reply = hostd_request_status(
+              *hostd_status_client_, correlation,
+              now + hostd_status_timeout_ns_);
+          if (reply.kind != HostdStatusReplyKind::status || !reply.status ||
+              !reply.authority_status)
+            throw std::runtime_error(
+                "hostd omitted its passive authority inventory status");
+          const auto &coordinator = *reply.status;
+          const auto &authority = *reply.authority_status;
+          constexpr std::uint64_t maximum_age_ns = 5'000'000'000ULL;
+          if (coordinator.host_id != authority_host_.host_id ||
+              coordinator.boot_id != authority_host_.boot_id ||
+              !authority.resource_inventory_observed ||
+              authority.resource_inventory_observation_age_ns >
+                  maximum_age_ns ||
+              authority.current_inventory_digest.empty() ||
+              authority.current_inventory_receipt_digest.empty() ||
+              authority.passive_memory_host_id != coordinator.host_id ||
+              authority.passive_memory_boot_id != coordinator.boot_id ||
+              authority.passive_memory_inventory_digest !=
+                  authority.current_inventory_digest ||
+              authority.passive_memory_inventory_receipt_digest !=
+                  authority.current_inventory_receipt_digest ||
+              authority.passive_memory_observed_monotonic_ns == 0U ||
+              authority.passive_memory_observed_monotonic_ns >
+                  static_cast<std::uint64_t>(now) ||
+              static_cast<std::uint64_t>(now) -
+                      authority.passive_memory_observed_monotonic_ns >
+                  maximum_age_ns ||
+              authority.passive_memory_observation_digest.empty() ||
+              authority.passive_accelerator_memory.empty() ||
+              authority.passive_accelerator_memory_truncated ||
+              authority.passive_accelerator_memory_count !=
+                  authority.passive_accelerator_memory.size())
+            throw std::runtime_error(
+                "hostd passive inventory is absent, stale, or names another "
+                "host/boot authority");
+          std::vector<PassiveAcceleratorMemoryEvidence> result;
+          result.reserve(authority.passive_accelerator_memory.size());
+          for (const auto &memory :
+               authority.passive_accelerator_memory) {
+            if (!memory.audited_eligible)
+              continue;
+            AcceleratorVendor vendor{};
+            switch (memory.vendor) {
+            case HostAcceleratorVendor::nvidia:
+              vendor = AcceleratorVendor::nvidia;
+              break;
+            case HostAcceleratorVendor::amd:
+              vendor = AcceleratorVendor::amd;
+              break;
+            case HostAcceleratorVendor::intel:
+              vendor = AcceleratorVendor::intel;
+              break;
+            case HostAcceleratorVendor::other:
+              throw std::runtime_error(
+                  "hostd passive inventory names an unsupported accelerator "
+                  "vendor");
+            }
+            result.push_back({
+                .vendor = vendor,
+                .stable_id = memory.stable_id,
+                .total_memory_bytes = memory.total_memory_bytes,
+                .free_memory_bytes = memory.free_memory_bytes,
+                .selector_labels = memory.selector_labels,
+                .observation_digest =
+                    authority.passive_memory_observation_digest,
+            });
+          }
+          return result;
+        };
+    auto snapshot = make_local_passive_host_snapshot_source(
+        authority_host_.host_id, authority_host_.boot_id,
+        [this] {
+          const auto sample = authority_now();
+          if (sample.boot.nanoseconds < 0)
+            throw std::runtime_error("authority boot clock is negative");
+          return static_cast<std::uint64_t>(sample.boot.nanoseconds);
+        }, std::move(hostd_accelerators));
+    preflight_evidence_ =
+        std::make_shared<RegisteredTrainingPreflightEvidenceProvider>(
+            adapter_registry_, std::move(snapshot),
+            std::vector<RegisteredTrainingNodeProbe>{
+                {.key = {.adapter = "rwkv-lab.hf-multimodal-sft",
+                         .version = "1.0.0",
+                         .runtime = ComponentRuntime::python_worker,
+                         .operation = "train",
+                         .contract =
+                             "rwkv_lab.hf_multimodal_sft.v1.Train"},
+                 .probe = make_hf_multimodal_sft_training_node_probe(
+                     [this](const AdapterProfile& profile) {
+                       const auto& launch = host_launch_registry_.resolve(
+                           profile.key, profile.code_fingerprint);
+                       return PassiveRuntimeProfileEvidence{
+                           .profile_digest =
+                               host_launch_registry_.profile_digest(
+                                   profile.key, profile.code_fingerprint),
+                           .provided_capabilities =
+                               launch.provided_capabilities,
+                       };
+                     })},
+            });
+  }
   if (static_cast<bool>(host_process_client_) != !controller_target_.empty() ||
       static_cast<bool>(host_grant_client_) !=
           static_cast<bool>(host_process_client_)) {
@@ -3679,6 +3845,14 @@ grpc::Status TrainVMService::Connect(
 grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
                                               const v1::SubmitExperimentRequest* request,
                                               v1::SubmitExperimentResponse* response) {
+  return submit_experiment(context, request, response, std::nullopt);
+}
+
+grpc::Status TrainVMService::submit_experiment(
+    grpc::ServerContext* context,
+    const v1::SubmitExperimentRequest* request,
+    v1::SubmitExperimentResponse* response,
+    const std::optional<AuthorRunAuthority>& authoring) {
   if (request == nullptr || response == nullptr) {
     return {grpc::StatusCode::INVALID_ARGUMENT, "request and response are required"};
   }
@@ -3731,6 +3905,25 @@ grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
     // intentionally carry the same normalized, hashed experiment document.
     response->set_canonical_plan(canonical);
     response->set_plan_hash(compiled.plan->plan_hash);
+    if (authoring) {
+      const AuthorityTimeSample now = authority_now();
+      const auto& receipt = authoring->receipt;
+      if (!request->create_run() ||
+          authoring->request_digest.size() != 71U ||
+          !authoring->request_digest.starts_with("sha256:") ||
+          receipt.api_version != kTrainingPreflightReceiptApiVersion ||
+          !receipt.passed || !receipt.cacheable ||
+          receipt.plan_hash != compiled.plan->plan_hash ||
+          receipt.receipt_digest.size() != 71U ||
+          !receipt.receipt_digest.starts_with("sha256:") ||
+          now.boot.nanoseconds < 0 ||
+          static_cast<std::uint64_t>(now.boot.nanoseconds) >=
+              receipt.valid_until_monotonic_ns) {
+        return {grpc::StatusCode::FAILED_PRECONDITION,
+                "canonical author-run requires a verified unexpired passive "
+                "preflight receipt bound to the exact plan"};
+      }
+    }
     if (request->create_run() &&
         request->expected_plan_hash() != compiled.plan->plan_hash) {
       return {grpc::StatusCode::FAILED_PRECONDITION,
@@ -3832,6 +4025,12 @@ grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
           {"adapter_lock_digest", adapter_lock_digest},
           {"adapter_lock", nlohmann::json::parse(adapter_lock_manifest)},
       };
+      if (authoring) {
+        expected_submission["author_run"] = {
+            {"request_digest", authoring->request_digest},
+            {"preflight_receipt", encode_json(authoring->receipt)},
+        };
+      }
       if (uses_training_components) {
         expected_submission["training_component_lock_digest"] =
             training_lock_digest;
@@ -3845,7 +4044,19 @@ grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
             {"plan_hash", request->expected_parent_plan_hash()},
         };
       }
-      if (stored_submission != expected_submission) {
+      nlohmann::json comparable_stored = stored_submission;
+      nlohmann::json comparable_expected = expected_submission;
+      if (authoring && comparable_stored.contains("author_run") &&
+          comparable_stored.at("author_run").is_object() &&
+          comparable_stored.at("author_run").value(
+              "request_digest", std::string{}) == authoring->request_digest) {
+        // A retry re-collects fresh passive evidence by design. The first
+        // durable receipt remains the launch record; idempotency is fenced by
+        // the exact request/plan/registry locks, not the observation time.
+        comparable_stored["author_run"].erase("preflight_receipt");
+        comparable_expected["author_run"].erase("preflight_receipt");
+      }
+      if (comparable_stored != comparable_expected) {
         throw RunCreationConflict(
             "run already exists with a different submission identity");
       }
@@ -3891,6 +4102,12 @@ grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
         {"adapter_lock_digest", adapter_lock_digest},
         {"adapter_lock", nlohmann::json::parse(adapter_lock_manifest)},
     };
+    if (authoring) {
+      submission_identity["author_run"] = {
+          {"request_digest", authoring->request_digest},
+          {"preflight_receipt", encode_json(authoring->receipt)},
+      };
+    }
     if (uses_training_components) {
       submission_identity["training_component_lock_digest"] =
           training_lock_digest;
@@ -3922,6 +4139,305 @@ grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
     return {grpc::StatusCode::INVALID_ARGUMENT, exception.what()};
   } catch (const std::exception& exception) {
     return {grpc::StatusCode::DATA_LOSS, exception.what()};
+  }
+}
+
+grpc::Status TrainVMService::AuthorRun(
+    grpc::ServerContext* context, const v1::AuthorRunRequest* request,
+    grpc::ServerWriter<v1::AuthorRunUpdate>* writer) {
+  if (request == nullptr || writer == nullptr) {
+    return {grpc::StatusCode::INVALID_ARGUMENT,
+            "author-run request and update stream are required"};
+  }
+  if (request->ByteSizeLong() > kMaximumSubmissionBytes ||
+      request->request_document().empty() ||
+      (request->source_format() != "json" &&
+       request->source_format() != "yaml")) {
+    return {grpc::StatusCode::INVALID_ARGUMENT,
+            "author-run requires a bounded closed JSON or YAML document"};
+  }
+  const auto canonical_plan_hash = [](const std::string& value) {
+    return value.size() == 64U &&
+           std::ranges::all_of(value, [](const unsigned char character) {
+             return (character >= static_cast<unsigned char>('0') &&
+                     character <= static_cast<unsigned char>('9')) ||
+                    (character >= static_cast<unsigned char>('a') &&
+                     character <= static_cast<unsigned char>('f'));
+           });
+  };
+  if ((request->dry_run() && !request->expected_plan_hash().empty()) ||
+      (!request->dry_run() &&
+       !canonical_plan_hash(request->expected_plan_hash()))) {
+    return {grpc::StatusCode::INVALID_ARGUMENT,
+            request->dry_run()
+                ? "dry-run authoring cannot carry an expected plan hash"
+                : "launch authoring requires a 64-character lowercase "
+                  "expected plan hash from a completed dry-run"};
+  }
+  const auto write = [&](v1::AuthorRunUpdate& update) {
+    update.set_dry_run(request->dry_run());
+    return writer->Write(update);
+  };
+  const auto stage = [&](AuthorRunStage value, std::string detail) {
+    v1::AuthorRunUpdate update;
+    update.set_stage(wire_author_run_stage(value));
+    update.set_detail(std::move(detail));
+    return write(update);
+  };
+  const auto fail = [&](std::string code, std::string path,
+                        std::string message, std::string help) {
+    v1::AuthorRunUpdate update;
+    update.set_stage(v1::AUTHOR_RUN_STAGE_FAILED);
+    update.set_detail("author-run failed before submission");
+    update.set_terminal(true);
+    add_diagnostic(update,
+                   TrainingPreflightDiagnostic{
+                       .severity = Diagnostic::Severity::error,
+                       .code = std::move(code),
+                       .path = std::move(path),
+                       .message = std::move(message),
+                       .help = std::move(help),
+                   });
+    (void)write(update);
+  };
+
+  if (!stage(AuthorRunStage::validating,
+             "validating closed author-run document"))
+    return cancellation_status();
+  try {
+    const AuthorRunDocument document = decode_author_run_document(
+        request->request_document(), request->source_format());
+    if (document.source.recipe &&
+        std::filesystem::path(document.source.recipe->registry_path) !=
+            recipe_registry_path_) {
+      fail("author_run.recipe_registry_authority", "/source/recipe/registry_path",
+           "recipe source does not name the deployed authority registry",
+           "Select a recipe returned by trainvm.recipe-profiles@1.0.0; author "
+           "documents cannot redirect recipe authority.");
+      return grpc::Status::OK;
+    }
+    if (!stage(AuthorRunStage::resolving,
+               "resolving recipe and component graph"))
+      return cancellation_status();
+    if (!stage(AuthorRunStage::locking_inputs,
+               "locking immutable static input content"))
+      return cancellation_status();
+    ResolvedAuthorRun resolved = resolve_and_lock_author_run(document);
+    if (!request->dry_run() &&
+        request->expected_plan_hash() != resolved.plan.plan_hash) {
+      fail("author_run.plan_changed", "/expected_plan_hash",
+           "resolved plan no longer matches the frozen preview",
+           "Run a new dry-run preview and review the changed recipe or input "
+           "content identities before submission.");
+      return grpc::Status::OK;
+    }
+
+    // Resolve every adapter/component before family probes. These are pure
+    // authority reads and make dry-run an honest preview of submission.
+    (void)adapter_registry_.plan_lock_manifest(resolved.plan);
+    if (training_components_.plan_uses_components(resolved.plan))
+      (void)training_components_.plan_lock_manifest(resolved.plan);
+
+    v1::AuthorRunUpdate resolved_update;
+    resolved_update.set_stage(v1::AUTHOR_RUN_STAGE_LOCKING_INPUTS);
+    resolved_update.set_detail("resolved canonical plan and provenance");
+    resolved_update.set_plan_hash(resolved.plan.plan_hash);
+    resolved_update.set_canonical_plan_json(
+        resolved.plan.canonical_plan.dump());
+    resolved_update.set_content_lock_reused(resolved.content_lock_reused);
+    if (resolved.recipe_expansion)
+      resolved_update.set_recipe_expansion_json(
+          resolved.recipe_expansion->dump());
+    if (!write(resolved_update))
+      return cancellation_status();
+
+    if (!stage(AuthorRunStage::preflight,
+               "collecting passive host and exact family-probe evidence"))
+      return cancellation_status();
+    TrainingPreflightEvidenceResult evidence =
+        preflight_evidence_->collect(resolved.plan,
+                                     resolved.recipe_provenance);
+    if (!evidence.environment || !evidence.diagnostics.empty()) {
+      v1::AuthorRunUpdate update;
+      update.set_stage(v1::AUTHOR_RUN_STAGE_FAILED);
+      update.set_detail("passive evidence collection failed");
+      update.set_plan_hash(resolved.plan.plan_hash);
+      update.set_terminal(true);
+      for (const auto& diagnostic : evidence.diagnostics)
+        add_diagnostic(update, diagnostic);
+      (void)write(update);
+      return grpc::Status::OK;
+    }
+    TrainingPreflightReceipt receipt =
+        run_training_preflight(resolved.plan, *evidence.environment);
+    v1::AuthorRunUpdate preflight_update;
+    preflight_update.set_stage(receipt.passed
+                                   ? v1::AUTHOR_RUN_STAGE_PREFLIGHT
+                                   : v1::AUTHOR_RUN_STAGE_FAILED);
+    preflight_update.set_detail(receipt.passed
+                                    ? "passive preflight passed"
+                                    : "passive preflight rejected submission");
+    preflight_update.set_plan_hash(resolved.plan.plan_hash);
+    preflight_update.set_canonical_plan_json(
+        resolved.plan.canonical_plan.dump());
+    preflight_update.set_preflight_receipt_json(encode_json(receipt).dump());
+    preflight_update.set_content_lock_reused(resolved.content_lock_reused);
+    if (resolved.recipe_expansion)
+      preflight_update.set_recipe_expansion_json(
+          resolved.recipe_expansion->dump());
+    for (const auto& diagnostic : receipt.diagnostics)
+      add_diagnostic(preflight_update, diagnostic);
+    preflight_update.set_terminal(!receipt.passed);
+    if (!write(preflight_update))
+      return cancellation_status();
+    if (!receipt.passed)
+      return grpc::Status::OK;
+
+    if (request->dry_run()) {
+      v1::AuthorRunUpdate update;
+      update.set_stage(v1::AUTHOR_RUN_STAGE_COMPLETE);
+      update.set_detail("dry-run complete; no directory, journal row, lease, "
+                        "or process was created");
+      update.set_plan_hash(resolved.plan.plan_hash);
+      update.set_canonical_plan_json(resolved.plan.canonical_plan.dump());
+      update.set_preflight_receipt_json(encode_json(receipt).dump());
+      update.set_content_lock_reused(resolved.content_lock_reused);
+      if (resolved.recipe_expansion)
+        update.set_recipe_expansion_json(resolved.recipe_expansion->dump());
+      update.set_terminal(true);
+      (void)write(update);
+      return grpc::Status::OK;
+    }
+    if (cancelled(context))
+      return cancellation_status();
+
+    // Serialize provisioning for one deterministic request identity. The
+    // normal SubmitExperiment command lock remains separate and is acquired
+    // only after this scoped lock is released by function return/retry.
+    std::scoped_lock authoring_lock(author_run_mutex_);
+    if (!stage(AuthorRunStage::provisioning,
+               "provisioning authority-owned run directory"))
+      return cancellation_status();
+    auto provision = provision_authorized_run_directory(
+        resolved.plan, *evidence.environment, resolved.request_digest);
+    // Recollect the complete passive host/family evidence after workspace
+    // creation. This is not merely a second path check over a stale snapshot.
+    TrainingPreflightEvidenceResult provisioned_evidence =
+        preflight_evidence_->collect(resolved.plan,
+                                     resolved.recipe_provenance);
+    if (!provisioned_evidence.environment ||
+        !provisioned_evidence.diagnostics.empty()) {
+      fail("author_run.provisioned_evidence", "/host",
+           "passive evidence could not be recollected after provisioning",
+           "Inspect hostd/family probe diagnostics and retry; no run or lease "
+           "was created.");
+      return grpc::Status::OK;
+    }
+    const TrainingPreflightReceipt provisioned_receipt =
+        run_training_preflight(resolved.plan,
+                               *provisioned_evidence.environment);
+    if (!provisioned_receipt.passed) {
+      fail("author_run.provisioned_preflight", "/spec/workspace/run_directory",
+           "run-directory provisioning changed or invalidated passive evidence",
+           "Inspect the authority-owned directory and retry; no run or lease "
+           "was created.");
+      return grpc::Status::OK;
+    }
+    if (cancelled(context))
+      return cancellation_status();
+
+    if (!stage(AuthorRunStage::submitting,
+               "submitting idempotent queued run"))
+      return cancellation_status();
+    v1::SubmitExperimentRequest preview_request;
+    preview_request.set_source_document(resolved.plan.canonical_plan.dump());
+    preview_request.set_source_format("json");
+    preview_request.set_create_run(false);
+    preview_request.set_expected_journal_id(journal_.journal_id());
+    v1::SubmitExperimentResponse preview;
+    grpc::Status status =
+        submit_experiment(context, &preview_request, &preview, std::nullopt);
+    if (!status.ok())
+      return status;
+    if (preview.diagnostics_size() != 0 ||
+        preview.plan_hash() != resolved.plan.plan_hash ||
+        preview.adapter_lock_digest().empty()) {
+      v1::AuthorRunUpdate update;
+      update.set_stage(v1::AUTHOR_RUN_STAGE_FAILED);
+      update.set_detail("authority submission preview failed");
+      update.set_terminal(true);
+      for (const auto& diagnostic : preview.diagnostics())
+        *update.add_diagnostics() = diagnostic;
+      (void)write(update);
+      return grpc::Status::OK;
+    }
+
+    v1::SubmitExperimentRequest create = preview_request;
+    create.set_create_run(true);
+    create.set_idempotency_key(resolved.request_digest);
+    create.set_expected_journal_id(journal_.journal_id());
+    create.set_author(document.author);
+    create.set_reason(document.reason);
+    create.set_expected_plan_hash(preview.plan_hash());
+    create.set_expected_adapter_lock_digest(preview.adapter_lock_digest());
+    create.set_expected_training_component_lock_digest(
+        preview.training_component_lock_digest());
+    v1::SubmitExperimentResponse submitted;
+    status = submit_experiment(
+        context, &create, &submitted,
+        AuthorRunAuthority{.request_digest = resolved.request_digest,
+                           .receipt = provisioned_receipt});
+    if (!status.ok())
+      return status;
+    if (!submitted.has_run() || submitted.run().run_id().empty() ||
+        submitted.run().plan_hash() != resolved.plan.plan_hash ||
+        submitted.run().plan_hash() != provisioned_receipt.plan_hash) {
+      v1::AuthorRunUpdate update;
+      update.set_stage(v1::AUTHOR_RUN_STAGE_FAILED);
+      update.set_detail("authority rejected queued run creation");
+      update.set_terminal(true);
+      for (const auto& diagnostic : submitted.diagnostics())
+        *update.add_diagnostics() = diagnostic;
+      (void)write(update);
+      return grpc::Status::OK;
+    }
+    provision.mark_durable();
+    v1::AuthorRunUpdate complete;
+    complete.set_stage(v1::AUTHOR_RUN_STAGE_COMPLETE);
+    complete.set_detail("run is durably visible to the dashboard");
+    complete.set_plan_hash(resolved.plan.plan_hash);
+    complete.set_canonical_plan_json(resolved.plan.canonical_plan.dump());
+    complete.set_preflight_receipt_json(
+        encode_json(provisioned_receipt).dump());
+    *complete.mutable_run() = submitted.run();
+    complete.set_dashboard_url("/api/trainvm/runs/" +
+                               submitted.run().run_id());
+    complete.set_content_lock_reused(resolved.content_lock_reused);
+    if (resolved.recipe_expansion)
+      complete.set_recipe_expansion_json(resolved.recipe_expansion->dump());
+    complete.set_terminal(true);
+    (void)write(complete);
+    return grpc::Status::OK;
+  } catch (const RunAuthoringError& error) {
+    fail("author_run.invalid", "", error.what(),
+         "Correct the closed author-run document; no run or lease was created.");
+    return grpc::Status::OK;
+  } catch (const RecipeProfileError& error) {
+    fail("author_run.recipe", "/source/recipe", error.what(),
+         "Select an exact deployed recipe/version and valid bounded overrides.");
+    return grpc::Status::OK;
+  } catch (const AdapterResolutionError& error) {
+    fail("author_run.adapter", "/source", error.what(),
+         "Install or select the exact registered adapter profile.");
+    return grpc::Status::OK;
+  } catch (const TrainingComponentResolutionError& error) {
+    fail("author_run.training_component", "/source", error.what(),
+         "Install or select the exact registered training components.");
+    return grpc::Status::OK;
+  } catch (const std::exception& error) {
+    fail("author_run.authority_failure", "", error.what(),
+         "Inspect the authority diagnostic; no unverified run was created.");
+    return grpc::Status::OK;
   }
 }
 
@@ -4574,7 +5090,8 @@ grpc::Status TrainVMService::GetDescriptor(
   if (cancelled(context)) return cancellation_status();
   if (request->version() != "1.0.0" ||
       (request->adapter() != "trainvm.training-components" &&
-       request->adapter() != "trainvm.operations")) {
+       request->adapter() != "trainvm.operations" &&
+       request->adapter() != "trainvm.recipe-profiles")) {
     return {grpc::StatusCode::NOT_FOUND,
             "no descriptor matches the exact requested provider and version"};
   }
@@ -4584,9 +5101,19 @@ grpc::Status TrainVMService::GetDescriptor(
           adapter_registry_.operation_descriptors_json().dump());
       response->set_schema_hash(
           adapter_registry_.operation_descriptors_digest());
-    } else {
+    } else if (request->adapter() == "trainvm.training-components") {
       response->set_schema_json(training_components_.document_json().dump());
       response->set_schema_hash(training_components_.registry_digest());
+    } else {
+      const RecipeProfileRegistry recipes =
+          RecipeProfileRegistry::load_file(recipe_registry_path_);
+      nlohmann::json document = recipes.document_json();
+      document["registry_path"] = recipe_registry_path_.string();
+      document["default_registry_path"] = recipe_registry_path_.string();
+      document["registry_digest"] = recipes.registry_digest();
+      const std::string canonical = document.dump();
+      response->set_schema_json(canonical);
+      response->set_schema_hash("sha256:" + sha256_hex(canonical));
     }
     return grpc::Status::OK;
   } catch (const std::exception& exception) {

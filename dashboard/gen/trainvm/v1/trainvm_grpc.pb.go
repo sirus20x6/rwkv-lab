@@ -20,6 +20,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	TrainVM_SubmitExperiment_FullMethodName       = "/trainvm.v1.TrainVM/SubmitExperiment"
+	TrainVM_AuthorRun_FullMethodName              = "/trainvm.v1.TrainVM/AuthorRun"
 	TrainVM_DiffPlan_FullMethodName               = "/trainvm.v1.TrainVM/DiffPlan"
 	TrainVM_CommandRun_FullMethodName             = "/trainvm.v1.TrainVM/CommandRun"
 	TrainVM_GetRun_FullMethodName                 = "/trainvm.v1.TrainVM/GetRun"
@@ -36,6 +37,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type TrainVMClient interface {
 	SubmitExperiment(ctx context.Context, in *SubmitExperimentRequest, opts ...grpc.CallOption) (*SubmitExperimentResponse, error)
+	AuthorRun(ctx context.Context, in *AuthorRunRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AuthorRunUpdate], error)
 	DiffPlan(ctx context.Context, in *PlanDiffRequest, opts ...grpc.CallOption) (*PlanDiffResponse, error)
 	CommandRun(ctx context.Context, in *RunCommandRequest, opts ...grpc.CallOption) (*RunCommandResponse, error)
 	GetRun(ctx context.Context, in *GetRunRequest, opts ...grpc.CallOption) (*RunSummary, error)
@@ -64,6 +66,25 @@ func (c *trainVMClient) SubmitExperiment(ctx context.Context, in *SubmitExperime
 	}
 	return out, nil
 }
+
+func (c *trainVMClient) AuthorRun(ctx context.Context, in *AuthorRunRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[AuthorRunUpdate], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &TrainVM_ServiceDesc.Streams[0], TrainVM_AuthorRun_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[AuthorRunRequest, AuthorRunUpdate]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type TrainVM_AuthorRunClient = grpc.ServerStreamingClient[AuthorRunUpdate]
 
 func (c *trainVMClient) DiffPlan(ctx context.Context, in *PlanDiffRequest, opts ...grpc.CallOption) (*PlanDiffResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -117,7 +138,7 @@ func (c *trainVMClient) ListRuns(ctx context.Context, in *ListRunsRequest, opts 
 
 func (c *trainVMClient) WatchEvents(ctx context.Context, in *WatchEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[EventEnvelope], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &TrainVM_ServiceDesc.Streams[0], TrainVM_WatchEvents_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &TrainVM_ServiceDesc.Streams[1], TrainVM_WatchEvents_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -169,6 +190,7 @@ func (c *trainVMClient) GetHostAuthorityStatus(ctx context.Context, in *GetHostA
 // for forward compatibility.
 type TrainVMServer interface {
 	SubmitExperiment(context.Context, *SubmitExperimentRequest) (*SubmitExperimentResponse, error)
+	AuthorRun(*AuthorRunRequest, grpc.ServerStreamingServer[AuthorRunUpdate]) error
 	DiffPlan(context.Context, *PlanDiffRequest) (*PlanDiffResponse, error)
 	CommandRun(context.Context, *RunCommandRequest) (*RunCommandResponse, error)
 	GetRun(context.Context, *GetRunRequest) (*RunSummary, error)
@@ -190,6 +212,9 @@ type UnimplementedTrainVMServer struct{}
 
 func (UnimplementedTrainVMServer) SubmitExperiment(context.Context, *SubmitExperimentRequest) (*SubmitExperimentResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SubmitExperiment not implemented")
+}
+func (UnimplementedTrainVMServer) AuthorRun(*AuthorRunRequest, grpc.ServerStreamingServer[AuthorRunUpdate]) error {
+	return status.Error(codes.Unimplemented, "method AuthorRun not implemented")
 }
 func (UnimplementedTrainVMServer) DiffPlan(context.Context, *PlanDiffRequest) (*PlanDiffResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DiffPlan not implemented")
@@ -256,6 +281,17 @@ func _TrainVM_SubmitExperiment_Handler(srv interface{}, ctx context.Context, dec
 	}
 	return interceptor(ctx, in, info, handler)
 }
+
+func _TrainVM_AuthorRun_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(AuthorRunRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(TrainVMServer).AuthorRun(m, &grpc.GenericServerStream[AuthorRunRequest, AuthorRunUpdate]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type TrainVM_AuthorRunServer = grpc.ServerStreamingServer[AuthorRunUpdate]
 
 func _TrainVM_DiffPlan_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PlanDiffRequest)
@@ -457,6 +493,11 @@ var TrainVM_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "AuthorRun",
+			Handler:       _TrainVM_AuthorRun_Handler,
+			ServerStreams: true,
+		},
 		{
 			StreamName:    "WatchEvents",
 			Handler:       _TrainVM_WatchEvents_Handler,

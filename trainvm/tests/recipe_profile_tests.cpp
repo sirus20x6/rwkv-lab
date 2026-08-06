@@ -92,6 +92,7 @@ trainvm::RecipeProfile profile() {
       .template_document = experiment_fixture(),
       .overrides = {
           precision_field(), memory_field(), target_step_field(), path_field()},
+      .content_bindings = std::nullopt,
       .compatibility = std::vector<trainvm::RecipeCompatibilityRule>{
           {
               .fields = {"training.precision", "resources.memory_gib"},
@@ -264,6 +265,29 @@ void invalid_and_ambiguous_authoring_fails_closed() {
               R"({"api_version":"trainvm.recipe-profiles/v1","api_version":"wrong","recipes":[]})");
         }),
         "duplicate registry object keys are rejected");
+  check(rejects([] {
+          const auto path = std::filesystem::path(TRAINVM_SOURCE_ROOT) /
+                            "docs/experiment-vm/examples/"
+                            "hf-multimodal-sft.recipe-profiles.v1.json";
+          std::ifstream input(path);
+          auto document = nlohmann::json::parse(input);
+          document["recipes"][0]["content_bindings"].push_back(
+              document["recipes"][0]["content_bindings"][0]);
+          (void)trainvm::RecipeProfileRegistry::from_json(document.dump());
+        }),
+        "two derived content bindings cannot own the same effective root");
+  check(rejects([] {
+          const auto path = std::filesystem::path(TRAINVM_SOURCE_ROOT) /
+                            "docs/experiment-vm/examples/"
+                            "hf-multimodal-sft.recipe-profiles.v1.json";
+          std::ifstream input(path);
+          auto document = nlohmann::json::parse(input);
+          document["recipes"][0]["content_bindings"][0]["path_target"] =
+              "/spec/workflow/nodes/train/invoke/training/components/"
+              "model_loader/configuration/missing";
+          (void)trainvm::RecipeProfileRegistry::from_json(document.dump());
+        }),
+        "derived content binding cannot name a missing root target");
 }
 
 void expanded_instances_have_source_aware_diffs() {

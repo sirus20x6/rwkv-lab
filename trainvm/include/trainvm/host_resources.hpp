@@ -167,6 +167,27 @@ struct HostKernelSnapshot final {
   bool operator==(const HostKernelSnapshot&) const = default;
 };
 
+// Volatile point-in-time evidence kept outside HostInventoryReceipt and all
+// topology/resource digests. It is observation-only and cannot authorize an
+// allocation, lease, device policy, or process.
+struct PassiveHostAcceleratorMemory final {
+  HostAcceleratorVendor vendor{};
+  std::string stable_id;
+  std::uint64_t total_memory_bytes{};
+  std::uint64_t free_memory_bytes{};
+
+  bool operator==(const PassiveHostAcceleratorMemory &) const = default;
+};
+
+struct PassiveHostMemorySnapshot final {
+  std::string host_id;
+  std::string boot_id;
+  std::uint64_t observed_monotonic_ns{};
+  std::vector<PassiveHostAcceleratorMemory> accelerators;
+
+  bool operator==(const PassiveHostMemorySnapshot &) const = default;
+};
+
 struct HostInventoryReceipt final {
   std::string api_version;
   std::string host_id;
@@ -268,6 +289,10 @@ class IHostKernel {
  public:
   virtual ~IHostKernel() = default;
   [[nodiscard]] virtual HostKernelSnapshot capture_inventory() = 0;
+  [[nodiscard]] virtual std::optional<PassiveHostMemorySnapshot>
+  passive_memory_snapshot() const {
+    return std::nullopt;
+  }
 };
 
 struct FakeHostKernelStep final {
