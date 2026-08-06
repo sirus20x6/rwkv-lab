@@ -5,6 +5,7 @@
 #include "trainvm/fsm.hpp"
 #include "trainvm/journal.hpp"
 #include "trainvm/reflection_json.hpp"
+#include "trainvm/recipe_profile.hpp"
 #include "trainvm/rwkv_lab_worker_contract.hpp"
 #include "trainvm/input_content_authority.hpp"
 #include "trainvm/service.hpp"
@@ -39,6 +40,9 @@ void usage() {
          "  # read trainvm.cache-qualification-evidence/v1 JSON from stdin;"
          " exit 0 qualified, 3 rejected\n"
       << "  trainvm inspect-training-components <training-components.json>\n"
+      << "  trainvm recipe inspect <recipe-profiles.json>\n"
+      << "  trainvm recipe expand <recipe-profiles.json> <instance.json>\n"
+      << "  trainvm recipe diff <recipe-profiles.json> <left.json> <right.json>\n"
       << "  trainvm inspect-hostd-client <hostd-client.json>\n"
       << "  trainvm inspect-input-content-root <absolute-path>\n"
       << "  trainvm lock-input-content <experiment.json> <root-set.json>\n"
@@ -268,6 +272,55 @@ nlohmann::json read_bounded_json_file(const std::filesystem::path& path,
   if (!input)
     throw std::runtime_error("could not parse " + std::string(label));
   return document;
+}
+
+int recipe_command(int argc, char** argv) {
+  if (argc < 4) {
+    usage();
+    return 64;
+  }
+  const trainvm::RecipeProfileRegistry registry =
+      trainvm::RecipeProfileRegistry::load_file(
+          std::filesystem::absolute(argv[3]).lexically_normal());
+  const std::string_view action(argv[2]);
+  if (action == "inspect" && argc == 4) {
+    const nlohmann::json document = registry.document_json();
+    std::cout << nlohmann::json{
+                     {"valid", true},
+                     {"recipes", document.at("recipes").size()},
+                     {"registry_digest", registry.registry_digest()},
+                     {"canonical_registry", document},
+                 }
+                     .dump(2)
+              << '\n';
+    return 0;
+  }
+  if (action == "expand" && argc == 5) {
+    const auto expanded = registry.expand_json(
+        read_bounded_json_file(argv[4], "recipe instance"));
+    std::cout << trainvm::expanded_recipe_json(expanded).dump(2) << '\n';
+    return 0;
+  }
+  if (action == "diff" && argc == 6) {
+    const auto left = registry.expand_json(
+        read_bounded_json_file(argv[4], "left recipe instance"));
+    const auto right = registry.expand_json(
+        read_bounded_json_file(argv[5], "right recipe instance"));
+    const auto differences = trainvm::diff_recipe_plans(left, right);
+    std::cout << nlohmann::json{
+                     {"api_version", "trainvm.recipe-diff/v1"},
+                     {"left_plan_digest", left.expanded_plan_digest},
+                     {"right_plan_digest", right.expanded_plan_digest},
+                     {"difference_count", differences.size()},
+                     {"differences",
+                      trainvm::recipe_plan_diff_json(differences)},
+                 }
+                     .dump(2)
+              << '\n';
+    return 0;
+  }
+  usage();
+  return 64;
 }
 
 int lock_input_content_command(const std::filesystem::path& experiment_path,
@@ -599,6 +652,9 @@ int main(int argc, char** argv) {
     if (argc == 3 &&
         std::string_view(argv[1]) == "inspect-hostd-client") {
       return inspect_hostd_client_command(argv[2]);
+    }
+    if (argc >= 2 && std::string_view(argv[1]) == "recipe") {
+      return recipe_command(argc, argv);
     }
     if (argc >= 2 &&
         std::string_view(argv[1]) == "inspect-input-content-root") {

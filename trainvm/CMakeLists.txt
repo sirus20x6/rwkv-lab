@@ -116,6 +116,7 @@ add_library(trainvm_core
   src/conversion_publication.cpp
   src/post_training_authority.cpp
   src/profiler_launch_profiles.cpp
+  src/recipe_profile.cpp
   src/rwkv_scratch_profiles.cpp
   src/sqlite_authority_vfs.cpp
   src/training_component_registry.cpp
@@ -274,6 +275,17 @@ target_link_libraries(training_component_registry_tests PRIVATE trainvm_core)
 add_test(NAME training_component_registry_tests
   COMMAND training_component_registry_tests
 )
+add_executable(recipe_profile_tests
+  tests/recipe_profile_tests.cpp
+)
+target_compile_options(recipe_profile_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_compile_definitions(recipe_profile_tests PRIVATE
+  TRAINVM_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+target_link_libraries(recipe_profile_tests PRIVATE trainvm_core)
+add_test(NAME recipe_profile_tests COMMAND recipe_profile_tests)
 add_executable(rwkv_lab_worker_contract_tests
   tests/rwkv_lab_worker_contract_tests.cpp
 )
