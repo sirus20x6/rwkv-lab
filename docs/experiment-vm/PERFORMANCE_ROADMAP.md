@@ -205,6 +205,13 @@ the package's own dense-GQA measurements report FA4 roughly 4–10 percent slowe
 
 ## Declarative execution and profiling (P0)
 
+The source-pinned [AutoMegaKernel static-validator audit](AUTOMEGAKERNEL_STATIC_VALIDATOR_AUDIT.md)
+classifies its typed task-DAG and counter-safety invariants as adaptation candidates, not a ready
+training backend. Its pinned CPU regressions pass, but the wider upstream search test has a
+reproducible stale-default failure, the claimed 7,160-case driver is absent from the OSS tree, and
+large graphs can skip RAW/WAW proofs. Any TrainVM megakernel work must close those fail-open and
+reproducibility gaps and use fenced live host identity before device qualification.
+
 - Make `compile`, `warmup`, `qualify`, `train`, `eval`, and `profile` explicit graph phases. Warm a
   bounded adapter-declared shape set and schedule transitions in a disposable worker, destroy it,
   then launch a fresh timed worker from the same checkpoint. In-process state restoration is not a
