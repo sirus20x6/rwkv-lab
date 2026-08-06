@@ -4240,7 +4240,24 @@ grpc::Status TrainVMService::AuthorRun(
 
     v1::AuthorRunUpdate resolved_update;
     resolved_update.set_stage(v1::AUTHOR_RUN_STAGE_LOCKING_INPUTS);
-    resolved_update.set_detail("resolved canonical plan and provenance");
+    std::uint64_t cache_hits = 0U;
+    std::uint64_t cache_misses = 0U;
+    std::uint64_t cache_bypasses = 0U;
+    std::uint64_t bytes_hashed = 0U;
+    for (const auto &measurement : resolved.content_measurements) {
+      cache_hits += measurement.cache_hits;
+      cache_misses += measurement.cache_misses;
+      cache_bypasses += measurement.cache_bypasses;
+      bytes_hashed += measurement.bytes_hashed;
+    }
+    resolved_update.set_detail(
+        "resolved canonical plan and provenance; " +
+        std::string(kInputContentMeasurementCacheApiVersion) + " "
+        "hits=" +
+        std::to_string(cache_hits) + " misses=" +
+        std::to_string(cache_misses) + " bypasses=" +
+        std::to_string(cache_bypasses) + " bytes_hashed=" +
+        std::to_string(bytes_hashed));
     resolved_update.set_plan_hash(resolved.plan.plan_hash);
     resolved_update.set_canonical_plan_json(
         resolved.plan.canonical_plan.dump());

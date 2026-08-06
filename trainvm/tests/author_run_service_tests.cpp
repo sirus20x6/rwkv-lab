@@ -4,6 +4,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -366,15 +367,28 @@ int main() {
           "checked-in HF recipe did not pass the production native probe");
 
     const auto preview = invoke(*stub, document, true);
+    const auto resolving = std::ranges::find_if(
+        preview, [](const v1::AuthorRunUpdate &update) {
+          return update.stage() == v1::AUTHOR_RUN_STAGE_LOCKING_INPUTS &&
+                 update.detail().contains(
+                     "trainvm.input-content-measurement-cache/v1");
+        });
     if (preview.empty() || !preview.back().terminal() ||
         preview.back().stage() != v1::AUTHOR_RUN_STAGE_COMPLETE ||
         preview.back().plan_hash().empty() ||
+        resolving == preview.end() ||
+        !resolving->detail().contains(
+            "trainvm.input-content-measurement-cache/v1 hits=") ||
+        !resolving->detail().contains(" bytes_hashed=0") ||
         std::filesystem::exists(temporary.path() / "runs" / "run"))
       throw std::runtime_error(
           "dry-run mutated state or omitted frozen plan: " +
           (preview.empty()
                ? std::string("no updates")
                : preview.back().detail() + " " +
+                     (resolving == preview.end()
+                          ? std::string("no resolving update ")
+                          : resolving->detail() + " ") +
                      (preview.back().diagnostics_size() == 0
                           ? std::string{}
                           : preview.back().diagnostics(0).code() + ":" +

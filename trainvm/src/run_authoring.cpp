@@ -521,6 +521,7 @@ ResolvedAuthorRun resolve_and_lock_author_run(
   }
 
   bool reused = false;
+  std::vector<InputContentMeasurementStats> content_measurements;
   nlohmann::json locked_document = plan.canonical_plan;
   const std::vector<std::string> existing_paths = locked_paths(plan);
   nlohmann::json derived_content = nlohmann::json::array();
@@ -541,7 +542,8 @@ ResolvedAuthorRun resolve_and_lock_author_run(
     roots.paths = normalized_root_set_paths(roots);
     if (roots.paths.size() != recipe_content_bindings.size())
       reject("recipe content bindings resolve to ambiguous duplicate roots");
-    const auto identities = measure_input_content_root_set(roots);
+    const auto identities =
+        measure_input_content_root_set(roots, &content_measurements);
     locked_document["spec"]["workspace"]["input_content_roots"] =
         encode_json(identities);
     for (const auto &binding : recipe_content_bindings) {
@@ -566,8 +568,8 @@ ResolvedAuthorRun resolve_and_lock_author_run(
     const std::vector<std::string> requested =
         normalized_root_set_paths(*document.input_content);
     (void)requested;
-    const auto identities =
-        measure_input_content_root_set(*document.input_content);
+    const auto identities = measure_input_content_root_set(
+        *document.input_content, &content_measurements);
     locked_document["spec"]["workspace"]["input_content_roots"] =
         encode_json(identities);
   } else if (!existing_paths.empty()) {
@@ -612,7 +614,8 @@ ResolvedAuthorRun resolve_and_lock_author_run(
           .recipe_provenance = std::move(recipe_provenance),
           .recipe_expansion = std::move(recipe_expansion),
           .request_digest = request_digest,
-          .content_lock_reused = reused};
+          .content_lock_reused = reused,
+          .content_measurements = std::move(content_measurements)};
 }
 
 PassiveHostSnapshotSource make_local_passive_host_snapshot_source(

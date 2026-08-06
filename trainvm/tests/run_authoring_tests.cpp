@@ -128,13 +128,26 @@ void passive_lora_selector_matches_python_module_semantics() {
 
 void resolves_locks_and_reuses_exact_lock() {
   TemporaryDirectory temporary;
+  const AuthorRunDocument authored = author_document(temporary);
   const ResolvedAuthorRun first =
-      resolve_and_lock_author_run(author_document(temporary));
+      resolve_and_lock_author_run(authored);
   check(first.plan.experiment.spec.workspace.input_content_roots.has_value(),
         "authoring measures and injects immutable input roots");
   check(!first.content_lock_reused &&
             first.request_digest.starts_with("sha256:"),
         "newly measured authoring identifies the exact request");
+  check(first.content_measurements.size() == 1U &&
+            first.content_measurements[0].cache_misses == 1U &&
+            first.content_measurements[0].cache_hits == 0U,
+        "first author preview reports a cold authority measurement");
+
+  const ResolvedAuthorRun warm = resolve_and_lock_author_run(authored);
+  check(warm.plan.plan_hash == first.plan.plan_hash &&
+            warm.request_digest == first.request_digest &&
+            warm.content_measurements.size() == 1U &&
+            warm.content_measurements[0].cache_hits == 1U &&
+            warm.content_measurements[0].bytes_hashed == 0U,
+        "fenced launch preserves plan identity while reporting warm reuse");
 
   AuthorRunDocument retry{
       .api_version = std::string(kAuthorRunApiVersion),
@@ -148,6 +161,8 @@ void resolves_locks_and_reuses_exact_lock() {
   const ResolvedAuthorRun second = resolve_and_lock_author_run(retry);
   check(second.content_lock_reused,
         "an exact existing content lock is recognized as reusable");
+  check(second.content_measurements.empty(),
+        "trusted non-training lock reuse does not invent cache telemetry");
   check(second.plan.plan_hash == first.plan.plan_hash,
         "reusing an exact content lock preserves the compiled plan");
 }

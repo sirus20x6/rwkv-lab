@@ -92,6 +92,7 @@ struct ResolvedAuthorRun final {
   std::optional<nlohmann::json> recipe_expansion;
   std::string request_digest;
   bool content_lock_reused{};
+  std::vector<InputContentMeasurementStats> content_measurements;
 };
 
 struct TrainingPreflightEvidenceResult final {
