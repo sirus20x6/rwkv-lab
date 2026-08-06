@@ -194,6 +194,19 @@ int main() {
                 rwkv.training_composition->allowed_components
                         ->at("model_loader")
                         .size() == 2U &&
+                rwkv.training_composition->allowed_components
+                        ->at("activation")
+                        .size() == 2U &&
+                rwkv.training_composition->allowed_components
+                        ->at("learning_rate")
+                        .size() == 2U &&
+                rwkv.training_composition->allowed_components
+                        ->at("optimizer")
+                        .size() == 2U &&
+                rwkv.training_composition->allowed_components
+                        ->at("normalization")
+                        .front()
+                        .name == "layer_norm" &&
                 posttraining.training_composition &&
                 posttraining.training_composition->model_family == "rwkv" &&
                 posttraining.training_composition->slots.size() == 4U &&
