@@ -373,6 +373,15 @@ def main() -> None:
                 precision = page.locator('[data-vm-recipe-field="precision.mode"]')
                 assert precision.locator("option").all_inner_texts() == ["bf16"]
                 if index == 0:
+                    page.locator('[data-vm-recipe-present="trainability.rank"]').check()
+                    page.locator('[data-vm-recipe-field="trainability.rank"]').fill("256")
+                    page.locator('[data-vm-recipe-field="trainability.rank"]').blur()
+                    page.click("#vm-recipe-preview")
+                    page.wait_for_function(
+                        "document.querySelector('#vm-recipe-request-state').textContent.includes('ready')"
+                    )
+                    diff_summary = page.locator("#vm-recipe-preview-panel details").nth(2).locator("summary").inner_text()
+                    assert not diff_summary.endswith("· 0")
                     original = page.locator("#vm-recipe-source").input_value()
                     page.click("#vm-recipe-import")
                     assert json.loads(page.locator("#vm-recipe-source").input_value()) == json.loads(original)
