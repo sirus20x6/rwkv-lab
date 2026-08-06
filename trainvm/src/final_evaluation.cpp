@@ -57,6 +57,7 @@ FinalOutputPolicy classify_output(const std::string &name,
     policy.exact_optimizer_step = true;
     return policy;
   case ArtifactType::image_gallery:
+  case ArtifactType::eval_examples:
     policy.evidence_kind = FinalEvidenceKind::examples;
     policy.exact_optimizer_step = true;
     policy.checkpoint_bound = true;
@@ -606,6 +607,83 @@ finalization_verdict_json(const FinalizationVerdict &verdict_value) {
 nlohmann::json
 final_evaluation_manifest_json(const FinalEvaluationManifest &manifest) {
   return encode_json(manifest);
+}
+
+FinalEvaluationManifest
+decode_final_evaluation_manifest(std::string_view bytes) {
+  if (bytes.empty() || bytes.size() > kMaximumFinalEvaluationManifestBytes) {
+    throw std::invalid_argument(
+        "final evaluation manifest bytes are empty or exceed their bound");
+  }
+  nlohmann::json document;
+  try {
+    document = nlohmann::json::parse(bytes.begin(), bytes.end());
+  } catch (const nlohmann::json::exception &) {
+    throw std::invalid_argument("final evaluation manifest JSON is invalid");
+  }
+  FinalEvaluationManifest manifest;
+  std::vector<Diagnostic> diagnostics;
+  if (!decode_json(document, manifest, "", diagnostics) ||
+      !diagnostics.empty()) {
+    throw std::invalid_argument(
+        "final evaluation manifest does not match its reflected schema");
+  }
+  if (encode_json(manifest).dump() != bytes) {
+    throw std::invalid_argument(
+        "final evaluation manifest bytes are not canonical");
+  }
+  if (manifest.api_version != "rwkv-lab.final-evaluation/v1" ||
+      !valid_digest(manifest.policy_digest) ||
+      !bounded_identity(manifest.checkpoint_artifact_id) ||
+      !valid_digest(manifest.checkpoint_fingerprint) ||
+      manifest.required_members.size() > kMaximumFinalMembers ||
+      !canonical_members(manifest.required_members) ||
+      !valid_digest(manifest.membership_digest) ||
+      manifest.membership_digest !=
+          final_membership_digest(manifest.required_members) ||
+      manifest.membership_count != manifest.required_members.size() ||
+      manifest.records.size() > kMaximumFinalRecords ||
+      manifest.output_receipts.size() > kMaximumFinalOutputs ||
+      !canonical_scalars(manifest.required_scalars) ||
+      manifest.resolved_member_count > manifest.membership_count ||
+      manifest.failed_member_count !=
+          manifest.membership_count - manifest.resolved_member_count ||
+      (manifest.recovery &&
+       (manifest.recovery->requested_members.size() > kMaximumFinalMembers ||
+        !canonical_members(manifest.recovery->requested_members) ||
+        !valid_digest(manifest.recovery->optimizer_state_before) ||
+        !valid_digest(manifest.recovery->optimizer_state_after)))) {
+    throw std::invalid_argument(
+        "final evaluation manifest semantic shape is invalid");
+  }
+  std::set<std::string> output_artifact_ids;
+  std::set<std::string> output_artifact_fingerprints;
+  for (const FinalOutputReceipt &output : manifest.output_receipts) {
+    if (!bounded_identity(output.output_name) ||
+        !bounded_identity(output.artifact_id) ||
+        !valid_digest(output.artifact_fingerprint) ||
+        !output_artifact_ids.insert(output.artifact_id).second ||
+        !output_artifact_fingerprints.insert(output.artifact_fingerprint)
+             .second) {
+      throw std::invalid_argument(
+          "final evaluation manifest output receipt is invalid");
+    }
+  }
+  for (const FinalMemberRecord &record : manifest.records) {
+    const bool success = record.disposition == FinalMemberDisposition::success;
+    if (!std::ranges::binary_search(manifest.required_members,
+                                    record.member_id) ||
+        !valid_digest(record.context_digest) || record.attempt == 0U ||
+        (success &&
+         (!record.result_digest || !valid_digest(*record.result_digest) ||
+          record.error_code)) ||
+        (!success && (record.result_digest || !record.error_code ||
+                      !bounded_identity(*record.error_code)))) {
+      throw std::invalid_argument(
+          "final evaluation manifest member record is invalid");
+    }
+  }
+  return manifest;
 }
 
 } // namespace trainvm

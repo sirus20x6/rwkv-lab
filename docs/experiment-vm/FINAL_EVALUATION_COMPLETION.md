@@ -23,6 +23,7 @@ one classification:
 | checkpoint | terminal anchor | durable, nonempty, exact optimizer step |
 | scalar result/report | scalar parent evidence | exact step and checkpoint bound when required |
 | image gallery | example parent evidence | nonempty, full frozen membership, zero unresolved errors, exact step/checkpoint |
+| semantic `eval_examples` | example parent evidence | canonical multimodal examples, full frozen membership, zero unresolved errors, exact step/checkpoint |
 | test report | test parent evidence | full frozen membership, zero unresolved errors, exact step/checkpoint |
 | opaque/other report | audit parent evidence | durable and nonempty when required |
 | `rwkv-lab.final-evaluation.v1` report | semantic closure | controller completion authority |
@@ -62,6 +63,10 @@ controller derives them from the accepted `artifact.published` event and wraps
 the strictly decoded `FinalEvaluationManifest` in a separate
 `FinalEvaluationReceipt`. Both reflected documents round-trip independently;
 the semantic manifest rejects controller-owned envelope fields.
+Untrusted closure bytes enter through `decode_final_evaluation_manifest()`
+only. It rejects oversized input before JSON allocation, strictly decodes the
+reflected schema, validates bounded semantic shape, and requires the original
+bytes to equal the one canonical serialization.
 
 The reducer receives a controller-derived `OperationFinalizationPolicy` and a
 `FinalEvaluationExpectation`. The latter fixes the exact policy digest,

@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "trainvm/eval_examples_contract.hpp"
 #include "trainvm/reflection_json.hpp"
 #include "trainvm/rwkv_lab_worker_contract.hpp"
 
@@ -75,7 +76,8 @@ trainvm::FinalMemberRecord success(std::string member,
 trainvm::FinalEvaluationReceipt
 receipt(const trainvm::OperationFinalizationPolicy &policy,
         std::uint64_t sequence, std::vector<std::string> members,
-        std::vector<trainvm::FinalMemberRecord> records) {
+        std::vector<trainvm::FinalMemberRecord> records,
+        std::string output_name = "test_eval") {
   std::ranges::sort(members);
   std::set<std::string> resolved;
   for (const auto &record : records) {
@@ -97,7 +99,7 @@ receipt(const trainvm::OperationFinalizationPolicy &policy,
               .resolved_member_count = resolved.size(),
               .failed_member_count = members.size() - resolved.size(),
               .required_members = std::move(members),
-              .output_receipts = {{.output_name = "test_eval",
+              .output_receipts = {{.output_name = std::move(output_name),
                                    .artifact_id = "test-evidence-" +
                                                   std::to_string(sequence),
                                    .artifact_fingerprint = digest('4')}},
@@ -109,11 +111,12 @@ receipt(const trainvm::OperationFinalizationPolicy &policy,
 trainvm::FinalEvaluationExpectation
 expectation(const trainvm::OperationFinalizationPolicy &policy,
             std::vector<std::string> members,
-            std::vector<trainvm::FinalScalarRequirement> scalars = {}) {
+            std::vector<trainvm::FinalScalarRequirement> scalars = {},
+            std::string output_name = "test_eval") {
   std::ranges::sort(members);
   std::ranges::sort(scalars, {}, &trainvm::FinalScalarRequirement::metric_name);
   return {
-      .output_name = "test_eval",
+      .output_name = std::move(output_name),
       .policy_digest = trainvm::finalization_policy_digest(policy),
       .optimizer_step = 745U,
       .checkpoint_artifact_id = "checkpoint-step-745",
@@ -198,6 +201,14 @@ int main() {
             "an optional closure must not clear migration-pending authority");
     optional_closure_profile.authoring->outputs.at("final_evaluation")
         .required = true;
+    optional_closure_profile.authoring->outputs.emplace(
+        "semantic_examples",
+        trainvm::OperationPortDescriptor{
+            .type = trainvm::OperationPortType::artifact,
+            .required = true,
+            .artifact_type = trainvm::ArtifactType::eval_examples,
+            .artifact_schema = std::string(trainvm::kEvalExamplesSchema),
+            .description = std::nullopt});
     const trainvm::FinalizationPolicyRegistry required_closure_registry(
         {optional_closure_profile});
     const auto &required_closure =
@@ -205,6 +216,32 @@ int main() {
     require(required_closure.closure_required &&
                 !required_closure.migration_pending,
             "only a required canonical closure may clear migration-pending");
+    require(std::ranges::any_of(
+                required_closure.outputs,
+                [](const auto &output) {
+                  return output.output_name == "semantic_examples" &&
+                         output.evidence_kind ==
+                             trainvm::FinalEvidenceKind::examples &&
+                         output.exact_optimizer_step &&
+                         output.checkpoint_bound &&
+                         output.coverage ==
+                             trainvm::FinalCoveragePolicy::full_membership &&
+                         output.errors ==
+                             trainvm::FinalErrorPolicy::zero_unresolved_errors;
+                }),
+            "merged eval_examples artifacts must inventory as strict examples "
+            "evidence");
+
+    const auto semantic_expectation =
+        expectation(required_closure, {"heldout-1"}, {}, "semantic_examples");
+    const auto semantic_receipt =
+        receipt(required_closure, 1U, {"heldout-1"}, {success("heldout-1")},
+                "semantic_examples");
+    require(trainvm::reduce_final_evaluation(
+                required_closure, semantic_expectation, {semantic_receipt})
+                    .disposition == trainvm::FinalizationDisposition::complete,
+            "merged eval_examples evidence must reduce through its strict "
+            "inventory policy");
 
     const auto &hf = registry.resolve(
         std::ranges::find_if(worker.adapter_registry.profiles, [](const auto &
@@ -480,6 +517,27 @@ int main() {
             !manifest.contains("artifact_fingerprint") &&
             !manifest.contains("durable_sequence"),
         "closure manifest must exclude controller-derived durability identity");
+    const std::string canonical_manifest_bytes = manifest.dump();
+    require(trainvm::decode_final_evaluation_manifest(
+                canonical_manifest_bytes) == all_error.manifest,
+            "raw semantic manifest authority decoder must round-trip canonical "
+            "bytes");
+    const auto decoder_rejects = [](std::string_view source) {
+      try {
+        (void)trainvm::decode_final_evaluation_manifest(source);
+        return false;
+      } catch (const std::invalid_argument &) {
+        return true;
+      }
+    };
+    require(
+        decoder_rejects(manifest.dump(2)),
+        "raw semantic manifest decoder must reject alternate JSON encodings");
+    const std::string oversized_manifest(
+        trainvm::kMaximumFinalEvaluationManifestBytes + 1U, ' ');
+    require(
+        decoder_rejects(oversized_manifest),
+        "raw semantic manifest bytes must be rejected before JSON allocation");
     trainvm::FinalEvaluationManifest decoded_manifest;
     std::vector<trainvm::Diagnostic> manifest_diagnostics;
     require(trainvm::decode_json(manifest, decoded_manifest, "",
@@ -496,6 +554,9 @@ int main() {
             "controller receipt reflection must round-trip exactly");
     auto forged_manifest = manifest;
     forged_manifest["artifact_id"] = "worker-selected-controller-id";
+    require(
+        decoder_rejects(forged_manifest.dump()),
+        "raw semantic manifest decoder must reject controller-owned fields");
     trainvm::FinalEvaluationManifest rejected_manifest;
     std::vector<trainvm::Diagnostic> forged_diagnostics;
     require(!trainvm::decode_json(forged_manifest, rejected_manifest, "",

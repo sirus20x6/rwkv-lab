@@ -1,15 +1,20 @@
 #pragma once
 
 #include <compare>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "trainvm/adapter_registry.hpp"
 
 namespace trainvm {
+
+inline constexpr std::size_t kMaximumFinalEvaluationManifestBytes =
+    32U * 1024U * 1024U;
 
 // Finalization is deliberately separate from execution. A successful trainer
 // return is only a proposal to complete; these policies describe the durable
@@ -203,5 +208,11 @@ finalization_verdict_json(const FinalizationVerdict &verdict);
 // the reducer and are intentionally absent from these canonical bytes.
 [[nodiscard]] nlohmann::json
 final_evaluation_manifest_json(const FinalEvaluationManifest &manifest);
+
+// The sole authority entry point for untrusted closure bytes. The size check
+// occurs before JSON allocation, then strict reflection and an exact canonical
+// byte round-trip prevent duplicate keys, aliases, or alternate encodings.
+[[nodiscard]] FinalEvaluationManifest
+decode_final_evaluation_manifest(std::string_view bytes);
 
 } // namespace trainvm
