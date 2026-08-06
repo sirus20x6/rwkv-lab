@@ -28,6 +28,7 @@ constexpr std::size_t kMaximumIdentityBytes = 192U;
 constexpr std::size_t kMaximumConfigurationBytes = 64U << 10U;
 constexpr std::size_t kMaximumCompositionBytes = 512U << 10U;
 constexpr std::size_t kMaximumStringValueBytes = 4096U;
+constexpr std::size_t kMaximumStringListItems = 256U;
 
 [[noreturn]] void reject(std::string message) {
   throw TrainingComponentResolutionError(std::move(message));
@@ -63,16 +64,93 @@ bool value_has_type(TrainingValueType type, const Json& value) {
              (!value.is_number_float() ||
               std::isfinite(value.get<double>()));
     case TrainingValueType::string:
+    case TrainingValueType::path:
     case TrainingValueType::enumeration:
       return value.is_string();
+    case TrainingValueType::string_list:
+      return value.is_array() &&
+             value.size() <= kMaximumStringListItems &&
+             std::ranges::all_of(value, [](const Json& item) {
+               return item.is_string() &&
+                      item.get_ref<const std::string&>().size() <=
+                          kMaximumStringValueBytes;
+             });
   }
   return false;
 }
 
 bool bounded_scalar(const Json& value) {
-  return !value.is_string() ||
-         value.get_ref<const std::string&>().size() <=
-             kMaximumStringValueBytes;
+  if (value.is_string())
+    return value.get_ref<const std::string&>().size() <=
+           kMaximumStringValueBytes;
+  if (value.is_array())
+    return value.size() <= kMaximumStringListItems &&
+           std::ranges::all_of(value, [](const Json& item) {
+             return item.is_string() &&
+                    item.get_ref<const std::string&>().size() <=
+                        kMaximumStringValueBytes;
+           });
+  return true;
+}
+
+bool sha256_digest(std::string_view value) {
+  return value.size() == 71U && value.starts_with("sha256:") &&
+         std::ranges::all_of(value.substr(7), [](char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f');
+         });
+}
+
+bool parameter_selector(std::string_view value) {
+  if (value.empty() || value.size() > 512U || value.front() == '!' ||
+      value.find('\0') != std::string_view::npos ||
+      value.find('\n') != std::string_view::npos ||
+      value.find('\r') != std::string_view::npos)
+    return false;
+  // fnmatch character classes must be balanced. Other characters are valid
+  // parameter-name bytes and are interpreted literally by the worker.
+  bool open = false;
+  for (const char character : value) {
+    if (character == '[') {
+      if (open) return false;
+      open = true;
+    } else if (character == ']') {
+      if (!open) return false;
+      open = false;
+    }
+  }
+  return !open;
+}
+
+bool formatted_string(TrainingStringFormat format, const Json& value) {
+  const auto valid = [format](std::string_view item) {
+    switch (format) {
+      case TrainingStringFormat::parameter_selector:
+        return parameter_selector(item);
+      case TrainingStringFormat::sha256_digest:
+        return sha256_digest(item);
+    }
+    return false;
+  };
+  if (value.is_string()) return valid(value.get_ref<const std::string&>());
+  return value.is_array() &&
+         std::ranges::all_of(value, [&](const Json& item) {
+           return item.is_string() &&
+                  valid(item.get_ref<const std::string&>());
+         });
+}
+
+void canonicalize_collection(const TrainingComponentField& field,
+                             Json& value) {
+  if (field.type != TrainingValueType::string_list || !value.is_array())
+    return;
+  if (field.collection_semantics == TrainingCollectionSemantics::set) {
+    std::vector<std::string> items = value.get<std::vector<std::string>>();
+    std::ranges::sort(items);
+    if (std::ranges::adjacent_find(items) != items.end())
+      reject("training component string-set field contains a duplicate");
+    value = std::move(items);
+  }
 }
 
 bool scheduled(TrainingComponentCategory category) {
@@ -126,6 +204,12 @@ void validate_field(TrainingComponentField& field, bool state_field) {
   } else if (field.type == TrainingValueType::enumeration) {
     reject("training component enum field requires declared values");
   }
+  if ((field.type == TrainingValueType::string_list) !=
+      field.collection_semantics.has_value())
+    reject("training component string-list fields require collection semantics");
+  if (field.string_format && field.type != TrainingValueType::string &&
+      field.type != TrainingValueType::string_list)
+    reject("training component string format requires a string field");
   if (state_field && (field.default_value || field.minimum || field.maximum ||
                       field.values || field.unit))
     reject("training component state fields describe shape, not configuration");
@@ -133,6 +217,16 @@ void validate_field(TrainingComponentField& field, bool state_field) {
     if (!value_has_type(field.type, *field.default_value) ||
         !bounded_scalar(*field.default_value))
       reject("training component field default has the wrong type");
+    canonicalize_collection(field, *field.default_value);
+    if (field.string_format &&
+        !formatted_string(*field.string_format, *field.default_value))
+      reject("training component field default violates its string format");
+    if (field.type == TrainingValueType::path) {
+      const std::filesystem::path path =
+          field.default_value->get_ref<const std::string&>();
+      if (!path.is_absolute() || !std::filesystem::exists(path))
+        reject("training component path default is unavailable");
+    }
     const double numeric = field.default_value->is_number()
                                ? field.default_value->get<double>()
                                : 0.0;
@@ -202,6 +296,17 @@ Json resolve_configuration(const TrainingComponentDescriptor& descriptor,
     const TrainingComponentField& contract = *field->second;
     if (!value_has_type(contract.type, value) || !bounded_scalar(value))
       reject("training component configuration field has the wrong type");
+    Json canonical = value;
+    canonicalize_collection(contract, canonical);
+    if (contract.string_format &&
+        !formatted_string(*contract.string_format, canonical))
+      reject("training component configuration violates a string format");
+    if (contract.type == TrainingValueType::path) {
+      const std::filesystem::path path =
+          canonical.get_ref<const std::string&>();
+      if (!path.is_absolute() || !std::filesystem::exists(path))
+        reject("training component configuration path is unavailable");
+    }
     if (value.is_number()) {
       const double numeric = value.get<double>();
       if ((contract.minimum && numeric < *contract.minimum) ||
@@ -211,7 +316,7 @@ Json resolve_configuration(const TrainingComponentDescriptor& descriptor,
     if (contract.values &&
         std::ranges::find(*contract.values, value) == contract.values->end())
       reject("training component configuration violates an enum contract");
-    resolved[name] = value;
+    resolved[name] = std::move(canonical);
   }
   for (const TrainingComponentField& field : descriptor.configuration) {
     if (field.required && !resolved.contains(field.name))
@@ -222,6 +327,43 @@ Json resolve_configuration(const TrainingComponentDescriptor& descriptor,
 
 Json canonical_descriptor(const TrainingComponentDescriptor& descriptor) {
   return encode_json(descriptor);
+}
+
+std::map<TrainingComponentCategory,
+         std::vector<const ResolvedTrainingComponent*>>
+components_by_category(const ResolvedTrainingComposition& composition) {
+  std::map<TrainingComponentCategory,
+           std::vector<const ResolvedTrainingComponent*>> grouped;
+  for (const auto& [slot, component] : composition.components) {
+    (void)slot;
+    grouped[component.descriptor.key.category].push_back(&component);
+  }
+  return grouped;
+}
+
+void validate_model_trainability_relationships(
+    const ResolvedTrainingComposition& composition) {
+  const auto grouped = components_by_category(composition);
+  const auto loaders = grouped.find(TrainingComponentCategory::model_loader);
+  const auto policies = grouped.find(TrainingComponentCategory::trainability);
+  const std::size_t loader_count =
+      loaders == grouped.end() ? 0U : loaders->second.size();
+  const std::size_t policy_count =
+      policies == grouped.end() ? 0U : policies->second.size();
+  if (loader_count > 1U || policy_count > 1U)
+    reject("training composition may select only one model loader and one trainability policy");
+  if ((loader_count == 0U) != (policy_count == 0U))
+    reject("training composition must select model loader and trainability together");
+  if (loader_count == 0U) return;
+
+  const auto& loader = *loaders->second.front();
+  const auto& policy = *policies->second.front();
+  const std::string quantization =
+      loader.configuration.value("quantization", std::string{"none"});
+  if (quantization != "none" &&
+      policy.descriptor.implementation ==
+          "rwkv_lab.trainability.full.v1")
+    reject("full trainability is incompatible with a quantized model loader");
 }
 
 Json composition_body(const ResolvedTrainingComposition& composition) {
@@ -391,12 +533,49 @@ ResolvedTrainingComposition TrainingComponentRegistry::resolve_composition(
                        .model_family = composition.model_family,
                        .configuration = selection.configuration}));
   }
+  validate_model_trainability_relationships(resolved);
   const std::string canonical_composition = composition_body(resolved).dump();
   if (canonical_composition.size() > kMaximumCompositionBytes)
     reject("resolved training composition exceeds its canonical byte bound");
   resolved.composition_digest =
       "sha256:" + sha256_hex(canonical_composition);
   return resolved;
+}
+
+void TrainingComponentRegistry::validate_resume_state(
+    const ResolvedTrainingComposition& composition, const Json& state) const {
+  if (!state.is_object() || state.dump().size() > kMaximumCompositionBytes)
+    reject("training component resume state must be a bounded object");
+
+  std::map<std::string, const ResolvedTrainingComponent*, std::less<>>
+      stateful;
+  for (const auto& [slot, component] : composition.components) {
+    if (component.descriptor.state_grade != TrainingStateGrade::stateless)
+      stateful.emplace(slot, &component);
+  }
+  if (state.size() != stateful.size())
+    reject("training component resume state has incomplete slot coverage");
+  for (const auto& [slot, value] : state.items()) {
+    const auto selected = stateful.find(slot);
+    if (selected == stateful.end() || !value.is_object())
+      reject("training component resume state contains an unknown slot");
+    const auto& fields = selected->second->descriptor.state;
+    if (value.size() != fields.size())
+      reject("training component resume state has incomplete field coverage");
+    for (const TrainingComponentField& field : fields) {
+      if (!value.contains(field.name))
+        reject("training component resume state is missing a required field");
+      Json item = value.at(field.name);
+      if (!value_has_type(field.type, item) || !bounded_scalar(item))
+        reject("training component resume state field has the wrong type");
+      canonicalize_collection(field, item);
+      if (item != value.at(field.name))
+        reject("training component resume state is not canonical");
+      if (field.string_format &&
+          !formatted_string(*field.string_format, item))
+        reject("training component resume state violates a string format");
+    }
+  }
 }
 
 WorkerLaunchRequest TrainingComponentRegistry::augment_worker_launch_request(

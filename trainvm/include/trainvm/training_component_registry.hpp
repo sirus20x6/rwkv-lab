@@ -30,7 +30,23 @@ enum class TrainingValueType {
   integer,
   number,
   string,
+  path,
+  string_list,
   enumeration,
+};
+
+// Lists must declare whether their order is part of experiment identity. Sets
+// are sorted and deduplicated by the authority; ordered lists retain author
+// order. Requiring this declaration prevents a target-selector set from
+// acquiring a different digest merely because a YAML author reordered it.
+enum class TrainingCollectionSemantics {
+  ordered,
+  set,
+};
+
+enum class TrainingStringFormat {
+  parameter_selector,
+  sha256_digest,
 };
 
 enum class TrainingStateGrade {
@@ -50,6 +66,8 @@ struct TrainingComponentField final {
   std::optional<double> minimum;
   std::optional<double> maximum;
   std::optional<std::vector<nlohmann::json>> values;
+  std::optional<TrainingCollectionSemantics> collection_semantics = std::nullopt;
+  std::optional<TrainingStringFormat> string_format = std::nullopt;
   std::optional<std::string> unit;
   std::optional<std::string> description;
 
@@ -134,6 +152,11 @@ class TrainingComponentRegistry final {
       const TrainingComponentRequest& request) const;
   [[nodiscard]] ResolvedTrainingComposition resolve_composition(
       const TrainingComposition& composition) const;
+  // Validate a worker checkpoint's per-slot component state before any tensor
+  // state is restored. The object must contain exactly the stateful slots and
+  // exactly the fields declared by their canonical descriptors.
+  void validate_resume_state(const ResolvedTrainingComposition& composition,
+                             const nlohmann::json& state) const;
   [[nodiscard]] WorkerLaunchRequest augment_worker_launch_request(
       WorkerLaunchRequest request,
       const std::optional<TrainingComposition>& composition) const;

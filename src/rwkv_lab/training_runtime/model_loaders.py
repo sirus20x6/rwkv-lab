@@ -1,0 +1,217 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import asdict, dataclass
+from enum import Enum
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any, Protocol
+
+
+class ModelLoaderImplementation(str, Enum):
+    HF_CAUSAL_V1 = "rwkv_lab.model_loader.hf_causal.v1"
+    HF_MULTIMODAL_V1 = "rwkv_lab.model_loader.hf_multimodal.v1"
+
+
+@dataclass(frozen=True, slots=True)
+class HuggingFaceModelConfiguration:
+    model_path: str
+    checkpoint_fingerprint: str
+    revision: str = "main"
+    local_files_only: bool = True
+    trust_remote_code: bool = False
+    attention_implementation: str = "sdpa"
+    quantization: str = "none"
+    exact_checkpoint: bool = True
+
+    def __post_init__(self) -> None:
+        path = Path(self.model_path)
+        if not path.is_absolute() or not path.exists():
+            raise ValueError("model_path must name an existing absolute asset")
+        if not (
+            len(self.checkpoint_fingerprint) == 71
+            and self.checkpoint_fingerprint.startswith("sha256:")
+            and all(
+                character in "0123456789abcdef"
+                for character in self.checkpoint_fingerprint[7:]
+            )
+        ):
+            raise ValueError("checkpoint_fingerprint must be a lowercase sha256 digest")
+        if self.attention_implementation not in {
+            "eager",
+            "sdpa",
+            "flash_attention_2",
+        }:
+            raise ValueError("unsupported attention implementation")
+        if self.quantization not in {"none", "4bit", "8bit"}:
+            raise ValueError("unsupported model quantization")
+
+    @classmethod
+    def from_resolved(cls, value: dict[str, Any]) -> HuggingFaceModelConfiguration:
+        expected = {
+            "model_path",
+            "checkpoint_fingerprint",
+            "revision",
+            "local_files_only",
+            "trust_remote_code",
+            "attention_implementation",
+            "quantization",
+            "exact_checkpoint",
+        }
+        if set(value) != expected:
+            raise ValueError("resolved Hugging Face model configuration is inexact")
+        return cls(**value)
+
+
+@dataclass(frozen=True, slots=True)
+class ModelLoadReceipt:
+    implementation: str
+    checkpoint_fingerprint: str
+    model_class: str
+    checkpoint_tensor_count: int
+    missing_keys: tuple[str, ...]
+    unexpected_keys: tuple[str, ...]
+    mismatched_keys: tuple[str, ...]
+    error_messages: tuple[str, ...]
+    exact: bool
+
+    def canonical_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @property
+    def digest(self) -> str:
+        encoded = json.dumps(
+            self.canonical_dict(), separators=(",", ":"), sort_keys=True
+        ).encode()
+        return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedModel:
+    model: Any
+    tokenizer_or_processor: Any
+    receipt: ModelLoadReceipt
+
+    def component_state(self) -> MappingProxyType[str, str]:
+        return MappingProxyType(
+            {
+                "base_checkpoint_fingerprint": self.receipt.checkpoint_fingerprint,
+                "load_receipt_digest": self.receipt.digest,
+            }
+        )
+
+
+class _TransformersFacade(Protocol):
+    AutoModelForCausalLM: Any
+    AutoModelForImageTextToText: Any
+    AutoTokenizer: Any
+    AutoProcessor: Any
+
+
+def _loading_arguments(configuration: HuggingFaceModelConfiguration) -> dict[str, Any]:
+    arguments: dict[str, Any] = {
+        "revision": configuration.revision,
+        "local_files_only": configuration.local_files_only,
+        "trust_remote_code": configuration.trust_remote_code,
+        "attn_implementation": configuration.attention_implementation,
+        "output_loading_info": True,
+    }
+    if configuration.quantization == "4bit":
+        arguments["load_in_4bit"] = True
+    elif configuration.quantization == "8bit":
+        arguments["load_in_8bit"] = True
+    return arguments
+
+
+def _receipt(
+    implementation: ModelLoaderImplementation,
+    configuration: HuggingFaceModelConfiguration,
+    model: Any,
+    loading_info: dict[str, Any],
+) -> ModelLoadReceipt:
+    missing = tuple(sorted(loading_info.get("missing_keys", ())))
+    unexpected = tuple(sorted(loading_info.get("unexpected_keys", ())))
+    mismatched = tuple(
+        sorted(str(item) for item in loading_info.get("mismatched_keys", ()))
+    )
+    errors = tuple(str(item) for item in loading_info.get("error_msgs", ()))
+    exact = not (missing or unexpected or mismatched or errors)
+    if configuration.exact_checkpoint and not exact:
+        raise RuntimeError(
+            "Hugging Face checkpoint did not load exactly: "
+            f"{len(missing)} missing, {len(unexpected)} unexpected, "
+            f"{len(mismatched)} mismatched, {len(errors)} errors"
+        )
+    return ModelLoadReceipt(
+        implementation=implementation.value,
+        checkpoint_fingerprint=configuration.checkpoint_fingerprint,
+        model_class=f"{type(model).__module__}.{type(model).__qualname__}",
+        checkpoint_tensor_count=len(model.state_dict()),
+        missing_keys=missing,
+        unexpected_keys=unexpected,
+        mismatched_keys=mismatched,
+        error_messages=errors,
+        exact=exact,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RegisteredModelLoader:
+    implementation: ModelLoaderImplementation
+    configuration: HuggingFaceModelConfiguration
+
+    def load(
+        self, *, transformers_module: _TransformersFacade | None = None
+    ) -> LoadedModel:
+        if transformers_module is None:
+            import transformers as transformers_module  # type: ignore[no-redef]
+
+        arguments = _loading_arguments(self.configuration)
+        if self.implementation is ModelLoaderImplementation.HF_CAUSAL_V1:
+            factory = transformers_module.AutoModelForCausalLM
+            auxiliary_factory = transformers_module.AutoTokenizer
+        else:
+            factory = transformers_module.AutoModelForImageTextToText
+            auxiliary_factory = transformers_module.AutoProcessor
+        loaded = factory.from_pretrained(self.configuration.model_path, **arguments)
+        if not isinstance(loaded, tuple) or len(loaded) != 2:
+            raise RuntimeError("Hugging Face loader did not return loading attestation")
+        model, loading_info = loaded
+        if not isinstance(loading_info, dict):
+            raise TypeError("Hugging Face loading attestation is malformed")
+        auxiliary = auxiliary_factory.from_pretrained(
+            self.configuration.model_path,
+            revision=self.configuration.revision,
+            local_files_only=self.configuration.local_files_only,
+            trust_remote_code=self.configuration.trust_remote_code,
+        )
+        return LoadedModel(
+            model=model,
+            tokenizer_or_processor=auxiliary,
+            receipt=_receipt(
+                self.implementation, self.configuration, model, loading_info
+            ),
+        )
+
+
+def build_registered_model_loader(
+    implementation: ModelLoaderImplementation,
+    configuration: HuggingFaceModelConfiguration,
+) -> RegisteredModelLoader:
+    return RegisteredModelLoader(implementation, configuration)
+
+
+def model_loader_from_resolved_component(
+    component: dict[str, Any],
+) -> RegisteredModelLoader:
+    if set(component) != {"configuration", "descriptor", "descriptor_digest"}:
+        raise ValueError("resolved model-loader envelope has unknown fields")
+    descriptor = component["descriptor"]
+    implementation = ModelLoaderImplementation(descriptor["implementation"])
+    if descriptor["key"]["category"] != "model_loader":
+        raise ValueError("resolved component is not a model loader")
+    configuration = HuggingFaceModelConfiguration.from_resolved(
+        dict(component["configuration"])
+    )
+    return build_registered_model_loader(implementation, configuration)

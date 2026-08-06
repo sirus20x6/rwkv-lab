@@ -428,9 +428,9 @@ void experiment_composition_is_reflected_and_bounded() {
 
   source["spec"]["workflow"]["nodes"]["train_to_boundary"]["invoke"]
         ["training"]["components"]["optimizer"]["configuration"]
-        ["learning_rate"] = nlohmann::json::array({0.1});
+        ["learning_rate"] = nlohmann::json{{"nested", 0.1}};
   check(!trainvm::compile_document(source).valid(),
-        "non-scalar component configuration is rejected during compilation");
+        "nested component configuration is rejected during compilation");
 }
 
 void checked_in_component_catalog_matches_native_authority_contract() {
@@ -439,10 +439,101 @@ void checked_in_component_catalog_matches_native_authority_contract() {
   const trainvm::TrainingComponentRegistry registry =
       trainvm::TrainingComponentRegistry::load_file(
           std::filesystem::absolute(path));
-  check(registry.document_json().at("components").size() == 22U &&
+  check(registry.document_json().at("components").size() == 28U &&
             registry.registry_digest().starts_with("sha256:") &&
             registry.registry_digest().size() == 71U,
         "checked-in cross-family component catalog is a canonical native authority document");
+
+  const std::string model_path =
+      std::filesystem::absolute(TRAINVM_SOURCE_ROOT).string();
+  const auto composition_for = [&](std::string policy,
+                                   nlohmann::json loader_configuration,
+                                   nlohmann::json policy_configuration) {
+    return trainvm::TrainingComposition{
+        .model_family = "transformer",
+        .components =
+            {{"model",
+              {.key = {.category =
+                           trainvm::TrainingComponentCategory::model_loader,
+                       .name = "hf_multimodal",
+                       .version = "1.0.0"},
+               .configuration = std::move(loader_configuration)}},
+             {"trainability",
+              {.key = {.category =
+                           trainvm::TrainingComponentCategory::trainability,
+                       .name = std::move(policy),
+                       .version = "1.0.0"},
+               .configuration = std::move(policy_configuration)}}},
+        .topologies = std::nullopt,
+        .post_training = std::nullopt,
+    };
+  };
+  const nlohmann::json loader_configuration{
+      {"model_path", model_path},
+      {"checkpoint_fingerprint", "sha256:" + std::string(64U, 'a')}};
+  const auto lora_composition = registry.resolve_composition(composition_for(
+      "lora", loader_configuration,
+      {{"rank", 256},
+       {"alpha", 512},
+       {"target_selectors",
+        nlohmann::json::array(
+            {"language_model.layers.*.self_attn.*_proj"})}}));
+  check(lora_composition.components.at("trainability")
+                .configuration.at("rank") == 256 &&
+            lora_composition.components.at("trainability")
+                .configuration.at("modules_to_save")
+                .empty(),
+        "Hugging Face multimodal loading and LoRA resolve without a workload-specific trainer");
+  registry.validate_resume_state(
+      lora_composition,
+      {{"model",
+        {{"base_checkpoint_fingerprint", "sha256:" + std::string(64U, 'a')},
+         {"load_receipt_digest", "sha256:" + std::string(64U, 'b')}}},
+       {"trainability",
+        {{"adapter_state_manifest", "sha256:" + std::string(64U, 'c')},
+         {"merged", false},
+         {"trainable_parameter_manifest",
+          "sha256:" + std::string(64U, 'd')}}}});
+  check(rejects([&] {
+          registry.validate_resume_state(
+              lora_composition,
+              {{"model",
+                {{"base_checkpoint_fingerprint",
+                  "sha256:" + std::string(64U, 'a')}}},
+               {"trainability",
+                {{"adapter_state_manifest",
+                  "sha256:" + std::string(64U, 'c')},
+                 {"merged", false},
+                 {"trainable_parameter_manifest",
+                  "sha256:" + std::string(64U, 'd')}}}});
+        }),
+        "incomplete component resume state fails before tensor restoration");
+  nlohmann::json quantized = loader_configuration;
+  quantized["quantization"] = "4bit";
+  check(rejects([&] {
+          (void)registry.resolve_composition(
+              composition_for("full", quantized, nlohmann::json::object()));
+        }),
+        "quantized loading is rejected with incompatible full trainability");
+  check(rejects([&] {
+          nlohmann::json missing = loader_configuration;
+          missing["model_path"] =
+              "/definitely/missing/trainvm-model-component-test";
+          (void)registry.resolve_composition(composition_for(
+              "lora", missing,
+              {{"rank", 256},
+               {"alpha", 512},
+               {"target_selectors", nlohmann::json::array({"q_proj"})}}));
+        }),
+        "missing model assets fail during component resolution");
+  check(rejects([&] {
+          (void)registry.resolve_composition(composition_for(
+              "lora", loader_configuration,
+              {{"rank", 256},
+               {"alpha", 512},
+               {"target_selectors", nlohmann::json::array({"["})}}));
+        }),
+        "malformed parameter selectors fail during component resolution");
   const auto optimizer = registry.resolve({
       .key = {.category = trainvm::TrainingComponentCategory::optimizer,
               .name = "fp32_master_adamw",

@@ -38,6 +38,8 @@ enum class MetricType { counter, gauge, histogram };
 enum class StepDomain { microbatch, optimizer_step, sample, token, epoch, wall_time };
 enum class Aggregation { last, sum, mean, weighted_mean, min, max, histogram };
 enum class TrainingComponentCategory {
+  model_loader,
+  trainability,
   optimizer,
   parameter_router,
   learning_rate_schedule,

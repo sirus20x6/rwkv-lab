@@ -233,9 +233,7 @@ def test_live_learning_rate_rebase_preserves_phase_groups_and_checkpoint_state()
 
     assert schedule.last_epoch == old_epoch
     assert schedule.base_lrs == pytest.approx([2.0e-4, 1.0e-4])
-    assert schedule.get_last_lr() == pytest.approx(
-        [value * 0.2 for value in old_rates]
-    )
+    assert schedule.get_last_lr() == pytest.approx([value * 0.2 for value in old_rates])
     assert [group["lr"] for group in optimizer.param_groups] == pytest.approx(
         schedule.get_last_lr()
     )
@@ -288,6 +286,8 @@ def test_component_catalog_and_runtime_dispatch_are_exactly_aligned():
         for component in document["components"]
     }
     assert grades["optimizer"] == "exact"
+    assert grades["model_loader"] == "exact"
+    assert grades["trainability"] == "exact"
     assert grades["learning_rate_schedule"] == "exact"
     assert grades["objective"] == "stateless"
     assert grades["activation"] == "stateless"
@@ -352,9 +352,7 @@ def test_registered_global_norm_clipping_has_typed_reference_semantics():
 def test_fixed_gradient_accumulation_owns_microbatch_count_and_loss_scaling():
     policy = build_registered_gradient_accumulation(
         GradientAccumulationImplementation.FIXED_V1,
-        FixedGradientAccumulationConfiguration(
-            microbatches_per_optimizer_step=4
-        ),
+        FixedGradientAccumulationConfiguration(microbatches_per_optimizer_step=4),
     )
     assert isinstance(policy, FixedGradientAccumulation)
     assert tuple(policy.microbatch_indices()) == (0, 1, 2, 3)
@@ -412,9 +410,7 @@ def test_fp32_parameter_bfloat16_compute_policy_is_truthful_and_stateless():
 
 
 def test_registered_activations_are_independent_forward_and_installation_policies():
-    squared_relu = build_registered_activation(
-        ActivationImplementation.SQUARED_RELU_V1
-    )
+    squared_relu = build_registered_activation(ActivationImplementation.SQUARED_RELU_V1)
     silu = build_registered_activation(ActivationImplementation.SILU_V1)
     assert isinstance(squared_relu, RegisteredActivation)
     value = torch.tensor([-1.0, 2.0])
