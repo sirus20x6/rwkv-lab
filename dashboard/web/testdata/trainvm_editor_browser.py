@@ -128,15 +128,24 @@ OPERATIONS = {
 
 def recipe_profile(name: str, version: str = "1") -> dict[str, object]:
     template = copy.deepcopy(EXAMPLE)
-    template.setdefault("metadata", {}).setdefault("labels", {}).update({
-        "data_content_fingerprint": "sha256:" + "0" * 64,
-        "model_content_fingerprint": "sha256:" + "0" * 64,
+    training = template["spec"]["workflow"]["nodes"]["train_to_boundary"]["invoke"].setdefault(
+        "training", {"components": {}}
+    )
+    training["components"].update({
+        "data": {"configuration": {
+            "content_fingerprint": "sha256:" + "0" * 64,
+            "manifest_path": "/datasets/train/manifest.jsonl",
+        }},
+        "model_loader": {"configuration": {
+            "checkpoint_fingerprint": "sha256:" + "0" * 64,
+            "model_path": "/models/base",
+        }},
     })
     overrides = [
-        {"domain": "model", "name": "model.fingerprint", "type": "string", "target": "/metadata/labels/model_content_fingerprint", "required": True},
-        {"domain": "model", "name": "model.path", "type": "path", "target": "/spec/parameters/source_config/value", "required": True},
-        {"domain": "data", "name": "data.content_fingerprint", "type": "string", "target": "/metadata/labels/data_content_fingerprint", "required": True},
-        {"domain": "data", "name": "data.manifest", "type": "path", "target": "/spec/parameters/cache_directory/value", "required": True},
+        {"domain": "model", "name": "model.fingerprint", "type": "string", "target": "/spec/workflow/nodes/train_to_boundary/invoke/training/components/model_loader/configuration/checkpoint_fingerprint", "required": True},
+        {"domain": "model", "name": "model.path", "type": "path", "target": "/spec/workflow/nodes/train_to_boundary/invoke/training/components/model_loader/configuration/model_path", "required": True},
+        {"domain": "data", "name": "data.content_fingerprint", "type": "string", "target": "/spec/workflow/nodes/train_to_boundary/invoke/training/components/data/configuration/content_fingerprint", "required": True},
+        {"domain": "data", "name": "data.manifest", "type": "path", "target": "/spec/workflow/nodes/train_to_boundary/invoke/training/components/data/configuration/manifest_path", "required": True},
         {"domain": "trainability", "name": "trainability.rank", "type": "integer", "target": "/spec/parameters/target_step/value", "required": False, "minimum": 1, "maximum": 4096},
         {"domain": "optimizer", "name": "optimizer.learning_rate", "type": "number", "target": "/spec/controls/catalog/learning_rate/default", "required": False, "minimum": 1e-8, "maximum": 0.1},
         {"domain": "schedule", "name": "schedule.maximum_steps", "type": "integer", "target": "/spec/parameters/final_step/value", "required": False, "minimum": 1, "maximum": 10_000_000},
@@ -154,12 +163,12 @@ def recipe_profile(name: str, version: str = "1") -> dict[str, object]:
         "overrides": sorted(overrides, key=lambda field: field["name"]),
         "content_bindings": [
             {
-                "path_target": "/spec/parameters/cache_directory/value",
-                "fingerprint_target": "/metadata/labels/data_content_fingerprint",
+                "path_target": "/spec/workflow/nodes/train_to_boundary/invoke/training/components/data/configuration/manifest_path",
+                "fingerprint_target": "/spec/workflow/nodes/train_to_boundary/invoke/training/components/data/configuration/content_fingerprint",
             },
             {
-                "path_target": "/spec/parameters/source_config/value",
-                "fingerprint_target": "/metadata/labels/model_content_fingerprint",
+                "path_target": "/spec/workflow/nodes/train_to_boundary/invoke/training/components/model_loader/configuration/model_path",
+                "fingerprint_target": "/spec/workflow/nodes/train_to_boundary/invoke/training/components/model_loader/configuration/checkpoint_fingerprint",
             },
         ],
         "compatibility": [{

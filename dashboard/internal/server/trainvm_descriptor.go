@@ -277,23 +277,27 @@ func validateRecipeProfileDescriptors(items []any) error {
 				fingerprintTarget, fingerprintOK := binding["fingerprint_target"].(string)
 				identity := pathTarget + "\x00" + fingerprintTarget
 				if !pathOK || !fingerprintOK || pathTarget == fingerprintTarget ||
-					!validRecipePointerSyntax(pathTarget) || !validRecipePointerSyntax(fingerprintTarget) ||
+					!trainingConfigurationTarget(pathTarget) || !trainingConfigurationTarget(fingerprintTarget) ||
 					seenPaths[pathTarget] || seenFingerprints[fingerprintTarget] ||
 					previousBinding != "" && identity <= previousBinding {
 					return fmt.Errorf("recipe content binding targets are invalid, duplicate, or noncanonical")
 				}
 				pathValue, pathExists := recipePointerValue(template, pathTarget)
 				fingerprintValue, fingerprintExists := recipePointerValue(template, fingerprintTarget)
-				_, pathValueOK := pathValue.(string)
-				_, fingerprintValueOK := fingerprintValue.(string)
-				pathOverride := false
+				pathText, pathValueOK := pathValue.(string)
+				fingerprintText, fingerprintValueOK := fingerprintValue.(string)
+				fingerprintOverride := false
 				for _, field := range fields {
-					if field["target"] == pathTarget && field["type"] == "path" {
-						pathOverride = true
+					target, _ := field["target"].(string)
+					if target == fingerprintTarget || recipePointerAncestor(target, fingerprintTarget) ||
+						recipePointerAncestor(fingerprintTarget, target) {
+						fingerprintOverride = true
 					}
 				}
-				if !pathExists || !fingerprintExists || !pathValueOK || !fingerprintValueOK || !pathOverride {
-					return fmt.Errorf("recipe content binding does not join an editable path to a derived fingerprint")
+				canonicalPath := absoluteNormalizedRecipePath(pathText)
+				if !pathExists || !fingerprintExists || !pathValueOK || !fingerprintValueOK ||
+					!canonicalPath || !canonicalSHA256(fingerprintText) || fingerprintOverride {
+					return fmt.Errorf("recipe content binding does not join a measured path to an authority-derived fingerprint")
 				}
 				seenPaths[pathTarget], seenFingerprints[fingerprintTarget] = true, true
 				previousBinding = identity
@@ -340,6 +344,26 @@ func validateRecipeProfileDescriptors(items []any) error {
 		}
 	}
 	return nil
+}
+
+func trainingConfigurationTarget(target string) bool {
+	parts := strings.Split(target, "/")
+	return len(parts) == 11 && parts[0] == "" && parts[1] == "spec" &&
+		parts[2] == "workflow" && parts[3] == "nodes" && parts[4] != "" &&
+		parts[5] == "invoke" && parts[6] == "training" && parts[7] == "components" &&
+		parts[8] != "" && parts[9] == "configuration" && parts[10] != "" &&
+		!strings.ContainsAny(parts[4], "~") && !strings.ContainsAny(parts[8], "~") &&
+		!strings.ContainsAny(parts[10], "~")
+}
+
+func recipePointerAncestor(left, right string) bool {
+	return len(right) > len(left) && strings.HasPrefix(right, left) && right[len(left)] == '/'
+}
+
+func absoluteNormalizedRecipePath(path string) bool {
+	return path != "" && len(path) <= 4096 && !strings.HasPrefix(path, "//") &&
+		(len(path) == 1 || !strings.HasSuffix(path, "/")) && filepath.IsAbs(path) &&
+		filepath.Clean(path) == path && !strings.Contains(path, "\x00")
 }
 
 func validRecipePointerSyntax(pointer string) bool {

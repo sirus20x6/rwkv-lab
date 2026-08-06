@@ -776,20 +776,26 @@ func TestTrainVMRecipeProfileDescriptorFailsClosed(t *testing.T) {
 			"description": "Generic training recipe.",
 			"template_document": map[string]any{
 				"api_version": "trainvm.rwkv-lab/v1alpha1",
-				"spec": map[string]any{"parameters": map[string]any{
-					"model":             map[string]any{"value": "/models/base"},
-					"model_fingerprint": map[string]any{"value": "sha256:" + strings.Repeat("0", 64)},
-					"precision":         map[string]any{"value": "bf16"},
-				}},
+				"spec": map[string]any{
+					"parameters": map[string]any{
+						"precision": map[string]any{"value": "bf16"},
+					},
+					"workflow": map[string]any{"nodes": map[string]any{
+						"train": map[string]any{"invoke": map[string]any{"training": map[string]any{
+							"components": map[string]any{"model_loader": map[string]any{
+								"configuration": map[string]any{
+									"model_path":             "/models/base",
+									"checkpoint_fingerprint": "sha256:" + strings.Repeat("0", 64),
+								},
+							}},
+						}}},
+					}},
+				},
 			},
 			"overrides": []any{
 				map[string]any{
-					"domain": "model", "name": "model.fingerprint", "required": true,
-					"target": "/spec/parameters/model_fingerprint/value", "type": "string",
-				},
-				map[string]any{
 					"domain": "model", "name": "model.path", "required": true,
-					"target": "/spec/parameters/model/value", "type": "path",
+					"target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/model_path", "type": "path",
 				},
 				map[string]any{
 					"domain": "precision", "name": "precision.mode", "required": false,
@@ -798,8 +804,8 @@ func TestTrainVMRecipeProfileDescriptorFailsClosed(t *testing.T) {
 				},
 			},
 			"content_bindings": []any{map[string]any{
-				"path_target":        "/spec/parameters/model/value",
-				"fingerprint_target": "/spec/parameters/model_fingerprint/value",
+				"path_target":        "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/model_path",
+				"fingerprint_target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/checkpoint_fingerprint",
 			}},
 			"compatibility": []any{map[string]any{
 				"fields": []any{"precision.mode"}, "allowed": []any{[]any{"bf16"}, []any{"fp8"}},
@@ -879,22 +885,32 @@ func TestTrainVMRecipeProfileDescriptorFailsClosed(t *testing.T) {
 			value["compatibility"].([]any)[0].(map[string]any)["allowed"] = []any{[]any{"bf16", 80}}
 		},
 		"missing override target": func(value map[string]any) {
-			value["overrides"].([]any)[1].(map[string]any)["target"] = "/spec/parameters/missing/value"
+			value["overrides"].([]any)[0].(map[string]any)["target"] = "/spec/parameters/missing/value"
 		},
 		"wrong target scalar type": func(value map[string]any) {
-			value["overrides"].([]any)[1].(map[string]any)["target"] = "/spec/parameters"
+			value["overrides"].([]any)[0].(map[string]any)["target"] = "/spec/parameters"
 		},
 		"unknown content binding field": func(value map[string]any) {
 			value["content_bindings"].([]any)[0].(map[string]any)["digest"] = "operator supplied"
 		},
-		"content path is not editable": func(value map[string]any) {
+		"content path is outside training configuration": func(value map[string]any) {
 			value["content_bindings"].([]any)[0].(map[string]any)["path_target"] = "/spec/parameters/precision/value"
 		},
 		"content fingerprint is missing": func(value map[string]any) {
 			value["content_bindings"].([]any)[0].(map[string]any)["fingerprint_target"] = "/spec/parameters/missing/value"
 		},
 		"malformed content pointer": func(value map[string]any) {
-			value["content_bindings"].([]any)[0].(map[string]any)["fingerprint_target"] = "/spec/parameters/~2/value"
+			value["content_bindings"].([]any)[0].(map[string]any)["fingerprint_target"] = "/spec/workflow/nodes/~2/invoke/training/components/model_loader/configuration/fingerprint"
+		},
+		"operator fingerprint override": func(value map[string]any) {
+			value["overrides"] = append(value["overrides"].([]any), map[string]any{
+				"domain": "model", "name": "zz.fingerprint", "required": true,
+				"target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/checkpoint_fingerprint",
+				"type":   "string",
+			})
+		},
+		"noncanonical template fingerprint": func(value map[string]any) {
+			value["template_document"].(map[string]any)["spec"].(map[string]any)["workflow"].(map[string]any)["nodes"].(map[string]any)["train"].(map[string]any)["invoke"].(map[string]any)["training"].(map[string]any)["components"].(map[string]any)["model_loader"].(map[string]any)["configuration"].(map[string]any)["checkpoint_fingerprint"] = "operator-supplied"
 		},
 		"template is not an object": func(value map[string]any) { value["template_document"] = "unsafe" },
 	}
