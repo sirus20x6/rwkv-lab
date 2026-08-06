@@ -181,6 +181,29 @@ def validate(
                     f"{prefix}: plan_hash must be the canonical 64-hex "
                     "CompiledPlan identity"
                 )
+            plan_identity = _mapping(variant.get("plan_identity"))
+            required_plan_identity_fields = {
+                "dry_run_preview_plan_hash",
+                "launch_expected_plan_hash",
+                "preflight_plan_hash",
+                "queued_run_plan_hash",
+            }
+            if set(plan_identity) != required_plan_identity_fields:
+                failures.append(f"{prefix}: plan_identity envelope is not exact")
+            else:
+                plan_hashes = {
+                    plan_identity.get(field)
+                    for field in required_plan_identity_fields
+                }
+                if any(not _is_plan_hash(value) for value in plan_hashes):
+                    failures.append(
+                        f"{prefix}: plan_identity contains a noncanonical plan hash"
+                    )
+                elif plan_hashes != {variant.get("plan_hash")}:
+                    failures.append(
+                        f"{prefix}: preview, launch fence, preflight, and queued run "
+                        "do not share one plan identity"
+                    )
             if not _is_sha256(variant.get("recipe_expansion_sha256")):
                 failures.append(
                     f"{prefix}: recipe_expansion_sha256 must bind the authority expansion"
@@ -233,6 +256,8 @@ def validate(
                 failures.append(f"{prefix}: preflight did not precede submission")
             if preflight.get("accelerator_leases_created") != 0:
                 failures.append(f"{prefix}: preflight acquired an accelerator lease")
+            if not _is_sha256(preflight.get("receipt_sha256")):
+                failures.append(f"{prefix}: preflight receipt identity is missing")
 
             run = _mapping(variant.get("run"))
             if not str(run.get("run_id", "")).strip():
@@ -245,6 +270,43 @@ def validate(
                 run.get("step_zero_examples", 0)
             ) <= 0:
                 failures.append(f"{prefix}: step-zero examples are missing")
+            step_zero = _mapping(run.get("step_zero_evidence"))
+            if set(step_zero) != {
+                "artifact_id",
+                "baseline_present",
+                "checkpoint_artifact_id",
+                "checkpoint_manifest_sha256",
+                "current_present",
+                "example_count",
+                "modality",
+                "optimizer_step",
+                "target_present",
+            }:
+                failures.append(f"{prefix}: step-zero evidence envelope is not exact")
+            else:
+                if step_zero.get("optimizer_step") != 0:
+                    failures.append(f"{prefix}: example artifact is not from step zero")
+                if step_zero.get("modality") != declaration.get("step_zero_modality"):
+                    failures.append(f"{prefix}: step-zero example modality mismatch")
+                if not str(step_zero.get("artifact_id", "")).strip():
+                    failures.append(f"{prefix}: step-zero example artifact is missing")
+                if not str(step_zero.get("checkpoint_artifact_id", "")).strip() or not _is_sha256(
+                    step_zero.get("checkpoint_manifest_sha256")
+                ):
+                    failures.append(
+                        f"{prefix}: step-zero examples are not checkpoint-bound"
+                    )
+                if not isinstance(step_zero.get("example_count"), int) or int(
+                    step_zero.get("example_count", 0)
+                ) <= 0 or step_zero.get("example_count") != run.get("step_zero_examples"):
+                    failures.append(
+                        f"{prefix}: step-zero artifact count disagrees with the run"
+                    )
+                for role in ("target", "baseline", "current"):
+                    if step_zero.get(f"{role}_present") is not True:
+                        failures.append(
+                            f"{prefix}: step-zero examples omit the {role} view"
+                        )
             if not isinstance(run.get("optimizer_steps"), int) or int(
                 run.get("optimizer_steps", 0)
             ) <= 0:
