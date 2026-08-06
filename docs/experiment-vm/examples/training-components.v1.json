@@ -89,7 +89,7 @@
       "key": {"category": "trainability", "name": "full", "version": "1.0.0"},
       "backend": "python",
       "implementation": "rwkv_lab.trainability.full.v1",
-      "model_families": ["transformer", "vision"],
+      "model_families": ["rwkv", "transformer", "vision"],
       "required_capabilities": ["trainability.full.v1"],
       "configuration": [],
       "state": [{"name": "trainable_parameter_manifest", "type": "string", "required": true, "string_format": "sha256_digest"}],
@@ -448,7 +448,7 @@
       "key": {"category": "split_selector", "name": "frozen_named", "version": "1.0.0"},
       "backend": "python",
       "implementation": "rwkv_lab.split_selector.frozen_named.v1",
-      "model_families": ["transformer", "vision"],
+      "model_families": ["rwkv", "transformer", "vision"],
       "required_capabilities": ["split_selector.frozen_named.v1"],
       "configuration": [
         {"name": "selection", "type": "enumeration", "required": true, "values": ["test", "train", "validation"]}
@@ -723,6 +723,30 @@
       "state": [
         {"name": "parameter_state_manifest", "type": "string", "required": true},
         {"name": "fp32_master_weights_manifest", "type": "string", "required": true}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "optimizer",
+        "name": "torch_adamw_no_decay",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.optimizer.torch_adamw_no_decay.v2",
+      "model_families": ["rwkv"],
+      "required_capabilities": ["optimizer.torch_adamw_no_decay.v2"],
+      "configuration": [
+        {"name": "learning_rate", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
+        {"name": "beta1", "type": "number", "required": false, "default": 0.9, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "beta2", "type": "number", "required": false, "default": 0.999, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "epsilon", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"},
+        {"name": "foreach", "type": "boolean", "required": false, "default": true},
+        {"name": "fused", "type": "boolean", "required": false, "default": false}
+      ],
+      "state": [
+        {"name": "parameter_state_manifest", "type": "string", "required": true}
       ],
       "state_grade": "exact",
       "reference_implementation": true
@@ -1008,7 +1032,7 @@
       "key": {"category": "generation_policy", "name": "greedy", "version": "1.0.0"},
       "backend": "python",
       "implementation": "rwkv_lab.generation_policy.greedy.v1",
-      "model_families": ["transformer", "vision"],
+      "model_families": ["rwkv", "transformer", "vision"],
       "required_capabilities": ["generation_policy.greedy.v1"],
       "configuration": [
         {"name": "maximum_new_tokens", "type": "integer", "required": true, "minimum": 1, "maximum": 4096, "unit": "tokens"},

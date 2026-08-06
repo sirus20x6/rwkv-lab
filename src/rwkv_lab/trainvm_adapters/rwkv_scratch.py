@@ -15,6 +15,7 @@ from rwkv_lab.training_runtime.schedules import (
     PowerCoolConfiguration,
     ScheduleImplementation,
 )
+from rwkv_lab.training_runtime.trainability import TrainabilityImplementation
 
 from .components import WorkerTrainingComponents
 
@@ -121,6 +122,11 @@ class RWKVScratchTrainConfig:
             raise TypeError("scratch-RWKV requires a registered RWKV model factory")
         if model.configuration.vocabulary_size != 65_536:
             raise ValueError("scratch-RWKV currently requires the 65536-token vocabulary")
+        if (
+            components.trainability().implementation
+            is not TrainabilityImplementation.FULL_V1
+        ):
+            raise ValueError("scratch-RWKV currently requires full trainability")
         _, schedule = components.learning_rate_configuration()
         if not isinstance(
             schedule, (LinearWarmupCosineConfiguration, PowerCoolConfiguration)

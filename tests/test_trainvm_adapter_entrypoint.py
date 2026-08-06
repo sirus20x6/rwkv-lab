@@ -573,6 +573,7 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
         FixedGradientAccumulation,
         FixedGradientAccumulationConfiguration,
         FrozenNamedSplitConfiguration,
+        FullTrainabilityConfiguration,
         JsonlFrozenTokenSplitsConfiguration,
         PaddedCollatorConfiguration,
         PowerCoolConfiguration,
@@ -583,6 +584,7 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
         RegisteredSampleProcessor,
         RegisteredSampler,
         RegisteredSplitSelector,
+        RegisteredTrainability,
         RWKVModelFactory,
         RWKVModelFactoryConfiguration,
         SampleMapperImplementation,
@@ -591,6 +593,7 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
         ScheduleImplementation,
         SplitSelectorImplementation,
         TokenIdsProcessorConfiguration,
+        TrainabilityImplementation,
     )
 
     read_root = tmp_path / "read"
@@ -693,6 +696,12 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
             return RWKVModelFactory(
                 implementation="rwkv_lab.model_loader.rwkv_scratch.v1",
                 configuration=RWKVModelFactoryConfiguration(65_536, 64, 1, 16, 7),
+            )
+
+        def trainability(self):
+            return RegisteredTrainability(
+                TrainabilityImplementation.FULL_V1,
+                FullTrainabilityConfiguration(),
             )
 
         def learning_rate_configuration(self):

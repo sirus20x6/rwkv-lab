@@ -1,0 +1,1376 @@
+{
+  "api_version": "trainvm.recipe-profiles/v1",
+  "recipes": [
+    {
+      "key": {
+        "name": "rwkv_lm_scratch",
+        "version": "1"
+      },
+      "description": "Generic registered-component RWKV language-model training from scratch over frozen token splits.",
+      "template_document": {
+        "api_version": "trainvm.rwkv-lab/v1alpha1",
+        "kind": "Experiment",
+        "metadata": {
+          "name": "rwkv-lm-scratch-v1",
+          "description": "Declarative scratch RWKV language-model recipe",
+          "labels": {
+            "family": "rwkv",
+            "recipe": "rwkv_lm_scratch@1"
+          }
+        },
+        "spec": {
+          "workspace": {
+            "root": "/thearray/git/moe-mla",
+            "run_directory": "/thearray/git/moe-mla/runs/rwkv-lm-scratch",
+            "concurrency_key": "rwkv-lm-scratch",
+            "allowed_read_roots": [
+              "/thearray/git/moe-mla",
+              "/thearray/git/datasets",
+              "/thearray/git/ob/text-generation-webui/models"
+            ],
+            "allowed_write_roots": [
+              "/thearray/git/moe-mla/runs/rwkv-lm-scratch"
+            ]
+          },
+          "resources": {
+            "accelerators": {
+              "vendor": "nvidia",
+              "count": 1,
+              "minimum_memory_gib": 24,
+              "exclusive": true
+            },
+            "minimum_host_memory_gib": 64,
+            "cpu_threads": 16,
+            "lease_timeout_seconds": 30,
+            "cpu_io_policy": {
+              "cpu_weight": 100,
+              "io_weight": 100,
+              "omp_threads": 8,
+              "preprocessing_workers": 8,
+              "nice": 0
+            }
+          },
+          "parameters": {},
+          "artifacts": {
+            "checkpoint": {
+              "type": "checkpoint",
+              "schema": "rwkv-lab.rwkv-scratch-checkpoint.v1",
+              "immutability": "immutable",
+              "fingerprint": "manifest_sha256",
+              "required": true
+            },
+            "eval_gallery": {
+              "type": "image_gallery",
+              "schema": "rwkv-lab.eval-gallery.v2",
+              "immutability": "append_only",
+              "fingerprint": "manifest_sha256",
+              "required": true
+            },
+            "metrics": {
+              "type": "metrics",
+              "schema": "rwkv-lab.rwkv-scratch-metrics.v1",
+              "immutability": "append_only",
+              "fingerprint": "manifest_sha256"
+            }
+          },
+          "components": {
+            "core": {
+              "adapter": "trainvm.core",
+              "version": "1.0.0",
+              "runtime": "builtin",
+              "operations": {
+                "acquire_resources": {
+                  "contract": "trainvm.v1.AcquireResources"
+                },
+                "release_resources": {
+                  "contract": "trainvm.v1.ReleaseResources"
+                }
+              }
+            },
+            "trainer": {
+              "adapter": "rwkv-lab.rwkv-scratch",
+              "version": "1.0.0",
+              "runtime": "python_worker",
+              "operations": {
+                "train": {
+                  "contract": "rwkv_lab.rwkv_scratch.v1.Train"
+                }
+              }
+            }
+          },
+          "workflow": {
+            "entrypoint": "acquire_resources",
+            "nodes": {
+              "acquire_resources": {
+                "invoke": {
+                  "component": "core",
+                  "operation": "acquire_resources",
+                  "inputs": {
+                    "concurrency_key": {
+                      "literal": "rwkv-lm-scratch"
+                    }
+                  }
+                },
+                "idempotency": "receipt_required",
+                "effect": "resource",
+                "transitions": [
+                  {
+                    "on": "resource.acquired",
+                    "target": "train"
+                  },
+                  {
+                    "on": "operation.failed",
+                    "target": "$failed"
+                  }
+                ]
+              },
+              "train": {
+                "description": "Publish step-zero examples before the first optimizer step, then train and checkpoint.",
+                "invoke": {
+                  "component": "trainer",
+                  "operation": "train",
+                  "inputs": {
+                    "config": {
+                      "literal": {}
+                    }
+                  },
+                  "training": {
+                    "model_family": "rwkv",
+                    "components": {
+                      "model_loader": {
+                        "key": {
+                          "category": "model_loader",
+                          "name": "rwkv_scratch",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "vocabulary_size": 65536,
+                          "d_model": 512,
+                          "n_layers": 6,
+                          "head_size": 64,
+                          "seed": 7
+                        }
+                      },
+                      "objective": {
+                        "key": {
+                          "category": "objective",
+                          "name": "linear_head_cross_entropy",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "chunk_size": 2048,
+                          "prefer_fused": true
+                        }
+                      },
+                      "optimizer": {
+                        "key": {
+                          "category": "optimizer",
+                          "name": "torch_adamw",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "learning_rate": 0.0006,
+                          "beta1": 0.9,
+                          "beta2": 0.95,
+                          "epsilon": 1E-8,
+                          "foreach": true,
+                          "fused": false
+                        }
+                      },
+                      "learning_rate": {
+                        "key": {
+                          "category": "learning_rate_schedule",
+                          "name": "powercool",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "warmup_steps": 100,
+                          "max_steps": 10000,
+                          "minimum_ratio": 0.1
+                        }
+                      },
+                      "weight_decay": {
+                        "key": {
+                          "category": "weight_decay_schedule",
+                          "name": "constant",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "weight_decay": 0.01
+                        }
+                      },
+                      "gradient_clipping": {
+                        "key": {
+                          "category": "gradient_clipping",
+                          "name": "global_norm",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "max_norm": 1.0,
+                          "norm_type": 2.0,
+                          "error_if_nonfinite": false
+                        }
+                      },
+                      "gradient_accumulation": {
+                        "key": {
+                          "category": "gradient_accumulation",
+                          "name": "fixed",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "microbatches_per_optimizer_step": 1
+                        }
+                      },
+                      "precision": {
+                        "key": {
+                          "category": "precision",
+                          "name": "bf16_parameters_fp32_reductions",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "parameter_dtype": "bfloat16",
+                          "compute_dtype": "bfloat16",
+                          "reduction_dtype": "float32",
+                          "gradient_scaling": false
+                        }
+                      },
+                      "data": {
+                        "key": {
+                          "category": "data_source",
+                          "name": "manifested_jsonl_token_splits",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "dataset_root": "/thearray/git/moe-mla",
+                          "content_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                          "declared_columns": [
+                            "id",
+                            "split",
+                            "tokens"
+                          ],
+                          "token_column": "tokens",
+                          "id_column": "id"
+                        }
+                      },
+                      "processor": {
+                        "key": {
+                          "category": "sample_processor",
+                          "name": "token_ids",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "token_column": "tokens",
+                          "vocabulary_size": 65536,
+                          "minimum_tokens": 2,
+                          "maximum_tokens": 512
+                        }
+                      },
+                      "sample_mapping": {
+                        "key": {
+                          "category": "sample_mapper",
+                          "name": "causal_tokens",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "token_column": "tokens",
+                          "maximum_tokens": 512
+                        }
+                      },
+                      "collation": {
+                        "key": {
+                          "category": "collator",
+                          "name": "padded",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "pad_token_id": 0,
+                          "label_pad_token_id": -100,
+                          "pad_to_multiple": 8,
+                          "maximum_sequence_length": 512
+                        }
+                      },
+                      "sampler": {
+                        "key": {
+                          "category": "sampler",
+                          "name": "deterministic",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "seed": 7,
+                          "shuffle": true
+                        }
+                      },
+                      "batching": {
+                        "key": {
+                          "category": "batching",
+                          "name": "fixed",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "batch_size": 16,
+                          "drop_last": false,
+                          "prefetch_workers": 4
+                        }
+                      },
+                      "split": {
+                        "key": {
+                          "category": "split_selector",
+                          "name": "frozen_named",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "selection": "train"
+                        }
+                      },
+                      "trainability": {
+                        "key": {
+                          "category": "trainability",
+                          "name": "full",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {}
+                      },
+                      "evaluation_split": {
+                        "key": {
+                          "category": "split_selector",
+                          "name": "frozen_named",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "selection": "validation"
+                        }
+                      },
+                      "test_split": {
+                        "key": {
+                          "category": "split_selector",
+                          "name": "frozen_named",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "selection": "test"
+                        }
+                      },
+                      "evaluator": {
+                        "key": {
+                          "category": "evaluator",
+                          "name": "scalar_loss",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "split_slot": "evaluation_split",
+                          "metrics": [
+                            "perplexity",
+                            "validation_loss"
+                          ],
+                          "reduction": "weighted_mean",
+                          "maximum_examples": 40
+                        }
+                      },
+                      "evaluation_schedule": {
+                        "key": {
+                          "category": "evaluation_schedule",
+                          "name": "launch_gate_periodic",
+                          "version": "2.0.0"
+                        },
+                        "configuration": {
+                          "full_step_zero": true,
+                          "qualitative_every_steps": 50,
+                          "full_every_steps": 50,
+                          "final": true
+                        }
+                      },
+                      "qualitative_samples": {
+                        "key": {
+                          "category": "qualitative_sample",
+                          "name": "fixed_held_out",
+                          "version": "2.0.0"
+                        },
+                        "configuration": {
+                          "identity_field": "id",
+                          "sample_count": 8
+                        }
+                      },
+                      "artifact_renderer": {
+                        "key": {
+                          "category": "artifact_renderer",
+                          "name": "evidence_envelope",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "modality": "text",
+                          "schema": "trainvm.eval-evidence.v1"
+                        }
+                      },
+                      "generation_policy": {
+                        "key": {
+                          "category": "generation_policy",
+                          "name": "greedy",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "maximum_new_tokens": 64,
+                          "generation_batch_size": 1,
+                          "padding_side": "left",
+                          "use_cache": true
+                        }
+                      },
+                      "checkpoint_policy": {
+                        "key": {
+                          "category": "checkpoint_policy",
+                          "name": "atomic_retained",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "every_steps": 1000,
+                          "keep_last": 2,
+                          "keep_best": 1,
+                          "publish_final": true,
+                          "resume_grade": "compatible"
+                        }
+                      },
+                      "activation": {
+                        "key": {
+                          "category": "activation",
+                          "name": "squared_relu",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {}
+                      },
+                      "normalization": {
+                        "key": {
+                          "category": "normalization",
+                          "name": "layer_norm",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "epsilon": 0.00001
+                        }
+                      },
+                      "curriculum": {
+                        "key": {
+                          "category": "curriculum",
+                          "name": "context_length",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "maximum_sequence_length": 512,
+                          "base_batch_size": 16,
+                          "stages": ""
+                        }
+                      }
+                    }
+                  }
+                },
+                "publishes": {
+                  "checkpoint": "checkpoint",
+                  "eval_gallery": "eval_gallery",
+                  "metrics": "metrics"
+                },
+                "idempotency": "receipt_required",
+                "effect": "process",
+                "timeout_seconds": 604800,
+                "transitions": [
+                  {
+                    "on": "worker.completed",
+                    "target": "release_resources"
+                  },
+                  {
+                    "on": "operation.failed",
+                    "target": "$failed"
+                  }
+                ]
+              },
+              "release_resources": {
+                "invoke": {
+                  "component": "core",
+                  "operation": "release_resources",
+                  "inputs": {
+                    "concurrency_key": {
+                      "literal": "rwkv-lm-scratch"
+                    }
+                  }
+                },
+                "idempotency": "replay_safe",
+                "effect": "resource",
+                "transitions": [
+                  {
+                    "on": "resource.released",
+                    "target": "$completed"
+                  },
+                  {
+                    "on": "operation.failed",
+                    "target": "$failed"
+                  }
+                ]
+              }
+            }
+          },
+          "controls": {
+            "catalog": {}
+          },
+          "observability": {
+            "heartbeat_seconds": 5,
+            "metrics": [
+              {
+                "name": "gradient_norm",
+                "type": "gauge",
+                "unit": "dimensionless",
+                "step_domain": "optimizer_step",
+                "aggregation": "last"
+              },
+              {
+                "name": "learning_rate",
+                "type": "gauge",
+                "unit": "ratio",
+                "step_domain": "optimizer_step",
+                "aggregation": "last"
+              },
+              {
+                "name": "perplexity",
+                "type": "gauge",
+                "unit": "dimensionless",
+                "step_domain": "optimizer_step",
+                "aggregation": "last"
+              },
+              {
+                "name": "train.loss",
+                "type": "gauge",
+                "unit": "dimensionless",
+                "step_domain": "optimizer_step",
+                "aggregation": "weighted_mean"
+              },
+              {
+                "name": "train.tokens_per_second",
+                "type": "gauge",
+                "unit": "token/second",
+                "step_domain": "optimizer_step",
+                "aggregation": "mean"
+              },
+              {
+                "name": "validation_loss",
+                "type": "gauge",
+                "unit": "dimensionless",
+                "step_domain": "optimizer_step",
+                "aggregation": "last"
+              }
+            ],
+            "retain_raw_metrics_days": 30,
+            "eval_gallery_artifact": "eval_gallery"
+          },
+          "recovery": {
+            "exact_resume": false,
+            "checkpoint_artifact": "checkpoint",
+            "reconcile": "fail_closed",
+            "orphan_policy": "leave_and_block",
+            "graceful_stop_seconds": 300,
+            "release_accelerators_when_paused": true
+          }
+        }
+      },
+      "overrides": [
+        {
+          "name": "model.activation",
+          "domain": "model",
+          "type": "enumeration",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/activation/key/name",
+          "required": false,
+          "values": [
+            "silu",
+            "squared_relu"
+          ]
+        },
+        {
+          "name": "model.normalization",
+          "domain": "model",
+          "type": "enumeration",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/normalization/key/name",
+          "required": false,
+          "values": [
+            "layer_norm"
+          ]
+        },
+        {
+          "name": "data.root",
+          "domain": "data",
+          "type": "path",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/dataset_root",
+          "required": true
+        },
+        {
+          "name": "hyperparameters.optimizer",
+          "domain": "hyperparameters",
+          "type": "enumeration",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/optimizer/key/name",
+          "required": false,
+          "values": [
+            "torch_adamw",
+            "torch_adamw_no_decay"
+          ]
+        },
+        {
+          "name": "hyperparameters.learning_rate_schedule",
+          "domain": "hyperparameters",
+          "type": "enumeration",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/learning_rate/key/name",
+          "required": false,
+          "values": [
+            "linear_warmup_cosine",
+            "powercool"
+          ]
+        },
+        {
+          "name": "hyperparameters.learning_rate",
+          "domain": "hyperparameters",
+          "type": "number",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/optimizer/configuration/learning_rate",
+          "required": false,
+          "minimum": 1E-8,
+          "maximum": 0.01
+        },
+        {
+          "name": "hyperparameters.maximum_steps",
+          "domain": "hyperparameters",
+          "type": "integer",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/learning_rate/configuration/max_steps",
+          "required": false,
+          "minimum": 1,
+          "maximum": 10000000
+        },
+        {
+          "name": "hyperparameters.gradient_accumulation",
+          "domain": "hyperparameters",
+          "type": "integer",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/gradient_accumulation/configuration/microbatches_per_optimizer_step",
+          "required": false,
+          "minimum": 1,
+          "maximum": 65536
+        },
+        {
+          "name": "evaluation.qualitative_sample_count",
+          "domain": "evaluation",
+          "type": "integer",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/qualitative_samples/configuration/sample_count",
+          "required": false,
+          "minimum": 1,
+          "maximum": 512
+        },
+        {
+          "name": "checkpointing.every_steps",
+          "domain": "checkpointing",
+          "type": "integer",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/checkpoint_policy/configuration/every_steps",
+          "required": false,
+          "minimum": 1,
+          "maximum": 10000000
+        },
+        {
+          "name": "resources.gpu_memory_gib",
+          "domain": "resources",
+          "type": "number",
+          "target": "/spec/resources/accelerators/minimum_memory_gib",
+          "required": false,
+          "minimum": 8,
+          "maximum": 192
+        }
+      ],
+      "content_bindings": [
+        {
+          "path_target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/dataset_root",
+          "fingerprint_target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/content_fingerprint"
+        }
+      ]
+    },
+    {
+      "key": {
+        "name": "rwkv_lm_continuation",
+        "version": "1"
+      },
+      "description": "Generic registered-component RWKV continuation training from an authority-bound terminal checkpoint.",
+      "template_document": {
+        "api_version": "trainvm.rwkv-lab/v1alpha1",
+        "kind": "Experiment",
+        "metadata": {
+          "name": "rwkv-lm-continuation-v1",
+          "description": "Declarative RWKV continuation recipe",
+          "labels": {
+            "family": "rwkv",
+            "recipe": "rwkv_lm_continuation@1"
+          }
+        },
+        "spec": {
+          "workspace": {
+            "root": "/thearray/git/moe-mla",
+            "run_directory": "/thearray/git/moe-mla/runs/rwkv-lm-continuation",
+            "concurrency_key": "rwkv-lm-continuation",
+            "allowed_read_roots": [
+              "/thearray/git/moe-mla",
+              "/thearray/git/datasets",
+              "/thearray/git/ob/text-generation-webui/models"
+            ],
+            "allowed_write_roots": [
+              "/thearray/git/moe-mla/runs/rwkv-lm-continuation"
+            ]
+          },
+          "resources": {
+            "accelerators": {
+              "vendor": "nvidia",
+              "count": 1,
+              "minimum_memory_gib": 24,
+              "exclusive": true
+            },
+            "minimum_host_memory_gib": 64,
+            "cpu_threads": 16,
+            "lease_timeout_seconds": 30,
+            "cpu_io_policy": {
+              "cpu_weight": 100,
+              "io_weight": 100,
+              "omp_threads": 8,
+              "preprocessing_workers": 8,
+              "nice": 0
+            }
+          },
+          "parameters": {},
+          "artifacts": {
+            "checkpoint": {
+              "type": "checkpoint",
+              "schema": "rwkv-lab.rwkv-scratch-checkpoint.v1",
+              "immutability": "immutable",
+              "fingerprint": "manifest_sha256",
+              "required": true
+            },
+            "eval_gallery": {
+              "type": "image_gallery",
+              "schema": "rwkv-lab.eval-gallery.v2",
+              "immutability": "append_only",
+              "fingerprint": "manifest_sha256",
+              "required": true
+            },
+            "metrics": {
+              "type": "metrics",
+              "schema": "rwkv-lab.rwkv-scratch-metrics.v1",
+              "immutability": "append_only",
+              "fingerprint": "manifest_sha256"
+            }
+          },
+          "components": {
+            "core": {
+              "adapter": "trainvm.core",
+              "version": "1.0.0",
+              "runtime": "builtin",
+              "operations": {
+                "acquire_resources": {
+                  "contract": "trainvm.v1.AcquireResources"
+                },
+                "release_resources": {
+                  "contract": "trainvm.v1.ReleaseResources"
+                }
+              }
+            },
+            "trainer": {
+              "adapter": "rwkv-lab.rwkv-scratch",
+              "version": "1.0.0",
+              "runtime": "python_worker",
+              "operations": {
+                "train": {
+                  "contract": "rwkv_lab.rwkv_scratch.v1.Train"
+                }
+              }
+            }
+          },
+          "workflow": {
+            "entrypoint": "acquire_resources",
+            "nodes": {
+              "acquire_resources": {
+                "invoke": {
+                  "component": "core",
+                  "operation": "acquire_resources",
+                  "inputs": {
+                    "concurrency_key": {
+                      "literal": "rwkv-lm-continuation"
+                    }
+                  }
+                },
+                "idempotency": "receipt_required",
+                "effect": "resource",
+                "transitions": [
+                  {
+                    "on": "resource.acquired",
+                    "target": "train"
+                  },
+                  {
+                    "on": "operation.failed",
+                    "target": "$failed"
+                  }
+                ]
+              },
+              "train": {
+                "description": "Publish step-zero examples before the first optimizer step, then train and checkpoint.",
+                "invoke": {
+                  "component": "trainer",
+                  "operation": "train",
+                  "inputs": {
+                    "config": {
+                      "literal": {}
+                    }
+                  },
+                  "training": {
+                    "model_family": "rwkv",
+                    "components": {
+                      "model_loader": {
+                        "key": {
+                          "category": "model_loader",
+                          "name": "rwkv_checkpoint",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "vocabulary_size": 65536,
+                          "d_model": 512,
+                          "n_layers": 6,
+                          "head_size": 64,
+                          "seed": 7,
+                          "checkpoint_path": "/thearray/git/moe-mla/README.md",
+                          "checkpoint_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                        }
+                      },
+                      "objective": {
+                        "key": {
+                          "category": "objective",
+                          "name": "linear_head_cross_entropy",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "chunk_size": 2048,
+                          "prefer_fused": true
+                        }
+                      },
+                      "optimizer": {
+                        "key": {
+                          "category": "optimizer",
+                          "name": "torch_adamw",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "learning_rate": 0.0006,
+                          "beta1": 0.9,
+                          "beta2": 0.95,
+                          "epsilon": 1E-8,
+                          "foreach": true,
+                          "fused": false
+                        }
+                      },
+                      "learning_rate": {
+                        "key": {
+                          "category": "learning_rate_schedule",
+                          "name": "powercool",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "warmup_steps": 100,
+                          "max_steps": 10000,
+                          "minimum_ratio": 0.1
+                        }
+                      },
+                      "weight_decay": {
+                        "key": {
+                          "category": "weight_decay_schedule",
+                          "name": "constant",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "weight_decay": 0.01
+                        }
+                      },
+                      "gradient_clipping": {
+                        "key": {
+                          "category": "gradient_clipping",
+                          "name": "global_norm",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "max_norm": 1.0,
+                          "norm_type": 2.0,
+                          "error_if_nonfinite": false
+                        }
+                      },
+                      "gradient_accumulation": {
+                        "key": {
+                          "category": "gradient_accumulation",
+                          "name": "fixed",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "microbatches_per_optimizer_step": 1
+                        }
+                      },
+                      "precision": {
+                        "key": {
+                          "category": "precision",
+                          "name": "bf16_parameters_fp32_reductions",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "parameter_dtype": "bfloat16",
+                          "compute_dtype": "bfloat16",
+                          "reduction_dtype": "float32",
+                          "gradient_scaling": false
+                        }
+                      },
+                      "data": {
+                        "key": {
+                          "category": "data_source",
+                          "name": "manifested_jsonl_token_splits",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "dataset_root": "/thearray/git/moe-mla",
+                          "content_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                          "declared_columns": [
+                            "id",
+                            "split",
+                            "tokens"
+                          ],
+                          "token_column": "tokens",
+                          "id_column": "id"
+                        }
+                      },
+                      "processor": {
+                        "key": {
+                          "category": "sample_processor",
+                          "name": "token_ids",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "token_column": "tokens",
+                          "vocabulary_size": 65536,
+                          "minimum_tokens": 2,
+                          "maximum_tokens": 512
+                        }
+                      },
+                      "sample_mapping": {
+                        "key": {
+                          "category": "sample_mapper",
+                          "name": "causal_tokens",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "token_column": "tokens",
+                          "maximum_tokens": 512
+                        }
+                      },
+                      "collation": {
+                        "key": {
+                          "category": "collator",
+                          "name": "padded",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "pad_token_id": 0,
+                          "label_pad_token_id": -100,
+                          "pad_to_multiple": 8,
+                          "maximum_sequence_length": 512
+                        }
+                      },
+                      "sampler": {
+                        "key": {
+                          "category": "sampler",
+                          "name": "deterministic",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "seed": 7,
+                          "shuffle": true
+                        }
+                      },
+                      "batching": {
+                        "key": {
+                          "category": "batching",
+                          "name": "fixed",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "batch_size": 16,
+                          "drop_last": false,
+                          "prefetch_workers": 4
+                        }
+                      },
+                      "split": {
+                        "key": {
+                          "category": "split_selector",
+                          "name": "frozen_named",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "selection": "train"
+                        }
+                      },
+                      "trainability": {
+                        "key": {
+                          "category": "trainability",
+                          "name": "full",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {}
+                      },
+                      "evaluation_split": {
+                        "key": {
+                          "category": "split_selector",
+                          "name": "frozen_named",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "selection": "validation"
+                        }
+                      },
+                      "test_split": {
+                        "key": {
+                          "category": "split_selector",
+                          "name": "frozen_named",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "selection": "test"
+                        }
+                      },
+                      "evaluator": {
+                        "key": {
+                          "category": "evaluator",
+                          "name": "scalar_loss",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "split_slot": "evaluation_split",
+                          "metrics": [
+                            "perplexity",
+                            "validation_loss"
+                          ],
+                          "reduction": "weighted_mean",
+                          "maximum_examples": 40
+                        }
+                      },
+                      "evaluation_schedule": {
+                        "key": {
+                          "category": "evaluation_schedule",
+                          "name": "launch_gate_periodic",
+                          "version": "2.0.0"
+                        },
+                        "configuration": {
+                          "full_step_zero": true,
+                          "qualitative_every_steps": 50,
+                          "full_every_steps": 50,
+                          "final": true
+                        }
+                      },
+                      "qualitative_samples": {
+                        "key": {
+                          "category": "qualitative_sample",
+                          "name": "fixed_held_out",
+                          "version": "2.0.0"
+                        },
+                        "configuration": {
+                          "identity_field": "id",
+                          "sample_count": 8
+                        }
+                      },
+                      "artifact_renderer": {
+                        "key": {
+                          "category": "artifact_renderer",
+                          "name": "evidence_envelope",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "modality": "text",
+                          "schema": "trainvm.eval-evidence.v1"
+                        }
+                      },
+                      "generation_policy": {
+                        "key": {
+                          "category": "generation_policy",
+                          "name": "greedy",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "maximum_new_tokens": 64,
+                          "generation_batch_size": 1,
+                          "padding_side": "left",
+                          "use_cache": true
+                        }
+                      },
+                      "checkpoint_policy": {
+                        "key": {
+                          "category": "checkpoint_policy",
+                          "name": "atomic_retained",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "every_steps": 1000,
+                          "keep_last": 2,
+                          "keep_best": 1,
+                          "publish_final": true,
+                          "resume_grade": "compatible"
+                        }
+                      },
+                      "activation": {
+                        "key": {
+                          "category": "activation",
+                          "name": "squared_relu",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {}
+                      },
+                      "normalization": {
+                        "key": {
+                          "category": "normalization",
+                          "name": "layer_norm",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "epsilon": 0.00001
+                        }
+                      },
+                      "curriculum": {
+                        "key": {
+                          "category": "curriculum",
+                          "name": "context_length",
+                          "version": "1.0.0"
+                        },
+                        "configuration": {
+                          "maximum_sequence_length": 512,
+                          "base_batch_size": 16,
+                          "stages": ""
+                        }
+                      }
+                    }
+                  }
+                },
+                "publishes": {
+                  "checkpoint": "checkpoint",
+                  "eval_gallery": "eval_gallery",
+                  "metrics": "metrics"
+                },
+                "idempotency": "receipt_required",
+                "effect": "process",
+                "timeout_seconds": 604800,
+                "transitions": [
+                  {
+                    "on": "worker.completed",
+                    "target": "release_resources"
+                  },
+                  {
+                    "on": "operation.failed",
+                    "target": "$failed"
+                  }
+                ]
+              },
+              "release_resources": {
+                "invoke": {
+                  "component": "core",
+                  "operation": "release_resources",
+                  "inputs": {
+                    "concurrency_key": {
+                      "literal": "rwkv-lm-continuation"
+                    }
+                  }
+                },
+                "idempotency": "replay_safe",
+                "effect": "resource",
+                "transitions": [
+                  {
+                    "on": "resource.released",
+                    "target": "$completed"
+                  },
+                  {
+                    "on": "operation.failed",
+                    "target": "$failed"
+                  }
+                ]
+              }
+            }
+          },
+          "controls": {
+            "catalog": {}
+          },
+          "observability": {
+            "heartbeat_seconds": 5,
+            "metrics": [
+              {
+                "name": "gradient_norm",
+                "type": "gauge",
+                "unit": "dimensionless",
+                "step_domain": "optimizer_step",
+                "aggregation": "last"
+              },
+              {
+                "name": "learning_rate",
+                "type": "gauge",
+                "unit": "ratio",
+                "step_domain": "optimizer_step",
+                "aggregation": "last"
+              },
+              {
+                "name": "perplexity",
+                "type": "gauge",
+                "unit": "dimensionless",
+                "step_domain": "optimizer_step",
+                "aggregation": "last"
+              },
+              {
+                "name": "train.loss",
+                "type": "gauge",
+                "unit": "dimensionless",
+                "step_domain": "optimizer_step",
+                "aggregation": "weighted_mean"
+              },
+              {
+                "name": "train.tokens_per_second",
+                "type": "gauge",
+                "unit": "token/second",
+                "step_domain": "optimizer_step",
+                "aggregation": "mean"
+              },
+              {
+                "name": "validation_loss",
+                "type": "gauge",
+                "unit": "dimensionless",
+                "step_domain": "optimizer_step",
+                "aggregation": "last"
+              }
+            ],
+            "retain_raw_metrics_days": 30,
+            "eval_gallery_artifact": "eval_gallery"
+          },
+          "recovery": {
+            "exact_resume": false,
+            "checkpoint_artifact": "checkpoint",
+            "reconcile": "fail_closed",
+            "orphan_policy": "leave_and_block",
+            "graceful_stop_seconds": 300,
+            "release_accelerators_when_paused": true
+          }
+        }
+      },
+      "overrides": [
+        {
+          "name": "model.activation",
+          "domain": "model",
+          "type": "enumeration",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/activation/key/name",
+          "required": false,
+          "values": [
+            "silu",
+            "squared_relu"
+          ]
+        },
+        {
+          "name": "model.normalization",
+          "domain": "model",
+          "type": "enumeration",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/normalization/key/name",
+          "required": false,
+          "values": [
+            "layer_norm"
+          ]
+        },
+        {
+          "name": "data.root",
+          "domain": "data",
+          "type": "path",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/dataset_root",
+          "required": true
+        },
+        {
+          "name": "hyperparameters.optimizer",
+          "domain": "hyperparameters",
+          "type": "enumeration",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/optimizer/key/name",
+          "required": false,
+          "values": [
+            "torch_adamw",
+            "torch_adamw_no_decay"
+          ]
+        },
+        {
+          "name": "hyperparameters.learning_rate_schedule",
+          "domain": "hyperparameters",
+          "type": "enumeration",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/learning_rate/key/name",
+          "required": false,
+          "values": [
+            "linear_warmup_cosine",
+            "powercool"
+          ]
+        },
+        {
+          "name": "hyperparameters.learning_rate",
+          "domain": "hyperparameters",
+          "type": "number",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/optimizer/configuration/learning_rate",
+          "required": false,
+          "minimum": 1E-8,
+          "maximum": 0.01
+        },
+        {
+          "name": "hyperparameters.maximum_steps",
+          "domain": "hyperparameters",
+          "type": "integer",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/learning_rate/configuration/max_steps",
+          "required": false,
+          "minimum": 1,
+          "maximum": 10000000
+        },
+        {
+          "name": "hyperparameters.gradient_accumulation",
+          "domain": "hyperparameters",
+          "type": "integer",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/gradient_accumulation/configuration/microbatches_per_optimizer_step",
+          "required": false,
+          "minimum": 1,
+          "maximum": 65536
+        },
+        {
+          "name": "evaluation.qualitative_sample_count",
+          "domain": "evaluation",
+          "type": "integer",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/qualitative_samples/configuration/sample_count",
+          "required": false,
+          "minimum": 1,
+          "maximum": 512
+        },
+        {
+          "name": "checkpointing.every_steps",
+          "domain": "checkpointing",
+          "type": "integer",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/checkpoint_policy/configuration/every_steps",
+          "required": false,
+          "minimum": 1,
+          "maximum": 10000000
+        },
+        {
+          "name": "resources.gpu_memory_gib",
+          "domain": "resources",
+          "type": "number",
+          "target": "/spec/resources/accelerators/minimum_memory_gib",
+          "required": false,
+          "minimum": 8,
+          "maximum": 192
+        },
+        {
+          "name": "model.checkpoint_path",
+          "domain": "model",
+          "type": "path",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/checkpoint_path",
+          "required": true
+        }
+      ],
+      "content_bindings": [
+        {
+          "path_target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/checkpoint_path",
+          "fingerprint_target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/checkpoint_fingerprint"
+        },
+        {
+          "path_target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/dataset_root",
+          "fingerprint_target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/content_fingerprint"
+        }
+      ]
+    }
+  ]
+}

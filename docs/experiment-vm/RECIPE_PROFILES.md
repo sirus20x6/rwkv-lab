@@ -67,6 +67,16 @@ the existing causal-token processor, mapper, collation, optimizer, schedule,
 evaluation, and checkpoint components. The three example instances differ only
 through bounded recipe values; no experiment-specific handler is required.
 
+The registered RWKV equivalents live in
+[rwkv-lm.recipe-profiles.v1.json](examples/rwkv-lm.recipe-profiles.v1.json),
+with compact examples for
+[scratch training](examples/rwkv-lm-scratch.recipe-instance.v1.json) and
+[checkpoint continuation](examples/rwkv-lm-continuation.recipe-instance.v1.json).
+Their model loader, activation, normalization, optimizer, learning-rate
+schedule, frozen train/validation/test splits, and full-trainability policy are
+finite registry selections. Architecture dimensions remain versioned in the
+profile template instead of becoming an unbounded run-authoring surface.
+
 The example's graph selects the registered `hf_multimodal` model loader and
 `lora` trainability policy as a required pair. Model path and fingerprint are
 owned by the loader configuration; rank and alpha are owned by the LoRA policy.

@@ -187,7 +187,7 @@ int main() {
                 hf.training_composition->slots.size() == 25U &&
                 rwkv.training_composition &&
                 rwkv.training_composition->model_family == "rwkv" &&
-                rwkv.training_composition->slots.size() == 25U &&
+                rwkv.training_composition->slots.size() == 27U &&
                 rwkv.training_composition->allowed_components->at("data")
                         .front()
                         .name == "manifested_jsonl_token_splits" &&
@@ -202,11 +202,15 @@ int main() {
                         .size() == 2U &&
                 rwkv.training_composition->allowed_components
                         ->at("optimizer")
-                        .size() == 2U &&
+                        .size() == 3U &&
                 rwkv.training_composition->allowed_components
                         ->at("normalization")
                         .front()
                         .name == "layer_norm" &&
+                rwkv.training_composition->allowed_components
+                        ->at("trainability")
+                        .front()
+                        .name == "full" &&
                 posttraining.training_composition &&
                 posttraining.training_composition->model_family == "rwkv" &&
                 posttraining.training_composition->slots.size() == 4U &&
