@@ -654,8 +654,6 @@ TrainingCompositionContract rwkv_scratch_composition() {
                {{TrainingComponentCategory::optimizer, "torch_adamw",
                  "1.0.0"},
                 {TrainingComponentCategory::optimizer,
-                 "torch_adamw_no_decay", "1.0.0"},
-                {TrainingComponentCategory::optimizer,
                  "torch_adamw_no_decay", "2.0.0"}}},
               {"precision",
                {{TrainingComponentCategory::precision,

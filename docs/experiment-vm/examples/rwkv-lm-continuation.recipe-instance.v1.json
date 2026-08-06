@@ -5,10 +5,10 @@
   "overrides": {
     "model.checkpoint_path": "/thearray/git/moe-mla/README.md",
     "data.root": "/thearray/git/moe-mla",
-    "model.activation": "silu",
-    "model.normalization": "layer_norm",
-    "hyperparameters.optimizer": "torch_adamw_no_decay",
-    "hyperparameters.learning_rate_schedule": "linear_warmup_cosine",
+    "model.activation": "silu@1.0.0",
+    "model.normalization": "layer_norm@1.0.0",
+    "hyperparameters.optimizer": "torch_adamw_no_decay@2.0.0",
+    "hyperparameters.learning_rate_schedule": "linear_warmup_cosine@1.0.0",
     "hyperparameters.learning_rate": 0.0003,
     "hyperparameters.maximum_steps": 2000,
     "evaluation.qualitative_sample_count": 8

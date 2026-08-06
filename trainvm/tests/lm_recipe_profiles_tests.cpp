@@ -1,4 +1,6 @@
+#include "trainvm/adapter_registry.hpp"
 #include "trainvm/recipe_profile.hpp"
+#include "trainvm/rwkv_lab_worker_contract.hpp"
 #include "trainvm/training_component_registry.hpp"
 
 #include <algorithm>
@@ -54,11 +56,38 @@ int main() {
       root / "docs/experiment-vm/examples/lm-training.recipe-profiles.v1.json");
   const auto components = trainvm::TrainingComponentRegistry::load_file(
       root / "docs/experiment-vm/examples/training-components.v1.json");
+  const auto worker = trainvm::rwkv_lab_worker_contract(
+      "sha256:" + std::string(64U, '0'));
+  const auto adapter_registry_path =
+      std::filesystem::temp_directory_path() /
+      "trainvm-lm-recipe-adapters.v2.json";
+  {
+    std::ofstream output(adapter_registry_path,
+                         std::ios::binary | std::ios::trunc);
+    output << trainvm::encode_json(worker.adapter_registry).dump();
+  }
+  std::filesystem::permissions(
+      adapter_registry_path, std::filesystem::perms::owner_read |
+                                 std::filesystem::perms::owner_write,
+      std::filesystem::perm_options::replace);
+  const auto adapters =
+      trainvm::AdapterRegistry::load_file(adapter_registry_path);
+  check(adapters
+            .resolve(trainvm::AdapterKey{
+                .adapter = "rwkv-lab.hf-multimodal-sft",
+                .version = "1.0.0",
+                .runtime = trainvm::ComponentRuntime::python_worker,
+                .operation = "train",
+                .contract = "rwkv_lab.hf_multimodal_sft.v1.Train",
+            })
+            .lifecycle.pause_release_resources,
+        "HF trainer registry supports resource-releasing pause");
   const auto expand = [&](std::string_view name) {
     const auto instance = read_json(root / "docs/experiment-vm/examples" /
                                     std::string(name));
     auto result = registry.expand_json(instance);
     components.validate_plan(result.plan);
+    adapters.validate_plan(result.plan);
     return result;
   };
 
@@ -133,6 +162,7 @@ int main() {
                                     std::string(name));
     auto result = rwkv_registry.expand_json(instance);
     components.validate_plan(result.plan);
+    adapters.validate_plan(result.plan);
     return result;
   };
   const auto rwkv_scratch =
@@ -194,8 +224,25 @@ int main() {
             training_components(rwkv_continuation)
                     .at("activation")
                     .at("key")
-                    .at("name") == "silu",
+                    .at("name") == "silu" &&
+            training_components(rwkv_continuation)
+                    .at("optimizer")
+                    .at("key")
+                    .at("version") == "2.0.0",
         "RWKV optimizer, schedule, and activation choices lower declaratively");
+  auto unsafe_registry_document = read_json(
+      root / "docs/experiment-vm/examples/rwkv-lm.recipe-profiles.v1.json");
+  for (auto& field : unsafe_registry_document["recipes"][0]["overrides"]) {
+    if (field["name"] == "hyperparameters.optimizer") {
+      field["values"] = {"torch_adamw", "torch_adamw_no_decay"};
+      break;
+    }
+  }
+  check(rejects([&] {
+          (void)trainvm::RecipeProfileRegistry::from_json(
+              unsafe_registry_document.dump());
+        }),
+        "name-only component choices cannot retain a template version");
   auto invalid_rwkv = read_json(
       root / "docs/experiment-vm/examples/rwkv-lm-scratch.recipe-instance.v1.json");
   invalid_rwkv["overrides"]["hyperparameters.optimizer"] = "unregistered";

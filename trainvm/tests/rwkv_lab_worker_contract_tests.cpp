@@ -202,7 +202,7 @@ int main() {
                         .size() == 2U &&
                 rwkv.training_composition->allowed_components
                         ->at("optimizer")
-                        .size() == 3U &&
+                        .size() == 2U &&
                 rwkv.training_composition->allowed_components
                         ->at("normalization")
                         .front()

@@ -146,6 +146,32 @@ bool training_component_name_target(std::string_view target) {
   return std::regex_match(target.begin(), target.end(), pattern);
 }
 
+struct ExactComponentSelection final {
+  std::string name;
+  std::string version;
+};
+
+std::optional<ExactComponentSelection> exact_component_selection(
+    const Json& value) {
+  if (!value.is_string()) return std::nullopt;
+  const std::string& encoded = value.get_ref<const std::string&>();
+  const std::size_t separator = encoded.rfind('@');
+  if (separator == std::string::npos || separator == 0U ||
+      separator + 1U == encoded.size())
+    return std::nullopt;
+  ExactComponentSelection selection{
+      .name = encoded.substr(0U, separator),
+      .version = encoded.substr(separator + 1U),
+  };
+  if (!symbolic_identity(selection.name) || selection.version.size() > 128U ||
+      std::ranges::any_of(selection.version, [](unsigned char character) {
+        return !std::isalnum(character) && character != '.' &&
+               character != '-' && character != '+';
+      }))
+    return std::nullopt;
+  return selection;
+}
+
 std::optional<TrainingComponentCategory> component_category_at_target(
     const Json& template_document, std::string_view target) {
   if (!training_component_name_target(target)) return std::nullopt;
@@ -418,6 +444,31 @@ void validate_field(RecipeOverrideField& field, const Json& template_document) {
              "owning override domain: " +
              field.name);
     }
+    const bool all_exact = std::ranges::all_of(
+        *field.values, [](const Json& value) {
+          return exact_component_selection(value).has_value();
+        });
+    if (!all_exact) {
+      reject("recipe component selection requires exact name@version keys: " +
+             field.name);
+    }
+    {
+      const std::string version_target =
+          field.target.substr(0U, field.target.size() - 4U) + "version";
+      const Json::json_pointer version_pointer(version_target);
+      if (!template_document.contains(version_pointer) ||
+          !template_document.at(version_pointer).is_string())
+        reject("exact recipe component selection has no version target: " +
+               field.name);
+      const std::string template_key =
+          template_document.at(Json::json_pointer(field.target))
+              .get<std::string>() +
+          "@" + template_document.at(version_pointer).get<std::string>();
+      if (std::ranges::find(*field.values, Json(template_key)) ==
+          field.values->end())
+        reject("exact recipe component selection omits the template key: " +
+               field.name);
+    }
   }
   if (field.minimum &&
       (!std::isfinite(*field.minimum) ||
@@ -454,7 +505,16 @@ void validate_field(RecipeOverrideField& field, const Json& template_document) {
     const Json& base = template_document.at(pointer);
     if (base.is_structured())
       reject("recipe overrides may target scalar values only: " + field.target);
-    validate_value(field, base, "recipe template value");
+    Json validation_base = base;
+    if (training_component_name_target(field.target)) {
+      const std::string version_target =
+          field.target.substr(0U, field.target.size() - 4U) + "version";
+      validation_base = base.get<std::string>() + "@" +
+                        template_document
+                            .at(Json::json_pointer(version_target))
+                            .get<std::string>();
+    }
+    validate_value(field, validation_base, "recipe template value");
     validate_path_authority(field, base, template_document);
   } catch (const Json::exception& error) {
     reject("recipe override target is not a valid JSON pointer: " +
@@ -845,14 +905,42 @@ ExpandedRecipe RecipeProfileRegistry::expand(
       validate_value(field, supplied->second, "recipe instance value");
       validate_path_authority(field, supplied->second,
                               selected.template_document);
-      expanded_document[target] = supplied->second;
-      provenance[field.target] = {
+      const auto exact = training_component_name_target(field.target)
+                             ? exact_component_selection(supplied->second)
+                             : std::nullopt;
+      expanded_document[target] = exact ? Json(exact->name) : supplied->second;
+      const RecipeValueSource source{
           .kind = "instance_override",
           .reference = instance.recipe.name + "@" + instance.recipe.version +
                        "#override/" + field.name,
       };
+      provenance[field.target] = source;
+      if (exact) {
+        const std::string version_target =
+            std::string(field.target.substr(0U, field.target.size() - 4U)) +
+            "version";
+        const Json::json_pointer version_pointer(version_target);
+        if (!expanded_document.contains(version_pointer) ||
+            !expanded_document.at(version_pointer).is_string())
+          reject("exact recipe component selection has no version target: " +
+                 field.name);
+        expanded_document[version_pointer] = exact->version;
+        provenance[version_target] = source;
+      }
     }
-    effective.emplace(field.name, expanded_document.at(target));
+    if (supplied != instance.overrides.end()) {
+      effective.emplace(field.name, supplied->second);
+    } else if (training_component_name_target(field.target)) {
+      const std::string version_target =
+          field.target.substr(0U, field.target.size() - 4U) + "version";
+      effective.emplace(
+          field.name,
+          expanded_document.at(target).get<std::string>() + "@" +
+              expanded_document.at(Json::json_pointer(version_target))
+                  .get<std::string>());
+    } else {
+      effective.emplace(field.name, expanded_document.at(target));
+    }
   }
   check_compatibility(selected, effective);
 

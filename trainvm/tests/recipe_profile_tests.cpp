@@ -384,7 +384,7 @@ void registered_component_names_are_finite_recipe_choices() {
         "/spec/workflow/nodes/train/invoke/training/components/model_loader/"
         "key/name"},
        {"required", false},
-       {"values", {"hf_causal", "hf_multimodal"}}});
+       {"values", {"hf_causal@1.0.0", "hf_multimodal@1.0.0"}}});
   const auto registry =
       trainvm::RecipeProfileRegistry::from_json(document.dump());
   nlohmann::json instance{
@@ -396,13 +396,17 @@ void registered_component_names_are_finite_recipe_choices() {
         {"data.root", "/thearray/git/moe-mla"},
         {"model.target_manifest",
          "/thearray/git/moe-mla/README.md"},
-        {"model.loader", "hf_causal"}}}};
+        {"model.loader", "hf_causal@1.0.0"}}}};
   const auto expanded = registry.expand_json(instance);
-  check(expanded.effective_overrides.at("model.loader") == "hf_causal" &&
+  check(expanded.effective_overrides.at("model.loader") ==
+                "hf_causal@1.0.0" &&
             expanded.plan.canonical_plan.at(nlohmann::json::json_pointer(
                 "/spec/workflow/nodes/train/invoke/training/components/"
-                "model_loader/key/name")) == "hf_causal",
-        "recipe instance selects one finite registered component name");
+                "model_loader/key/name")) == "hf_causal" &&
+            expanded.plan.canonical_plan.at(nlohmann::json::json_pointer(
+                "/spec/workflow/nodes/train/invoke/training/components/"
+                "model_loader/key/version")) == "1.0.0",
+        "recipe instance selects one finite exact registered component key");
 
   instance["overrides"]["model.loader"] = "operator_python_import";
   check(rejects([&] { (void)registry.expand_json(instance); }),

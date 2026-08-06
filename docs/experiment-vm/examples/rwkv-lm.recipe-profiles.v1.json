@@ -58,19 +58,6 @@
               "immutability": "immutable",
               "fingerprint": "manifest_sha256",
               "required": true
-            },
-            "eval_gallery": {
-              "type": "image_gallery",
-              "schema": "rwkv-lab.eval-gallery.v2",
-              "immutability": "append_only",
-              "fingerprint": "manifest_sha256",
-              "required": true
-            },
-            "metrics": {
-              "type": "metrics",
-              "schema": "rwkv-lab.rwkv-scratch-metrics.v1",
-              "immutability": "append_only",
-              "fingerprint": "manifest_sha256"
             }
           },
           "components": {
@@ -462,9 +449,7 @@
                   }
                 },
                 "publishes": {
-                  "checkpoint": "checkpoint",
-                  "eval_gallery": "eval_gallery",
-                  "metrics": "metrics"
+                  "checkpoint": "checkpoint"
                 },
                 "idempotency": "receipt_required",
                 "effect": "process",
@@ -554,16 +539,14 @@
                 "aggregation": "last"
               }
             ],
-            "retain_raw_metrics_days": 30,
-            "eval_gallery_artifact": "eval_gallery"
+            "retain_raw_metrics_days": 30
           },
           "recovery": {
             "exact_resume": false,
             "checkpoint_artifact": "checkpoint",
             "reconcile": "fail_closed",
             "orphan_policy": "leave_and_block",
-            "graceful_stop_seconds": 300,
-            "release_accelerators_when_paused": true
+            "graceful_stop_seconds": 300
           }
         }
       },
@@ -575,8 +558,8 @@
           "target": "/spec/workflow/nodes/train/invoke/training/components/activation/key/name",
           "required": false,
           "values": [
-            "silu",
-            "squared_relu"
+            "silu@1.0.0",
+            "squared_relu@1.0.0"
           ]
         },
         {
@@ -586,7 +569,7 @@
           "target": "/spec/workflow/nodes/train/invoke/training/components/normalization/key/name",
           "required": false,
           "values": [
-            "layer_norm"
+            "layer_norm@1.0.0"
           ]
         },
         {
@@ -603,8 +586,8 @@
           "target": "/spec/workflow/nodes/train/invoke/training/components/optimizer/key/name",
           "required": false,
           "values": [
-            "torch_adamw",
-            "torch_adamw_no_decay"
+            "torch_adamw@1.0.0",
+            "torch_adamw_no_decay@2.0.0"
           ]
         },
         {
@@ -614,8 +597,8 @@
           "target": "/spec/workflow/nodes/train/invoke/training/components/learning_rate/key/name",
           "required": false,
           "values": [
-            "linear_warmup_cosine",
-            "powercool"
+            "linear_warmup_cosine@1.0.0",
+            "powercool@1.0.0"
           ]
         },
         {
@@ -737,19 +720,6 @@
               "immutability": "immutable",
               "fingerprint": "manifest_sha256",
               "required": true
-            },
-            "eval_gallery": {
-              "type": "image_gallery",
-              "schema": "rwkv-lab.eval-gallery.v2",
-              "immutability": "append_only",
-              "fingerprint": "manifest_sha256",
-              "required": true
-            },
-            "metrics": {
-              "type": "metrics",
-              "schema": "rwkv-lab.rwkv-scratch-metrics.v1",
-              "immutability": "append_only",
-              "fingerprint": "manifest_sha256"
             }
           },
           "components": {
@@ -1143,9 +1113,7 @@
                   }
                 },
                 "publishes": {
-                  "checkpoint": "checkpoint",
-                  "eval_gallery": "eval_gallery",
-                  "metrics": "metrics"
+                  "checkpoint": "checkpoint"
                 },
                 "idempotency": "receipt_required",
                 "effect": "process",
@@ -1235,16 +1203,14 @@
                 "aggregation": "last"
               }
             ],
-            "retain_raw_metrics_days": 30,
-            "eval_gallery_artifact": "eval_gallery"
+            "retain_raw_metrics_days": 30
           },
           "recovery": {
             "exact_resume": false,
             "checkpoint_artifact": "checkpoint",
             "reconcile": "fail_closed",
             "orphan_policy": "leave_and_block",
-            "graceful_stop_seconds": 300,
-            "release_accelerators_when_paused": true
+            "graceful_stop_seconds": 300
           }
         }
       },
@@ -1256,8 +1222,8 @@
           "target": "/spec/workflow/nodes/train/invoke/training/components/activation/key/name",
           "required": false,
           "values": [
-            "silu",
-            "squared_relu"
+            "silu@1.0.0",
+            "squared_relu@1.0.0"
           ]
         },
         {
@@ -1267,7 +1233,7 @@
           "target": "/spec/workflow/nodes/train/invoke/training/components/normalization/key/name",
           "required": false,
           "values": [
-            "layer_norm"
+            "layer_norm@1.0.0"
           ]
         },
         {
@@ -1284,8 +1250,8 @@
           "target": "/spec/workflow/nodes/train/invoke/training/components/optimizer/key/name",
           "required": false,
           "values": [
-            "torch_adamw",
-            "torch_adamw_no_decay"
+            "torch_adamw@1.0.0",
+            "torch_adamw_no_decay@2.0.0"
           ]
         },
         {
@@ -1295,8 +1261,8 @@
           "target": "/spec/workflow/nodes/train/invoke/training/components/learning_rate/key/name",
           "required": false,
           "values": [
-            "linear_warmup_cosine",
-            "powercool"
+            "linear_warmup_cosine@1.0.0",
+            "powercool@1.0.0"
           ]
         },
         {

@@ -731,30 +731,6 @@
       "key": {
         "category": "optimizer",
         "name": "torch_adamw_no_decay",
-        "version": "1.0.0"
-      },
-      "backend": "python",
-      "implementation": "rwkv_lab.optimizer.torch_adamw_no_decay.v2",
-      "model_families": ["rwkv"],
-      "required_capabilities": ["optimizer.torch_adamw_no_decay.v2"],
-      "configuration": [
-        {"name": "learning_rate", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
-        {"name": "beta1", "type": "number", "required": false, "default": 0.9, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
-        {"name": "beta2", "type": "number", "required": false, "default": 0.999, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
-        {"name": "epsilon", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"},
-        {"name": "foreach", "type": "boolean", "required": false, "default": true},
-        {"name": "fused", "type": "boolean", "required": false, "default": false}
-      ],
-      "state": [
-        {"name": "parameter_state_manifest", "type": "string", "required": true}
-      ],
-      "state_grade": "exact",
-      "reference_implementation": true
-    },
-    {
-      "key": {
-        "category": "optimizer",
-        "name": "torch_adamw_no_decay",
         "version": "2.0.0"
       },
       "backend": "python",

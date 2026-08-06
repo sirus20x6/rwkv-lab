@@ -54,7 +54,7 @@
           "artifacts": {
             "checkpoint": {
               "type": "checkpoint",
-              "schema": "hf.decoder-lm.v1",
+              "schema": "hf.multimodal-sft.v1",
               "immutability": "immutable",
               "fingerprint": "manifest_sha256",
               "required": true
@@ -65,12 +65,6 @@
               "immutability": "append_only",
               "fingerprint": "manifest_sha256",
               "required": true
-            },
-            "metrics": {
-              "type": "metrics",
-              "schema": "hf.decoder-lm.metrics.v1",
-              "immutability": "append_only",
-              "fingerprint": "manifest_sha256"
             },
             "test_eval": {
               "type": "report",
@@ -449,7 +443,6 @@
                 "publishes": {
                   "checkpoint": "checkpoint",
                   "eval_gallery": "eval_gallery",
-                  "metrics": "metrics",
                   "test_eval": "test_eval"
                 },
                 "idempotency": "receipt_required",
@@ -759,7 +752,7 @@
           "artifacts": {
             "checkpoint": {
               "type": "checkpoint",
-              "schema": "hf.decoder-lm.v1",
+              "schema": "hf.multimodal-sft.v1",
               "immutability": "immutable",
               "fingerprint": "manifest_sha256",
               "required": true
@@ -770,12 +763,6 @@
               "immutability": "append_only",
               "fingerprint": "manifest_sha256",
               "required": true
-            },
-            "metrics": {
-              "type": "metrics",
-              "schema": "hf.decoder-lm.metrics.v1",
-              "immutability": "append_only",
-              "fingerprint": "manifest_sha256"
             },
             "test_eval": {
               "type": "report",
@@ -1167,7 +1154,6 @@
                 "publishes": {
                   "checkpoint": "checkpoint",
                   "eval_gallery": "eval_gallery",
-                  "metrics": "metrics",
                   "test_eval": "test_eval"
                 },
                 "idempotency": "receipt_required",
