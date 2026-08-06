@@ -298,6 +298,7 @@ def test_controller_selected_resume_checkpoint_is_rehashed_before_use(
 
     assert resolved is not None
     assert resolved.artifact_id == result.artifact_id
+    assert resolved.manifest_sha256 == result.manifest_sha256
     assert resolved.optimizer_step == 12
     assert resolved.payload_directory.name == "payload"
     assert resolved.state_components == (

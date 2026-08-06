@@ -133,6 +133,8 @@ class LoraTargetManifestConfiguration:
     alpha: int
     dropout: float
     target_manifest_path: str
+    manifest_schema: str
+    required_policy_digest: str
     bias: str
     merge_on_completion: bool
 
@@ -148,6 +150,18 @@ class LoraTargetManifestConfiguration:
         )
         if not Path(self.target_manifest_path).is_file():
             raise ValueError("LoRA target manifest must be an existing file")
+        if not isinstance(self.manifest_schema, str) or not self.manifest_schema:
+            raise ValueError("LoRA target manifest schema must be nonempty")
+        if not (
+            isinstance(self.required_policy_digest, str)
+            and len(self.required_policy_digest) == 71
+            and self.required_policy_digest.startswith("sha256:")
+            and all(
+                character in "0123456789abcdef"
+                for character in self.required_policy_digest[7:]
+            )
+        ):
+            raise ValueError("LoRA target policy digest must be a lowercase sha256")
 
     @classmethod
     def from_resolved(
@@ -158,6 +172,8 @@ class LoraTargetManifestConfiguration:
             "alpha",
             "dropout",
             "target_manifest_path",
+            "manifest_schema",
+            "required_policy_digest",
             "bias",
             "merge_on_completion",
         }:
@@ -175,7 +191,12 @@ class LoraTargetReceipt:
     weight_index_sha256: str
 
 
-def load_lora_target_receipt(path: Path) -> LoraTargetReceipt:
+def load_lora_target_receipt(
+    path: Path,
+    *,
+    manifest_schema: str | None = None,
+    required_policy_digest: str | None = None,
+) -> LoraTargetReceipt:
     encoded = path.read_bytes()
     document = json.loads(encoded)
     expected = {
@@ -191,22 +212,20 @@ def load_lora_target_receipt(path: Path) -> LoraTargetReceipt:
     }
     if not isinstance(document, dict) or set(document) != expected:
         raise ValueError("LoRA target manifest is inexact")
-    targets = tuple(document["targets"])
+    raw_targets = document["targets"]
+    targets = tuple(raw_targets) if isinstance(raw_targets, list) else ()
     policy = document["policy"]
     lowercase_sha256 = lambda value: (
         isinstance(value, str)
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
     )
-    expected_policy = {
-        "fused_moe_experts": "frozen",
-        "mtp": "not_loaded",
-        "multimodal_projector": "frozen",
-        "router": "frozen",
-        "vision": "frozen",
-    }
+    policy_digest = "sha256:" + hashlib.sha256(
+        json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     if (
-        document["schema"] != "rwkv-lab.qwen-caption-lora-targets.v1"
+        not isinstance(document["schema"], str)
+        or not document["schema"]
         or not isinstance(document["architecture"], list)
         or not document["architecture"]
         or any(
@@ -218,28 +237,54 @@ def load_lora_target_receipt(path: Path) -> LoraTargetReceipt:
         or not lowercase_sha256(document["model_config_sha256"])
         or not lowercase_sha256(document["weight_index_sha256"])
         or not lowercase_sha256(document["target_digest"])
+        or not isinstance(raw_targets, list)
+        or isinstance(document["target_count"], bool)
+        or not isinstance(document["target_count"], int)
         or document["target_count"] != len(targets)
         or not targets
         or any(not isinstance(target, str) or not target for target in targets)
         or tuple(sorted(set(targets))) != targets
-        or policy != expected_policy
+        or not isinstance(policy, dict)
+        or not policy
+        or any(
+            not isinstance(key, str)
+            or not key
+            or not isinstance(value, str)
+            or not value
+            for key, value in policy.items()
+        )
+        or (
+            manifest_schema is not None
+            and document["schema"] != manifest_schema
+        )
+        or (
+            required_policy_digest is not None
+            and policy_digest != required_policy_digest
+        )
     ):
         raise ValueError("LoRA target manifest receipt is invalid")
     return LoraTargetReceipt(
         targets,
         "sha256:" + hashlib.sha256(encoded).hexdigest(),
         "sha256:" + document["target_digest"],
-        "sha256:"
-        + hashlib.sha256(
-            json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest(),
+        policy_digest,
         document["model_config_sha256"],
         document["weight_index_sha256"],
     )
 
 
-def preflight_lora_target_manifest(model_path: Path, manifest_path: Path) -> LoraTargetReceipt:
-    receipt = load_lora_target_receipt(manifest_path)
+def preflight_lora_target_manifest(
+    model_path: Path,
+    manifest_path: Path,
+    *,
+    manifest_schema: str | None = None,
+    required_policy_digest: str | None = None,
+) -> LoraTargetReceipt:
+    receipt = load_lora_target_receipt(
+        manifest_path,
+        manifest_schema=manifest_schema,
+        required_policy_digest=required_policy_digest,
+    )
     config = model_path / "config.json"
     index = model_path / "model.safetensors.index.json"
     if (
@@ -419,7 +464,11 @@ class RegisteredTrainability:
                 (LoraTargetManifestConfiguration, LoraTrainabilityConfiguration),
             )
             target_receipt = (
-                load_lora_target_receipt(Path(configuration.target_manifest_path))
+                load_lora_target_receipt(
+                    Path(configuration.target_manifest_path),
+                    manifest_schema=configuration.manifest_schema,
+                    required_policy_digest=configuration.required_policy_digest,
+                )
                 if isinstance(configuration, LoraTargetManifestConfiguration)
                 else None
             )

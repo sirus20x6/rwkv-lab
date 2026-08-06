@@ -488,7 +488,24 @@ int main() {
                                        .at("outputs")
                                        .at("eval_gallery")
                                        .at("artifact_schema") ==
-                                   "rwkv-lab.eval-gallery.v2")) &&
+                                   "rwkv-lab.eval-gallery.v2" &&
+                               operation.at("authoring")
+                                       .at("outputs")
+                                       .at("test_eval")
+                                       .at("type") == "artifact" &&
+                               operation.at("authoring")
+                                       .at("outputs")
+                                       .at("test_eval")
+                                       .at("required") == true &&
+                               operation.at("authoring")
+                                       .at("outputs")
+                                       .at("test_eval")
+                                       .at("artifact_type") == "report" &&
+                               operation.at("authoring")
+                                       .at("outputs")
+                                       .at("test_eval")
+                                       .at("artifact_schema") ==
+                                   "rwkv-lab.hf-test-caption-evidence-bundle.v1")) &&
                              (!is_vision_frozen ||
                               operation.at("authoring")
                                       .at("outputs")
@@ -520,6 +537,13 @@ int main() {
                 !appearance.authoring->outputs.contains("log") &&
                 !appearance.authoring->outputs.contains("metrics"),
             "MageFlow must advertise only its protocol-published checkpoint and eval gallery outputs");
+    require(hf.authoring && hf.authoring->outputs.size() == 3U &&
+                hf.authoring->outputs.at("test_eval").required &&
+                hf.authoring->outputs.at("test_eval").artifact_type ==
+                    trainvm::ArtifactType::report &&
+                hf.authoring->outputs.at("test_eval").artifact_schema ==
+                    "rwkv-lab.hf-test-caption-evidence-bundle.v1",
+            "HF multimodal SFT discovery must expose its required sealed test-evaluation output");
 
     nlohmann::json exact_source = load_mageflow_fixture();
     exact_source["spec"].erase("execution");

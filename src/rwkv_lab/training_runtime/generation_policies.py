@@ -19,6 +19,7 @@ class GreedyGenerationConfiguration:
     maximum_new_tokens: int
     generation_batch_size: int
     use_cache: bool
+    padding_side: str
 
     def __post_init__(self) -> None:
         if (
@@ -35,6 +36,10 @@ class GreedyGenerationConfiguration:
             raise ValueError("generation_batch_size must be in [1, 256]")
         if not isinstance(self.use_cache, bool):
             raise TypeError("use_cache must be boolean")
+        if self.padding_side != "left":
+            raise ValueError(
+                "batched decoder generation requires explicit left padding"
+            )
 
     @classmethod
     def from_resolved(
@@ -43,6 +48,7 @@ class GreedyGenerationConfiguration:
         if set(configuration) != {
             "generation_batch_size",
             "maximum_new_tokens",
+            "padding_side",
             "use_cache",
         }:
             raise ValueError("resolved greedy generation configuration is inexact")
@@ -62,6 +68,7 @@ class GreedyGenerationPolicy:
                 "generation_batch_size": self.configuration.generation_batch_size,
                 "implementation": self.implementation.value,
                 "maximum_new_tokens": self.configuration.maximum_new_tokens,
+                "padding_side": self.configuration.padding_side,
                 "use_cache": self.configuration.use_cache,
             },
             separators=(",", ":"),

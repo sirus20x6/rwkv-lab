@@ -975,14 +975,15 @@ TrainingNodeProbe make_hf_multimodal_sft_training_node_probe(
     const auto &components = invoke.at("training").at("components");
     const auto component = [&](std::string_view slot,
                                std::string_view expected_category,
-                               std::string_view expected_name)
+                               std::string_view expected_name,
+                               std::string_view expected_version = "1.0.0")
         -> const nlohmann::json & {
       const auto found = components.find(std::string(slot));
       if (found == components.end() || !found->is_object() ||
           !found->contains("key") || !found->at("key").is_object() ||
           found->at("key").value("category", "") != expected_category ||
           found->at("key").value("name", "") != expected_name ||
-          found->at("key").value("version", "") != "1.0.0" ||
+          found->at("key").value("version", "") != expected_version ||
           !found->contains("configuration") ||
           !found->at("configuration").is_object())
         throw std::runtime_error("HF multimodal passive probe requires exact " +
@@ -1061,34 +1062,40 @@ TrainingNodeProbe make_hf_multimodal_sft_training_node_probe(
       throw std::runtime_error(
           "HF local model has no bounded tokenizer payload identity");
 
-    const auto &data =
-        component("data", "data_source", "jsonl_image_caption");
+    const auto &data = component("data", "data_source",
+                                 "manifested_jsonl_image_splits");
     const auto &data_config = data.at("configuration");
-    const std::filesystem::path manifest(
-        data_config.at("manifest_path").get<std::string>());
-    if (invoke.contains("inputs") && invoke.at("inputs").contains("manifest")) {
-      const auto &binding = invoke.at("inputs").at("manifest");
-      if (!binding.is_object() || !binding.contains("parameter") ||
-          !binding.at("parameter").is_string())
-        throw std::runtime_error(
-            "HF manifest invocation binding is not a closed parameter");
-      const auto &parameters = plan.canonical_plan.at("spec").at("parameters");
-      const std::string parameter =
-          binding.at("parameter").get<std::string>();
-      if (!parameters.contains(parameter) ||
-          parameters.at(parameter).at("value").get<std::string>() !=
-              manifest.string())
-        throw std::runtime_error(
-            "HF invocation parameter and data component name different "
-            "manifests");
-    }
-    const std::filesystem::path image_root(
-        data_config.at("image_root").get<std::string>());
-    if (!path_within_root(manifest, image_root))
-      throw std::runtime_error(
-          "HF manifest is outside its authority-bound image root");
-    require_locked_fingerprint(image_root, data_config,
+    const std::filesystem::path dataset_root(
+        data_config.at("dataset_root").get<std::string>());
+    if (!dataset_root.is_absolute())
+      throw std::runtime_error("HF frozen dataset root is not absolute");
+    require_locked_fingerprint(dataset_root, data_config,
                                "content_fingerprint");
+    const std::filesystem::path receipt_path = dataset_root / "manifest.json";
+    std::string split_receipt_digest;
+    const auto split_receipt = read_passive_json_object(
+        receipt_path, 16U * 1024U * 1024U, split_receipt_digest);
+    if (!split_receipt.contains("counts") ||
+        !split_receipt.at("counts").is_object() ||
+        !split_receipt.contains("files") ||
+        !split_receipt.at("files").is_object())
+      throw std::runtime_error("HF frozen split receipt is incomplete");
+    for (const std::string_view split : {"train", "validation", "test"}) {
+      const std::string name = std::string(split) + ".jsonl";
+      if (!split_receipt.at("counts").contains(split) ||
+          split_receipt.at("counts").at(split).get<std::int64_t>() <= 0 ||
+          !split_receipt.at("files").contains(name))
+        throw std::runtime_error("HF frozen split receipt omits a required split");
+      const auto payload = read_passive_file(dataset_root / name,
+                                             512U * 1024U * 1024U);
+      const auto &claimed = split_receipt.at("files").at(name);
+      if (!claimed.is_object() ||
+          claimed.value("sha256", "") != payload.digest.substr(7U) ||
+          claimed.value("rows", 0) !=
+              split_receipt.at("counts").at(split).get<std::int64_t>())
+        throw std::runtime_error("HF frozen split receipt digest disagrees");
+    }
+    const std::filesystem::path manifest = dataset_root / "train.jsonl";
     std::ifstream manifest_stream(manifest, std::ios::binary);
     std::string sample_line;
     while (std::getline(manifest_stream, sample_line) && sample_line.empty()) {
@@ -1114,9 +1121,9 @@ TrainingNodeProbe make_hf_multimodal_sft_training_node_probe(
     std::filesystem::path sample_image(
         sample.at(image_column).get<std::string>());
     if (!sample_image.is_absolute())
-      sample_image = image_root / sample_image;
+      sample_image = dataset_root / sample_image;
     sample_image = sample_image.lexically_normal();
-    if (!path_within_root(sample_image, image_root))
+    if (!path_within_root(sample_image, dataset_root))
       throw std::runtime_error("HF manifest sample escapes its image root");
     const PassiveImageHeader image_header =
         inspect_passive_image_header(sample_image);
@@ -1128,21 +1135,16 @@ TrainingNodeProbe make_hf_multimodal_sft_training_node_probe(
             caption_columns)
       throw std::runtime_error(
           "HF processor schema does not match the data component");
-    (void)component("sample_mapping", "sample_mapper", "assistant_only");
+    (void)component("sample_mapping", "sample_mapper",
+                    "assistant_conversation", "2.0.0");
+    (void)component("activation_memory", "activation_memory",
+                    "hf_gradient_checkpointing");
+    (void)component("generation_policy", "generation_policy", "greedy");
+    (void)component("test_split", "split_selector", "frozen_named");
 
-    const auto &trainability =
-        component("trainability", "trainability", "lora");
+    const auto &trainability = component(
+        "trainability", "trainability", "lora_target_manifest", "2.0.0");
     const auto &trainability_config = trainability.at("configuration");
-    const auto target_selectors =
-        trainability_config.at("target_selectors")
-            .get<std::vector<std::string>>();
-    if (trainability_config.at("rank").get<std::int64_t>() <= 0 ||
-        target_selectors.empty() || target_selectors.size() > 256U ||
-        !std::ranges::all_of(target_selectors, [](const auto &selector) {
-          return !selector.empty() && selector.size() <= 512U;
-        }))
-      throw std::runtime_error(
-          "HF LoRA trainability target selection is empty or unbounded");
     std::string tensor_index_digest;
     const auto tensor_index = read_passive_json_object(
         model_path / "model.safetensors.index.json",
@@ -1153,23 +1155,94 @@ TrainingNodeProbe make_hf_multimodal_sft_training_node_probe(
       for (const auto &entry : tensor_index.at("weight_map").items())
         parameter_keys.push_back(entry.key());
     }
-    if (!tensor_index.contains("weight_map") ||
-        !tensor_index.at("weight_map").is_object() ||
-        tensor_index.at("weight_map").empty() ||
-        !hf_lora_selectors_match_parameter_index(target_selectors,
-                                                  parameter_keys))
+    const std::filesystem::path target_manifest_path(
+        trainability_config.at("target_manifest_path").get<std::string>());
+    const bool target_manifest_authorized = std::ranges::any_of(
+        locked_roots, [&](const nlohmann::json &root) {
+          const std::filesystem::path authority_root(
+              root.at("path").get<std::string>());
+          return target_manifest_path == authority_root ||
+                 path_within_root(target_manifest_path, authority_root);
+        });
+    if (!target_manifest_path.is_absolute() || !target_manifest_authorized)
       throw std::runtime_error(
-          "HF LoRA selector does not match the passive safetensors key index");
+          "HF LoRA target manifest lacks input-content authority");
+    std::string target_manifest_digest;
+    const auto target_manifest = read_passive_json_object(
+        target_manifest_path, 16U * 1024U * 1024U, target_manifest_digest);
+    static const std::set<std::string, std::less<>> target_manifest_fields{
+        "architecture", "model_config_sha256", "model_type", "policy",
+        "schema", "target_count", "target_digest", "targets",
+        "weight_index_sha256"};
+    std::set<std::string, std::less<>> actual_target_manifest_fields;
+    for (const auto &entry : target_manifest.items())
+      actual_target_manifest_fields.insert(entry.key());
+    if (actual_target_manifest_fields != target_manifest_fields ||
+        !target_manifest.at("policy").is_object() ||
+        target_manifest.at("policy").empty() ||
+        !target_manifest.at("architecture").is_array() ||
+        target_manifest.at("architecture").empty() ||
+        !target_manifest.at("targets").is_array() ||
+        !target_manifest.at("target_count").is_number_integer())
+      throw std::runtime_error("HF LoRA target manifest is not exact");
+    const auto targets = target_manifest.value(
+        "targets", std::vector<std::string>{});
+    bool policy_valid = true;
+    for (const auto &entry : target_manifest.at("policy").items())
+      policy_valid = policy_valid && !entry.key().empty() &&
+                     entry.value().is_string() &&
+                     !entry.value().get<std::string>().empty();
+    bool architecture_valid = true;
+    for (const nlohmann::json &entry : target_manifest.at("architecture"))
+      architecture_valid = architecture_valid && entry.is_string() &&
+                           !entry.get<std::string>().empty();
+    std::set<std::string> indexed_modules;
+    for (const auto &parameter : parameter_keys) {
+      for (const std::string_view suffix : {".weight", ".bias"}) {
+        if (parameter.ends_with(suffix))
+          indexed_modules.insert(
+              parameter.substr(0U, parameter.size() - suffix.size()));
+      }
+    }
+    const auto rank = trainability_config.at("rank").get<std::int64_t>();
+    if (rank <= 0 || rank > 4096 ||
+        target_manifest.value("schema", "").empty() ||
+        target_manifest.value("model_type", "").empty() ||
+        !policy_valid || !architecture_valid ||
+        trainability_config.value("manifest_schema", "") !=
+            target_manifest.value("schema", "") ||
+        trainability_config.value("required_policy_digest", "") !=
+            "sha256:" + sha256_hex(target_manifest.at("policy").dump()) ||
+        target_manifest.value("target_count", 0) !=
+            static_cast<std::int64_t>(targets.size()) ||
+        target_manifest.value("model_config_sha256", "") !=
+            model_config_digest.substr(7U) ||
+        target_manifest.value("weight_index_sha256", "") !=
+            tensor_index_digest.substr(7U) ||
+        !canonical_digest("sha256:" +
+                          target_manifest.value("model_config_sha256", "")) ||
+        !canonical_digest("sha256:" +
+                          target_manifest.value("weight_index_sha256", "")) ||
+        !canonical_digest("sha256:" +
+                          target_manifest.value("target_digest", "")) ||
+        targets.empty() ||
+        !std::ranges::is_sorted(targets) ||
+        std::ranges::adjacent_find(targets) != targets.end() ||
+        !std::ranges::all_of(targets, [&](const auto &target) {
+          return !target.empty() && indexed_modules.contains(target);
+        }))
+      throw std::runtime_error(
+          "HF LoRA target manifest does not match the passive tensor index");
 
     const auto &schedule =
         component("evaluation_schedule", "evaluation_schedule",
-                  "launch_gate_periodic");
+                  "launch_gate_periodic", "2.0.0");
     if (!schedule.at("configuration").value("full_step_zero", false) ||
-        schedule.at("configuration").value("launch_gate_examples", 0) <= 0)
+        !schedule.at("configuration").value("final", false))
       throw std::runtime_error(
-          "HF evaluation schedule does not require full step-zero evidence");
+          "HF evaluation schedule does not require step-zero and final evidence");
     (void)component("qualitative_samples", "qualitative_sample",
-                    "fixed_held_out");
+                    "fixed_held_out", "2.0.0");
     const auto &renderer =
         component("artifact_renderer", "artifact_renderer",
                   "caption_triplet");
@@ -1190,7 +1263,9 @@ TrainingNodeProbe make_hf_multimodal_sft_training_node_probe(
     if (!node.at("publishes").contains("eval_gallery") ||
         node.at("publishes").at("eval_gallery") != "eval_gallery" ||
         !node.at("publishes").contains("checkpoint") ||
-        node.at("publishes").at("checkpoint") != "checkpoint")
+        node.at("publishes").at("checkpoint") != "checkpoint" ||
+        !node.at("publishes").contains("test_eval") ||
+        node.at("publishes").at("test_eval") != "test_eval")
       throw std::runtime_error(
           "HF training node omits checkpoint or eval-gallery publication");
     const auto &artifacts = plan.canonical_plan.at("spec").at("artifacts");
@@ -1198,7 +1273,10 @@ TrainingNodeProbe make_hf_multimodal_sft_training_node_probe(
             "hf.multimodal-sft.v1" ||
         artifacts.at("eval_gallery").at("schema") !=
             "rwkv-lab.eval-gallery.v2" ||
-        !artifacts.at("eval_gallery").value("required", false))
+        !artifacts.at("eval_gallery").value("required", false) ||
+        artifacts.at("test_eval").at("schema") !=
+            "rwkv-lab.hf-test-caption-evidence-bundle.v1" ||
+        !artifacts.at("test_eval").value("required", false))
       throw std::runtime_error(
           "HF output artifact schemas are not the admitted exact pair");
 
@@ -1212,12 +1290,14 @@ TrainingNodeProbe make_hf_multimodal_sft_training_node_probe(
         {"tokenizer_payload_digest", tokenizer_payload->digest},
         {"processor_config_digest", processor_config_digest},
         {"manifest_sample_digest", "sha256:" + sha256_hex(sample_line)},
+        {"split_receipt_digest", split_receipt_digest},
         {"sample_image",
          {{"path", sample_image.string()},
           {"format", image_header.format},
           {"width", image_header.width},
           {"height", image_header.height}}},
         {"trainability", trainability_config},
+        {"target_manifest_digest", target_manifest_digest},
         {"tensor_index_digest", tensor_index_digest},
         {"evaluation_schedule", schedule.at("configuration")},
         {"renderer", renderer.at("configuration")},

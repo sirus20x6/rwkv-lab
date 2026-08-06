@@ -414,8 +414,13 @@ void validate_data_pipeline_relationships(
           "rwkv_lab.data_source.jsonl_frozen_image_splits.v1";
   const bool image_processor = processor.descriptor.implementation ==
                                "rwkv_lab.sample_processor.image_caption.v1";
-  const bool assistant_mapper = mapper.descriptor.implementation ==
-                               "rwkv_lab.sample_mapper.assistant_only.v1";
+  const bool assistant_only_mapper = mapper.descriptor.implementation ==
+                                     "rwkv_lab.sample_mapper.assistant_only.v1";
+  const bool assistant_conversation_mapper =
+      mapper.descriptor.implementation ==
+      "rwkv_lab.sample_mapper.assistant_conversation.v2";
+  const bool assistant_mapper =
+      assistant_only_mapper || assistant_conversation_mapper;
   if (image_source != image_processor || image_processor != assistant_mapper)
     reject("training data source, processor and mapper modalities are incompatible");
   if (batching.configuration.value("bucket_by", std::string{"token_length"}) ==
@@ -447,14 +452,16 @@ void validate_data_pipeline_relationships(
     referenced.push_back(processor.configuration.at("image_column"));
     for (const auto& column : processor.configuration.at("caption_columns"))
       referenced.push_back(column.get<std::string>());
-    referenced.push_back(mapper.configuration.at("prompt_column"));
     referenced.push_back(mapper.configuration.at("target_column"));
-    const bool has_prompt_column =
-        !mapper.configuration.at("prompt_column").get<std::string>().empty();
-    const bool has_fixed_prompt =
-        !mapper.configuration.at("fixed_prompt").get<std::string>().empty();
-    if (has_prompt_column == has_fixed_prompt)
-      reject("assistant-only mapping must select exactly one prompt source");
+    if (assistant_only_mapper) {
+      referenced.push_back(mapper.configuration.at("prompt_column"));
+      const bool has_prompt_column =
+          !mapper.configuration.at("prompt_column").get<std::string>().empty();
+      const bool has_fixed_prompt =
+          !mapper.configuration.at("fixed_prompt").get<std::string>().empty();
+      if (has_prompt_column == has_fixed_prompt)
+        reject("assistant-only mapping must select exactly one prompt source");
+    }
   } else {
     referenced.push_back(source.configuration.at("token_column"));
     referenced.push_back(processor.configuration.at("token_column"));
@@ -497,8 +504,9 @@ void validate_evaluation_checkpoint_relationships(
   if (selected != 0U && selected != 4U)
     reject("training evaluation suite requires evaluator, schedule, fixed samples, and renderer together");
   if (selected == 4U) {
-    if (!schedule->configuration.at("full_step_zero").get<bool>())
-      reject("training evaluation suite requires nonempty true step-zero evidence");
+    if (!schedule->configuration.at("full_step_zero").get<bool>() ||
+        !schedule->configuration.at("final").get<bool>())
+      reject("training evaluation suite requires true step-zero and final evidence");
     if (schedule->descriptor.key.version == "1.0.0") {
       const auto launch_count =
           schedule->configuration.at("launch_gate_examples").get<std::int64_t>();

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 from contextlib import nullcontext
@@ -13,6 +14,7 @@ from rwkv_lab.training_components import (
     AssistantOnlyMapperConfiguration,
     CausalTokensMapperConfiguration,
     ImageCaptionProcessorConfiguration,
+    JsonlFrozenImageSplitsConfiguration,
     LinearHeadCrossEntropyConfiguration,
     LinearHeadCrossEntropyObjective,
     PaddedCollatorConfiguration,
@@ -21,6 +23,9 @@ from rwkv_lab.training_components import (
 from rwkv_lab.training_runtime.activation_memory import (
     HFGradientCheckpointing,
     HFGradientCheckpointingConfiguration,
+)
+from rwkv_lab.training_runtime.generation_policies import (
+    GreedyGenerationConfiguration,
 )
 from rwkv_lab.training_runtime.trainability import (
     load_lora_target_receipt,
@@ -41,8 +46,10 @@ from rwkv_lab.trainvm_adapters.hf_multimodal_sft import (
 
 
 class FakeTokenizer:
-    padding_side = "right"
     eos_token_id = 2
+
+    def __init__(self, padding_side: str = "right") -> None:
+        self.padding_side = padding_side
 
     def __call__(self, text: str, *, add_special_tokens: bool = False):
         del add_special_tokens
@@ -50,8 +57,8 @@ class FakeTokenizer:
 
 
 class FakeProcessor:
-    def __init__(self) -> None:
-        self.tokenizer = FakeTokenizer()
+    def __init__(self, padding_side: str = "right") -> None:
+        self.tokenizer = FakeTokenizer(padding_side)
 
     def apply_chat_template(
         self, messages, *, tokenize: bool, add_generation_prompt: bool
@@ -86,8 +93,9 @@ class FakeProcessor:
         ids = torch.zeros((len(rows), length), dtype=torch.long)
         attention = torch.zeros_like(ids)
         for index, row in enumerate(rows):
-            ids[index, : len(row)] = torch.tensor(row)
-            attention[index, : len(row)] = 1
+            start = 0 if self.tokenizer.padding_side == "right" else length - len(row)
+            ids[index, start : start + len(row)] = torch.tensor(row)
+            attention[index, start : start + len(row)] = 1
         return {
             "input_ids": ids,
             "attention_mask": attention,
@@ -96,9 +104,9 @@ class FakeProcessor:
         }
 
 
-def _codec() -> HFForwardBatchCodec:
+def _codec(*, padding_side: str = "right") -> HFForwardBatchCodec:
     return HFForwardBatchCodec(
-        FakeProcessor(),
+        FakeProcessor(padding_side),
         AssistantOnlyMapperConfiguration(
             prompt_column="",
             fixed_prompt="describe",
@@ -133,8 +141,11 @@ def _sample(sample_id: str, image: float, caption: str) -> ProcessedSample:
     )
 
 
-def test_multimodal_codec_keeps_image_target_identity_and_masks_prompt() -> None:
-    batch = _codec().encode(
+@pytest.mark.parametrize("padding_side", ["left", "right"])
+def test_multimodal_codec_keeps_image_target_identity_and_masks_prompt(
+    padding_side: str,
+) -> None:
+    batch = _codec(padding_side=padding_side).encode(
         (_sample("sample-1", 1.0, "red"), _sample("sample-2", 7.0, "blue"))
     )
     assert batch.sample_ids == ("sample-1", "sample-2")
@@ -145,6 +156,12 @@ def test_multimodal_codec_keeps_image_target_identity_and_masks_prompt() -> None
     assert (labels != -100).sum(dim=1).tolist() == [4, 5]
     for row, target in zip(labels, ("red" + chr(2), "blue" + chr(2)), strict=True):
         assert row[row != -100].tolist() == [ord(character) for character in target]
+
+
+def test_batched_generation_policy_requires_explicit_left_padding() -> None:
+    with pytest.raises(ValueError, match="left padding"):
+        GreedyGenerationConfiguration(128, 4, True, "right")
+    assert GreedyGenerationConfiguration(128, 4, True, "left").padding_side == "left"
 
 
 def _causal_codec(*, mapper_maximum: int = 8, collator_maximum: int = 8):
@@ -396,6 +413,10 @@ def test_exact_lora_target_manifest_is_bound_to_snapshot_metadata(tmp_path) -> N
     ).encode()
     (tmp_path / "config.json").write_bytes(config)
     (tmp_path / "model.safetensors.index.json").write_bytes(index)
+    policy = {"attention": "adapted", "vision": "frozen"}
+    policy_digest = "sha256:" + hashlib.sha256(
+        json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     manifest = tmp_path / "targets.json"
     manifest.write_text(
         json.dumps(
@@ -403,14 +424,8 @@ def test_exact_lora_target_manifest_is_bound_to_snapshot_metadata(tmp_path) -> N
                 "architecture": ["Fixture"],
                 "model_config_sha256": hashlib.sha256(config).hexdigest(),
                 "model_type": "fixture",
-                    "policy": {
-                        "fused_moe_experts": "frozen",
-                        "mtp": "not_loaded",
-                        "vision": "frozen",
-                        "multimodal_projector": "frozen",
-                        "router": "frozen",
-                    },
-                    "schema": "rwkv-lab.qwen-caption-lora-targets.v1",
+                "policy": policy,
+                "schema": "fixture.generic-targets.v9",
                 "target_count": 2,
                 "target_digest": "a" * 64,
                 "targets": ["lm_head", "model.layers.0.q_proj"],
@@ -419,10 +434,22 @@ def test_exact_lora_target_manifest_is_bound_to_snapshot_metadata(tmp_path) -> N
         ),
         encoding="utf-8",
     )
-    receipt = preflight_lora_target_manifest(tmp_path, manifest)
+    receipt = preflight_lora_target_manifest(
+        tmp_path,
+        manifest,
+        manifest_schema="fixture.generic-targets.v9",
+        required_policy_digest=policy_digest,
+    )
     assert receipt.targets == ("lm_head", "model.layers.0.q_proj")
     assert receipt.producer_target_digest == "sha256:" + "a" * 64
-    assert load_lora_target_receipt(manifest) == receipt
+    assert (
+        load_lora_target_receipt(
+            manifest,
+            manifest_schema="fixture.generic-targets.v9",
+            required_policy_digest=policy_digest,
+        )
+        == receipt
+    )
 
     changed = json.loads(manifest.read_text(encoding="utf-8"))
     changed["targets"][1] = "model.layers.0.missing"
@@ -827,13 +854,31 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         RawSample("a", 0, {"tokens": [1, 2, 3, 4]}),
         RawSample("b", 1, {"tokens": [2, 3, 4, 5]}),
         RawSample("held", 2, {"tokens": [5, 6, 8, 9]}),
+        RawSample("test", 3, {"tokens": [6, 7, 8, 9]}),
+    )
+    dataset_root = tmp_path / "frozen-data"
+    dataset_root.mkdir()
+    for name in ("manifest.json", "train.jsonl", "validation.jsonl", "test.jsonl"):
+        (dataset_root / name).write_text("{}\n", encoding="utf-8")
+    frozen_configuration = JsonlFrozenImageSplitsConfiguration(
+        dataset_root=str(dataset_root),
+        content_fingerprint="sha256:" + "d" * 64,
+        declared_columns=("caption", "id", "image", "split"),
+        image_column="image",
+        caption_columns=("caption",),
+        id_column="id",
     )
 
     class Source:
-        configuration = object()
+        configuration = frozen_configuration
 
-        def records(self):
-            return iter(records)
+        def records_for_split(self, split):
+            selected = {
+                "train": records[:2],
+                "validation": records[2:3],
+                "test": records[3:],
+            }
+            return selected[split]
 
         def component_state(self):
             return {"content_fingerprint": "sha256:" + "d" * 64, "cursor": 0}
@@ -845,7 +890,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         configuration = object()
 
         def process(self, sample, *, image_root):
-            assert image_root is None
+            assert image_root == dataset_root
             return ProcessedSample(
                 sample.sample_id,
                 sample.ordinal,
@@ -854,15 +899,20 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
             )
 
     class Split:
-        def __init__(self, held_out):
-            self.held_out = held_out
+        def __init__(self, selection):
+            self.selection = selection
 
         def select(self, identities):
-            selected = ("held",) if self.held_out else ("a", "b")
-            return SplitSelection(selected, ("held",), "sha256:" + "e" * 64)
+            selected = tuple(identities)
+            digest_character = {"train": "d", "validation": "e", "test": "f"}[
+                self.selection
+            ]
+            return SplitSelection(
+                selected, (), "sha256:" + digest_character * 64
+            )
 
     class Pipeline:
-        def __init__(self, held_out):
+        def __init__(self, selection):
             self.source = Source()
             self.processor = Processor()
             self.mapper = SimpleNamespace(
@@ -888,7 +938,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
                     batch_size=1, drop_last=False, prefetch_workers=0
                 ),
             )
-            self.split_selector = Split(held_out)
+            self.split_selector = Split(selection)
 
         def validate_schema(self):
             return None
@@ -931,6 +981,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         compute_dtype = torch.float32
 
         def convert_module(self, loaded_model, device):
+            timeline.append("device_move")
             return loaded_model.to(device)
 
         def reduce(self, value):
@@ -979,18 +1030,33 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         composition = Composition()
 
         def __init__(self):
-            self.training = Pipeline(False)
-            self.evaluation = Pipeline(True)
+            self.training = Pipeline("train")
+            self.evaluation = Pipeline("validation")
+            self.test = Pipeline("test")
 
         def data_pipeline(self, *, split_slot):
-            return self.evaluation if split_slot == "evaluation_split" else self.training
+            timeline.append(f"data_pipeline:{split_slot}")
+            return {
+                "split": self.training,
+                "evaluation_split": self.evaluation,
+                "test_split": self.test,
+            }[split_slot]
 
         def model_loader(self, *, slot):
             assert slot == "model_loader"
-            return SimpleNamespace(load=lambda **_kwargs: Loaded(model))
+            def load(**_kwargs):
+                timeline.append("model_load")
+                return Loaded(model)
+
+            return SimpleNamespace(load=load)
 
         def trainability(self):
-            return SimpleNamespace(apply=lambda item: TrainabilityResult(item))
+            def apply(item):
+                with torch.no_grad():
+                    item.head.weight.add_(0.01)
+                return TrainabilityResult(item)
+
+            return SimpleNamespace(apply=apply)
 
         def precision(self):
             return Precision()
@@ -1064,6 +1130,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
 
         def evaluation_schedule(self):
             return SimpleNamespace(
+                configuration=SimpleNamespace(final=True),
                 for_step=lambda step, final=False: Decision(
                     qualitative=step == 0 or final,
                     full_scalar=step == 0 or final,
@@ -1082,10 +1149,11 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
 
         def generation_policy(self):
             return SimpleNamespace(
-                    configuration=SimpleNamespace(
-                        maximum_new_tokens=128,
-                        generation_batch_size=1,
-                        use_cache=True,
+                configuration=SimpleNamespace(
+                    maximum_new_tokens=128,
+                    generation_batch_size=1,
+                    padding_side="left",
+                    use_cache=True,
                 ),
                 digest="sha256:" + "5" * 64,
             )
@@ -1100,14 +1168,17 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         checkpoint_boundary_requested = False
         checkpoint_completion_requested = False
 
-        def __init__(self):
+        def __init__(self, *, fail_gallery=False, fail_artifact=False):
             self.events = []
             self.safe_points = []
+            self.fail_gallery = fail_gallery
+            self.fail_artifact = fail_artifact
 
         def checkpoint_state(self):
             return {"effective_control_revision": 0, "effective_controls": {}}
 
         def poll_initialization(self):
+            timeline.append("initialization")
             self.safe_points.append(("initialization", 0))
 
         def microbatch(self, step, applier):
@@ -1138,7 +1209,18 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
 
         def publish_evaluation_gallery(self, request, *, checkpoint):
             self.events.append(("gallery", request, model.head.weight.detach().clone()))
+            if self.fail_gallery:
+                self.fail_gallery = False
+                raise RuntimeError("simulated crash after launch checkpoint")
             return SimpleNamespace(artifact_id="gallery")
+
+        def publish_artifact(self, request):
+            if self.fail_artifact:
+                self.fail_artifact = False
+                raise RuntimeError("simulated crash after final checkpoint")
+            timeline.append("test_artifact")
+            self.events.append(("artifact", request, model.head.weight.detach().clone()))
+            return SimpleNamespace(artifact_id="test-eval")
 
         def publish_requested_checkpoint(self, request):
             raise AssertionError(request)
@@ -1148,23 +1230,68 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
             self.metrics = []
 
         def publish_if_declared(self, name, value, *, step):
+            if name == "eval.test_loss":
+                timeline.append("test_metric")
             self.metrics.append((name, value, step))
 
         def optimizer_step(self, step, phase):
             return None
 
-    controls = Controls()
+    failed_controls = Controls(fail_gallery=True)
+    failed_observability = Observability()
+    with pytest.raises(RuntimeError, match="crash after launch checkpoint"):
+        run_hf_multimodal_sft(
+            invocation=SimpleNamespace(attempt_id="attempt-crash"),
+            components=Components(),
+            run_directory=tmp_path / "run",
+            controls=failed_controls,
+            observability=failed_observability,
+            step_profiler=SimpleNamespace(
+                input_wait=nullcontext, step=lambda _step: None
+            ),
+            resume_directory=None,
+            device="cpu",
+        )
+    launch_checkpoint = failed_controls.events[0][1].source_directory
+    assert [event[0] for event in failed_controls.events] == [
+        "checkpoint",
+        "gallery",
+    ]
+
+    controls = Controls(fail_artifact=True)
     observability = Observability()
+    with pytest.raises(RuntimeError, match="crash after final checkpoint"):
+        run_hf_multimodal_sft(
+            invocation=SimpleNamespace(attempt_id="attempt-1"),
+            components=Components(),
+            run_directory=tmp_path / "run",
+            controls=controls,
+            observability=observability,
+            step_profiler=SimpleNamespace(
+                input_wait=nullcontext, step=lambda _step: None
+            ),
+            resume_directory=launch_checkpoint,
+            resume_parent_artifact_ids=("checkpoint-crash",),
+            resume_checkpoint_manifest_digest="sha256:" + "1" * 64,
+            device="cpu",
+        )
+    final_checkpoint = controls.events[3][1].source_directory
+    final_checkpoint_state = json.loads(
+        (final_checkpoint / "engine-state.json").read_text(encoding="utf-8")
+    )
+    assert final_checkpoint_state["runtime_state"]["finalization_pending"] is True
+    final_controls = Controls()
+    final_observability = Observability()
     step = run_hf_multimodal_sft(
-        invocation=SimpleNamespace(attempt_id="attempt-1"),
+        invocation=SimpleNamespace(attempt_id="attempt-finalize"),
         components=Components(),
         run_directory=tmp_path / "run",
-        controls=controls,
-        observability=observability,
-        step_profiler=SimpleNamespace(
-            input_wait=nullcontext, step=lambda _step: None
-        ),
-        resume_directory=None,
+        controls=final_controls,
+        observability=final_observability,
+        step_profiler=SimpleNamespace(input_wait=nullcontext, step=lambda _step: None),
+        resume_directory=final_checkpoint,
+        resume_parent_artifact_ids=("checkpoint-4",),
+        resume_checkpoint_manifest_digest="sha256:" + "4" * 64,
         device="cpu",
     )
     assert step == 1
@@ -1172,17 +1299,43 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         "checkpoint",
         "gallery",
         "checkpoint",
+        "checkpoint",
+    ]
+    assert [event[0] for event in final_controls.events] == [
+        "artifact",
         "gallery",
     ]
-    assert torch.equal(controls.events[0][2], initial)
+    assert not torch.equal(generation_weights[0], generation_weights[1])
+    assert torch.equal(failed_controls.events[0][2], generation_weights[1])
+    assert torch.equal(controls.events[0][2], generation_weights[2])
     step_zero_item = controls.events[1][1].items[0]
     assert (
         step_zero_item.sampling_attributes["baseline"]
         == step_zero_item.sampling_attributes["current"]
     )
+    assert step_zero_item.sampling_attributes == {
+        "teacher_target": "8 9",
+        "baseline": "7",
+        "current": "7",
+        "ordered_identities_digest": "sha256:" + "4" * 64,
+    }
+    final_item = final_controls.events[1][1].items[0]
+    assert final_item.heldout_item_id == step_zero_item.heldout_item_id
+    assert final_item.prompt_or_condition_digest == (
+        step_zero_item.prompt_or_condition_digest
+    )
+    assert final_item.sampling_attributes == {
+        "teacher_target": "8 9",
+        "baseline": "7",
+        "current": "7",
+        "ordered_identities_digest": "sha256:" + "4" * 64,
+    }
     assert not torch.equal(model.head.weight, initial)
     assert timeline.index("generate") < timeline.index("optimizer")
-    assert len(generation_weights) == 2
+    assert timeline.index("initialization") < timeline.index("data_pipeline:split")
+    assert timeline.index("data_pipeline:test_split") < timeline.index("model_load")
+    assert timeline.index("model_load") < timeline.index("device_move")
+    assert len(generation_weights) == 6
     assert torch.equal(generation_weights[0], initial)
     assert not torch.equal(generation_weights[-1], initial)
     assert step_zero_item.sampling_attributes["ordered_identities_digest"] == (
@@ -1197,16 +1350,95 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         "identities_digest": "sha256:" + "4" * 64,
         "selector_digest": "sha256:" + "e" * 64,
     }
-    assert observability.metrics[0][0] == "eval.loss"
-    assert observability.metrics[0][2] == 0
+    assert checkpoint_state["runtime_state"]["launch_gallery_complete"] is False
+    assert checkpoint_state["runtime_state"]["publication_pending"] is True
+    assert checkpoint_state["runtime_state"]["published_steps"] == [0]
+    replayed_checkpoint_state = json.loads(
+        (
+            controls.events[0][1].source_directory / "engine-state.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert replayed_checkpoint_state["runtime_state"]["publication_pending"] is True
+    assert replayed_checkpoint_state["runtime_state"]["published_steps"] == [0]
+    pending_manifest = replayed_checkpoint_state["runtime_state"][
+        "checkpoint_policy"
+    ]["publication_manifest"]
+    assert pending_manifest.startswith("sha256:")
+    assert pending_manifest != "sha256:" + "1" * 64
+    assert (
+        replayed_checkpoint_state["runtime_state"]["checkpoint_policy"]
+        == replayed_checkpoint_state["component_state"]["checkpoint_policy"]
+    )
+    baseline_checkpoint_state = json.loads(
+        (
+            controls.events[2][1].source_directory / "engine-state.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert baseline_checkpoint_state["runtime_state"]["baseline_complete"] is True
+    assert baseline_checkpoint_state["runtime_state"][
+        "baseline_checkpoint_artifact_id"
+    ] == "checkpoint-1"
+    assert (
+        baseline_checkpoint_state["runtime_state"]["launch_gallery_complete"]
+        is True
+    )
+    assert not (
+        controls.events[2][1].source_directory / "sealed-test-baseline"
+    ).exists()
+    quarantined_baseline = tmp_path / "run" / ".private-test-quarantine" / "baseline"
+    assert quarantined_baseline.is_dir()
+    assert quarantined_baseline.stat().st_mode & 0o077 == 0
+    assert all(path.stat().st_mode & 0o277 == 0 for path in quarantined_baseline.iterdir())
+    assert failed_observability.metrics[0][0] == "eval.loss"
+    assert failed_observability.metrics[0][2] == 0
+    assert all(
+        not (name == "eval.test_loss" and at_step == 0)
+        for name, _value, at_step in (
+            *failed_observability.metrics,
+            *observability.metrics,
+        )
+    )
+    final_test_metrics = [
+        (value, at_step)
+        for name, value, at_step in final_observability.metrics
+        if name == "eval.test_loss"
+    ]
+    assert len(final_test_metrics) == 1
+    assert final_test_metrics[0][1] == 1
+    assert final_controls.events[0][1].output_name == "test_eval"
+    assert final_controls.events[0][1].parent_artifact_ids == (
+        "checkpoint-1",
+        "checkpoint-4",
+    )
+    bundle_receipt = json.loads(
+        (
+            tmp_path / "run" / "test-caption-bundle-step-1" / "receipt.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert bundle_receipt["baseline_checkpoint_artifact_id"] == "checkpoint-1"
+    assert bundle_receipt["final_checkpoint_artifact_id"] == "checkpoint-4"
+    assert timeline.index("test_artifact") < timeline.index("test_metric")
     assert controls.safe_points == [
         ("initialization", 0),
+        ("evaluation", 0),
         ("evaluation", 0),
         ("microbatch", 1),
         ("optimizer_step", 1),
         ("evaluation", 1),
         ("checkpoint", 1),
+        ("evaluation", 1),
     ]
+
+
+def test_checkpoint_evidence_identity_never_reads_live_model_tensors():
+    import rwkv_lab.trainvm_adapters.hf_multimodal_sft as engine
+
+    assert not hasattr(engine, "_trainable_tensor_digest")
+    assert engine._checkpoint_model_state_digest(
+        model_load_receipt="sha256:" + "a" * 64,
+        checkpoint_artifact_id="checkpoint-exact",
+        manifest_digest="sha256:" + "b" * 64,
+    ).startswith("sha256:")
 
 
 def test_test_caption_evidence_batches_by_resolution_and_restores_manifest_order(
@@ -1257,8 +1489,12 @@ def test_test_caption_evidence_batches_by_resolution_and_restores_manifest_order
         device=torch.device("cpu"),
         step=0,
         model_load_receipt="sha256:" + "a" * 64,
+        checkpoint_artifact_id="checkpoint-baseline",
+        checkpoint_manifest_digest="sha256:" + "0" * 64,
+        model_state_digest="sha256:" + "1" * 64,
         split_membership_digest="sha256:" + "b" * 64,
         decode_policy_digest="sha256:" + "c" * 64,
+        model_state_mode="base_adapters_disabled",
         maximum_new_tokens=768,
         generation_batch_size=2,
         use_cache=True,
@@ -1285,6 +1521,21 @@ def test_test_caption_evidence_batches_by_resolution_and_restores_manifest_order
         split_membership_digest="sha256:" + "b" * 64,
         step=0,
     )
+    engine._write_test_scalar_receipt(
+        directory=directory,
+        loss=1.25,
+        records=len(samples),
+        split_membership_digest="sha256:" + "b" * 64,
+        step=0,
+    )
+    with pytest.raises(HFMultimodalSFTError, match="scalar evidence is inconsistent"):
+        engine._write_test_scalar_receipt(
+            directory=directory,
+            loss=1.5,
+            records=len(samples),
+            split_membership_digest="sha256:" + "b" * 64,
+            step=0,
+        )
     final = engine._write_test_caption_evidence(
         directory=tmp_path / "final",
         stack=object(),
@@ -1293,8 +1544,12 @@ def test_test_caption_evidence_batches_by_resolution_and_restores_manifest_order
         device=torch.device("cpu"),
         step=745,
         model_load_receipt="sha256:" + "a" * 64,
+        checkpoint_artifact_id="checkpoint-final",
+        checkpoint_manifest_digest="sha256:" + "9" * 64,
+        model_state_digest="sha256:" + "2" * 64,
         split_membership_digest="sha256:" + "b" * 64,
         decode_policy_digest="sha256:" + "c" * 64,
+        model_state_mode="trained",
         maximum_new_tokens=768,
         generation_batch_size=2,
         use_cache=True,
@@ -1306,13 +1561,329 @@ def test_test_caption_evidence_batches_by_resolution_and_restores_manifest_order
         split_membership_digest="sha256:" + "b" * 64,
         step=745,
     )
+    bundle_identity = {
+        "baseline_checkpoint_artifact_id": "checkpoint-baseline",
+        "baseline_checkpoint_manifest_digest": "sha256:" + "0" * 64,
+        "final_checkpoint_artifact_id": "checkpoint-final",
+        "final_checkpoint_manifest_digest": "sha256:" + "9" * 64,
+        "final_model_state_digest": "sha256:" + "2" * 64,
+    }
     bundle = engine._bundle_test_caption_evidence(
         directory=tmp_path / "bundle",
         baseline=directory,
         final=final,
         split_membership_digest="sha256:" + "b" * 64,
+        **bundle_identity,
     )
     bundle_receipt = json.loads((bundle / "receipt.json").read_text())
     assert bundle_receipt["split_membership_digest"] == "sha256:" + "b" * 64
     assert (bundle / "baseline" / "captions.jsonl").is_file()
     assert (bundle / "final" / "captions.jsonl").is_file()
+    assert (
+        engine._bundle_test_caption_evidence(
+            directory=tmp_path / "bundle",
+            baseline=directory,
+            final=final,
+            split_membership_digest="sha256:" + "b" * 64,
+            **bundle_identity,
+        )
+        == bundle
+    )
+    (directory / "unexpected.txt").write_text("not sealed", encoding="utf-8")
+    with pytest.raises(HFMultimodalSFTError, match="inexact file layout"):
+        engine._bundle_test_caption_evidence(
+            directory=tmp_path / "bundle-source-extra",
+            baseline=directory,
+            final=final,
+            split_membership_digest="sha256:" + "b" * 64,
+            **bundle_identity,
+        )
+    (directory / "unexpected.txt").unlink()
+    baseline_link = tmp_path / "baseline-link"
+    baseline_link.symlink_to(directory, target_is_directory=True)
+    with pytest.raises(HFMultimodalSFTError, match="cannot be a symlink"):
+        engine._bundle_test_caption_evidence(
+            directory=tmp_path / "bundle-source-link",
+            baseline=baseline_link,
+            final=final,
+            split_membership_digest="sha256:" + "b" * 64,
+            **bundle_identity,
+        )
+    identity_path = directory / "identity.json"
+    identity_contents = identity_path.read_bytes()
+    identity_path.unlink()
+    identity_path.write_bytes(identity_contents + b" ")
+    with pytest.raises(HFMultimodalSFTError, match="receipts are inconsistent"):
+        engine._bundle_test_caption_evidence(
+            directory=tmp_path / "bundle-tampered-identity",
+            baseline=directory,
+            final=final,
+            split_membership_digest="sha256:" + "b" * 64,
+            **bundle_identity,
+        )
+    identity_path.unlink()
+    identity_path.write_bytes(identity_contents)
+    final_captions_path = final / "captions.jsonl"
+    final_receipt_path = final / "receipt.json"
+    final_captions_contents = final_captions_path.read_bytes()
+    final_receipt_contents = final_receipt_path.read_bytes()
+    final_records = tuple(
+        json.loads(line) for line in final_captions_contents.splitlines()
+    )
+    final_records[0]["target"] = "misaligned-teacher-target"
+    tampered_captions = b"".join(
+        json.dumps(
+            record,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+        for record in final_records
+    )
+    final_receipt = json.loads(final_receipt_contents)
+    final_receipt["captions_sha256"] = (
+        "sha256:" + hashlib.sha256(tampered_captions).hexdigest()
+    )
+    final_captions_path.unlink()
+    final_captions_path.write_bytes(tampered_captions)
+    final_receipt_path.unlink()
+    final_receipt_path.write_text(
+        json.dumps(final_receipt, separators=(",", ":"), sort_keys=True),
+        encoding="utf-8",
+    )
+    with pytest.raises(HFMultimodalSFTError, match="not identity-aligned"):
+        engine._bundle_test_caption_evidence(
+            directory=tmp_path / "bundle-misaligned-target",
+            baseline=directory,
+            final=final,
+            split_membership_digest="sha256:" + "b" * 64,
+            **bundle_identity,
+        )
+    final_captions_path.unlink()
+    final_captions_path.write_bytes(final_captions_contents)
+    final_receipt_path.unlink()
+    final_receipt_path.write_bytes(final_receipt_contents)
+    (bundle / "unexpected.txt").write_text("not sealed", encoding="utf-8")
+    with pytest.raises(HFMultimodalSFTError, match="bundle is inconsistent"):
+        engine._bundle_test_caption_evidence(
+            directory=bundle,
+            baseline=directory,
+            final=final,
+            split_membership_digest="sha256:" + "b" * 64,
+            **bundle_identity,
+        )
+    (bundle / "unexpected.txt").unlink()
+    identity = bundle / "baseline" / "identity.json"
+    identity.unlink()
+    identity.symlink_to(directory / "identity.json")
+    with pytest.raises(HFMultimodalSFTError, match="bundle is inconsistent"):
+        engine._bundle_test_caption_evidence(
+            directory=bundle,
+            baseline=directory,
+            final=final,
+            split_membership_digest="sha256:" + "b" * 64,
+            **bundle_identity,
+        )
+
+
+def test_test_caption_evidence_retries_failed_ids_and_collapses_latest_records(
+    tmp_path, monkeypatch
+) -> None:
+    import rwkv_lab.trainvm_adapters.hf_multimodal_sft as engine
+
+    samples = tuple(
+        ProcessedSample(
+            sample_id,
+            ordinal,
+            {"caption": f"target-{sample_id}"},
+            image=object(),
+            image_size=(512, 512),
+        )
+        for ordinal, sample_id in enumerate(("a", "b"))
+    )
+    attempts = 0
+
+    def generate(*, samples, **_values):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("transient generation failure")
+        return tuple(
+            (
+                f"target-{sample.sample_id}",
+                f"generated-{attempts}-{sample.sample_id}",
+                "sha256:" + f"{sample.ordinal:064x}",
+            )
+            for sample in samples
+        )
+
+    monkeypatch.setattr(engine, "generate_hf_captions", generate)
+    arguments = {
+        "directory": tmp_path / "evidence",
+        "stack": object(),
+        "codec": object(),
+        "samples": samples,
+        "device": torch.device("cpu"),
+        "step": 0,
+        "model_load_receipt": "sha256:" + "a" * 64,
+        "checkpoint_artifact_id": "checkpoint-baseline",
+        "checkpoint_manifest_digest": "sha256:" + "0" * 64,
+        "model_state_digest": "sha256:" + "1" * 64,
+        "split_membership_digest": "sha256:" + "b" * 64,
+        "decode_policy_digest": "sha256:" + "c" * 64,
+        "model_state_mode": "base_adapters_disabled",
+        "maximum_new_tokens": 32,
+        "generation_batch_size": 2,
+        "use_cache": True,
+    }
+    with pytest.raises(engine.HFMultimodalSFTError, match="failed generations"):
+        engine._write_test_caption_evidence(**arguments)
+    failed = tuple(
+        json.loads(line)
+        for line in (
+            tmp_path / "evidence" / "captions.partial.jsonl"
+        ).read_text().splitlines()
+    )
+    assert [record["status"] for record in failed] == ["failed", "failed"]
+
+    # A torn final append is the only malformed input tolerated during recovery.
+    with (tmp_path / "evidence" / "captions.partial.jsonl").open("ab") as output:
+        output.write(b'{"sample_id":"torn"')
+    directory = engine._write_test_caption_evidence(**arguments)
+    assert not (directory / "captions.partial.jsonl").exists()
+    final = tuple(
+        json.loads(line)
+        for line in (directory / "captions.jsonl").read_text().splitlines()
+    )
+    assert tuple(record["sample_id"] for record in final) == ("a", "b")
+    assert tuple(record["text"] for record in final) == (
+        "generated-2-a",
+        "generated-2-b",
+    )
+    assert json.loads((directory / "receipt.json").read_text())["failures"] == 0
+
+
+def test_test_caption_evidence_rejects_stale_resume_identity(
+    tmp_path, monkeypatch
+) -> None:
+    import rwkv_lab.trainvm_adapters.hf_multimodal_sft as engine
+
+    sample = ProcessedSample(
+        "a", 0, {"caption": "target"}, image=object(), image_size=(512, 512)
+    )
+    monkeypatch.setattr(
+        engine,
+        "generate_hf_captions",
+        lambda **_values: (("target", "generated", "sha256:" + "d" * 64),),
+    )
+    arguments = {
+        "directory": tmp_path / "evidence",
+        "stack": object(),
+        "codec": object(),
+        "samples": (sample,),
+        "device": torch.device("cpu"),
+        "step": 0,
+        "model_load_receipt": "sha256:" + "a" * 64,
+        "checkpoint_artifact_id": "checkpoint-baseline",
+        "checkpoint_manifest_digest": "sha256:" + "0" * 64,
+        "model_state_digest": "sha256:" + "1" * 64,
+        "split_membership_digest": "sha256:" + "b" * 64,
+        "decode_policy_digest": "sha256:" + "c" * 64,
+        "model_state_mode": "base_adapters_disabled",
+        "maximum_new_tokens": 32,
+        "generation_batch_size": 1,
+        "use_cache": True,
+    }
+    engine._write_test_caption_evidence(**arguments)
+    arguments["decode_policy_digest"] = "sha256:" + "e" * 64
+    with pytest.raises(engine.HFMultimodalSFTError, match="stale or mismatched"):
+        engine._write_test_caption_evidence(**arguments)
+    arguments["decode_policy_digest"] = "sha256:" + "c" * 64
+    arguments["model_state_digest"] = "sha256:" + "f" * 64
+    with pytest.raises(engine.HFMultimodalSFTError, match="stale or mismatched"):
+        engine._write_test_caption_evidence(**arguments)
+
+
+def test_test_caption_evidence_resumes_after_base_exception_without_replay(
+    tmp_path, monkeypatch
+) -> None:
+    import rwkv_lab.trainvm_adapters.hf_multimodal_sft as engine
+
+    samples = tuple(
+        ProcessedSample(
+            sample_id,
+            ordinal,
+            {"caption": f"target-{sample_id}"},
+            image=object(),
+            image_size=(512, 512),
+        )
+        for ordinal, sample_id in enumerate(("a", "b", "c", "d"))
+    )
+    first_calls: list[tuple[str, ...]] = []
+
+    def interrupted(*, samples, **_values):
+        identities = tuple(sample.sample_id for sample in samples)
+        first_calls.append(identities)
+        if identities == ("c", "d"):
+            raise KeyboardInterrupt
+        return tuple(
+            (
+                f"target-{sample.sample_id}",
+                f"generated-{sample.sample_id}",
+                "sha256:" + f"{sample.ordinal:064x}",
+            )
+            for sample in samples
+        )
+
+    monkeypatch.setattr(engine, "generate_hf_captions", interrupted)
+    arguments = {
+        "directory": tmp_path / "evidence",
+        "stack": object(),
+        "codec": object(),
+        "samples": samples,
+        "device": torch.device("cpu"),
+        "step": 0,
+        "model_load_receipt": "sha256:" + "a" * 64,
+        "checkpoint_artifact_id": "checkpoint-baseline",
+        "checkpoint_manifest_digest": "sha256:" + "0" * 64,
+        "model_state_digest": "sha256:" + "1" * 64,
+        "split_membership_digest": "sha256:" + "b" * 64,
+        "decode_policy_digest": "sha256:" + "c" * 64,
+        "model_state_mode": "base_adapters_disabled",
+        "maximum_new_tokens": 32,
+        "generation_batch_size": 2,
+        "use_cache": True,
+    }
+    with pytest.raises(KeyboardInterrupt):
+        engine._write_test_caption_evidence(**arguments)
+    assert first_calls == [("a", "b"), ("c", "d")]
+
+    resumed_calls: list[tuple[str, ...]] = []
+
+    def resumed(*, samples, **_values):
+        resumed_calls.append(tuple(sample.sample_id for sample in samples))
+        return tuple(
+            (
+                f"target-{sample.sample_id}",
+                f"generated-{sample.sample_id}",
+                "sha256:" + f"{sample.ordinal:064x}",
+            )
+            for sample in samples
+        )
+
+    monkeypatch.setattr(engine, "generate_hf_captions", resumed)
+    directory = engine._write_test_caption_evidence(**arguments)
+    assert resumed_calls == [("c", "d")]
+    records = tuple(
+        json.loads(line)
+        for line in (directory / "captions.jsonl").read_text().splitlines()
+    )
+    assert tuple(record["sample_id"] for record in records) == (
+        "a",
+        "b",
+        "c",
+        "d",
+    )
+    assert not (directory / "captions.partial.jsonl").exists()

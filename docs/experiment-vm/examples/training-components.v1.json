@@ -118,6 +118,8 @@
         {"name": "alpha", "type": "integer", "required": true, "minimum": 1, "maximum": 65536},
         {"name": "dropout", "type": "number", "required": false, "default": 0.0, "minimum": 0.0, "maximum": 0.999999},
         {"name": "target_manifest_path", "type": "path", "required": true},
+        {"name": "manifest_schema", "type": "string", "required": true},
+        {"name": "required_policy_digest", "type": "string", "required": true, "string_format": "sha256_digest"},
         {"name": "bias", "type": "enumeration", "required": false, "default": "none", "values": ["all", "lora_only", "none"]},
         {"name": "merge_on_completion", "type": "boolean", "required": false, "default": false}
       ],
@@ -953,6 +955,7 @@
       "configuration": [
         {"name": "maximum_new_tokens", "type": "integer", "required": true, "minimum": 1, "maximum": 4096, "unit": "tokens"},
         {"name": "generation_batch_size", "type": "integer", "required": false, "default": 1, "minimum": 1, "maximum": 256, "unit": "count"},
+        {"name": "padding_side", "type": "enumeration", "required": false, "default": "left", "values": ["left"]},
         {"name": "use_cache", "type": "boolean", "required": false, "default": true}
       ],
       "state": [],

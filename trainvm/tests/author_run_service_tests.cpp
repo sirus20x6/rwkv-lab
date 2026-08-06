@@ -118,26 +118,24 @@ std::vector<AdapterProfile> profiles() {
                     {"batching", TrainingComponentCategory::batching},
                     {"split", TrainingComponentCategory::split_selector},
                     {"evaluation_split", TrainingComponentCategory::split_selector},
+                    {"test_split", TrainingComponentCategory::split_selector},
                     {"objective", TrainingComponentCategory::objective},
                     {"optimizer", TrainingComponentCategory::optimizer},
+                    {"learning_rate", TrainingComponentCategory::learning_rate_schedule},
+                    {"weight_decay", TrainingComponentCategory::weight_decay_schedule},
+                    {"gradient_clipping", TrainingComponentCategory::gradient_clipping},
+                    {"gradient_accumulation", TrainingComponentCategory::gradient_accumulation},
                     {"precision", TrainingComponentCategory::precision},
+                    {"activation_memory", TrainingComponentCategory::activation_memory},
                     {"evaluator", TrainingComponentCategory::evaluator},
                     {"evaluation_schedule", TrainingComponentCategory::evaluation_schedule},
+                    {"generation_policy", TrainingComponentCategory::generation_policy},
                     {"qualitative_samples", TrainingComponentCategory::qualitative_sample},
                     {"artifact_renderer", TrainingComponentCategory::artifact_renderer},
                     {"checkpoint_policy", TrainingComponentCategory::checkpoint_policy}},
           .allowed_components = std::nullopt},
       .authoring = OperationAuthoringDeclaration{
-          .inputs = {{"manifest", port(OperationPortType::string, true)},
-                     {"image_column", port(OperationPortType::string, true)},
-                     {"target_column", port(OperationPortType::string, true)},
-                     {"maximum_steps", port(OperationPortType::integer, true)},
-                     {"step_zero_examples",
-                      port(OperationPortType::integer, true)},
-                     {"checkpoint_every",
-                      port(OperationPortType::integer, true)},
-                     {"eval_every", port(OperationPortType::integer, true)},
-                     {"run_directory", port(OperationPortType::string, true)}},
+          .inputs = {},
           .outputs =
               {{"checkpoint",
                 port(OperationPortType::artifact, false,
@@ -147,7 +145,10 @@ std::vector<AdapterProfile> profiles() {
                                 "rwkv-lab.eval-gallery.v2")},
                {"metrics", port(OperationPortType::artifact, false,
                                 ArtifactType::metrics,
-                                "hf.multimodal-sft.metrics.v1")}}}};
+                                "hf.multimodal-sft.metrics.v1")},
+               {"test_eval", port(OperationPortType::artifact, false,
+                                  ArtifactType::report,
+                                  "rwkv-lab.hf-test-caption-evidence-bundle.v1")}}}};
   return {core("acquire_resources", "trainvm.v1.AcquireResources",
                Idempotency::receipt_required),
           core("release_resources", "trainvm.v1.ReleaseResources",
@@ -239,23 +240,73 @@ nlohmann::json prepare_registry(const TemporaryDirectory &temporary) {
   std::filesystem::create_directory(input);
   std::filesystem::create_directory(input / "model");
   std::filesystem::create_directory(input / "data");
-  std::ofstream(input / "data" / "manifest.jsonl")
-      << "{\"image\":\"one.png\",\"caption\":\"one\"}\n";
+  std::filesystem::create_directory(input / "data" / "images");
+  std::filesystem::create_directory(input / "model" / "targets");
   const std::string png_header(
       "\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR"
       "\x00\x00\x00\x01\x00\x00\x00\x01",
       24U);
-  std::ofstream image(input / "data" / "one.png", std::ios::binary);
+  std::ofstream image(input / "data" / "images" / "one.png", std::ios::binary);
   image.write(png_header.data(), static_cast<std::streamsize>(png_header.size()));
-  std::ofstream(input / "model" / "config.json") << "{}\n";
+  image.close();
+  const nlohmann::json split_rows = {
+      {"train", {{{"id", "train-1"}, {"split", "train"},
+                    {"image", "images/one.png"}, {"caption", "train caption"}}}},
+      {"validation", {{{"id", "validation-1"}, {"split", "validation"},
+                         {"image", "images/one.png"},
+                         {"caption", "validation caption"}}}},
+      {"test", {{{"id", "test-1"}, {"split", "test"},
+                   {"image", "images/one.png"}, {"caption", "test caption"}}}}};
+  nlohmann::json counts = nlohmann::json::object();
+  nlohmann::json files = nlohmann::json::object();
+  for (const std::string split : {"train", "validation", "test"}) {
+    std::string payload;
+    for (const auto &row : split_rows.at(split))
+      payload += row.dump() + "\n";
+    const std::string name = split + ".jsonl";
+    std::ofstream(input / "data" / name) << payload;
+    counts[split] = split_rows.at(split).size();
+    files[name] = {{"rows", split_rows.at(split).size()},
+                   {"sha256", sha256_hex(payload)}};
+  }
+  std::ofstream(input / "data" / "manifest.json")
+      << nlohmann::json{{"schema", "fixture.manifested-jsonl-splits.v1"},
+                        {"dataset_digest", "fixture"},
+                        {"counts", counts},
+                        {"files", files},
+                        {"unique_content_hashes", 3}}
+             .dump()
+      << '\n';
+  const std::string model_config =
+      nlohmann::json{{"model_type", "fixture"}}.dump() + "\n";
+  std::ofstream(input / "model" / "config.json") << model_config;
   std::ofstream(input / "model" / "tokenizer_config.json") << "{}\n";
   std::ofstream(input / "model" / "preprocessor_config.json") << "{}\n";
   std::ofstream(input / "model" / "tokenizer.json") << "{}\n";
+  const std::string weight_index =
+      nlohmann::json{
+          {"weight_map",
+           {{"model.language_model.layers.3.self_attn.q_proj.weight",
+             "model-00001-of-00001.safetensors"}}}}
+          .dump() +
+      "\n";
   std::ofstream(input / "model" / "model.safetensors.index.json")
+      << weight_index;
+  const nlohmann::json target_policy = {{"attention", "adapted"},
+                                         {"vision", "frozen"}};
+  const std::filesystem::path target_manifest =
+      input / "model" / "targets" / "custom-targets.json";
+  std::ofstream(target_manifest)
       << nlohmann::json{
-             {"weight_map",
-              {{"model.language_model.layers.3.self_attn.q_proj.weight",
-                "model-00001-of-00001.safetensors"}}}}
+             {"architecture", {"FixtureForCausalLM"}},
+             {"model_config_sha256", sha256_hex(model_config)},
+             {"model_type", "fixture"},
+             {"policy", target_policy},
+             {"schema", "fixture.generic-targets.v9"},
+             {"target_count", 1},
+             {"target_digest", std::string(64U, 'a')},
+             {"targets", {"model.language_model.layers.3.self_attn.q_proj"}},
+             {"weight_index_sha256", sha256_hex(weight_index)}}
              .dump()
       << '\n';
   (void)::chmod(input.c_str(), 0755);
@@ -266,10 +317,15 @@ nlohmann::json prepare_registry(const TemporaryDirectory &temporary) {
   auto &loader = spec["workflow"]["nodes"]["train"]["invoke"]["training"]
                      ["components"]["model_loader"]["configuration"];
   loader["model_path"] = (input / "model").string();
-  data["manifest_path"] = (input / "data" / "manifest.jsonl").string();
-  data["image_root"] = (input / "data").string();
-  spec["parameters"]["manifest_path"]["value"] =
-      (input / "data" / "manifest.jsonl").string();
+  data["dataset_root"] = (input / "data").string();
+  auto &trainability = spec["workflow"]["nodes"]["train"]["invoke"]
+                            ["training"]["components"]["trainability"]
+                            ["configuration"];
+  trainability["target_manifest_path"] = target_manifest.string();
+  trainability["manifest_schema"] = "fixture.generic-targets.v9";
+  trainability["required_policy_digest"] =
+      "sha256:" + sha256_hex(target_policy.dump());
+  trainability["rank"] = 64;
   spec["workspace"]["root"] = temporary.path().string();
   spec["workspace"]["run_directory"] = run.string();
   spec["workspace"]["allowed_read_roots"] = {input.string()};
@@ -286,8 +342,10 @@ std::string author_document(const TemporaryDirectory &temporary,
       "docs/experiment-vm/examples/qwen-caption-lora-r256.recipe-instance.v1.json"));
   const auto input = temporary.path() / "input";
   instance["overrides"]["model.path"] = (input / "model").string();
-  instance["overrides"]["data.manifest"] =
-      (input / "data" / "manifest.jsonl").string();
+  instance["overrides"]["data.root"] = (input / "data").string();
+  instance["overrides"]["model.target_manifest"] =
+      (input / "model" / "targets" / "custom-targets.json").string();
+  instance["overrides"]["trainability.lora_rank"] = 64;
   return nlohmann::json{
       {"api_version", kAuthorRunApiVersion},
       {"source", {{"recipe", {{"registry_path", registry_path.string()},
@@ -365,6 +423,40 @@ int main() {
         exact_evidence.node_id != "train")
       throw std::runtime_error(
           "checked-in HF recipe did not pass the production native probe");
+    const auto& compiled_checkpoint =
+        passively_resolved.plan.experiment.spec.artifacts.at("checkpoint");
+    if (!compiled_checkpoint.required)
+      throw std::runtime_error(
+          "checked-in HF recipe does not require a durable checkpoint");
+    const auto invocation_components = TrainingComponentRegistry::from_json(
+        read_file(std::filesystem::path(TRAINVM_SOURCE_ROOT) /
+                  "docs/experiment-vm/examples/training-components.v1.json"));
+    const auto& compiled_train =
+        passively_resolved.plan.experiment.spec.workflow.nodes.at("train");
+    if (!compiled_train.invoke.training)
+      throw std::runtime_error("checked-in HF recipe lost its training composition");
+    const auto compiled_invocation = build_worker_invocation(
+        passively_resolved.plan,
+        WorkerInvocationContext{
+            .run_id = "author-run-required-output",
+            .node_id = "train",
+            .attempt_id = "attempt-required-output",
+            .dispatch_id = "dispatch-required-output",
+            .plan_revision = 1U,
+            .host_id = "sha256:" + std::string(64U, '8'),
+            .artifacts = {},
+            .effective_controls = nlohmann::json::object(),
+            .effective_control_revision = 0U,
+            .resolved_training = resolved_training_composition_json(
+                invocation_components.resolve_composition(
+                    *compiled_train.invoke.training)),
+            .resume = nullptr,
+        });
+    if (!compiled_invocation.publishes.at("checkpoint")
+             .at("declaration")
+             .value("required", false))
+      throw std::runtime_error(
+          "compiled HF invocation weakened its required checkpoint output");
 
     const auto preview = invoke(*stub, document, true);
     const auto resolving = std::ranges::find_if(
@@ -399,9 +491,10 @@ int main() {
                           : preview.back().diagnostics(0).code() + ":" +
                                 preview.back().diagnostics(0).message())));
 
-    std::ofstream(temporary.path() / "input" / "data" / "manifest.jsonl",
+    std::ofstream(temporary.path() / "input" / "data" / "train.jsonl",
                   std::ios::app)
-        << "{\"image\":\"two.png\",\"caption\":\"two\"}\n";
+        << "{\"id\":\"train-2\",\"split\":\"train\","
+           "\"image\":\"images/one.png\",\"caption\":\"two\"}\n";
     const auto stale = invoke(*stub, document, false,
                               preview.back().plan_hash());
     if (stale.empty() || stale.back().stage() != v1::AUTHOR_RUN_STAGE_FAILED ||

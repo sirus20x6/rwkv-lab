@@ -5,7 +5,7 @@
   "overrides": {
     "model.path": "/thearray/git/ob/text-generation-webui/models/Qwen3.6-35B-A3B-heretic",
     "data.root": "/thearray/git/datasets/captiontest/qwen36-caption-finetune-v1",
-    "trainability.target_manifest": "/thearray/git/datasets/captiontest/qwen36-caption-finetune-v1/lora-targets.json",
+    "model.target_manifest": "/thearray/git/datasets/captiontest/qwen36-caption-finetune-v1/lora-targets.json",
     "data.batch_size": 1,
     "trainability.lora_rank": 256,
     "trainability.lora_alpha": 512,

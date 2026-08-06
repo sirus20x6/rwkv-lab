@@ -20,7 +20,7 @@ def digest(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
-def composition():
+def composition(*, frozen_evaluation: bool = False):
     root = Path(__file__).resolve().parents[1]
     registry = json.loads(
         (root / "docs/experiment-vm/examples/training-components.v1.json").read_text(
@@ -93,8 +93,12 @@ def composition():
             {"seed": 7, "held_out_count": 2, "selection": "train"},
         ),
         "evaluation_split": (
-            "deterministic_holdout",
-            {"seed": 7, "held_out_count": 2, "selection": "held_out"},
+            "frozen_named" if frozen_evaluation else "deterministic_holdout",
+            (
+                {"selection": "validation"}
+                if frozen_evaluation
+                else {"seed": 7, "held_out_count": 2, "selection": "held_out"}
+            ),
         ),
         "evaluator": (
             "scalar_loss",
@@ -140,6 +144,10 @@ def composition():
             },
         ),
     }
+    if frozen_evaluation:
+        requested = {
+            slot: requested[slot] for slot in ("evaluation_split", "evaluator")
+        }
     components = {}
     for slot, (name, configuration) in requested.items():
         category = {
@@ -162,7 +170,7 @@ def composition():
     body = {
         "api_version": "trainvm.resolved-training-composition/v1",
         "components": components,
-        "model_family": "rwkv",
+        "model_family": "transformer" if frozen_evaluation else "rwkv",
         "registry_digest": digest(canonical(registry)),
     }
     return load_resolved_training_composition(
@@ -247,6 +255,17 @@ def test_worker_component_bridge_rejects_family_and_slot_category_confusion() ->
     parameter = torch.nn.Parameter(torch.tensor([1.0]))
     with pytest.raises(ValueError, match="not 'optimizer'"):
         runtime.optimizer([parameter], slot="learning_rate")
+
+
+def test_worker_evaluator_bridge_accepts_production_frozen_validation_split() -> None:
+    runtime = WorkerTrainingComponents(
+        composition(frozen_evaluation=True), "transformer"
+    )
+
+    evaluator = runtime.evaluator()
+
+    assert evaluator.configuration.split_slot == "evaluation_split"
+    assert evaluator.reduce((2.0, 4.0)) == pytest.approx(3.0)
 
 
 def test_worker_optimizer_and_schedule_resume_the_same_next_update() -> None:

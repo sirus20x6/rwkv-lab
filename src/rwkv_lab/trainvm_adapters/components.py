@@ -109,9 +109,16 @@ class WorkerTrainingComponents:
         split = self.composition.require(
             evaluator.configuration.split_slot, category="split_selector"
         )
-        if split.configuration["selection"] != "held_out":
+        expected_selection = {
+            "rwkv_lab.split_selector.deterministic_holdout.v1": "held_out",
+            "rwkv_lab.split_selector.frozen_named.v1": "validation",
+        }.get(split.implementation)
+        if (
+            expected_selection is None
+            or split.configuration["selection"] != expected_selection
+        ):
             raise AdapterComponentError(
-                "evaluator split slot does not select the held-out partition"
+                "evaluator split slot does not select its validation partition"
             )
         return evaluator
 

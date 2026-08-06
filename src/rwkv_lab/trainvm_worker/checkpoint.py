@@ -106,6 +106,7 @@ class PublishedCheckpoint:
 class ResolvedResumeCheckpoint:
     artifact_id: str
     manifest_path: Path
+    manifest_sha256: str
     payload_directory: Path
     optimizer_step: int
     resume_grade: str
@@ -616,6 +617,7 @@ def resolve_resume_checkpoint(invocation: object) -> ResolvedResumeCheckpoint | 
     return ResolvedResumeCheckpoint(
         artifact_id=str(checkpoint.get("artifact_id")),
         manifest_path=manifest_path,
+        manifest_sha256=str(checkpoint.get("fingerprint")),
         payload_directory=payload,
         optimizer_step=optimizer_step,
         resume_grade=resume_grade,

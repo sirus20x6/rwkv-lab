@@ -127,6 +127,16 @@ OperationAuthoringDeclaration hf_multimodal_sft_authoring() {
            .description =
                "Required checkpoint-bound step-zero and periodic held-out evidence.",
        }},
+      {"test_eval",
+       OperationPortDescriptor{
+           .type = OperationPortType::artifact,
+           .required = true,
+           .artifact_type = ArtifactType::report,
+           .artifact_schema =
+               "rwkv-lab.hf-test-caption-evidence-bundle.v1",
+           .description =
+               "Required immutable baseline/final test-caption evidence bundle.",
+       }},
   };
   return authoring;
 }

@@ -54,6 +54,9 @@ class AdapterDispatchError(ValueError):
     pass
 
 
+_UNRESOLVED_RESUME = object()
+
+
 @dataclass(frozen=True, slots=True)
 class HandlerResult:
     event_type: str
@@ -151,8 +154,10 @@ def _resume_payload(
     paths: WorkspacePathAuthority,
     *,
     required_state: frozenset[str],
+    resolved: Any = _UNRESOLVED_RESUME,
 ) -> Path | None:
-    resolved = resolve_resume_checkpoint(invocation)
+    if resolved is _UNRESOLVED_RESUME:
+        resolved = resolve_resume_checkpoint(invocation)
     if resolved is None:
         return None
     missing = required_state.difference(resolved.state_components)
@@ -787,7 +792,14 @@ def _hf_multimodal_sft(
             str(target_manifest_value), label="HF LoRA target manifest", kind="file"
         )
         try:
-            preflight_lora_target_manifest(resolved_model, target_manifest)
+            preflight_lora_target_manifest(
+                resolved_model,
+                target_manifest,
+                manifest_schema=trainability.configuration.manifest_schema,
+                required_policy_digest=(
+                    trainability.configuration.required_policy_digest
+                ),
+            )
         except (OSError, TypeError, ValueError) as error:
             raise AdapterDispatchError(
                 "HF LoRA target manifest failed snapshot preflight"
@@ -823,12 +835,19 @@ def _hf_multimodal_sft(
                     f"HF {field} escapes the frozen dataset root"
                 ) from error
         if target_manifest_value is not None:
-            try:
-                target_manifest.relative_to(resolved_root)
-            except ValueError as error:
+            covered = False
+            for identity in paths.input_content_roots:
+                authority_root = Path(identity.path)
+                try:
+                    target_manifest.relative_to(authority_root)
+                except ValueError:
+                    continue
+                covered = True
+                break
+            if not covered:
                 raise AdapterDispatchError(
-                    "HF LoRA target manifest escapes the frozen dataset root"
-                ) from error
+                    "HF LoRA target manifest lacks input-content authority"
+                )
         manifest = None
     else:
         manifest = paths.read_path(
@@ -888,6 +907,7 @@ def _hf_multimodal_sft(
         raise AdapterDispatchError(
             "HF data failed authority-bound pre-load validation"
         ) from error
+    resolved_resume = resolve_resume_checkpoint(invocation)
     resume = _resume_payload(
         invocation,
         paths,
@@ -906,14 +926,17 @@ def _hf_multimodal_sft(
                 "weight_decay_schedule",
             }
         ),
+        resolved=resolved_resume,
     )
     parent_ids: tuple[str, ...] = ()
+    resume_manifest_digest: str | None = None
     if invocation.resume is not None:
-        checkpoint = invocation.resume.get("checkpoint")
-        artifact_id = checkpoint.get("artifact_id") if isinstance(checkpoint, Mapping) else None
-        if not isinstance(artifact_id, str) or not artifact_id:
-            raise AdapterDispatchError("HF resume checkpoint has no artifact identity")
-        parent_ids = (artifact_id,)
+        if resolved_resume is None:
+            raise AdapterDispatchError(
+                "HF resume checkpoint has no artifact/manifest identity"
+            )
+        parent_ids = (resolved_resume.artifact_id,)
+        resume_manifest_digest = resolved_resume.manifest_sha256
     from .hf_multimodal_sft import run_hf_multimodal_sft
 
     step = run_hf_multimodal_sft(
@@ -925,6 +948,7 @@ def _hf_multimodal_sft(
         step_profiler=step_profiler or NullStepProfiler(),
         resume_directory=resume,
         resume_parent_artifact_ids=parent_ids,
+        resume_checkpoint_manifest_digest=resume_manifest_digest,
     )
     return HandlerResult(
         "worker.completed",

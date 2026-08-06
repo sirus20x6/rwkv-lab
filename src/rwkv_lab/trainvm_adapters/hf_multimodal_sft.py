@@ -59,6 +59,10 @@ _MULTIMODAL_TENSOR_KEYS = frozenset(
     }
 )
 _ENGINE_STATE_SCHEMA = "rwkv-lab.hf-multimodal-sft-state.v1"
+_PENDING_PUBLICATION_DIGEST = (
+    "sha256:"
+    + hashlib.sha256(b"rwkv-lab.checkpoint-publication-pending/v1").hexdigest()
+)
 
 
 class HFMultimodalSFTError(RuntimeError):
@@ -160,6 +164,15 @@ def _digest(value: object) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _is_digest(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 71
+        and value.startswith("sha256:")
+        and all(character in "0123456789abcdef" for character in value[7:])
+    )
 
 
 def _prompt_and_target(
@@ -382,9 +395,10 @@ class HFForwardBatchCodec:
         tokenizer = getattr(processor, "tokenizer", None)
         if tokenizer is None:
             raise HFMultimodalSFTError("multimodal processor exposes no tokenizer")
-        if getattr(tokenizer, "padding_side", "right") != "right":
+        padding_side = getattr(tokenizer, "padding_side", None)
+        if padding_side not in {"left", "right"}:
             raise HFMultimodalSFTError(
-                "multimodal assistant masking requires right padding"
+                "multimodal assistant masking requires an explicit padding side"
             )
         prompts: list[str] = []
         full_texts: list[str] = []
@@ -476,6 +490,8 @@ class HFForwardBatchCodec:
             zip(raw_prompts, raw_full, strict=True)
         ):
             token_count = int(attention[index].sum())
+            token_start = 0 if padding_side == "right" else input_ids.shape[1] - token_count
+            token_end = token_start + token_count
             if token_count > min(
                 mapper.maximum_tokens,
                 self.collator_configuration.maximum_sequence_length,
@@ -484,8 +500,8 @@ class HFForwardBatchCodec:
                     "image-token-expanded sequence exceeds the declared token policy"
                 )
             expansion = token_count - len(full_ids)
-            boundary = len(prompt_ids) + expansion
-            if not 0 < boundary < token_count:
+            boundary = token_start + len(prompt_ids) + expansion
+            if not token_start < boundary < token_end:
                 raise HFMultimodalSFTError(
                     "image-token expansion erased the assistant target"
                 )
@@ -494,11 +510,11 @@ class HFForwardBatchCodec:
                 dtype=input_ids.dtype,
                 device=input_ids.device,
             )
-            if not torch.equal(input_ids[index, boundary:token_count], suffix):
+            if not torch.equal(input_ids[index, boundary:token_end], suffix):
                 raise HFMultimodalSFTError(
                     "image-token expansion changed the assistant target suffix"
                 )
-            labels[index, boundary:token_count] = input_ids[index, boundary:token_count]
+            labels[index, boundary:token_end] = input_ids[index, boundary:token_end]
         tensors["labels"] = labels
         supervised = int(
             (labels != self.collator_configuration.label_pad_token_id).sum()
@@ -1759,6 +1775,25 @@ def generate_hf_captions(
     return tuple(result)
 
 
+def _checkpoint_model_state_digest(
+    *, model_load_receipt: str, checkpoint_artifact_id: str, manifest_digest: str
+) -> str:
+    if (
+        not _is_digest(model_load_receipt)
+        or not checkpoint_artifact_id
+        or not _is_digest(manifest_digest)
+    ):
+        raise HFMultimodalSFTError("checkpoint model-state identity is invalid")
+    return _digest(
+        {
+            "api_version": "rwkv-lab.hf-checkpoint-model-state/v1",
+            "checkpoint_artifact_id": checkpoint_artifact_id,
+            "checkpoint_manifest_digest": manifest_digest,
+            "model_load_receipt": model_load_receipt,
+        }
+    )
+
+
 def _component_state(
     *,
     components: Any,
@@ -1833,21 +1868,257 @@ def _write_test_caption_evidence(
     device: torch.device,
     step: int,
     model_load_receipt: str,
+    checkpoint_artifact_id: str,
+    checkpoint_manifest_digest: str,
+    model_state_digest: str,
     split_membership_digest: str,
     decode_policy_digest: str,
+    model_state_mode: str,
     maximum_new_tokens: int,
     generation_batch_size: int,
     use_cache: bool,
     progress: Callable[[int, int, int, float], None] | None = None,
 ) -> Path:
-    directory.mkdir(mode=0o750, exist_ok=False)
+    directory.mkdir(mode=0o750, exist_ok=True)
+    if model_state_mode not in {"base_adapters_disabled", "trained"}:
+        raise HFMultimodalSFTError("test evidence model-state mode is invalid")
+    if (
+        not checkpoint_artifact_id
+        or not _is_digest(checkpoint_manifest_digest)
+        or not _is_digest(model_state_digest)
+    ):
+        raise HFMultimodalSFTError("test evidence model-state digest is invalid")
     path = directory / "captions.jsonl"
-    failures = 0
+    partial_path = directory / "captions.partial.jsonl"
+    identity_path = directory / "identity.json"
+    sample_ids = tuple(sample.sample_id for sample in samples)
+    if not sample_ids or len(set(sample_ids)) != len(sample_ids):
+        raise HFMultimodalSFTError("test caption evidence IDs are empty or duplicate")
+    identity = {
+        "api_version": "rwkv-lab.hf-test-caption-evidence-identity/v1",
+        "checkpoint_artifact_id": checkpoint_artifact_id,
+        "checkpoint_manifest_digest": checkpoint_manifest_digest,
+        "decode_policy_digest": decode_policy_digest,
+        "model_load_receipt": model_load_receipt,
+        "model_state_digest": model_state_digest,
+        "model_state_mode": model_state_mode,
+        "records": len(samples),
+        "sample_ids_digest": _digest(sample_ids),
+        "split_membership_digest": split_membership_digest,
+        "step": step,
+    }
+    identity_encoded = json.dumps(
+        identity, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    identity_digest = "sha256:" + hashlib.sha256(identity_encoded).hexdigest()
+    if identity_path.exists():
+        if identity_path.read_bytes() != identity_encoded:
+            raise HFMultimodalSFTError(
+                "partial test caption evidence identity is stale or mismatched"
+            )
+    else:
+        with _exclusive_output(directory, "identity.json") as output:
+            output.write(identity_encoded)
+            output.flush()
+            os.fsync(output.fileno())
+    receipt_path = directory / "receipt.json"
+    if receipt_path.is_file() and path.is_file():
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        encoded_final = path.read_bytes()
+        try:
+            final_records = tuple(
+                json.loads(line) for line in encoded_final.splitlines()
+            )
+        except json.JSONDecodeError as error:
+            raise HFMultimodalSFTError(
+                "final test caption evidence is malformed"
+            ) from error
+        final_records_valid = (
+            encoded_final.endswith(b"\n")
+            and len(final_records) == len(samples)
+            and all(
+                isinstance(record, dict)
+                and set(record)
+                == {
+                    "error_code",
+                    "prompt_digest",
+                    "sample_id",
+                    "status",
+                    "step",
+                    "target",
+                    "text",
+                    "wall_time_ms",
+                }
+                and record["sample_id"] == expected_id
+                and record["status"] == "complete"
+                and record["error_code"] is None
+                and isinstance(record["step"], int)
+                and not isinstance(record["step"], bool)
+                and record["step"] == step
+                and isinstance(record["wall_time_ms"], (int, float))
+                and not isinstance(record["wall_time_ms"], bool)
+                and math.isfinite(float(record["wall_time_ms"]))
+                and float(record["wall_time_ms"]) >= 0.0
+                and all(
+                    isinstance(record[field], str) and record[field].strip()
+                    for field in ("prompt_digest", "target", "text")
+                )
+                and len(record["prompt_digest"]) == 71
+                and record["prompt_digest"].startswith("sha256:")
+                and all(
+                    character in "0123456789abcdef"
+                    for character in record["prompt_digest"][7:]
+                )
+                for record, expected_id in zip(
+                    final_records, sample_ids, strict=True
+                )
+            )
+        )
+        if (
+            set(receipt)
+            != {
+                "api_version",
+                "captions_sha256",
+                "checkpoint_artifact_id",
+                "checkpoint_manifest_digest",
+                "decode_policy_digest",
+                "failures",
+                "identity_sha256",
+                "model_load_receipt",
+                "model_state_digest",
+                "model_state_mode",
+                "records",
+                "split_membership_digest",
+                "step",
+                "total_wall_time_ms",
+            }
+            or receipt.get("api_version")
+            != "rwkv-lab.hf-test-caption-evidence/v1"
+            or receipt.get("records") != len(samples)
+            or receipt.get("failures") != 0
+            or receipt.get("identity_sha256") != identity_digest
+            or receipt.get("checkpoint_artifact_id") != checkpoint_artifact_id
+            or receipt.get("checkpoint_manifest_digest")
+            != checkpoint_manifest_digest
+            or receipt.get("model_load_receipt") != model_load_receipt
+            or receipt.get("model_state_digest") != model_state_digest
+            or receipt.get("model_state_mode") != model_state_mode
+            or receipt.get("split_membership_digest") != split_membership_digest
+            or receipt.get("decode_policy_digest") != decode_policy_digest
+            or receipt.get("step") != step
+            or isinstance(receipt.get("total_wall_time_ms"), bool)
+            or not isinstance(receipt.get("total_wall_time_ms"), (int, float))
+            or not math.isfinite(float(receipt["total_wall_time_ms"]))
+            or float(receipt["total_wall_time_ms"]) < 0.0
+            or receipt.get("captions_sha256")
+            != "sha256:" + hashlib.sha256(encoded_final).hexdigest()
+            or not final_records_valid
+        ):
+            raise HFMultimodalSFTError("final test caption evidence is inconsistent")
+        partial_path.unlink(missing_ok=True)
+        directory_descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+        return directory
+
+    allowed_ids = frozenset(sample_ids)
+    latest: dict[str, dict[str, Any]] = {}
     total_wall_time_ms = 0.0
+    failures = 0
+    if partial_path.exists():
+        encoded = partial_path.read_bytes()
+        valid_end = 0
+        chunks = encoded.splitlines(keepends=True)
+        for offset, chunk in enumerate(chunks):
+            complete_line = chunk.endswith(b"\n")
+            try:
+                record = json.loads(chunk)
+            except json.JSONDecodeError as error:
+                if offset != len(chunks) - 1:
+                    raise HFMultimodalSFTError(
+                        "partial test caption evidence is malformed before EOF"
+                    ) from error
+                with partial_path.open("r+b") as output:
+                    output.truncate(valid_end)
+                    output.flush()
+                    os.fsync(output.fileno())
+                break
+            if (
+                not isinstance(record, dict)
+                or set(record)
+                != {
+                    "error_code",
+                    "prompt_digest",
+                    "sample_id",
+                    "status",
+                    "step",
+                    "target",
+                    "text",
+                    "wall_time_ms",
+                }
+                or record.get("sample_id") not in allowed_ids
+                or not isinstance(record.get("sample_id"), str)
+                or isinstance(record.get("step"), bool)
+                or not isinstance(record.get("step"), int)
+                or record.get("step") != step
+                or record.get("status") not in {"complete", "failed"}
+                or isinstance(record.get("wall_time_ms"), bool)
+                or not isinstance(record.get("wall_time_ms"), (int, float))
+                or not math.isfinite(float(record["wall_time_ms"]))
+                or float(record["wall_time_ms"]) < 0.0
+            ):
+                raise HFMultimodalSFTError(
+                    "partial test caption evidence record is inexact"
+                )
+            total_wall_time_ms += float(record.get("wall_time_ms", 0.0))
+            if record["status"] == "complete":
+                if not all(
+                    isinstance(record[field], str) and record[field].strip()
+                    for field in ("prompt_digest", "target", "text")
+                ) or record["error_code"] is not None or not (
+                    len(record["prompt_digest"]) == 71
+                    and record["prompt_digest"].startswith("sha256:")
+                    and all(
+                        character in "0123456789abcdef"
+                        for character in record["prompt_digest"][7:]
+                    )
+                ):
+                    raise HFMultimodalSFTError(
+                        "partial completed caption evidence is empty"
+                    )
+            elif not (
+                isinstance(record["error_code"], str)
+                and record["error_code"].strip()
+                and record["prompt_digest"] == ""
+                and record["target"] == ""
+                and record["text"] == ""
+            ):
+                raise HFMultimodalSFTError(
+                    "partial failed caption evidence is inconsistent"
+                )
+            latest[record["sample_id"]] = record
+            valid_end += len(chunk)
+            if not complete_line:
+                with partial_path.open("ab") as output:
+                    output.write(b"\n")
+                    output.flush()
+                    os.fsync(output.fileno())
+
     records: list[dict[str, Any] | None] = [None] * len(samples)
-    completed = 0
+    for index, sample in enumerate(samples):
+        candidate = latest.get(sample.sample_id)
+        if candidate is not None and candidate["status"] == "complete":
+            records[index] = candidate
+    completed = sum(record is not None for record in records)
+    failures = sum(record["status"] == "failed" for record in latest.values())
+    if progress is not None:
+        progress(completed, len(samples), failures, total_wall_time_ms)
     resolution_buckets: dict[tuple[int, int] | None, list[int]] = {}
     for index, sample in enumerate(samples):
+        if records[index] is not None:
+            continue
         key = (
             (
                 (sample.image_size[0] + 255) // 256,
@@ -1862,70 +2133,127 @@ def _write_test_caption_evidence(
         for indices in resolution_buckets.values()
         for start in range(0, len(indices), generation_batch_size)
     )
-    for indices in batches:
-        batch = tuple(samples[index] for index in indices)
-        started = time.perf_counter()
-        try:
-            generated = generate_hf_captions(
-                stack=stack,
-                codec=codec,
-                samples=batch,
-                device=device,
-                maximum_new_tokens=maximum_new_tokens,
-                use_cache=use_cache,
-            )
-            if len(generated) != len(batch):
-                raise HFMultimodalSFTError(
-                    "test caption batch returned the wrong record count"
+    partial_descriptor = os.open(
+        partial_path,
+        os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0),
+        0o640,
+    )
+    with os.fdopen(partial_descriptor, "ab") as partial:
+        for indices in batches:
+            batch = tuple(samples[index] for index in indices)
+            started = time.perf_counter()
+            try:
+                generated = generate_hf_captions(
+                    stack=stack,
+                    codec=codec,
+                    samples=batch,
+                    device=device,
+                    maximum_new_tokens=maximum_new_tokens,
+                    use_cache=use_cache,
                 )
-            status = "complete"
-            error_code = None
-        except Exception:  # noqa: BLE001 - bounded evidence, then fail closed
-            generated = tuple(("", "", "") for _ in batch)
-            status = "failed"
-            error_code = "generation_failed"
-            failures += len(batch)
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
-        total_wall_time_ms += elapsed_ms
-        per_item_ms = elapsed_ms / len(batch)
-        for index, sample, evidence in zip(indices, batch, generated, strict=True):
-            target, current, prompt_digest = evidence
-            records[index] = {
-                "error_code": error_code,
-                "prompt_digest": prompt_digest,
-                "sample_id": sample.sample_id,
-                "status": status,
-                "step": step,
-                "target": target,
-                "text": current,
-                "wall_time_ms": per_item_ms,
-            }
-        completed += len(batch)
-        if progress is not None:
-            progress(completed, len(samples), failures, total_wall_time_ms)
-    with _exclusive_output(path.parent, path.name) as output:
-        for record in records:
-            if record is None:
-                raise HFMultimodalSFTError("test caption evidence is incomplete")
-            output.write(
-                json.dumps(
-                    record,
-                    allow_nan=False,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ).encode("utf-8")
-                + b"\n"
+                if len(generated) != len(batch):
+                    raise HFMultimodalSFTError(
+                        "test caption batch returned the wrong record count"
+                    )
+                status = "complete"
+                error_code = None
+            except Exception:  # noqa: BLE001 - persist the failure, then fence
+                generated = tuple(("", "", "") for _ in batch)
+                status = "failed"
+                error_code = "generation_failed"
+                failures += len(batch)
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            total_wall_time_ms += elapsed_ms
+            per_item_ms = elapsed_ms / len(batch)
+            for index, sample, evidence in zip(
+                indices, batch, generated, strict=True
+            ):
+                target, current, prompt_digest = evidence
+                record = {
+                    "error_code": error_code,
+                    "prompt_digest": prompt_digest,
+                    "sample_id": sample.sample_id,
+                    "status": status,
+                    "step": step,
+                    "target": target,
+                    "text": current,
+                    "wall_time_ms": per_item_ms,
+                }
+                partial.write(
+                    json.dumps(
+                        record,
+                        allow_nan=False,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8")
+                    + b"\n"
+                )
+                latest[sample.sample_id] = record
+                if status == "complete":
+                    records[index] = record
+            partial.flush()
+            os.fsync(partial.fileno())
+            failures = sum(
+                record["status"] == "failed" for record in latest.values()
             )
-        output.flush()
-        os.fsync(output.fileno())
+            if status == "failed":
+                raise HFMultimodalSFTError(
+                    f"HF test caption gate recorded {failures} failed generations"
+                )
+            completed += len(batch)
+            if progress is not None:
+                progress(completed, len(samples), failures, total_wall_time_ms)
+    encoded_records = bytearray()
+    for record in records:
+        if record is None:
+            raise HFMultimodalSFTError("test caption evidence is incomplete")
+        encoded_records.extend(
+            json.dumps(
+                record,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            + b"\n"
+        )
+    if path.exists():
+        if path.read_bytes() != encoded_records:
+            raise HFMultimodalSFTError(
+                "unsealed final test caption evidence is inconsistent"
+            )
+    else:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".captions-complete-", suffix=".jsonl", dir=directory
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(encoded_records)
+                output.flush()
+                os.fsync(output.fileno())
+            os.chmod(temporary, 0o440, follow_symlinks=False)
+            os.replace(temporary, path)
+            directory_descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        finally:
+            temporary.unlink(missing_ok=True)
     file_digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
     receipt = {
         "api_version": "rwkv-lab.hf-test-caption-evidence/v1",
         "captions_sha256": file_digest,
+        "checkpoint_artifact_id": checkpoint_artifact_id,
+        "checkpoint_manifest_digest": checkpoint_manifest_digest,
         "decode_policy_digest": decode_policy_digest,
         "failures": failures,
+        "identity_sha256": identity_digest,
         "model_load_receipt": model_load_receipt,
+        "model_state_digest": model_state_digest,
+        "model_state_mode": model_state_mode,
         "records": len(records),
         "split_membership_digest": split_membership_digest,
         "step": step,
@@ -1943,10 +2271,12 @@ def _write_test_caption_evidence(
         )
         output.flush()
         os.fsync(output.fileno())
-    if failures:
-        raise HFMultimodalSFTError(
-            f"HF test caption gate recorded {failures} failed generations"
-        )
+    partial_path.unlink(missing_ok=True)
+    directory_descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
     return directory
 
 
@@ -1956,34 +2286,391 @@ def _bundle_test_caption_evidence(
     baseline: Path,
     final: Path,
     split_membership_digest: str,
+    baseline_checkpoint_artifact_id: str,
+    baseline_checkpoint_manifest_digest: str,
+    final_checkpoint_artifact_id: str,
+    final_checkpoint_manifest_digest: str,
+    final_model_state_digest: str,
 ) -> Path:
-    directory.mkdir(mode=0o750, exist_ok=False)
-    for name, source in (("baseline", baseline), ("final", final)):
-        if not source.is_dir():
-            raise HFMultimodalSFTError("test caption evidence bundle is incomplete")
-        shutil.copytree(source, directory / name, copy_function=shutil.copy2)
+    if (
+        not baseline_checkpoint_artifact_id
+        or not final_checkpoint_artifact_id
+        or not _is_digest(baseline_checkpoint_manifest_digest)
+        or not _is_digest(final_checkpoint_manifest_digest)
+        or not _is_digest(final_model_state_digest)
+    ):
+        raise HFMultimodalSFTError("test evidence bundle identity is invalid")
+    sources = {"baseline": baseline, "final": final}
+    sealed_names = frozenset(
+        {"captions.jsonl", "identity.json", "receipt.json", "scalar-evaluation.json"}
+    )
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+
+    def regular_bytes(parent: int, name: str) -> bytes:
+        try:
+            descriptor = os.open(name, os.O_RDONLY | nofollow, dir_fd=parent)
+        except OSError as error:
+            raise HFMultimodalSFTError(
+                "sealed test caption evidence cannot be opened without following links"
+            ) from error
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                raise HFMultimodalSFTError(
+                    "sealed test caption evidence contains a special node"
+                )
+            chunks: list[bytes] = []
+            size = 0
+            while chunk := os.read(descriptor, 4 * 1024 * 1024):
+                chunks.append(chunk)
+                size += len(chunk)
+            after = os.fstat(descriptor)
+            if (
+                size != before.st_size
+                or after.st_size != before.st_size
+                or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+            ):
+                raise HFMultimodalSFTError(
+                    "sealed test caption evidence changed while reading"
+                )
+            return b"".join(chunks)
+        finally:
+            os.close(descriptor)
+
+    def sealed_bytes_from_descriptor(root: int) -> dict[str, bytes]:
+        try:
+            names = tuple(os.listdir(root))
+        except OSError as error:
+            raise HFMultimodalSFTError(
+                "test caption evidence bundle is incomplete"
+            ) from error
+        if set(names) != sealed_names:
+            raise HFMultimodalSFTError(
+                "sealed test caption evidence has an inexact file layout"
+            )
+        return {name: regular_bytes(root, name) for name in sorted(sealed_names)}
+
+    def sealed_bytes(root: Path) -> dict[str, bytes]:
+        try:
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+        except OSError as error:
+            raise HFMultimodalSFTError(
+                "sealed test caption evidence cannot be a symlink"
+            ) from error
+        try:
+            return sealed_bytes_from_descriptor(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def json_mapping(contents: bytes, label: str) -> dict[str, Any]:
+        try:
+            document = json.loads(contents)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise HFMultimodalSFTError(
+                f"sealed {label} evidence is malformed"
+            ) from error
+        if not isinstance(document, dict):
+            raise HFMultimodalSFTError(f"sealed {label} evidence is not a mapping")
+        return document
+
+    def caption_records(contents: bytes) -> tuple[dict[str, Any], ...]:
+        if not contents.endswith(b"\n"):
+            raise HFMultimodalSFTError("sealed caption evidence is incomplete")
+        try:
+            records = tuple(json.loads(line) for line in contents.splitlines())
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise HFMultimodalSFTError("sealed caption evidence is malformed") from error
+        if any(not isinstance(record, dict) for record in records):
+            raise HFMultimodalSFTError("sealed caption evidence is malformed")
+        return records
+
+    def validate_source(
+        name: str, objects: Mapping[str, bytes]
+    ) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
+        evidence = json_mapping(objects["receipt.json"], f"{name} receipt")
+        identity = json_mapping(objects["identity.json"], f"{name} identity")
+        scalar = json_mapping(
+            objects["scalar-evaluation.json"], f"{name} scalar receipt"
+        )
+        records = caption_records(objects["captions.jsonl"])
+        if (
+            set(evidence)
+            != {
+                "api_version",
+                "captions_sha256",
+                "checkpoint_artifact_id",
+                "checkpoint_manifest_digest",
+                "decode_policy_digest",
+                "failures",
+                "identity_sha256",
+                "model_load_receipt",
+                "model_state_digest",
+                "model_state_mode",
+                "records",
+                "split_membership_digest",
+                "step",
+                "total_wall_time_ms",
+            }
+            or set(identity)
+            != {
+                "api_version",
+                "checkpoint_artifact_id",
+                "checkpoint_manifest_digest",
+                "decode_policy_digest",
+                "model_load_receipt",
+                "model_state_digest",
+                "model_state_mode",
+                "records",
+                "sample_ids_digest",
+                "split_membership_digest",
+                "step",
+            }
+            or set(scalar)
+            != {
+                "api_version",
+                "coverage",
+                "loss",
+                "records",
+                "split_membership_digest",
+                "step",
+            }
+            or evidence["api_version"] != "rwkv-lab.hf-test-caption-evidence/v1"
+            or identity["api_version"]
+            != "rwkv-lab.hf-test-caption-evidence-identity/v1"
+            or scalar["api_version"] != "rwkv-lab.hf-test-scalar-evidence/v1"
+            or scalar["coverage"] != "full"
+            or not isinstance(evidence["records"], int)
+            or isinstance(evidence["records"], bool)
+            or not isinstance(evidence["step"], int)
+            or isinstance(evidence["step"], bool)
+            or not isinstance(evidence["total_wall_time_ms"], (int, float))
+            or isinstance(evidence["total_wall_time_ms"], bool)
+            or not math.isfinite(float(evidence["total_wall_time_ms"]))
+            or float(evidence["total_wall_time_ms"]) < 0.0
+            or not isinstance(scalar["loss"], (int, float))
+            or isinstance(scalar["loss"], bool)
+            or not math.isfinite(float(scalar["loss"]))
+            or evidence["captions_sha256"]
+            != "sha256:" + hashlib.sha256(objects["captions.jsonl"]).hexdigest()
+            or evidence["identity_sha256"]
+            != "sha256:" + hashlib.sha256(objects["identity.json"]).hexdigest()
+            or evidence["failures"] != 0
+            or evidence["records"] != len(records)
+            or evidence["records"] != identity["records"]
+            or evidence["records"] != scalar["records"]
+            or evidence["split_membership_digest"] != split_membership_digest
+            or identity["split_membership_digest"] != split_membership_digest
+            or scalar["split_membership_digest"] != split_membership_digest
+            or evidence["step"] != identity["step"]
+            or evidence["step"] != scalar["step"]
+            or evidence["checkpoint_artifact_id"]
+            != identity["checkpoint_artifact_id"]
+            or evidence["checkpoint_manifest_digest"]
+            != identity["checkpoint_manifest_digest"]
+            or evidence["decode_policy_digest"] != identity["decode_policy_digest"]
+            or evidence["model_load_receipt"] != identity["model_load_receipt"]
+            or evidence["model_state_digest"] != identity["model_state_digest"]
+            or evidence["model_state_mode"] != identity["model_state_mode"]
+        ):
+            raise HFMultimodalSFTError(
+                f"sealed {name} evidence receipts are inconsistent"
+            )
+        expected_mode = "base_adapters_disabled" if name == "baseline" else "trained"
+        if (
+            evidence["model_state_mode"] != expected_mode
+            or (name == "baseline" and evidence["step"] != 0)
+            or (name == "final" and evidence["step"] <= 0)
+        ):
+            raise HFMultimodalSFTError(
+                f"sealed {name} evidence has the wrong model state"
+            )
+        sample_ids = tuple(record.get("sample_id") for record in records)
+        if (
+            any(
+                set(record)
+                != {
+                    "error_code",
+                    "prompt_digest",
+                    "sample_id",
+                    "status",
+                    "step",
+                    "target",
+                    "text",
+                    "wall_time_ms",
+                }
+                or record["status"] != "complete"
+                or record["error_code"] is not None
+                or not isinstance(record["step"], int)
+                or isinstance(record["step"], bool)
+                or record["step"] != evidence["step"]
+                or not isinstance(record["wall_time_ms"], (int, float))
+                or isinstance(record["wall_time_ms"], bool)
+                or not math.isfinite(float(record["wall_time_ms"]))
+                or float(record["wall_time_ms"]) < 0.0
+                or not all(
+                    isinstance(record[field], str) and record[field].strip()
+                    for field in ("prompt_digest", "sample_id", "target", "text")
+                )
+                for record in records
+            )
+            or len(set(sample_ids)) != len(sample_ids)
+            or identity["sample_ids_digest"] != _digest(sample_ids)
+        ):
+            raise HFMultimodalSFTError(
+                f"sealed {name} caption identities are inconsistent"
+            )
+        return identity, records
+
+    source_objects = {name: sealed_bytes(source) for name, source in sources.items()}
+    validated = {
+        name: validate_source(name, objects) for name, objects in source_objects.items()
+    }
+    baseline_identity, baseline_records = validated["baseline"]
+    final_identity, final_records = validated["final"]
+    if (
+        baseline_identity["checkpoint_artifact_id"]
+        != baseline_checkpoint_artifact_id
+        or baseline_identity["checkpoint_manifest_digest"]
+        != baseline_checkpoint_manifest_digest
+        or final_identity["checkpoint_artifact_id"] != final_checkpoint_artifact_id
+        or final_identity["checkpoint_manifest_digest"]
+        != final_checkpoint_manifest_digest
+        or final_identity["model_state_digest"] != final_model_state_digest
+        or any(
+            baseline_identity[field] != final_identity[field]
+            for field in (
+                "decode_policy_digest",
+                "model_load_receipt",
+                "records",
+                "sample_ids_digest",
+                "split_membership_digest",
+            )
+        )
+        or tuple(
+            (record["sample_id"], record["prompt_digest"], record["target"])
+            for record in baseline_records
+        )
+        != tuple(
+            (record["sample_id"], record["prompt_digest"], record["target"])
+            for record in final_records
+        )
+    ):
+        raise HFMultimodalSFTError(
+            "baseline and final test evidence are not identity-aligned"
+        )
     receipt = {
         "api_version": "rwkv-lab.hf-test-caption-evidence-bundle/v1",
-        "baseline_receipt_sha256": "sha256:"
-        + hashlib.sha256((directory / "baseline" / "receipt.json").read_bytes()).hexdigest(),
-        "baseline_scalar_receipt_sha256": "sha256:"
-        + hashlib.sha256(
-            (directory / "baseline" / "scalar-evaluation.json").read_bytes()
-        ).hexdigest(),
-        "final_receipt_sha256": "sha256:"
-        + hashlib.sha256((directory / "final" / "receipt.json").read_bytes()).hexdigest(),
-        "final_scalar_receipt_sha256": "sha256:"
-        + hashlib.sha256(
-            (directory / "final" / "scalar-evaluation.json").read_bytes()
-        ).hexdigest(),
+        "baseline_checkpoint_artifact_id": baseline_checkpoint_artifact_id,
+        "baseline_checkpoint_manifest_digest": baseline_checkpoint_manifest_digest,
+        "final_checkpoint_artifact_id": final_checkpoint_artifact_id,
+        "final_checkpoint_manifest_digest": final_checkpoint_manifest_digest,
+        "final_model_state_digest": final_model_state_digest,
         "split_membership_digest": split_membership_digest,
     }
-    with _exclusive_output(directory, "receipt.json") as output:
-        output.write(
-            json.dumps(receipt, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        )
-        output.flush()
-        os.fsync(output.fileno())
+    # Compute the immutable receipt from the sealed sources, not the destination.
+    receipt.update(
+        {
+            "baseline_receipt_sha256": "sha256:"
+            + hashlib.sha256(source_objects["baseline"]["receipt.json"]).hexdigest(),
+            "baseline_scalar_receipt_sha256": "sha256:"
+            + hashlib.sha256(
+                source_objects["baseline"]["scalar-evaluation.json"]
+            ).hexdigest(),
+            "final_receipt_sha256": "sha256:"
+            + hashlib.sha256(source_objects["final"]["receipt.json"]).hexdigest(),
+            "final_scalar_receipt_sha256": "sha256:"
+            + hashlib.sha256(
+                source_objects["final"]["scalar-evaluation.json"]
+            ).hexdigest(),
+        }
+    )
+    encoded = json.dumps(receipt, separators=(",", ":"), sort_keys=True).encode(
+        "utf-8"
+    )
+
+    def exact_bundle(root: Path) -> bool:
+        try:
+            root_descriptor = os.open(
+                root, os.O_RDONLY | os.O_DIRECTORY | nofollow
+            )
+        except OSError:
+            return False
+        try:
+            if set(os.listdir(root_descriptor)) != {
+                "baseline",
+                "final",
+                "receipt.json",
+            }:
+                return False
+            destination_objects: dict[str, dict[str, bytes]] = {}
+            for name in ("baseline", "final"):
+                child = os.open(
+                    name,
+                    os.O_RDONLY | os.O_DIRECTORY | nofollow,
+                    dir_fd=root_descriptor,
+                )
+                try:
+                    destination_objects[name] = sealed_bytes_from_descriptor(child)
+                finally:
+                    os.close(child)
+            if regular_bytes(root_descriptor, "receipt.json") != encoded:
+                return False
+        except (HFMultimodalSFTError, OSError):
+            return False
+        finally:
+            os.close(root_descriptor)
+        for name in ("baseline", "final"):
+            objects = destination_objects[name]
+            if objects != source_objects[name]:
+                return False
+            if (
+                "sha256:" + hashlib.sha256(objects["receipt.json"]).hexdigest()
+                != receipt[f"{name}_receipt_sha256"]
+                or "sha256:"
+                + hashlib.sha256(objects["scalar-evaluation.json"]).hexdigest()
+                != receipt[f"{name}_scalar_receipt_sha256"]
+            ):
+                return False
+            try:
+                validate_source(name, objects)
+            except HFMultimodalSFTError:
+                return False
+        return True
+
+    if directory.exists():
+        if not exact_bundle(directory):
+            raise HFMultimodalSFTError(
+                "existing test caption evidence bundle is inconsistent"
+            )
+        return directory
+
+    directory.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(prefix=f".{directory.name}-", dir=directory.parent)
+    )
+    try:
+        for name, objects in source_objects.items():
+            evidence = staging / name
+            evidence.mkdir(mode=0o750)
+            for file_name, contents in objects.items():
+                with _exclusive_output(evidence, file_name) as output:
+                    output.write(contents)
+                    output.flush()
+                    os.fsync(output.fileno())
+        with _exclusive_output(staging, "receipt.json") as output:
+            output.write(encoded)
+            output.flush()
+            os.fsync(output.fileno())
+        _fsync_directories(staging)
+        os.rename(staging, directory)
+        parent_descriptor = os.open(directory.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
     return directory
 
 
@@ -2005,17 +2692,57 @@ def _write_test_scalar_receipt(
         "split_membership_digest": split_membership_digest,
         "step": step,
     }
+    encoded = json.dumps(
+        receipt,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    path = directory / "scalar-evaluation.json"
+    if path.exists():
+        if path.read_bytes() != encoded:
+            raise HFMultimodalSFTError(
+                "existing full test scalar evidence is inconsistent"
+            )
+        return
     with _exclusive_output(directory, "scalar-evaluation.json") as output:
-        output.write(
-            json.dumps(
-                receipt,
-                allow_nan=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-        )
+        output.write(encoded)
         output.flush()
         os.fsync(output.fileno())
+
+
+def _quarantine_test_evidence(directory: Path) -> str:
+    expected = {
+        "captions.jsonl",
+        "identity.json",
+        "receipt.json",
+        "scalar-evaluation.json",
+    }
+    try:
+        root_info = directory.lstat()
+        if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+            raise HFMultimodalSFTError(
+                "private test-evidence quarantine root is invalid"
+            )
+        entries = tuple(directory.iterdir())
+    except OSError as error:
+        raise HFMultimodalSFTError(
+            "private test-evidence quarantine is unavailable"
+        ) from error
+    if {entry.name for entry in entries} != expected:
+        raise HFMultimodalSFTError(
+            "private test-evidence quarantine has an inexact layout"
+        )
+    for entry in entries:
+        info = entry.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise HFMultimodalSFTError(
+                "private test-evidence quarantine contains a non-file"
+            )
+        os.chmod(entry, 0o400, follow_symlinks=False)
+    os.chmod(directory, 0o700, follow_symlinks=False)
+    os.chmod(directory.parent, 0o700, follow_symlinks=False)
+    return _digest(_staged_objects(directory))
 
 
 def run_hf_multimodal_sft(
@@ -2028,6 +2755,7 @@ def run_hf_multimodal_sft(
     step_profiler: Any,
     resume_directory: Path | None,
     resume_parent_artifact_ids: tuple[str, ...] = (),
+    resume_checkpoint_manifest_digest: str | None = None,
     device: torch.device | str | None = None,
 ) -> int:
     """Execute one exact, component-owned HF SFT lifecycle."""
@@ -2038,36 +2766,66 @@ def run_hf_multimodal_sft(
         EvalGalleryItem,
         EvalGalleryPublicationRequest,
         GalleryImage,
+        PublishedCheckpoint,
     )
 
     run_directory.mkdir(mode=0o750, parents=True, exist_ok=True)
+    quarantine_root = run_directory / ".private-test-quarantine"
+    quarantine_root.mkdir(mode=0o700, exist_ok=True)
+    quarantine_info = quarantine_root.lstat()
+    if stat.S_ISLNK(quarantine_info.st_mode) or not stat.S_ISDIR(
+        quarantine_info.st_mode
+    ):
+        raise HFMultimodalSFTError("private test-evidence quarantine is invalid")
+    os.chmod(quarantine_root, 0o700, follow_symlinks=False)
+    quarantine_baseline = quarantine_root / "baseline"
+    controls.poll_initialization()
     selected_device = torch.device(
         device or ("cuda" if torch.cuda.is_available() else "cpu")
     )
+    data = HFDataRuntime.build(components)
+    policy = components.checkpoint_policy()
+    evaluator = components.evaluator()
+    evaluation_schedule = components.evaluation_schedule()
+    if not evaluation_schedule.configuration.final:
+        raise HFMultimodalSFTError(
+            "HF operation requires final scalar and qualitative evaluation"
+        )
+    renderer = components.artifact_renderer()
+    generation_policy = components.generation_policy()
+    maximum_new_tokens = generation_policy.configuration.maximum_new_tokens
+    use_generation_cache = generation_policy.configuration.use_cache
+    generation_batch_size = generation_policy.configuration.generation_batch_size
+    padding_side = generation_policy.configuration.padding_side
+    decode_policy_digest = generation_policy.digest
+    maximum_steps = components.learning_rate_configuration()[1].max_steps
     loader = components.model_loader(slot="model_loader")
     loaded = loader.load()
     if not loaded.receipt.exact:
         raise HFMultimodalSFTError("HF engine requires an exact base-load receipt")
-    precision = components.precision()
-    inference_model = precision.convert_module(loaded.model, selected_device)
-    controls.poll_initialization()
-    data = HFDataRuntime.build(components)
+    tokenizer = getattr(
+        loaded.tokenizer_or_processor,
+        "tokenizer",
+        loaded.tokenizer_or_processor,
+    )
+    try:
+        tokenizer.padding_side = padding_side
+    except (AttributeError, TypeError) as error:
+        raise HFMultimodalSFTError(
+            "HF tokenizer cannot apply the declared generation padding policy"
+        ) from error
+    if getattr(tokenizer, "padding_side", None) != padding_side:
+        raise HFMultimodalSFTError(
+            "HF tokenizer disagrees with the declared generation padding policy"
+        )
     codec = HFForwardBatchCodec(
         loaded.tokenizer_or_processor,
         data.training_pipeline.mapper.configuration,
         data.training_pipeline.processor.configuration,
         data.training_pipeline.collator.configuration,
     )
-    policy = components.checkpoint_policy()
-    evaluator = components.evaluator()
-    evaluation_schedule = components.evaluation_schedule()
-    renderer = components.artifact_renderer()
-    generation_policy = components.generation_policy()
-    maximum_new_tokens = generation_policy.configuration.maximum_new_tokens
-    use_generation_cache = generation_policy.configuration.use_cache
-    generation_batch_size = generation_policy.configuration.generation_batch_size
-    decode_policy_digest = generation_policy.digest
-    maximum_steps = components.learning_rate_configuration()[1].max_steps
+    precision = components.precision()
+    inference_model = precision.convert_module(loaded.model, selected_device)
     def reject_live_controls(
         _candidate: Mapping[str, Any], assignments: Mapping[str, Any]
     ) -> None:
@@ -2075,7 +2833,6 @@ def run_hf_multimodal_sft(
             raise HFMultimodalSFTError("HF SFT v1 exposes no live scalar controls")
 
     preoptimizer_qualitative: tuple[tuple[str, str, str], ...] | None = None
-    preoptimizer_test_evidence: Path | None = None
     if resume_directory is None:
         launch_decision = evaluation_schedule.for_step(0)
         if not (
@@ -2086,9 +2843,7 @@ def run_hf_multimodal_sft(
             raise HFMultimodalSFTError("HF operation lacks a complete step-zero gate")
         controls.evaluation(0, reject_live_controls)
         keepalive = getattr(observability, "keepalive", None)
-        phase = (
-            keepalive(0, "baseline_eval") if callable(keepalive) else nullcontext()
-        )
+        phase = keepalive(0, "launch_eval") if callable(keepalive) else nullcontext()
         with phase:
             inference_stack = SimpleNamespace(model=inference_model, precision=precision)
             preoptimizer_qualitative = generate_hf_captions(
@@ -2099,42 +2854,18 @@ def run_hf_multimodal_sft(
                 maximum_new_tokens=maximum_new_tokens,
                 use_cache=use_generation_cache,
             )
-            if data.test_records:
-                preoptimizer_test_evidence = _write_test_caption_evidence(
-                    directory=run_directory / "test-caption-evidence-step-0",
-                    stack=inference_stack,
-                    codec=codec,
-                    samples=data.test_samples(),
-                    device=selected_device,
-                    step=0,
-                    model_load_receipt=loaded.receipt.digest,
-                    split_membership_digest=str(data.test_membership_digest),
-                    decode_policy_digest=decode_policy_digest,
-                    maximum_new_tokens=maximum_new_tokens,
-                    generation_batch_size=generation_batch_size,
-                    use_cache=use_generation_cache,
-                    progress=lambda completed, total, failed, elapsed_ms: (
-                        observability.publish_if_declared(
-                            "eval.caption_items_completed", completed, step=0
-                        ),
-                        observability.publish_if_declared(
-                            "eval.caption_items_total", total, step=0
-                        ),
-                        observability.publish_if_declared(
-                            "eval.caption_items_failed", failed, step=0
-                        ),
-                        observability.publish_if_declared(
-                            "eval.caption_wall_seconds", elapsed_ms / 1000.0, step=0
-                        ),
-                    ),
-                )
     stack = initialize_training_stack(
         components,
         selected_device,
         loaded=loaded,
         precision=precision,
     )
-    baseline_test_evidence = preoptimizer_test_evidence
+    baseline_test_evidence: Path | None = None
+    baseline_complete = False
+    baseline_evidence_digest = "sha256:" + "0" * 64
+    baseline_checkpoint_artifact_id: str | None = None
+    baseline_checkpoint_manifest_digest: str | None = None
+    launch_gallery_complete = False
     zero_digest = "sha256:" + "0" * 64
     checkpoint_policy_state: Mapping[str, Any] = policy.component_state(
         last_published_step=0,
@@ -2143,6 +2874,7 @@ def run_hf_multimodal_sft(
         atomic_publication_complete=True,
     )
     published_steps: list[int] = []
+    publication_pending = False
     baselines: dict[str, str] = {}
     step = 0
     if resume_directory is not None:
@@ -2160,8 +2892,15 @@ def run_hf_multimodal_sft(
             controls_state_validator=controls.verify_checkpoint_state,
         )
         if set(restored.runtime_state) != {
+            "baseline_checkpoint_artifact_id",
+            "baseline_checkpoint_manifest_digest",
+            "baseline_complete",
+            "baseline_evidence_digest",
             "checkpoint_policy",
             "data",
+            "finalization_pending",
+            "launch_gallery_complete",
+            "publication_pending",
             "published_steps",
         }:
             raise HFMultimodalSFTError("HF operation runtime resume state is inexact")
@@ -2169,22 +2908,121 @@ def run_hf_multimodal_sft(
         stack.activation_memory.restore_component_state(
             restored.component_state["activation_memory"], stack.model
         )
+        if restored.runtime_state["checkpoint_policy"] != restored.component_state[
+            "checkpoint_policy"
+        ]:
+            raise HFMultimodalSFTError(
+                "checkpoint policy runtime and component state disagree"
+            )
         checkpoint_policy_state = restored.runtime_state["checkpoint_policy"]
-        published_steps = list(restored.runtime_state["published_steps"])
+        restored_published_steps = restored.runtime_state["published_steps"]
+        if not isinstance(restored_published_steps, list):
+            raise HFMultimodalSFTError(
+                "checkpoint publication history is malformed"
+            )
+        published_steps = list(restored_published_steps)
+        publication_pending = restored.runtime_state["publication_pending"]
         baselines = dict(restored.qualitative_baselines)
         step = restored.optimizer_step
-        candidate_baseline = resume_directory / "sealed-test-baseline"
-        if data.test_records and not candidate_baseline.is_dir():
-            raise HFMultimodalSFTError(
-                "exact resume checkpoint lacks sealed test baseline evidence"
+        candidate_baseline = quarantine_baseline
+        baseline_complete = restored.runtime_state["baseline_complete"]
+        baseline_evidence_digest = restored.runtime_state[
+            "baseline_evidence_digest"
+        ]
+        baseline_checkpoint_artifact_id = restored.runtime_state[
+            "baseline_checkpoint_artifact_id"
+        ]
+        baseline_checkpoint_manifest_digest = restored.runtime_state[
+            "baseline_checkpoint_manifest_digest"
+        ]
+        launch_gallery_complete = restored.runtime_state[
+            "launch_gallery_complete"
+        ]
+        if (
+            not isinstance(baseline_complete, bool)
+            or not isinstance(launch_gallery_complete, bool)
+            or not isinstance(publication_pending, bool)
+            or not publication_pending
+            or (baseline_complete and not launch_gallery_complete)
+            or not published_steps
+            or published_steps[-1] != step
+            or published_steps != sorted(set(published_steps))
+            or step > maximum_steps
+            or any(
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+                for value in published_steps
             )
-        baseline_test_evidence = candidate_baseline if data.test_records else None
+            or resume_checkpoint_manifest_digest is None
+            or not _is_digest(baseline_evidence_digest)
+            or not isinstance(
+                restored.runtime_state["finalization_pending"], bool
+            )
+            or restored.runtime_state["finalization_pending"]
+            != (step == maximum_steps)
+            or len(resume_parent_artifact_ids) != 1
+        ):
+            raise HFMultimodalSFTError("launch gate completion state is invalid")
+        expected_pending_policy = policy.component_state(
+            last_published_step=step,
+            publication_manifest=_PENDING_PUBLICATION_DIGEST,
+            retention_manifest=_digest(policy.retained_steps(published_steps)),
+            atomic_publication_complete=True,
+        )
+        if checkpoint_policy_state != expected_pending_policy:
+            raise HFMultimodalSFTError(
+                "exact resume lacks a canonical pending checkpoint publication"
+            )
+        checkpoint_policy_state = policy.component_state(
+            last_published_step=step,
+            publication_manifest=resume_checkpoint_manifest_digest,
+            retention_manifest=_digest(policy.retained_steps(published_steps)),
+            atomic_publication_complete=True,
+        )
+        publication_pending = False
+        if baseline_checkpoint_artifact_id is None:
+            if step != 0:
+                raise HFMultimodalSFTError(
+                    "trained resume lacks its step-zero checkpoint anchor"
+                )
+            baseline_checkpoint_artifact_id = resume_parent_artifact_ids[0]
+            baseline_checkpoint_manifest_digest = resume_checkpoint_manifest_digest
+        if (
+            not isinstance(baseline_checkpoint_artifact_id, str)
+            or not baseline_checkpoint_artifact_id
+            or not _is_digest(baseline_checkpoint_manifest_digest)
+        ):
+            raise HFMultimodalSFTError("step-zero checkpoint anchor is invalid")
+        if data.test_records and baseline_complete and (
+            not candidate_baseline.is_dir()
+            or _quarantine_test_evidence(candidate_baseline)
+            != baseline_evidence_digest
+        ):
+            raise HFMultimodalSFTError(
+                "exact resume lacks its private test-baseline quarantine"
+            )
+        baseline_test_evidence = (
+            candidate_baseline
+            if data.test_records and baseline_complete
+            else None
+        )
 
     checkpoint_sequence = 0
-
     def stage_checkpoint_request() -> Any:
-        nonlocal checkpoint_sequence, checkpoint_policy_state
+        nonlocal checkpoint_sequence
         checkpoint_sequence += 1
+        projected_published_steps = list(published_steps)
+        if not projected_published_steps or projected_published_steps[-1] != step:
+            projected_published_steps.append(step)
+        pending_policy_state = policy.component_state(
+            last_published_step=step,
+            publication_manifest=_PENDING_PUBLICATION_DIGEST,
+            retention_manifest=_digest(
+                policy.retained_steps(projected_published_steps)
+            ),
+            atomic_publication_complete=True,
+        )
         state = HFEngineState(
             optimizer_step=step,
             composition_digest=components.composition.composition_digest,
@@ -2194,14 +3032,23 @@ def run_hf_multimodal_sft(
                 components=components,
                 stack=stack,
                 data=data,
-                checkpoint_policy_state=checkpoint_policy_state,
+                checkpoint_policy_state=pending_policy_state,
                 optimizer_step=step,
             ),
             controls_state=controls.checkpoint_state(),
             runtime_state={
-                "checkpoint_policy": dict(checkpoint_policy_state),
+                "baseline_checkpoint_artifact_id": baseline_checkpoint_artifact_id,
+                "baseline_checkpoint_manifest_digest": (
+                    baseline_checkpoint_manifest_digest
+                ),
+                "checkpoint_policy": dict(pending_policy_state),
+                "baseline_complete": baseline_complete,
+                "baseline_evidence_digest": baseline_evidence_digest,
                 "data": dict(data.runtime_state()),
-                "published_steps": list(published_steps),
+                "finalization_pending": step == maximum_steps,
+                "launch_gallery_complete": launch_gallery_complete,
+                "publication_pending": True,
+                "published_steps": projected_published_steps,
             },
             qualitative_baselines=baselines,
         )
@@ -2217,11 +3064,6 @@ def run_hf_multimodal_sft(
             weight_decay_schedule=stack.weight_decay_schedule,
             precision=stack.precision,
             state=state,
-            sealed_evidence=(
-                {"sealed-test-baseline": baseline_test_evidence}
-                if baseline_test_evidence is not None
-                else None
-            ),
         )
         request = CheckpointPublicationRequest(
             source_directory=staging,
@@ -2245,21 +3087,23 @@ def run_hf_multimodal_sft(
         return request
 
     def record_published_checkpoint(published: Any) -> None:
-        nonlocal checkpoint_policy_state
-        published_steps.append(step)
+        nonlocal checkpoint_policy_state, publication_pending
+        if not published_steps or published_steps[-1] != step:
+            published_steps.append(step)
         checkpoint_policy_state = policy.component_state(
             last_published_step=step,
             publication_manifest=published.manifest_sha256,
             retention_manifest=_digest(policy.retained_steps(published_steps)),
             atomic_publication_complete=True,
         )
+        publication_pending = False
 
     def publish_gallery(checkpoint: Any, generated: Sequence[tuple[str, str, str]]) -> None:
         samples = data.qualitative_samples()
         items: list[Any] = []
         cards = run_directory / f"eval-cards-step-{step}"
         if any(_source_image_path(data, sample) is None for sample in samples):
-            cards.mkdir(mode=0o750, exist_ok=False)
+            cards.mkdir(mode=0o750, exist_ok=True)
         for index, (sample, evidence) in enumerate(zip(samples, generated, strict=True)):
             teacher, current, prompt_digest = evidence
             baseline = baselines[sample.sample_id]
@@ -2280,7 +3124,8 @@ def run_hf_multimodal_sft(
             source_path = _source_image_path(data, sample)
             if source_path is None:
                 source_path = cards / f"{index:04d}.png"
-                _text_card(source_path, current)
+                if not source_path.exists():
+                    _text_card(source_path, current)
             image = GalleryImage(source_path)
             items.append(
                 EvalGalleryItem(
@@ -2328,62 +3173,176 @@ def run_hf_multimodal_sft(
         decision = evaluation_schedule.for_step(0)
         if not (decision.launch_gate and decision.qualitative and decision.full_scalar):
             raise HFMultimodalSFTError("HF operation lacks a complete step-zero gate")
-        eval_loss = evaluate_hf_scalar_loss(
-            stack=stack,
-            codec=codec,
-            data=data,
-            evaluator=evaluator,
-            device=selected_device,
-            maximum_examples=evaluator.configuration.maximum_examples,
-        )
-        if preoptimizer_qualitative is None:
-            raise HFMultimodalSFTError("step-zero caption gate was not completed")
-        qualitative = preoptimizer_qualitative
-        baselines.update(
-            {
-                sample_id: current
-                for sample_id, (_, current, _) in zip(
-                    data.qualitative_ids, qualitative, strict=True
+        def base_model_context() -> Any:
+            disable_adapter = getattr(stack.model, "disable_adapter", None)
+            if stack.trainability_result.adapter_backed:
+                if not callable(disable_adapter):
+                    raise HFMultimodalSFTError(
+                        "adapter-backed baseline cannot prove adapters are disabled"
+                    )
+                return disable_adapter()
+            return nullcontext()
+
+        qualitative: tuple[tuple[str, str, str], ...] | None = None
+        if not baselines:
+            if preoptimizer_qualitative is None:
+                raise HFMultimodalSFTError("step-zero caption gate was not completed")
+            baselines.update(
+                {
+                    sample_id: current
+                    for sample_id, (_, current, _) in zip(
+                        data.qualitative_ids, preoptimizer_qualitative, strict=True
+                    )
+                }
+            )
+            qualitative = generate_hf_captions(
+                stack=stack,
+                codec=codec,
+                samples=data.qualitative_samples(),
+                device=selected_device,
+                maximum_new_tokens=maximum_new_tokens,
+                use_cache=use_generation_cache,
+            )
+            if any(
+                base_teacher != current_teacher or base_prompt != current_prompt
+                for (base_teacher, _base, base_prompt), (
+                    current_teacher,
+                    _current,
+                    current_prompt,
+                ) in zip(preoptimizer_qualitative, qualitative, strict=True)
+            ):
+                raise HFMultimodalSFTError(
+                    "step-zero teacher, baseline, and current identities are misaligned"
                 )
-            }
-        )
-        observability.publish_if_declared("eval.loss", eval_loss, step=0)
-        if data.test_records:
-            test_loss = evaluate_hf_scalar_loss(
+            eval_loss = evaluate_hf_scalar_loss(
                 stack=stack,
                 codec=codec,
                 data=data,
                 evaluator=evaluator,
                 device=selected_device,
                 maximum_examples=evaluator.configuration.maximum_examples,
-                samples=data.test_samples(
-                    maximum=evaluator.configuration.maximum_examples
-                ),
             )
-            observability.publish_if_declared("eval.test_loss", test_loss, step=0)
-            if preoptimizer_test_evidence is None:
+            observability.publish_if_declared("eval.loss", eval_loss, step=0)
+        elif not launch_gallery_complete:
+            controls.evaluation(0, reject_live_controls)
+            qualitative = generate_hf_captions(
+                stack=stack,
+                codec=codec,
+                samples=data.qualitative_samples(),
+                device=selected_device,
+                maximum_new_tokens=maximum_new_tokens,
+                use_cache=use_generation_cache,
+            )
+
+        if not launch_gallery_complete:
+            if qualitative is None:
+                raise HFMultimodalSFTError("step-zero gallery evidence is unavailable")
+            request = stage_checkpoint_request()
+            checkpoint = controls.publish_policy_checkpoint(request)
+            record_published_checkpoint(checkpoint)
+            baseline_checkpoint_artifact_id = checkpoint.artifact_id
+            baseline_checkpoint_manifest_digest = checkpoint.manifest_sha256
+            publish_gallery(checkpoint, qualitative)
+            launch_gallery_complete = True
+        if not launch_gallery_complete:
+            raise HFMultimodalSFTError("step-zero gallery gate was not completed")
+
+        if data.test_records and not baseline_complete:
+            if (
+                baseline_checkpoint_artifact_id is None
+                or baseline_checkpoint_manifest_digest is None
+            ):
                 raise HFMultimodalSFTError(
-                    "step-zero full test caption gate was not completed"
+                    "test baseline lacks its step-zero checkpoint anchor"
                 )
-            test_evidence = preoptimizer_test_evidence
+            base_model_state_digest = _checkpoint_model_state_digest(
+                model_load_receipt=loaded.receipt.digest,
+                checkpoint_artifact_id=baseline_checkpoint_artifact_id,
+                manifest_digest=baseline_checkpoint_manifest_digest,
+            )
+            controls.evaluation(0, reject_live_controls)
+            keepalive = getattr(observability, "keepalive", None)
+            phase = (
+                keepalive(0, "baseline_eval")
+                if callable(keepalive)
+                else nullcontext()
+            )
+            with phase, base_model_context():
+                baseline_test_evidence = _write_test_caption_evidence(
+                    directory=quarantine_baseline,
+                    stack=stack,
+                    codec=codec,
+                    samples=data.test_samples(),
+                    device=selected_device,
+                    step=0,
+                    model_load_receipt=loaded.receipt.digest,
+                    checkpoint_artifact_id=baseline_checkpoint_artifact_id,
+                    checkpoint_manifest_digest=(
+                        baseline_checkpoint_manifest_digest
+                    ),
+                    model_state_digest=base_model_state_digest,
+                    split_membership_digest=str(data.test_membership_digest),
+                    decode_policy_digest=decode_policy_digest,
+                    model_state_mode="base_adapters_disabled",
+                    maximum_new_tokens=maximum_new_tokens,
+                    generation_batch_size=generation_batch_size,
+                    use_cache=use_generation_cache,
+                    progress=lambda completed, total, failed, elapsed_ms: (
+                        observability.publish_if_declared(
+                            "eval.caption_items_completed", completed, step=0
+                        ),
+                        observability.publish_if_declared(
+                            "eval.caption_items_total", total, step=0
+                        ),
+                        observability.publish_if_declared(
+                            "eval.caption_items_failed", failed, step=0
+                        ),
+                        observability.publish_if_declared(
+                            "eval.caption_wall_seconds", elapsed_ms / 1000.0, step=0
+                        ),
+                    ),
+                )
+                test_loss = evaluate_hf_scalar_loss(
+                    stack=stack,
+                    codec=codec,
+                    data=data,
+                    evaluator=evaluator,
+                    device=selected_device,
+                    maximum_examples=len(data.test_records),
+                    samples=data.test_samples(),
+                )
             _write_test_scalar_receipt(
-                directory=test_evidence,
+                directory=baseline_test_evidence,
                 loss=test_loss,
                 records=len(data.test_records),
                 split_membership_digest=str(data.test_membership_digest),
                 step=0,
             )
-        else:
-            test_evidence = None
-        request = stage_checkpoint_request()
-        checkpoint = controls.publish_policy_checkpoint(request)
-        record_published_checkpoint(checkpoint)
-        publish_gallery(checkpoint, qualitative)
+            baseline_evidence_digest = _quarantine_test_evidence(
+                baseline_test_evidence
+            )
+            baseline_complete = True
+            request = stage_checkpoint_request()
+            checkpoint = controls.publish_policy_checkpoint(request)
+            record_published_checkpoint(checkpoint)
+        elif not data.test_records:
+            baseline_complete = True
+
+    final_checkpoint: Any | None = None
+    if resume_directory is not None and step == maximum_steps:
+        assert resume_checkpoint_manifest_digest is not None
+        final_checkpoint = PublishedCheckpoint(
+            artifact_id=resume_parent_artifact_ids[0],
+            manifest_path=resume_directory,
+            manifest_sha256=resume_checkpoint_manifest_digest,
+            payload_size_bytes=0,
+            file_count=0,
+            worker_sequence=0,
+        )
 
     stack.model.train()
     stack.optimizer.zero_grad(set_to_none=True)
     while step < maximum_steps:
-        test_evidence = None
         started = time.perf_counter()
         tokens = 0
         losses: list[tuple[float, int]] = []
@@ -2446,73 +3405,6 @@ def run_hf_multimodal_sft(
                 maximum_examples=evaluator.configuration.maximum_examples,
             )
             observability.publish_if_declared("eval.loss", value, step=step)
-            if step == maximum_steps and data.test_records:
-                test_value = evaluate_hf_scalar_loss(
-                    stack=stack,
-                    codec=codec,
-                    data=data,
-                    evaluator=evaluator,
-                    device=selected_device,
-                    maximum_examples=evaluator.configuration.maximum_examples,
-                    samples=data.test_samples(
-                        maximum=evaluator.configuration.maximum_examples
-                    ),
-                )
-                observability.publish_if_declared(
-                    "eval.test_loss", test_value, step=step
-                )
-                keepalive = getattr(observability, "keepalive", None)
-                phase = (
-                    keepalive(step, "final_eval")
-                    if callable(keepalive)
-                    else nullcontext()
-                )
-                with phase:
-                    def publish_final_progress(
-                        completed: int,
-                        total: int,
-                        failed: int,
-                        elapsed_ms: float,
-                        at_step: int = step,
-                    ) -> None:
-                        observability.publish_if_declared(
-                            "eval.caption_items_completed", completed, step=at_step
-                        )
-                        observability.publish_if_declared(
-                            "eval.caption_items_total", total, step=at_step
-                        )
-                        observability.publish_if_declared(
-                            "eval.caption_items_failed", failed, step=at_step
-                        )
-                        observability.publish_if_declared(
-                            "eval.caption_wall_seconds",
-                            elapsed_ms / 1000.0,
-                            step=at_step,
-                        )
-
-                    test_evidence = _write_test_caption_evidence(
-                        directory=run_directory
-                        / f"test-caption-evidence-step-{step}",
-                        stack=stack,
-                        codec=codec,
-                        samples=data.test_samples(),
-                        device=selected_device,
-                        step=step,
-                        model_load_receipt=stack.loaded.receipt.digest,
-                        split_membership_digest=str(data.test_membership_digest),
-                        decode_policy_digest=decode_policy_digest,
-                        maximum_new_tokens=maximum_new_tokens,
-                        generation_batch_size=generation_batch_size,
-                        use_cache=use_generation_cache,
-                        progress=publish_final_progress,
-                    )
-                _write_test_scalar_receipt(
-                    directory=test_evidence,
-                    loss=test_value,
-                    records=len(data.test_records),
-                    split_membership_digest=str(data.test_membership_digest),
-                    step=step,
-                )
         policy_due = policy.due(step, final=step == maximum_steps)
         checkpoint = None
         request = None
@@ -2530,26 +3422,13 @@ def run_hf_multimodal_sft(
             assert request is not None
             checkpoint = controls.publish_policy_checkpoint(request)
             record_published_checkpoint(checkpoint)
-        if test_evidence is not None:
-            assert checkpoint is not None
-            if baseline_test_evidence is None:
+        if step == maximum_steps:
+            if checkpoint is None:
                 raise HFMultimodalSFTError(
-                    "final test evidence lacks its sealed baseline"
+                    "final evaluation lacks its exact checkpoint anchor"
                 )
-            test_evidence = _bundle_test_caption_evidence(
-                directory=run_directory / f"test-caption-bundle-step-{step}",
-                baseline=baseline_test_evidence,
-                final=test_evidence,
-                split_membership_digest=str(data.test_membership_digest),
-            )
-            controls.publish_artifact(
-                ArtifactPublicationRequest(
-                    source_directory=test_evidence,
-                    output_name="test_eval",
-                    parent_artifact_ids=(checkpoint.artifact_id,),
-                )
-            )
-        if decision.qualitative:
+            final_checkpoint = checkpoint
+        elif decision.qualitative:
             qualitative = generate_hf_captions(
                 stack=stack,
                 codec=codec,
@@ -2559,6 +3438,118 @@ def run_hf_multimodal_sft(
                 use_cache=use_generation_cache,
             )
             publish_gallery(checkpoint, qualitative)
+
+    if step != maximum_steps or final_checkpoint is None:
+        raise HFMultimodalSFTError("HF operation did not reach finalization")
+    if (
+        not data.test_records
+        or baseline_test_evidence is None
+        or baseline_checkpoint_artifact_id is None
+        or baseline_checkpoint_manifest_digest is None
+    ):
+        raise HFMultimodalSFTError(
+            "final test evidence lacks its private baseline/checkpoint anchor"
+        )
+    final_decision = evaluation_schedule.for_step(step, final=True)
+    if not (final_decision.full_scalar and final_decision.qualitative):
+        raise HFMultimodalSFTError("HF finalization is not fully evaluable")
+    controls.evaluation(step, reject_live_controls)
+    final_model_state_digest = _checkpoint_model_state_digest(
+        model_load_receipt=stack.loaded.receipt.digest,
+        checkpoint_artifact_id=final_checkpoint.artifact_id,
+        manifest_digest=final_checkpoint.manifest_sha256,
+    )
+    test_value = evaluate_hf_scalar_loss(
+        stack=stack,
+        codec=codec,
+        data=data,
+        evaluator=evaluator,
+        device=selected_device,
+        maximum_examples=len(data.test_records),
+        samples=data.test_samples(),
+    )
+    keepalive = getattr(observability, "keepalive", None)
+    phase = (
+        keepalive(step, "final_eval") if callable(keepalive) else nullcontext()
+    )
+
+    def publish_final_progress(
+        completed: int,
+        total: int,
+        failed: int,
+        elapsed_ms: float,
+    ) -> None:
+        observability.publish_if_declared(
+            "eval.caption_items_completed", completed, step=step
+        )
+        observability.publish_if_declared(
+            "eval.caption_items_total", total, step=step
+        )
+        observability.publish_if_declared(
+            "eval.caption_items_failed", failed, step=step
+        )
+        observability.publish_if_declared(
+            "eval.caption_wall_seconds", elapsed_ms / 1000.0, step=step
+        )
+
+    with phase:
+        test_evidence = _write_test_caption_evidence(
+            directory=run_directory / f"test-caption-evidence-step-{step}",
+            stack=stack,
+            codec=codec,
+            samples=data.test_samples(),
+            device=selected_device,
+            step=step,
+            model_load_receipt=stack.loaded.receipt.digest,
+            checkpoint_artifact_id=final_checkpoint.artifact_id,
+            checkpoint_manifest_digest=final_checkpoint.manifest_sha256,
+            model_state_digest=final_model_state_digest,
+            split_membership_digest=str(data.test_membership_digest),
+            decode_policy_digest=decode_policy_digest,
+            model_state_mode="trained",
+            maximum_new_tokens=maximum_new_tokens,
+            generation_batch_size=generation_batch_size,
+            use_cache=use_generation_cache,
+            progress=publish_final_progress,
+        )
+    _write_test_scalar_receipt(
+        directory=test_evidence,
+        loss=test_value,
+        records=len(data.test_records),
+        split_membership_digest=str(data.test_membership_digest),
+        step=step,
+    )
+    bundle = _bundle_test_caption_evidence(
+        directory=run_directory / f"test-caption-bundle-step-{step}",
+        baseline=baseline_test_evidence,
+        final=test_evidence,
+        split_membership_digest=str(data.test_membership_digest),
+        baseline_checkpoint_artifact_id=baseline_checkpoint_artifact_id,
+        baseline_checkpoint_manifest_digest=baseline_checkpoint_manifest_digest,
+        final_checkpoint_artifact_id=final_checkpoint.artifact_id,
+        final_checkpoint_manifest_digest=final_checkpoint.manifest_sha256,
+        final_model_state_digest=final_model_state_digest,
+    )
+    controls.publish_artifact(
+        ArtifactPublicationRequest(
+            source_directory=bundle,
+            output_name="test_eval",
+            parent_artifact_ids=(
+                baseline_checkpoint_artifact_id,
+                final_checkpoint.artifact_id,
+            ),
+        )
+    )
+    observability.publish_if_declared("eval.test_loss", test_value, step=step)
+    qualitative = generate_hf_captions(
+        stack=stack,
+        codec=codec,
+        samples=data.qualitative_samples(),
+        device=selected_device,
+        maximum_new_tokens=maximum_new_tokens,
+        use_cache=use_generation_cache,
+    )
+    publish_gallery(final_checkpoint, qualitative)
     return step
 
 

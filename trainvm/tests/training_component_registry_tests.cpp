@@ -750,6 +750,13 @@ void checked_in_component_catalog_matches_native_authority_contract() {
         }),
         "an evaluator cannot consume the training split view");
   check(rejects([&] {
+          auto no_final_evidence = evaluation_composition;
+          no_final_evidence.components.at("evaluation_schedule")
+              .configuration["final"] = false;
+          (void)registry.resolve_composition(no_final_evidence);
+        }),
+        "a training evaluation suite cannot disable final evidence");
+  check(rejects([&] {
           auto changed_partition = evaluation_composition;
           changed_partition.components.at("evaluation_split")
               .configuration["seed"] = 30;

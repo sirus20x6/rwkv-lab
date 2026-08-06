@@ -29,8 +29,9 @@
           },
           "parameters": {},
           "artifacts": {
-            "checkpoint": {"type": "checkpoint", "schema": "hf.multimodal-sft.v1", "immutability": "immutable", "fingerprint": "manifest_sha256"},
+            "checkpoint": {"type": "checkpoint", "schema": "hf.multimodal-sft.v1", "immutability": "immutable", "fingerprint": "manifest_sha256", "required": true},
             "eval_gallery": {"type": "image_gallery", "schema": "rwkv-lab.eval-gallery.v2", "immutability": "append_only", "fingerprint": "manifest_sha256", "required": true},
+            "metrics": {"type": "metrics", "schema": "hf.multimodal-sft.metrics.v1", "immutability": "append_only", "fingerprint": "manifest_sha256"},
             "test_eval": {"type": "report", "schema": "rwkv-lab.hf-test-caption-evidence-bundle.v1", "immutability": "immutable", "fingerprint": "manifest_sha256", "required": true}
           },
           "components": {
@@ -95,6 +96,8 @@
                           "alpha": 512,
                           "dropout": 0.05,
                           "target_manifest_path": "/thearray/git/datasets/captiontest/qwen36-caption-finetune-v1/lora-targets.json",
+                          "manifest_schema": "rwkv-lab.qwen-caption-lora-targets.v1",
+                          "required_policy_digest": "sha256:5f29468be7a2bbfeebb9ccc58fd2bdc01ee3027ce50cfd3b03bec624545c1390",
                           "bias": "none",
                           "merge_on_completion": false
                         }
@@ -191,7 +194,7 @@
                       },
                       "generation_policy": {
                         "key": {"category": "generation_policy", "name": "greedy", "version": "1.0.0"},
-                        "configuration": {"maximum_new_tokens": 768, "generation_batch_size": 4, "use_cache": true}
+                        "configuration": {"maximum_new_tokens": 768, "generation_batch_size": 4, "padding_side": "left", "use_cache": true}
                       },
                       "checkpoint_policy": {
                         "key": {"category": "checkpoint_policy", "name": "atomic_retained", "version": "1.0.0"},
@@ -254,7 +257,7 @@
         {"name": "model.path", "domain": "model", "type": "path", "target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/model_path", "required": true, "description": "Exact local Hugging Face model snapshot"},
         {"name": "model.attention_implementation", "domain": "model", "type": "enumeration", "target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/attention_implementation", "required": false, "values": ["flash_attention_2", "sdpa"]},
         {"name": "data.root", "domain": "data", "type": "path", "target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/dataset_root", "required": true, "description": "Authority-bounded manifested train/validation/test dataset root"},
-        {"name": "trainability.target_manifest", "domain": "trainability", "type": "path", "target": "/spec/workflow/nodes/train/invoke/training/components/trainability/configuration/target_manifest_path", "required": true, "description": "Exact model-bound LoRA target manifest"},
+        {"name": "model.target_manifest", "domain": "model", "type": "path", "target": "/spec/workflow/nodes/train/invoke/training/components/trainability/configuration/target_manifest_path", "required": true, "description": "Exact model-bound LoRA target manifest"},
         {"name": "data.batch_size", "domain": "data", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/batching/configuration/batch_size", "required": false, "minimum": 1, "maximum": 65536},
         {"name": "trainability.lora_rank", "domain": "trainability", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/trainability/configuration/rank", "required": false, "minimum": 1, "maximum": 1024},
         {"name": "trainability.lora_alpha", "domain": "trainability", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/trainability/configuration/alpha", "required": false, "minimum": 1, "maximum": 4096},

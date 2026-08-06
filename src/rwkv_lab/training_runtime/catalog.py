@@ -84,6 +84,7 @@ def supported_worker_capabilities() -> frozenset[str]:
             "data_source.jsonl_token_corpus.v1",
             "sample_processor.image_caption.v1",
             "sample_processor.token_ids.v1",
+            "sample_mapper.assistant_conversation.v2",
             "sample_mapper.assistant_only.v1",
             "sample_mapper.causal_tokens.v1",
             "collator.padded.v1",
