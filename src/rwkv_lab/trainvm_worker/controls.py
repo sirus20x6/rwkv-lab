@@ -153,6 +153,21 @@ class WorkerControlRuntime:
             "effective_controls": dict(self._effective),
         }
 
+    def poll_initialization(self) -> None:
+        """Observe cancellation before step zero without inventing step 1.
+
+        Scheduled control patches retain their declared safe point and are not
+        acknowledged against a fictitious positive optimizer step.
+        """
+
+        self._collect()
+        if self._pending and self._pending[0].kind is CommandKind.CANCEL:
+            command = self._pending.pop(0)
+            self._session.acknowledge_lifecycle(
+                command, LifecycleDisposition.APPLIED
+            )
+            raise WorkerCancellationRequested(command.reason)
+
     def verify_checkpoint_state(self, state: Mapping[str, object]) -> None:
         if (
             state.get("effective_control_revision") != self._revision
@@ -493,6 +508,20 @@ class WorkerControlRuntime:
                 *request.parent_artifact_ids,
                 checkpoint.artifact_id,
             ),
+        )
+
+    def publish_artifact(self, request: object) -> object:
+        """Publish an immutable non-checkpoint operation artifact immediately."""
+
+        from .artifact import ArtifactPublicationRequest, ArtifactPublisher
+
+        if not isinstance(request, ArtifactPublicationRequest):
+            raise WorkerControlError("artifact publication requires a typed request")
+        return ArtifactPublisher(
+            self._session, output_name=request.output_name
+        ).publish(
+            request.source_directory,
+            parent_artifact_ids=request.parent_artifact_ids,
         )
 
     def _wait_for_resume(self, optimizer_step: int) -> None:

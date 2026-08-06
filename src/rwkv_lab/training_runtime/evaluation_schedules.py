@@ -10,19 +10,20 @@ from .resolved import resolved_component_parts
 
 class EvaluationScheduleImplementation(str, Enum):
     LAUNCH_GATE_PERIODIC_V1 = "rwkv_lab.evaluation_schedule.launch_gate_periodic.v1"
+    LAUNCH_GATE_PERIODIC_V2 = "rwkv_lab.evaluation_schedule.launch_gate_periodic.v2"
 
 
 @dataclass(frozen=True, slots=True)
 class EvaluationScheduleConfiguration:
-    launch_gate_examples: int
     full_step_zero: bool = True
     qualitative_every_steps: int = 0
     full_every_steps: int = 0
     defer_full_scalar: bool = True
     final: bool = True
+    launch_gate_examples: int | None = None
 
     def __post_init__(self) -> None:
-        if (
+        if self.launch_gate_examples is not None and (
             not isinstance(self.launch_gate_examples, int)
             or isinstance(self.launch_gate_examples, bool)
             or not 1 <= self.launch_gate_examples <= 1_000_000
@@ -38,7 +39,7 @@ class EvaluationScheduleConfiguration:
             raise ValueError("the true full scalar step-zero baseline is mandatory")
 
     @classmethod
-    def from_resolved(
+    def from_resolved_v1(
         cls, configuration: Mapping[str, Any]
     ) -> EvaluationScheduleConfiguration:
         expected = {
@@ -52,6 +53,20 @@ class EvaluationScheduleConfiguration:
         if set(configuration) != expected:
             raise ValueError("resolved evaluation schedule configuration is inexact")
         return cls(**configuration)
+
+    @classmethod
+    def from_resolved_v2(
+        cls, configuration: Mapping[str, Any]
+    ) -> EvaluationScheduleConfiguration:
+        expected = {
+            "full_step_zero",
+            "qualitative_every_steps",
+            "full_every_steps",
+            "final",
+        }
+        if set(configuration) != expected:
+            raise ValueError("resolved evaluation schedule v2 configuration is inexact")
+        return cls(defer_full_scalar=False, **configuration)
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,13 +108,19 @@ def evaluation_schedule_from_resolved_component(
     implementation, configuration = resolved_component_parts(
         component, "evaluation_schedule"
     )
-    if implementation != EvaluationScheduleImplementation.LAUNCH_GATE_PERIODIC_V1:
+    if implementation == EvaluationScheduleImplementation.LAUNCH_GATE_PERIODIC_V1:
+        configuration = EvaluationScheduleConfiguration.from_resolved_v1(
+            configuration
+        )
+    elif implementation == EvaluationScheduleImplementation.LAUNCH_GATE_PERIODIC_V2:
+        configuration = EvaluationScheduleConfiguration.from_resolved_v2(
+            configuration
+        )
+    else:
         raise ValueError(
             "resolved evaluation schedule implementation is not allowlisted"
         )
-    return EvaluationSchedule(
-        EvaluationScheduleConfiguration.from_resolved(configuration)
-    )
+    return EvaluationSchedule(configuration)
 
 
 __all__ = [

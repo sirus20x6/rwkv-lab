@@ -407,8 +407,11 @@ void validate_data_pipeline_relationships(
   const auto& batching =
       *grouped.at(TrainingComponentCategory::batching).front();
 
-  const bool image_source = source.descriptor.implementation ==
-                            "rwkv_lab.data_source.jsonl_image_caption.v1";
+  const bool image_source =
+      source.descriptor.implementation ==
+          "rwkv_lab.data_source.jsonl_image_caption.v1" ||
+      source.descriptor.implementation ==
+          "rwkv_lab.data_source.jsonl_frozen_image_splits.v1";
   const bool image_processor = processor.descriptor.implementation ==
                                "rwkv_lab.sample_processor.image_caption.v1";
   const bool assistant_mapper = mapper.descriptor.implementation ==
@@ -494,12 +497,16 @@ void validate_evaluation_checkpoint_relationships(
   if (selected != 0U && selected != 4U)
     reject("training evaluation suite requires evaluator, schedule, fixed samples, and renderer together");
   if (selected == 4U) {
-    if (!schedule->configuration.at("full_step_zero").get<bool>() ||
-        schedule->configuration.at("launch_gate_examples").get<std::int64_t>() <= 0)
+    if (!schedule->configuration.at("full_step_zero").get<bool>())
       reject("training evaluation suite requires nonempty true step-zero evidence");
-    if (samples->configuration.at("sample_count").get<std::int64_t>() <
-        schedule->configuration.at("launch_gate_examples").get<std::int64_t>())
-      reject("fixed held-out sample set is smaller than the step-zero launch gate");
+    if (schedule->descriptor.key.version == "1.0.0") {
+      const auto launch_count =
+          schedule->configuration.at("launch_gate_examples").get<std::int64_t>();
+      if (launch_count <= 0 ||
+          samples->configuration.at("sample_count").get<std::int64_t>() !=
+              launch_count)
+        reject("legacy step-zero launch count must exactly match fixed held-out sample count");
+    }
     if (!symbolic_identity(
             samples->configuration.at("identity_field").get_ref<const std::string&>()))
       reject("fixed held-out identity field must be a symbolic field name");
@@ -512,21 +519,35 @@ void validate_evaluation_checkpoint_relationships(
     const std::string split_slot =
         evaluator->configuration.at("split_slot").get<std::string>();
     const auto split = composition.components.find(split_slot);
+    const bool frozen_split =
+        split != composition.components.end() &&
+        split->second.descriptor.implementation ==
+            "rwkv_lab.split_selector.frozen_named.v1";
     if (split == composition.components.end() ||
         split->second.descriptor.key.category !=
             TrainingComponentCategory::split_selector ||
-        split->second.configuration.at("selection") != "held_out")
+        split->second.configuration.at("selection") !=
+            (frozen_split ? "validation" : "held_out"))
       reject("training evaluator must reference a deterministic held-out split-selector slot");
     const auto training_split = composition.components.find("split");
     if (training_split == composition.components.end() ||
         training_split->second.descriptor.key.category !=
             TrainingComponentCategory::split_selector ||
         training_split->second.configuration.at("selection") != "train" ||
-        training_split->second.configuration.at("seed") !=
-            split->second.configuration.at("seed") ||
-        training_split->second.configuration.at("held_out_count") !=
-            split->second.configuration.at("held_out_count"))
+        (!frozen_split &&
+         (training_split->second.configuration.at("seed") !=
+              split->second.configuration.at("seed") ||
+          training_split->second.configuration.at("held_out_count") !=
+              split->second.configuration.at("held_out_count"))))
       reject("training and evaluation split-selector views must name one deterministic partition");
+    if (frozen_split) {
+      const auto test_split = composition.components.find("test_split");
+      if (test_split == composition.components.end() ||
+          test_split->second.descriptor.implementation !=
+              "rwkv_lab.split_selector.frozen_named.v1" ||
+          test_split->second.configuration.at("selection") != "test")
+        reject("manifested data requires an untouched frozen test split");
+    }
   }
   const auto* checkpoint = unique_component(
       grouped, TrainingComponentCategory::checkpoint_policy,
@@ -537,6 +558,22 @@ void validate_evaluation_checkpoint_relationships(
           "rwkv_lab.trainability.frozen.v1" &&
       checkpoint == nullptr)
     reject("trainable model composition requires an explicit checkpoint policy");
+}
+
+void validate_optimizer_decay_relationships(
+    const ResolvedTrainingComposition& composition) {
+  const auto grouped = components_by_category(composition);
+  const auto* optimizer = unique_component(
+      grouped, TrainingComponentCategory::optimizer, "optimizer");
+  const auto* decay = unique_component(
+      grouped, TrainingComponentCategory::weight_decay_schedule,
+      "weight decay schedule");
+  if (optimizer == nullptr || decay == nullptr ||
+      !optimizer->configuration.contains("weight_decay"))
+    return;
+  if (optimizer->configuration.at("weight_decay").get<double>() !=
+      decay->configuration.at("weight_decay").get<double>())
+    reject("legacy optimizer and weight-decay schedule must declare one equal initial value");
 }
 
 Json composition_body(const ResolvedTrainingComposition& composition) {
@@ -709,6 +746,7 @@ ResolvedTrainingComposition TrainingComponentRegistry::resolve_composition(
   validate_model_trainability_relationships(resolved);
   validate_data_pipeline_relationships(resolved);
   validate_evaluation_checkpoint_relationships(resolved);
+  validate_optimizer_decay_relationships(resolved);
   const std::string canonical_composition = composition_body(resolved).dump();
   if (canonical_composition.size() > kMaximumCompositionBytes)
     reject("resolved training composition exceeds its canonical byte bound");

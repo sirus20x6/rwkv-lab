@@ -439,7 +439,7 @@ void checked_in_component_catalog_matches_native_authority_contract() {
   const trainvm::TrainingComponentRegistry registry =
       trainvm::TrainingComponentRegistry::load_file(
           std::filesystem::absolute(path));
-  check(registry.document_json().at("components").size() == 45U &&
+  check(registry.document_json().at("components").size() == 53U &&
             registry.registry_digest().starts_with("sha256:") &&
             registry.registry_digest().size() == 71U,
         "checked-in cross-family component catalog is a canonical native authority document");
@@ -762,7 +762,7 @@ void checked_in_component_catalog_matches_native_authority_contract() {
               .configuration["sample_count"] = 9;
           (void)registry.resolve_composition(too_small);
         }),
-        "step-zero launch evidence cannot exceed the fixed held-out identity set");
+        "legacy step-zero launch evidence count cannot diverge from the fixed held-out identity set");
   auto exact_plan_result = trainvm::compile_document(experiment_fixture());
   if (exact_plan_result.plan) {
     auto exact_plan = *exact_plan_result.plan;

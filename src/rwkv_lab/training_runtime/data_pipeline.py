@@ -22,6 +22,9 @@ class DataPipelineError(ValueError):
 
 class DataSourceImplementation(str, Enum):
     JSONL_IMAGE_CAPTION_V1 = "rwkv_lab.data_source.jsonl_image_caption.v1"
+    JSONL_FROZEN_IMAGE_SPLITS_V1 = (
+        "rwkv_lab.data_source.jsonl_frozen_image_splits.v1"
+    )
     JSONL_TOKEN_CORPUS_V1 = "rwkv_lab.data_source.jsonl_token_corpus.v1"
 
 
@@ -32,6 +35,9 @@ class SampleProcessorImplementation(str, Enum):
 
 class SampleMapperImplementation(str, Enum):
     ASSISTANT_ONLY_V1 = "rwkv_lab.sample_mapper.assistant_only.v1"
+    ASSISTANT_CONVERSATION_V2 = (
+        "rwkv_lab.sample_mapper.assistant_conversation.v2"
+    )
     CAUSAL_TOKENS_V1 = "rwkv_lab.sample_mapper.causal_tokens.v1"
 
 
@@ -50,6 +56,7 @@ class BatchingImplementation(str, Enum):
 
 class SplitSelectorImplementation(str, Enum):
     DETERMINISTIC_HOLDOUT_V1 = "rwkv_lab.split_selector.deterministic_holdout.v1"
+    FROZEN_NAMED_V1 = "rwkv_lab.split_selector.frozen_named.v1"
 
 
 def _digest_bytes(value: bytes) -> str:
@@ -220,8 +227,74 @@ class JsonlTokenCorpusConfiguration:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class JsonlFrozenImageSplitsConfiguration:
+    dataset_root: str
+    content_fingerprint: str
+    declared_columns: tuple[str, ...]
+    image_column: str
+    caption_columns: tuple[str, ...]
+    id_column: str
+
+    def __post_init__(self) -> None:
+        root = _require_path(self.dataset_root, "dataset_root", directory=True)
+        _require_digest(self.content_fingerprint, "content_fingerprint")
+        for name in ("manifest.json", "train.jsonl", "validation.jsonl", "test.jsonl"):
+            _require_path(str(root / name), name)
+        declared = _columns(self.declared_columns, "declared_columns")
+        image = _column(self.image_column, "image_column")
+        captions = _ordered_columns(self.caption_columns, "caption_columns")
+        identifier = _column(self.id_column, "id_column")
+        if not {image, identifier, *captions}.issubset(declared):
+            raise DataPipelineError(
+                "frozen image-split columns are absent from declared_columns"
+            )
+
+    @classmethod
+    def from_resolved(
+        cls, value: Mapping[str, Any]
+    ) -> JsonlFrozenImageSplitsConfiguration:
+        value = _exact(
+            value,
+            {
+                "dataset_root",
+                "content_fingerprint",
+                "declared_columns",
+                "image_column",
+                "caption_columns",
+                "id_column",
+            },
+            "JSONL frozen image-splits source",
+        )
+        return cls(
+            **{
+                **value,
+                "declared_columns": _columns(
+                    value["declared_columns"], "declared_columns"
+                ),
+                "caption_columns": _ordered_columns(
+                    value["caption_columns"], "caption_columns"
+                ),
+            }
+        )
+
+    @property
+    def image_root(self) -> str:
+        return self.dataset_root
+
+    @property
+    def manifest_path(self) -> str:
+        return str(Path(self.dataset_root) / "train.jsonl")
+
+    @property
+    def split_manifest(self) -> str:
+        return str(Path(self.dataset_root) / "manifest.json")
+
+
 DataSourceConfiguration: TypeAlias = (
-    JsonlImageCaptionConfiguration | JsonlTokenCorpusConfiguration
+    JsonlFrozenImageSplitsConfiguration
+    | JsonlImageCaptionConfiguration
+    | JsonlTokenCorpusConfiguration
 )
 
 
@@ -242,22 +315,138 @@ class RegisteredDataSource:
     def declared_columns(self) -> tuple[str, ...]:
         return self.configuration.declared_columns
 
-    def verify_content(self) -> None:
+    def verify_content(
+        self, *, authority_content_fingerprint: str | None = None
+    ) -> None:
+        if isinstance(self.configuration, JsonlFrozenImageSplitsConfiguration):
+            configuration = self.configuration
+            if authority_content_fingerprint != configuration.content_fingerprint:
+                raise DataPipelineError(
+                    "frozen dataset fingerprint lacks matching workspace authority"
+                )
+            with Path(configuration.split_manifest).open(
+                "r", encoding="utf-8"
+            ) as handle:
+                receipt = json.load(handle)
+            counts = receipt.get("counts") if isinstance(receipt, dict) else None
+            files = receipt.get("files") if isinstance(receipt, dict) else None
+            if (
+                not isinstance(receipt.get("schema"), str)
+                or not isinstance(receipt.get("dataset_digest"), str)
+                or not isinstance(counts, dict)
+                or set(counts) != {"train", "validation", "test"}
+                or not isinstance(files, dict)
+            ):
+                raise DataPipelineError("frozen split receipt is incomplete")
+            seen_ids: set[str] = set()
+            total_rows = 0
+            for split, path in self._split_paths().items():
+                entry = files.get(path.name)
+                if (
+                    not isinstance(entry, dict)
+                    or set(entry) != {"rows", "sha256"}
+                    or entry["rows"] != counts[split]
+                    or _file_digest(path) != "sha256:" + entry["sha256"]
+                ):
+                    raise DataPipelineError(
+                        f"frozen {split} manifest disagrees with its receipt"
+                    )
+                rows = 0
+                with path.open("r", encoding="utf-8") as handle:
+                    for line_number, line in enumerate(handle, start=1):
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError as error:
+                            raise DataPipelineError(
+                                f"malformed frozen {split} row {line_number}"
+                            ) from error
+                        if not isinstance(row, dict) or row.get("split") != split:
+                            raise DataPipelineError(
+                                f"frozen {split} row has wrong split identity"
+                            )
+                        sample_id = row.get(configuration.id_column)
+                        caption = row.get(configuration.caption_columns[0])
+                        image_value = row.get(configuration.image_column)
+                        if (
+                            not isinstance(sample_id, str)
+                            or not sample_id
+                            or sample_id in seen_ids
+                        ):
+                            raise DataPipelineError(
+                                "frozen manifests contain an empty or duplicate ID"
+                            )
+                        if not isinstance(caption, str) or not caption.strip():
+                            raise DataPipelineError(
+                                "frozen manifest contains an empty caption"
+                            )
+                        if not isinstance(image_value, str) or not image_value:
+                            raise DataPipelineError(
+                                "frozen manifest contains an invalid image path"
+                            )
+                        image = Path(image_value)
+                        if not image.is_absolute():
+                            image = Path(configuration.dataset_root) / image
+                        try:
+                            image.resolve(strict=True).relative_to(
+                                Path(configuration.dataset_root).resolve(strict=True)
+                            )
+                        except (OSError, ValueError) as error:
+                            raise DataPipelineError(
+                                "frozen manifest image is absent or outside dataset root"
+                            ) from error
+                        if not image.is_file():
+                            raise DataPipelineError("frozen manifest image is not a file")
+                        seen_ids.add(sample_id)
+                        rows += 1
+                if rows != counts[split] or rows != entry["rows"]:
+                    raise DataPipelineError(
+                        f"frozen {split} row count disagrees with its receipt"
+                    )
+                total_rows += rows
+            unique_content = receipt.get("unique_content_hashes")
+            if isinstance(unique_content, int) and unique_content != total_rows:
+                raise DataPipelineError(
+                    "frozen dataset unique-content receipt disagrees with split rows"
+                )
+            return
         path = Path(self.configuration.manifest_path)
         actual = _file_digest(path)
         if actual != self.configuration.content_fingerprint:
             raise DataPipelineError("data-source content fingerprint disagrees")
 
+    def _split_paths(self) -> Mapping[str, Path]:
+        configuration = self.configuration
+        if not isinstance(configuration, JsonlFrozenImageSplitsConfiguration):
+            raise DataPipelineError("data source has no frozen named splits")
+        return MappingProxyType(
+            {
+                "train": Path(configuration.dataset_root) / "train.jsonl",
+                "validation": Path(configuration.dataset_root) / "validation.jsonl",
+                "test": Path(configuration.dataset_root) / "test.jsonl",
+            }
+        )
+
     def records(
-        self, *, start_cursor: int = 0, limit: int | None = None
+        self,
+        *,
+        start_cursor: int = 0,
+        limit: int | None = None,
+        split: str = "train",
     ) -> Iterator[RawSample]:
         if not isinstance(start_cursor, int) or start_cursor < 0:
             raise DataPipelineError("data-source cursor must be a nonnegative integer")
         if limit is not None and (not isinstance(limit, int) or limit < 0):
             raise DataPipelineError("data-source limit must be a nonnegative integer")
         configuration = self.configuration
+        path = (
+            self._split_paths().get(split)
+            if isinstance(configuration, JsonlFrozenImageSplitsConfiguration)
+            else Path(configuration.manifest_path)
+        )
+        if path is None:
+            raise DataPipelineError("frozen split name is invalid")
         emitted = 0
-        with Path(configuration.manifest_path).open("r", encoding="utf-8") as handle:
+        with path.open("r", encoding="utf-8") as handle:
             for ordinal, line in enumerate(handle):
                 if ordinal < start_cursor:
                     continue
@@ -283,12 +472,23 @@ class RegisteredDataSource:
                 sample_id = str(value[id_column]) if id_column else f"line:{ordinal}"
                 if not sample_id:
                     raise DataPipelineError("data source produced an empty sample id")
+                if isinstance(
+                    configuration, JsonlFrozenImageSplitsConfiguration
+                ) and value.get("split") != split:
+                    raise DataPipelineError(
+                        f"frozen {split} manifest contains a cross-split row"
+                    )
                 yield RawSample(
                     sample_id=sample_id,
                     ordinal=ordinal,
                     values=MappingProxyType(value),
                 )
                 emitted += 1
+
+    def records_for_split(self, split: str) -> tuple[RawSample, ...]:
+        if not isinstance(self.configuration, JsonlFrozenImageSplitsConfiguration):
+            raise DataPipelineError("data source has no frozen named splits")
+        return tuple(self.records(split=split))
 
     def take(self, count: int) -> tuple[RawSample, ...]:
         """Read and advance the exact streaming cursor.
@@ -563,6 +763,50 @@ class AssistantOnlyMapperConfiguration:
 
 
 @dataclass(frozen=True, slots=True)
+class AssistantConversationMapperConfiguration:
+    system_prompt: str
+    user_prompt: str
+    target_column: str
+    maximum_tokens: int
+    append_eos: bool
+
+    def __post_init__(self) -> None:
+        _column(self.target_column, "target_column")
+        for value, label in (
+            (self.system_prompt, "system_prompt"),
+            (self.user_prompt, "user_prompt"),
+        ):
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value.encode("utf-8")) > 16_384
+            ):
+                raise DataPipelineError(f"{label} must be bounded nonempty text")
+        if not 1 <= self.maximum_tokens <= 1_048_576:
+            raise DataPipelineError("maximum_tokens is invalid")
+        if not isinstance(self.append_eos, bool):
+            raise DataPipelineError("append_eos must be boolean")
+
+    @classmethod
+    def from_resolved(
+        cls, value: Mapping[str, Any]
+    ) -> AssistantConversationMapperConfiguration:
+        return cls(
+            **_exact(
+                value,
+                {
+                    "system_prompt",
+                    "user_prompt",
+                    "target_column",
+                    "maximum_tokens",
+                    "append_eos",
+                },
+                "assistant-conversation mapper",
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class CausalTokensMapperConfiguration:
     token_column: str
     maximum_tokens: int
@@ -580,7 +824,9 @@ class CausalTokensMapperConfiguration:
 
 
 SampleMapperConfiguration: TypeAlias = (
-    AssistantOnlyMapperConfiguration | CausalTokensMapperConfiguration
+    AssistantConversationMapperConfiguration
+    | AssistantOnlyMapperConfiguration
+    | CausalTokensMapperConfiguration
 )
 
 
@@ -620,6 +866,8 @@ class RegisteredSampleMapper:
         configuration = self.configuration
         if isinstance(configuration, CausalTokensMapperConfiguration):
             return frozenset({configuration.token_column})
+        if isinstance(configuration, AssistantConversationMapperConfiguration):
+            return frozenset({configuration.target_column})
         return frozenset(
             {
                 configuration.target_column,
@@ -648,6 +896,76 @@ class RegisteredSampleMapper:
             )
         if tokenizer is None:
             raise DataPipelineError("assistant-only mapping requires a tokenizer")
+        if isinstance(configuration, AssistantConversationMapperConfiguration):
+            render = getattr(tokenizer, "apply_chat_template", None)
+            if not callable(render):
+                raise DataPipelineError(
+                    "assistant-conversation mapping requires apply_chat_template"
+                )
+            messages: list[dict[str, Any]] = [
+                {"role": "system", "content": configuration.system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": configuration.user_prompt},
+                    ],
+                },
+            ]
+            target = sample.values[configuration.target_column]
+            if not isinstance(target, str) or not target.strip():
+                raise DataPipelineError(
+                    "assistant-conversation target must be nonempty text"
+                )
+            prompt = render(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            full = render(
+                [*messages, {"role": "assistant", "content": target}],
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            if (
+                not isinstance(prompt, str)
+                or not isinstance(full, str)
+                or not full.startswith(prompt)
+            ):
+                raise DataPipelineError(
+                    "assistant-conversation template has no stable target boundary"
+                )
+            backend = _tokenizer_backend(tokenizer)
+            prompt_ids = list(backend.encode(prompt, add_special_tokens=False))
+            full_ids = list(backend.encode(full, add_special_tokens=False))
+            if full_ids[: len(prompt_ids)] != prompt_ids:
+                raise DataPipelineError(
+                    "assistant-conversation tokens have no stable target boundary"
+                )
+            input_ids = full_ids[: configuration.maximum_tokens]
+            supervised = max(0, len(input_ids) - len(prompt_ids))
+            labels = (
+                [-100] * (len(input_ids) - supervised) + input_ids[-supervised:]
+                if supervised
+                else [-100] * len(input_ids)
+            )
+            if not input_ids or not any(label != -100 for label in labels):
+                raise DataPipelineError(
+                    "assistant-conversation mapping produced no supervised tokens"
+                )
+            if configuration.append_eos:
+                eos = backend.eos_token_id
+                if not isinstance(eos, int) or input_ids[-1] != eos:
+                    raise DataPipelineError(
+                        "assistant-conversation template must append exact EOS"
+                    )
+            return MappedSample(
+                sample.sample_id,
+                tuple(input_ids),
+                tuple(labels),
+                sample.image,
+                sample.image_size,
+            )
         tokenizer = _tokenizer_backend(tokenizer)
         prompt = (
             sample.values[configuration.prompt_column]
@@ -936,6 +1254,21 @@ class DeterministicHoldoutConfiguration:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenNamedSplitConfiguration:
+    selection: str
+
+    def __post_init__(self) -> None:
+        if self.selection not in {"test", "train", "validation"}:
+            raise DataPipelineError("frozen named split selection is invalid")
+
+    @classmethod
+    def from_resolved(
+        cls, value: Mapping[str, Any]
+    ) -> FrozenNamedSplitConfiguration:
+        return cls(**_exact(value, {"selection"}, "frozen named split selector"))
+
+
+@dataclass(frozen=True, slots=True)
 class SplitSelection:
     selected_ids: tuple[str, ...]
     held_out_ids: tuple[str, ...]
@@ -945,12 +1278,24 @@ class SplitSelection:
 @dataclass(frozen=True, slots=True)
 class RegisteredSplitSelector:
     implementation: SplitSelectorImplementation
-    configuration: DeterministicHoldoutConfiguration
+    configuration: DeterministicHoldoutConfiguration | FrozenNamedSplitConfiguration
 
     def select(self, sample_ids: Sequence[str]) -> SplitSelection:
         membership = tuple(sample_ids)
         if len(set(membership)) != len(membership):
             raise DataPipelineError("split selection requires unique sample ids")
+        if isinstance(self.configuration, FrozenNamedSplitConfiguration):
+            return SplitSelection(
+                membership,
+                (),
+                _canonical_digest(
+                    {
+                        "algorithm": "manifested-jsonl-split-v1",
+                        "selection": self.configuration.selection,
+                        "source_membership": membership,
+                    }
+                ),
+            )
         if self.configuration.held_out_count >= len(membership):
             raise DataPipelineError(
                 "held_out_count must leave at least one training sample"
@@ -1259,7 +1604,8 @@ class DeclarativeDataPipeline:
                 "pipeline references undeclared columns: " + ", ".join(missing)
             )
         if isinstance(
-            self.source.configuration, JsonlImageCaptionConfiguration
+            self.source.configuration,
+            (JsonlFrozenImageSplitsConfiguration, JsonlImageCaptionConfiguration),
         ) != isinstance(
             self.processor.configuration, ImageCaptionProcessorConfiguration
         ):
@@ -1297,7 +1643,10 @@ class DeclarativeDataPipeline:
         configuration = self.source.configuration
         image_root = (
             Path(configuration.image_root)
-            if isinstance(configuration, JsonlImageCaptionConfiguration)
+            if isinstance(
+                configuration,
+                (JsonlFrozenImageSplitsConfiguration, JsonlImageCaptionConfiguration),
+            )
             else None
         )
         mapped: list[MappedSample] = []
@@ -1398,8 +1747,10 @@ def data_source_from_resolved_component(
     configuration: DataSourceConfiguration
     if implementation is DataSourceImplementation.JSONL_IMAGE_CAPTION_V1:
         configuration = JsonlImageCaptionConfiguration.from_resolved(value)
-    else:
+    elif implementation is DataSourceImplementation.JSONL_TOKEN_CORPUS_V1:
         configuration = JsonlTokenCorpusConfiguration.from_resolved(value)
+    else:
+        configuration = JsonlFrozenImageSplitsConfiguration.from_resolved(value)
     return RegisteredDataSource(implementation, configuration)
 
 
@@ -1424,6 +1775,8 @@ def sample_mapper_from_resolved_component(
     configuration: SampleMapperConfiguration
     if implementation is SampleMapperImplementation.ASSISTANT_ONLY_V1:
         configuration = AssistantOnlyMapperConfiguration.from_resolved(value)
+    elif implementation is SampleMapperImplementation.ASSISTANT_CONVERSATION_V2:
+        configuration = AssistantConversationMapperConfiguration.from_resolved(value)
     else:
         configuration = CausalTokensMapperConfiguration.from_resolved(value)
     return RegisteredSampleMapper(implementation, configuration)
@@ -1465,9 +1818,12 @@ def split_selector_from_resolved_component(
 ) -> RegisteredSplitSelector:
     implementation_value, value = _resolved(component, "split_selector")
     implementation = SplitSelectorImplementation(implementation_value)
-    return RegisteredSplitSelector(
-        implementation, DeterministicHoldoutConfiguration.from_resolved(value)
+    configuration = (
+        DeterministicHoldoutConfiguration.from_resolved(value)
+        if implementation is SplitSelectorImplementation.DETERMINISTIC_HOLDOUT_V1
+        else FrozenNamedSplitConfiguration.from_resolved(value)
     )
+    return RegisteredSplitSelector(implementation, configuration)
 
 
 def build_data_pipeline(

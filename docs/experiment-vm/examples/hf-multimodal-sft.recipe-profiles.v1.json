@@ -30,7 +30,8 @@
           "parameters": {},
           "artifacts": {
             "checkpoint": {"type": "checkpoint", "schema": "hf.multimodal-sft.v1", "immutability": "immutable", "fingerprint": "manifest_sha256"},
-            "eval_gallery": {"type": "image_gallery", "schema": "rwkv-lab.eval-gallery.v2", "immutability": "append_only", "fingerprint": "manifest_sha256", "required": true}
+            "eval_gallery": {"type": "image_gallery", "schema": "rwkv-lab.eval-gallery.v2", "immutability": "append_only", "fingerprint": "manifest_sha256", "required": true},
+            "test_eval": {"type": "report", "schema": "rwkv-lab.hf-test-caption-evidence-bundle.v1", "immutability": "immutable", "fingerprint": "manifest_sha256", "required": true}
           },
           "components": {
             "core": {
@@ -88,28 +89,31 @@
                         }
                       },
                       "trainability": {
-                        "key": {"category": "trainability", "name": "lora", "version": "1.0.0"},
+                        "key": {"category": "trainability", "name": "lora_target_manifest", "version": "2.0.0"},
                         "configuration": {
                           "rank": 256,
                           "alpha": 512,
-                          "dropout": 0.0,
-                          "target_selectors": ["model.language_model.layers.*.self_attn.*_proj"],
-                          "modules_to_save": [],
+                          "dropout": 0.05,
+                          "target_manifest_path": "/thearray/git/datasets/captiontest/qwen36-caption-finetune-v1/lora-targets.json",
                           "bias": "none",
                           "merge_on_completion": false
                         }
+                      },
+                      "activation_memory": {
+                        "key": {"category": "activation_memory", "name": "hf_gradient_checkpointing", "version": "1.0.0"},
+                        "configuration": {"use_reentrant": false}
                       },
                       "objective": {
                         "key": {"category": "objective", "name": "linear_head_cross_entropy", "version": "1.0.0"},
                         "configuration": {"chunk_size": 2048, "prefer_fused": true}
                       },
                       "optimizer": {
-                        "key": {"category": "optimizer", "name": "torch_adamw", "version": "1.0.0"},
-                        "configuration": {"learning_rate": 0.00002, "weight_decay": 0.01, "beta1": 0.9, "beta2": 0.999, "epsilon": 0.00000001, "foreach": true, "fused": false}
+                        "key": {"category": "optimizer", "name": "torch_adamw_no_decay", "version": "2.0.0"},
+                        "configuration": {"learning_rate": 0.00002, "beta1": 0.9, "beta2": 0.95, "epsilon": 0.00000001, "foreach": true, "fused": false}
                       },
                       "learning_rate": {
                         "key": {"category": "learning_rate_schedule", "name": "linear_warmup_cosine", "version": "1.0.0"},
-                        "configuration": {"warmup_steps": 50, "max_steps": 1000, "minimum_ratio": 0.1}
+                        "configuration": {"warmup_steps": 22, "max_steps": 745, "minimum_ratio": 0.1}
                       },
                       "weight_decay": {
                         "key": {"category": "weight_decay_schedule", "name": "constant", "version": "1.0.0"},
@@ -121,59 +125,73 @@
                       },
                       "gradient_accumulation": {
                         "key": {"category": "gradient_accumulation", "name": "fixed", "version": "1.0.0"},
-                        "configuration": {"microbatches_per_optimizer_step": 1}
+                        "configuration": {"microbatches_per_optimizer_step": 16}
                       },
                       "precision": {
                         "key": {"category": "precision", "name": "bf16_parameters_fp32_reductions", "version": "1.0.0"},
                         "configuration": {"parameter_dtype": "bfloat16", "compute_dtype": "bfloat16", "reduction_dtype": "float32", "gradient_scaling": false}
                       },
                       "data": {
-                        "key": {"category": "data_source", "name": "jsonl_image_caption", "version": "1.0.0"},
-                        "configuration": {"manifest_path": "/thearray/git/datasets/captiontest/train.jsonl", "image_root": "/thearray/git/datasets/captiontest", "content_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "declared_columns": ["caption", "image", "source_relative_path"], "image_column": "image", "caption_columns": ["caption"], "id_column": "source_relative_path"}
+                        "key": {"category": "data_source", "name": "manifested_jsonl_image_splits", "version": "1.0.0"},
+                        "configuration": {"dataset_root": "/thearray/git/datasets/captiontest/qwen36-caption-finetune-v1", "content_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "declared_columns": ["caption", "id", "image", "split"], "image_column": "image", "caption_columns": ["caption"], "id_column": "id"}
                       },
                       "processor": {
                         "key": {"category": "sample_processor", "name": "image_caption", "version": "1.0.0"},
-                        "configuration": {"image_column": "image", "caption_columns": ["caption"], "minimum_pixels": 1024, "maximum_pixels": 4194304, "maximum_edge": 2048, "oversize_policy": "downscale"}
+                        "configuration": {"image_column": "image", "caption_columns": ["caption"], "minimum_pixels": 65536, "maximum_pixels": 1048576, "maximum_edge": 4096, "oversize_policy": "downscale"}
                       },
                       "sample_mapping": {
-                        "key": {"category": "sample_mapper", "name": "assistant_only", "version": "1.0.0"},
-                        "configuration": {"prompt_column": "", "fixed_prompt": "Describe the image.", "target_column": "caption", "maximum_tokens": 2048, "append_eos": true}
+                        "key": {"category": "sample_mapper", "name": "assistant_conversation", "version": "2.0.0"},
+                        "configuration": {
+                          "system_prompt": "You are an expert image-captioning assistant. Describe only what the image supports, in natural language suitable for training a text-to-image model.",
+                          "user_prompt": "Write one detailed master caption in 4-8 sentences. Cover the main subject, secondary objects, actions, spatial relationships, setting, composition, camera viewpoint, lighting, colors, materials, texture, photographic or artistic style, and all genuinely legible text. Integrate details naturally in context rather than listing tags. Do not mention these instructions, metadata, uncertainty policy, or the image file path.",
+                          "target_column": "caption",
+                          "maximum_tokens": 1024,
+                          "append_eos": true
+                        }
                       },
                       "collation": {
                         "key": {"category": "collator", "name": "padded", "version": "1.0.0"},
-                        "configuration": {"pad_token_id": 0, "label_pad_token_id": -100, "pad_to_multiple": 8, "maximum_sequence_length": 2048}
+                        "configuration": {"pad_token_id": 0, "label_pad_token_id": -100, "pad_to_multiple": 8, "maximum_sequence_length": 1024}
                       },
                       "sampler": {
                         "key": {"category": "sampler", "name": "deterministic", "version": "1.0.0"},
-                        "configuration": {"seed": 38051, "shuffle": true}
+                        "configuration": {"seed": 20260805, "shuffle": true}
                       },
                       "batching": {
                         "key": {"category": "batching", "name": "fixed", "version": "1.0.0"},
                         "configuration": {"batch_size": 1, "drop_last": false, "prefetch_workers": 8}
                       },
                       "split": {
-                        "key": {"category": "split_selector", "name": "deterministic_holdout", "version": "1.0.0"},
-                        "configuration": {"seed": 38051, "held_out_count": 10, "selection": "train"}
+                        "key": {"category": "split_selector", "name": "frozen_named", "version": "1.0.0"},
+                        "configuration": {"selection": "train"}
                       },
                       "evaluation_split": {
-                        "key": {"category": "split_selector", "name": "deterministic_holdout", "version": "1.0.0"},
-                        "configuration": {"seed": 38051, "held_out_count": 10, "selection": "held_out"}
+                        "key": {"category": "split_selector", "name": "frozen_named", "version": "1.0.0"},
+                        "configuration": {"selection": "validation"}
+                      },
+                      "test_split": {
+                        "key": {"category": "split_selector", "name": "frozen_named", "version": "1.0.0"},
+                        "configuration": {"selection": "test"}
                       },
                       "evaluator": {
                         "key": {"category": "evaluator", "name": "scalar_loss", "version": "1.0.0"},
                         "configuration": {"split_slot": "evaluation_split", "metrics": ["loss"], "reduction": "weighted_mean", "maximum_examples": 0}
                       },
                       "evaluation_schedule": {
-                        "key": {"category": "evaluation_schedule", "name": "launch_gate_periodic", "version": "1.0.0"},
-                        "configuration": {"launch_gate_examples": 10, "full_step_zero": true, "qualitative_every_steps": 100, "full_every_steps": 100, "defer_full_scalar": true, "final": true}
+                        "key": {"category": "evaluation_schedule", "name": "launch_gate_periodic", "version": "2.0.0"},
+                        "configuration": {"full_step_zero": true, "qualitative_every_steps": 100, "full_every_steps": 100, "final": true}
                       },
                       "qualitative_samples": {
-                        "key": {"category": "qualitative_sample", "name": "fixed_held_out", "version": "1.0.0"},
-                        "configuration": {"identity_field": "source_relative_path", "identities_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "selector_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "sample_count": 10}
+                        "key": {"category": "qualitative_sample", "name": "fixed_held_out", "version": "2.0.0"},
+                        "configuration": {"identity_field": "id", "sample_count": 10}
                       },
                       "artifact_renderer": {
                         "key": {"category": "artifact_renderer", "name": "caption_triplet", "version": "1.0.0"},
                         "configuration": {"modality": "multimodal", "schema": "trainvm.caption-triplet.v1"}
+                      },
+                      "generation_policy": {
+                        "key": {"category": "generation_policy", "name": "greedy", "version": "1.0.0"},
+                        "configuration": {"maximum_new_tokens": 768, "generation_batch_size": 4, "use_cache": true}
                       },
                       "checkpoint_policy": {
                         "key": {"category": "checkpoint_policy", "name": "atomic_retained", "version": "1.0.0"},
@@ -182,7 +200,7 @@
                     }
                   }
                 },
-                "publishes": {"checkpoint": "checkpoint", "eval_gallery": "eval_gallery", "metrics": "metrics"},
+                "publishes": {"checkpoint": "checkpoint", "eval_gallery": "eval_gallery", "metrics": "metrics", "test_eval": "test_eval"},
                 "idempotency": "receipt_required",
                 "effect": "process",
                 "timeout_seconds": 604800,
@@ -210,6 +228,12 @@
           "observability": {
             "heartbeat_seconds": 5,
             "metrics": [
+              {"name": "eval.loss", "type": "gauge", "unit": "dimensionless", "step_domain": "optimizer_step", "aggregation": "last"},
+              {"name": "eval.caption_items_completed", "type": "gauge", "unit": "count", "step_domain": "optimizer_step", "aggregation": "last"},
+              {"name": "eval.caption_items_failed", "type": "gauge", "unit": "count", "step_domain": "optimizer_step", "aggregation": "last"},
+              {"name": "eval.caption_items_total", "type": "gauge", "unit": "count", "step_domain": "optimizer_step", "aggregation": "last"},
+              {"name": "eval.caption_wall_seconds", "type": "gauge", "unit": "second", "step_domain": "optimizer_step", "aggregation": "last"},
+              {"name": "eval.test_loss", "type": "gauge", "unit": "dimensionless", "step_domain": "optimizer_step", "aggregation": "last"},
               {"name": "train.loss", "type": "gauge", "unit": "dimensionless", "step_domain": "optimizer_step", "aggregation": "weighted_mean"},
               {"name": "train.tokens_per_second", "type": "gauge", "unit": "token/second", "step_domain": "optimizer_step", "aggregation": "mean"}
             ],
@@ -229,24 +253,29 @@
       "overrides": [
         {"name": "model.path", "domain": "model", "type": "path", "target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/model_path", "required": true, "description": "Exact local Hugging Face model snapshot"},
         {"name": "model.attention_implementation", "domain": "model", "type": "enumeration", "target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/attention_implementation", "required": false, "values": ["flash_attention_2", "sdpa"]},
-        {"name": "data.manifest", "domain": "data", "type": "path", "target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/manifest_path", "required": true, "description": "Frozen image-caption manifest"},
-        {"name": "data.image_root", "domain": "data", "type": "path", "target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/image_root", "required": true, "description": "Authority-bounded root for manifest image paths"},
-        {"name": "data.content_fingerprint", "domain": "data", "type": "string", "target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/content_fingerprint", "required": true, "description": "Frozen manifest and image-set identity"},
+        {"name": "data.root", "domain": "data", "type": "path", "target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/dataset_root", "required": true, "description": "Authority-bounded manifested train/validation/test dataset root"},
+        {"name": "trainability.target_manifest", "domain": "trainability", "type": "path", "target": "/spec/workflow/nodes/train/invoke/training/components/trainability/configuration/target_manifest_path", "required": true, "description": "Exact model-bound LoRA target manifest"},
         {"name": "data.batch_size", "domain": "data", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/batching/configuration/batch_size", "required": false, "minimum": 1, "maximum": 65536},
         {"name": "trainability.lora_rank", "domain": "trainability", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/trainability/configuration/rank", "required": false, "minimum": 1, "maximum": 1024},
         {"name": "trainability.lora_alpha", "domain": "trainability", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/trainability/configuration/alpha", "required": false, "minimum": 1, "maximum": 4096},
         {"name": "hyperparameters.learning_rate", "domain": "hyperparameters", "type": "number", "target": "/spec/workflow/nodes/train/invoke/training/components/optimizer/configuration/learning_rate", "required": false, "minimum": 0.00000001, "maximum": 0.01},
         {"name": "hyperparameters.gradient_accumulation", "domain": "hyperparameters", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/gradient_accumulation/configuration/microbatches_per_optimizer_step", "required": false, "minimum": 1, "maximum": 65536},
         {"name": "hyperparameters.maximum_steps", "domain": "hyperparameters", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/learning_rate/configuration/max_steps", "required": false, "minimum": 1, "maximum": 10000000},
-        {"name": "evaluation.step_zero_examples", "domain": "evaluation", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/evaluation_schedule/configuration/launch_gate_examples", "required": false, "minimum": 1, "maximum": 256},
+        {"name": "evaluation.qualitative_sample_count", "domain": "evaluation", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/qualitative_samples/configuration/sample_count", "required": false, "minimum": 1, "maximum": 512},
         {"name": "evaluation.qualitative_every_steps", "domain": "evaluation", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/evaluation_schedule/configuration/qualitative_every_steps", "required": false, "minimum": 0, "maximum": 10000000},
         {"name": "evaluation.full_every_steps", "domain": "evaluation", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/evaluation_schedule/configuration/full_every_steps", "required": false, "minimum": 0, "maximum": 10000000},
         {"name": "checkpointing.every_steps", "domain": "checkpointing", "type": "integer", "target": "/spec/workflow/nodes/train/invoke/training/components/checkpoint_policy/configuration/every_steps", "required": false, "minimum": 1, "maximum": 1000000},
         {"name": "resources.gpu_memory_gib", "domain": "resources", "type": "number", "target": "/spec/resources/accelerators/minimum_memory_gib", "required": false, "minimum": 24, "maximum": 192}
       ],
       "content_bindings": [
-        {"path_target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/model_path", "fingerprint_target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/checkpoint_fingerprint"},
-        {"path_target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/image_root", "fingerprint_target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/content_fingerprint"}
+        {
+          "path_target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/model_path",
+          "fingerprint_target": "/spec/workflow/nodes/train/invoke/training/components/model_loader/configuration/checkpoint_fingerprint"
+        },
+        {
+          "path_target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/dataset_root",
+          "fingerprint_target": "/spec/workflow/nodes/train/invoke/training/components/data/configuration/content_fingerprint"
+        }
       ],
       "compatibility": [
         {

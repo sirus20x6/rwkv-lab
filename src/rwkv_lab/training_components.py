@@ -5,6 +5,12 @@ one owned module beneath :mod:`rwkv_lab.training_runtime`; this facade preserves
 the existing trainer API without re-coupling the implementations.
 """
 
+from rwkv_lab.training_runtime.activation_memory import (
+    ActivationMemoryImplementation,
+    HFGradientCheckpointing,
+    HFGradientCheckpointingConfiguration,
+    activation_memory_from_resolved_component,
+)
 from rwkv_lab.training_runtime.activations import (
     ActivationImplementation,
     RegisteredActivation,
@@ -38,6 +44,7 @@ from rwkv_lab.training_runtime.curricula import (
     parse_context_stages,
 )
 from rwkv_lab.training_runtime.data_pipeline import (
+    AssistantConversationMapperConfiguration,
     AssistantOnlyMapperConfiguration,
     BatchingImplementation,
     BucketedBatchingConfiguration,
@@ -50,7 +57,9 @@ from rwkv_lab.training_runtime.data_pipeline import (
     DeterministicHoldoutConfiguration,
     DeterministicSamplerConfiguration,
     FixedBatchingConfiguration,
+    FrozenNamedSplitConfiguration,
     ImageCaptionProcessorConfiguration,
+    JsonlFrozenImageSplitsConfiguration,
     JsonlImageCaptionConfiguration,
     JsonlTokenCorpusConfiguration,
     MappedSample,
@@ -91,6 +100,12 @@ from rwkv_lab.training_runtime.evaluators import (
     ScalarLossEvaluator,
     ScalarLossEvaluatorConfiguration,
     evaluator_from_resolved_component,
+)
+from rwkv_lab.training_runtime.generation_policies import (
+    GenerationPolicyImplementation,
+    GreedyGenerationConfiguration,
+    GreedyGenerationPolicy,
+    generation_policy_from_resolved_component,
 )
 from rwkv_lab.training_runtime.gradient_accumulation import (
     FixedGradientAccumulation,
@@ -151,8 +166,11 @@ from rwkv_lab.training_runtime.precision import (
     precision_policy_from_resolved_component,
 )
 from rwkv_lab.training_runtime.qualitative_samples import (
+    DerivedFixedHeldOutConfiguration,
+    DerivedFixedHeldOutSamples,
     FixedHeldOutConfiguration,
     FixedHeldOutSamples,
+    HeldOutSampleBinding,
     QualitativeSampleImplementation,
     qualitative_sample_from_resolved_component,
 )
@@ -182,12 +200,15 @@ from rwkv_lab.training_runtime.schedules import (
 from rwkv_lab.training_runtime.trainability import (
     FrozenTrainabilityConfiguration,
     FullTrainabilityConfiguration,
+    LoraTargetManifestConfiguration,
+    LoraTargetReceipt,
     LoraTrainabilityConfiguration,
     NamedRulesTrainabilityConfiguration,
     RegisteredTrainability,
     TrainabilityImplementation,
     TrainabilityResult,
     build_registered_trainability,
+    load_lora_target_receipt,
     resolve_lora_targets,
     trainability_from_resolved_component,
 )
@@ -201,12 +222,14 @@ from rwkv_lab.training_runtime.weight_decay_schedules import (
 
 __all__ = [
     "ActivationImplementation",
+    "ActivationMemoryImplementation",
     "AdamWConfiguration",
     "AdamWNoDecayConfiguration",
     "AppearanceExpertRoutingConfiguration",
     "ArtifactRenderer",
     "ArtifactRendererConfiguration",
     "ArtifactRendererImplementation",
+    "AssistantConversationMapperConfiguration",
     "AssistantOnlyMapperConfiguration",
     "AtomicCheckpointPolicy",
     "AtomicCheckpointPolicyConfiguration",
@@ -228,6 +251,8 @@ __all__ = [
     "DataPreflightEvidence",
     "DataSourceImplementation",
     "DeclarativeDataPipeline",
+    "DerivedFixedHeldOutConfiguration",
+    "DerivedFixedHeldOutSamples",
     "DeterministicHoldoutConfiguration",
     "DeterministicSamplerConfiguration",
     "EvaluationDecision",
@@ -244,14 +269,22 @@ __all__ = [
     "FixedHeldOutSamples",
     "Float8PrecisionConfiguration",
     "Float8PrecisionPolicy",
+    "FrozenNamedSplitConfiguration",
     "FrozenTrainabilityConfiguration",
     "FullBackboneRoutingConfiguration",
     "FullTrainabilityConfiguration",
+    "GenerationPolicyImplementation",
     "GlobalNormClippingConfiguration",
     "GradientAccumulationImplementation",
     "GradientClippingImplementation",
+    "GreedyGenerationConfiguration",
+    "GreedyGenerationPolicy",
+    "HFGradientCheckpointing",
+    "HFGradientCheckpointingConfiguration",
+    "HeldOutSampleBinding",
     "HuggingFaceModelConfiguration",
     "ImageCaptionProcessorConfiguration",
+    "JsonlFrozenImageSplitsConfiguration",
     "JsonlImageCaptionConfiguration",
     "JsonlTokenCorpusConfiguration",
     "LayerNormConfiguration",
@@ -261,6 +294,8 @@ __all__ = [
     "LinearWarmupConstantConfiguration",
     "LinearWarmupCosineConfiguration",
     "LoadedModel",
+    "LoraTargetManifestConfiguration",
+    "LoraTargetReceipt",
     "LoraTrainabilityConfiguration",
     "MappedSample",
     "ModelLoadReceipt",
@@ -304,6 +339,7 @@ __all__ = [
     "TrainabilityResult",
     "WeightDecayScheduleImplementation",
     "activation_from_resolved_component",
+    "activation_memory_from_resolved_component",
     "artifact_renderer_from_resolved_component",
     "batching_from_resolved_component",
     "build_data_pipeline",
@@ -328,10 +364,12 @@ __all__ = [
     "data_source_from_resolved_component",
     "evaluation_schedule_from_resolved_component",
     "evaluator_from_resolved_component",
+    "generation_policy_from_resolved_component",
     "gradient_accumulation_from_resolved_component",
     "gradient_clipping_from_resolved_component",
     "linear_warmup_constant_multiplier",
     "linear_warmup_cosine_multiplier",
+    "load_lora_target_receipt",
     "model_loader_from_resolved_component",
     "normalization_from_resolved_component",
     "objective_from_resolved_component",

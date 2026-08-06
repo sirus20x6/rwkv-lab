@@ -720,6 +720,219 @@ def _qwen_ao3(
     )
 
 
+def _hf_multimodal_sft(
+    invocation: WorkerInvocation,
+    components: WorkerTrainingComponents,
+    step_profiler: WorkerStepProfiler | None = None,
+    observability: WorkerObservability | None = None,
+    controls: WorkerControlRuntime | None = None,
+    execution_phases: WorkerExecutionPhases | None = None,
+) -> HandlerResult:
+    del execution_phases
+    if observability is None or controls is None:
+        raise AdapterDispatchError("HF SFT requires worker runtime authorities")
+    if invocation.inputs:
+        raise AdapterDispatchError(
+            "HF SFT operation accepts no duplicate scalar operation inputs"
+        )
+    paths = WorkspacePathAuthority.from_workspace(
+        invocation.workspace, require_content=True
+    )
+    model_configuration = components.configuration(
+        "model_loader", category="model_loader"
+    )
+    resolved_model = paths.read_path(
+        str(model_configuration["model_path"]),
+        label="HF model snapshot",
+        kind="directory",
+    )
+    model_locks = tuple(
+        identity
+        for identity in paths.input_content_roots
+        if Path(identity.path) == resolved_model
+    )
+    if (
+        len(model_locks) != 1
+        or model_locks[0].kind != "directory"
+        or model_locks[0].tree_sha256
+        != model_configuration["checkpoint_fingerprint"]
+    ):
+        raise AdapterDispatchError(
+            "HF model fingerprint disagrees with workspace content authority"
+        )
+    trainability = components.trainability()
+    target_selectors = getattr(trainability.configuration, "target_selectors", None)
+    target_manifest_value = getattr(
+        trainability.configuration, "target_manifest_path", None
+    )
+    if target_selectors is not None:
+        from rwkv_lab.training_runtime.trainability import (
+            preflight_lora_targets_from_snapshot,
+        )
+
+        try:
+            preflight_lora_targets_from_snapshot(
+                resolved_model, tuple(target_selectors)
+            )
+        except (OSError, TypeError, ValueError) as error:
+            raise AdapterDispatchError(
+                "HF LoRA selectors failed metadata-only snapshot preflight"
+            ) from error
+    if target_manifest_value is not None:
+        from rwkv_lab.training_runtime.trainability import (
+            preflight_lora_target_manifest,
+        )
+
+        target_manifest = paths.read_path(
+            str(target_manifest_value), label="HF LoRA target manifest", kind="file"
+        )
+        try:
+            preflight_lora_target_manifest(resolved_model, target_manifest)
+        except (OSError, TypeError, ValueError) as error:
+            raise AdapterDispatchError(
+                "HF LoRA target manifest failed snapshot preflight"
+            ) from error
+    data_configuration = components.configuration("data", category="data_source")
+    dataset_root = data_configuration.get("dataset_root")
+    if dataset_root is not None:
+        resolved_root = paths.read_path(
+            str(dataset_root), label="HF frozen dataset root", kind="directory"
+        )
+        matching_locks = tuple(
+            identity
+            for identity in paths.input_content_roots
+            if Path(identity.path) == resolved_root
+        )
+        if (
+            len(matching_locks) != 1
+            or matching_locks[0].kind != "directory"
+            or matching_locks[0].tree_sha256
+            != data_configuration.get("content_fingerprint")
+        ):
+            raise AdapterDispatchError(
+                "HF frozen dataset fingerprint disagrees with workspace authority"
+            )
+        for field in ("manifest.json", "train.jsonl", "validation.jsonl", "test.jsonl"):
+            candidate = paths.read_path(
+                str(resolved_root / field), label=f"HF {field}", kind="file"
+            )
+            try:
+                candidate.relative_to(resolved_root)
+            except ValueError as error:
+                raise AdapterDispatchError(
+                    f"HF {field} escapes the frozen dataset root"
+                ) from error
+        if target_manifest_value is not None:
+            try:
+                target_manifest.relative_to(resolved_root)
+            except ValueError as error:
+                raise AdapterDispatchError(
+                    "HF LoRA target manifest escapes the frozen dataset root"
+                ) from error
+        manifest = None
+    else:
+        manifest = paths.read_path(
+            str(data_configuration["manifest_path"]),
+            label="HF data manifest",
+            kind="file",
+        )
+    image_root = data_configuration.get("image_root")
+    if image_root is not None:
+        resolved_image_root = paths.read_path(
+            str(image_root), label="HF image root", kind="directory"
+        )
+        content_fingerprint = data_configuration.get("content_fingerprint")
+        matching_locks = tuple(
+            identity
+            for identity in paths.input_content_roots
+            if Path(identity.path) == resolved_image_root
+        )
+        if (
+            len(matching_locks) != 1
+            or matching_locks[0].kind != "directory"
+            or matching_locks[0].tree_sha256 != content_fingerprint
+        ):
+            raise AdapterDispatchError(
+                "HF image data fingerprint disagrees with workspace content authority"
+            )
+        image_column = data_configuration.get("image_column")
+        if not isinstance(image_column, str):
+            raise AdapterDispatchError("HF image data has no image column")
+        paths.verify_jsonl_file_references(
+            manifest, fields=(image_column,), label="HF data manifest"
+        )
+    elif manifest is not None:
+        content_fingerprint = data_configuration.get("content_fingerprint")
+        manifest_locks = tuple(
+            identity
+            for identity in paths.input_content_roots
+            if Path(identity.path) == manifest
+        )
+        if (
+            len(manifest_locks) != 1
+            or manifest_locks[0].kind != "file"
+            or manifest_locks[0].tree_sha256 != content_fingerprint
+        ):
+            raise AdapterDispatchError(
+                "HF causal data fingerprint disagrees with workspace content authority"
+            )
+    try:
+        source = components.data_pipeline(split_slot="split").source
+        if dataset_root is not None:
+            source.verify_content(
+                authority_content_fingerprint=matching_locks[0].tree_sha256
+            )
+        else:
+            source.verify_content()
+    except (OSError, ValueError) as error:
+        raise AdapterDispatchError(
+            "HF data failed authority-bound pre-load validation"
+        ) from error
+    resume = _resume_payload(
+        invocation,
+        paths,
+        required_state=frozenset(
+            {
+                "component_composition",
+                "control_revision",
+                "data_cursor",
+                "lr_schedule",
+                "model",
+                "optimizer",
+                "rng_accelerator",
+                "rng_numpy",
+                "rng_python",
+                "rng_torch",
+                "weight_decay_schedule",
+            }
+        ),
+    )
+    parent_ids: tuple[str, ...] = ()
+    if invocation.resume is not None:
+        checkpoint = invocation.resume.get("checkpoint")
+        artifact_id = checkpoint.get("artifact_id") if isinstance(checkpoint, Mapping) else None
+        if not isinstance(artifact_id, str) or not artifact_id:
+            raise AdapterDispatchError("HF resume checkpoint has no artifact identity")
+        parent_ids = (artifact_id,)
+    from .hf_multimodal_sft import run_hf_multimodal_sft
+
+    step = run_hf_multimodal_sft(
+        invocation=invocation,
+        components=components,
+        run_directory=paths.run_directory,
+        controls=controls,
+        observability=observability,
+        step_profiler=step_profiler or NullStepProfiler(),
+        resume_directory=resume,
+        resume_parent_artifact_ids=parent_ids,
+    )
+    return HandlerResult(
+        "worker.completed",
+        {"reason": "training_complete", "status": "complete"},
+        optimizer_step=step,
+    )
+
+
 def _rwkv_scratch(
     invocation: WorkerInvocation,
     components: WorkerTrainingComponents,
@@ -2336,6 +2549,12 @@ def _cache_directory(
 
 
 _HANDLERS: Mapping[AdapterKey, Handler] = {
+    (
+        "rwkv-lab.hf-multimodal-sft",
+        "1.0.0",
+        "train",
+        "rwkv_lab.hf_multimodal_sft.v1.Train",
+    ): _hf_multimodal_sft,
     (
         "rwkv-lab.mageflow-appearance-expert",
         "1.0.0",

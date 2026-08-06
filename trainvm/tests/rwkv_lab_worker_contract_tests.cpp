@@ -184,7 +184,7 @@ int main() {
                 qwen.training_composition->slots.size() == 4U &&
                 hf.training_composition &&
                 hf.training_composition->model_family == "transformer" &&
-                hf.training_composition->slots.size() == 22U &&
+                hf.training_composition->slots.size() == 25U &&
                 rwkv.training_composition &&
                 rwkv.training_composition->model_family == "rwkv" &&
                 rwkv.training_composition->slots.size() == 10U &&

@@ -108,6 +108,48 @@
       "reference_implementation": true
     },
     {
+      "key": {"category": "trainability", "name": "lora_target_manifest", "version": "2.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.trainability.lora_target_manifest.v2",
+      "model_families": ["transformer", "vision"],
+      "required_capabilities": ["trainability.lora_target_manifest.v2"],
+      "configuration": [
+        {"name": "rank", "type": "integer", "required": true, "minimum": 1, "maximum": 4096},
+        {"name": "alpha", "type": "integer", "required": true, "minimum": 1, "maximum": 65536},
+        {"name": "dropout", "type": "number", "required": false, "default": 0.0, "minimum": 0.0, "maximum": 0.999999},
+        {"name": "target_manifest_path", "type": "path", "required": true},
+        {"name": "bias", "type": "enumeration", "required": false, "default": "none", "values": ["all", "lora_only", "none"]},
+        {"name": "merge_on_completion", "type": "boolean", "required": false, "default": false}
+      ],
+      "state": [
+        {"name": "adapter_state_manifest", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "merged", "type": "boolean", "required": true},
+        {"name": "trainable_parameter_manifest", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "target_manifest_file_digest", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "producer_target_digest", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "producer_digest_status", "type": "string", "required": true},
+        {"name": "target_policy_digest", "type": "string", "required": true, "string_format": "sha256_digest"}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "activation_memory", "name": "hf_gradient_checkpointing", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.activation_memory.hf_gradient_checkpointing.v1",
+      "model_families": ["transformer", "vision"],
+      "required_capabilities": ["activation_memory.hf_gradient_checkpointing.v1"],
+      "configuration": [
+        {"name": "use_reentrant", "type": "boolean", "required": false, "default": false}
+      ],
+      "state": [
+        {"name": "enabled", "type": "boolean", "required": true},
+        {"name": "use_reentrant", "type": "boolean", "required": true}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
       "key": {"category": "data_source", "name": "jsonl_image_caption", "version": "1.0.0"},
       "backend": "python",
       "implementation": "rwkv_lab.data_source.jsonl_image_caption.v1",
@@ -121,6 +163,27 @@
         {"name": "image_column", "type": "string", "required": true},
         {"name": "caption_columns", "type": "string_list", "required": true, "collection_semantics": "ordered"},
         {"name": "id_column", "type": "string", "required": false, "default": ""}
+      ],
+      "state": [
+        {"name": "content_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "cursor", "type": "integer", "required": true}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "data_source", "name": "manifested_jsonl_image_splits", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.data_source.jsonl_frozen_image_splits.v1",
+      "model_families": ["transformer", "vision"],
+      "required_capabilities": ["data_source.jsonl_frozen_image_splits.v1"],
+      "configuration": [
+        {"name": "dataset_root", "type": "path", "required": true},
+        {"name": "content_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "declared_columns", "type": "string_list", "required": true, "collection_semantics": "set"},
+        {"name": "image_column", "type": "string", "required": true},
+        {"name": "caption_columns", "type": "string_list", "required": true, "collection_semantics": "ordered"},
+        {"name": "id_column", "type": "string", "required": true}
       ],
       "state": [
         {"name": "content_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
@@ -192,6 +255,23 @@
       "configuration": [
         {"name": "prompt_column", "type": "string", "required": false, "default": ""},
         {"name": "fixed_prompt", "type": "string", "required": false, "default": ""},
+        {"name": "target_column", "type": "string", "required": true},
+        {"name": "maximum_tokens", "type": "integer", "required": true, "minimum": 1, "maximum": 1048576, "unit": "tokens"},
+        {"name": "append_eos", "type": "boolean", "required": false, "default": true}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "sample_mapper", "name": "assistant_conversation", "version": "2.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.sample_mapper.assistant_conversation.v2",
+      "model_families": ["transformer", "vision"],
+      "required_capabilities": ["sample_mapper.assistant_conversation.v2"],
+      "configuration": [
+        {"name": "system_prompt", "type": "string", "required": true},
+        {"name": "user_prompt", "type": "string", "required": true},
         {"name": "target_column", "type": "string", "required": true},
         {"name": "maximum_tokens", "type": "integer", "required": true, "minimum": 1, "maximum": 1048576, "unit": "tokens"},
         {"name": "append_eos", "type": "boolean", "required": false, "default": true}
@@ -299,6 +379,19 @@
         {"name": "seed", "type": "integer", "required": true, "minimum": 0, "maximum": 9223372036854775807},
         {"name": "held_out_count", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000000, "unit": "samples"},
         {"name": "selection", "type": "enumeration", "required": false, "default": "train", "values": ["held_out", "train"]}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "split_selector", "name": "frozen_named", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.split_selector.frozen_named.v1",
+      "model_families": ["transformer", "vision"],
+      "required_capabilities": ["split_selector.frozen_named.v1"],
+      "configuration": [
+        {"name": "selection", "type": "enumeration", "required": true, "values": ["test", "train", "validation"]}
       ],
       "state": [],
       "state_grade": "stateless",
@@ -774,6 +867,23 @@
       "reference_implementation": true
     },
     {
+      "key": {"category": "evaluation_schedule", "name": "launch_gate_periodic", "version": "2.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.evaluation_schedule.launch_gate_periodic.v2",
+      "model_families": ["*"],
+      "required_capabilities": ["evaluation_schedule.launch_gate_periodic.v2"],
+      "configuration": [
+        {"name": "full_step_zero", "type": "boolean", "required": false, "default": true},
+        {"name": "qualitative_every_steps", "type": "integer", "required": false, "default": 0, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"},
+        {"name": "full_every_steps", "type": "integer", "required": false, "default": 0, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"},
+        {"name": "final", "type": "boolean", "required": false, "default": true}
+      ],
+      "state": [],
+      "step_domain": "optimizer_step",
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
       "key": {"category": "qualitative_sample", "name": "fixed_held_out", "version": "1.0.0"},
       "backend": "python",
       "implementation": "rwkv_lab.qualitative_sample.fixed_held_out.v1",
@@ -787,6 +897,23 @@
       ],
       "state": [],
       "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "qualitative_sample", "name": "fixed_held_out", "version": "2.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.qualitative_sample.fixed_held_out.v2",
+      "model_families": ["*"],
+      "required_capabilities": ["qualitative_sample.fixed_held_out.v2"],
+      "configuration": [
+        {"name": "identity_field", "type": "string", "required": true},
+        {"name": "sample_count", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000, "unit": "samples"}
+      ],
+      "state": [
+        {"name": "identities_digest", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "selector_digest", "type": "string", "required": true, "string_format": "sha256_digest"}
+      ],
+      "state_grade": "exact",
       "reference_implementation": true
     },
     {
@@ -812,6 +939,21 @@
       "configuration": [
         {"name": "modality", "type": "enumeration", "required": false, "default": "multimodal", "values": ["multimodal"]},
         {"name": "schema", "type": "enumeration", "required": false, "default": "trainvm.caption-triplet.v1", "values": ["trainvm.caption-triplet.v1"]}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "generation_policy", "name": "greedy", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.generation_policy.greedy.v1",
+      "model_families": ["transformer", "vision"],
+      "required_capabilities": ["generation_policy.greedy.v1"],
+      "configuration": [
+        {"name": "maximum_new_tokens", "type": "integer", "required": true, "minimum": 1, "maximum": 4096, "unit": "tokens"},
+        {"name": "generation_batch_size", "type": "integer", "required": false, "default": 1, "minimum": 1, "maximum": 256, "unit": "count"},
+        {"name": "use_cache", "type": "boolean", "required": false, "default": true}
       ],
       "state": [],
       "state_grade": "stateless",

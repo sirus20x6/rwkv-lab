@@ -1474,6 +1474,12 @@ def test_transformer_mla_handler_binds_paths_profile_and_compatible_checkpoint(
 def test_dispatch_table_is_closed_and_training_composition_is_required() -> None:
     expected = {
         (
+            "rwkv-lab.hf-multimodal-sft",
+            "1.0.0",
+            "train",
+            "rwkv_lab.hf_multimodal_sft.v1.Train",
+        ),
+        (
             "rwkv-lab.mageflow-appearance-expert",
             "1.0.0",
             "train",
