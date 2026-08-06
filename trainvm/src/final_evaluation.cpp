@@ -14,13 +14,18 @@ namespace trainvm {
 namespace {
 
 constexpr std::size_t kMaximumFinalizationHistory = 64U;
-constexpr std::size_t kMaximumFinalMembers = 100'000U;
-constexpr std::size_t kMaximumFinalRecords = 400'000U;
+// The first migrated family evaluates 674 held-out members.  Keep the public
+// closure envelope comfortably above that while making the semantic maxima
+// actually representable inside the raw/parser bounds below.
+constexpr std::size_t kMaximumFinalMembers = 10'000U;
+constexpr std::size_t kMaximumFinalRecords = 40'000U;
 constexpr std::size_t kMaximumFinalOutputs = 64U;
 constexpr std::size_t kMaximumFinalScalars = 256U;
 constexpr std::size_t kMaximumAggregateRecords = 2'000'000U;
 constexpr std::size_t kMaximumAggregateCollectionEntries = 4'000'000U;
 constexpr std::size_t kMaximumAggregateIdentityBytes = 64U * 1024U * 1024U;
+constexpr std::size_t kMaximumManifestParserNodes = 500'000U;
+constexpr int kMaximumManifestParserDepth = 64;
 
 bool valid_digest(std::string_view value) {
   return value.size() == 71U && value.starts_with("sha256:") &&
@@ -119,6 +124,41 @@ bool canonical_scalars(const std::vector<FinalScalarRequirement> &values) {
          std::ranges::all_of(values, [](const FinalScalarRequirement &value) {
            return bounded_identity(value.metric_name) &&
                   value.step_domain == "optimizer_step";
+         });
+}
+
+bool canonical_member_contexts(const std::vector<FinalMemberContext> &values) {
+  return values.size() <= kMaximumFinalMembers &&
+         std::ranges::is_sorted(values, {}, &FinalMemberContext::member_id) &&
+         std::ranges::adjacent_find(
+             values, {}, &FinalMemberContext::member_id) == values.end() &&
+         std::ranges::all_of(values, [](const FinalMemberContext &value) {
+           return bounded_identity(value.member_id) &&
+                  valid_digest(value.context_digest);
+         });
+}
+
+bool canonical_output_names(const std::vector<std::string> &values) {
+  return !values.empty() && values.size() <= kMaximumFinalOutputs &&
+         std::ranges::is_sorted(values) &&
+         std::ranges::adjacent_find(values) == values.end() &&
+         std::ranges::none_of(values, [](const std::string &value) {
+           return !bounded_identity(value);
+         });
+}
+
+bool canonical_scalar_observations(
+    const std::vector<FinalScalarObservation> &values) {
+  return values.size() <= kMaximumFinalScalars &&
+         std::ranges::is_sorted(values, {},
+                                &FinalScalarObservation::metric_name) &&
+         std::ranges::adjacent_find(values, {},
+                                    &FinalScalarObservation::metric_name) ==
+             values.end() &&
+         std::ranges::all_of(values, [](const FinalScalarObservation &value) {
+           return bounded_identity(value.metric_name) &&
+                  value.step_domain == "optimizer_step" &&
+                  bounded_identity(value.event_id);
          });
 }
 
@@ -240,6 +280,9 @@ reduce_final_evaluation(const OperationFinalizationPolicy &operation_policy,
         "semantic final evaluation requires a registered strict output policy");
   }
   if (!bounded_identity(expectation.output_name) ||
+      !canonical_output_names(expectation.required_output_names) ||
+      !std::ranges::binary_search(expectation.required_output_names,
+                                  expectation.output_name) ||
       !valid_digest(expectation.policy_digest) ||
       expectation.policy_digest !=
           finalization_policy_digest(operation_policy) ||
@@ -248,6 +291,9 @@ reduce_final_evaluation(const OperationFinalizationPolicy &operation_policy,
       !valid_digest(expectation.terminal_optimizer_fingerprint) ||
       expectation.required_members.size() > kMaximumFinalMembers ||
       !canonical_members(expectation.required_members) ||
+      !canonical_member_contexts(expectation.member_contexts) ||
+      expectation.member_contexts.size() !=
+          expectation.required_members.size() ||
       expectation.membership_count != expectation.required_members.size() ||
       !valid_digest(expectation.membership_digest) ||
       expectation.membership_digest !=
@@ -255,6 +301,30 @@ reduce_final_evaluation(const OperationFinalizationPolicy &operation_policy,
       !canonical_scalars(expectation.required_scalars)) {
     throw std::invalid_argument(
         "controller final evaluation expectation is invalid");
+  }
+  for (std::size_t index = 0U; index < expectation.required_members.size();
+       ++index) {
+    if (expectation.member_contexts[index].member_id !=
+        expectation.required_members[index]) {
+      throw std::invalid_argument(
+          "controller final member contexts disagree with membership");
+    }
+  }
+  for (const std::string &required_output : expectation.required_output_names) {
+    if (std::ranges::find(operation_policy.outputs, required_output,
+                          &FinalOutputPolicy::output_name) ==
+        operation_policy.outputs.end()) {
+      throw std::invalid_argument(
+          "controller final output expectation is not registered");
+    }
+  }
+  for (const FinalOutputPolicy &policy_output : operation_policy.outputs) {
+    if (policy_output.required &&
+        !std::ranges::binary_search(expectation.required_output_names,
+                                    policy_output.output_name)) {
+      throw std::invalid_argument(
+          "controller final output expectation omits a required output");
+    }
   }
   std::size_t expectation_identity_bytes = 0U;
   if (!consume_identity(expectation.output_name, expectation_identity_bytes) ||
@@ -265,6 +335,19 @@ reduce_final_evaluation(const OperationFinalizationPolicy &operation_policy,
                             return !consume_identity(
                                 member, expectation_identity_bytes);
                           }) ||
+      std::ranges::any_of(expectation.required_output_names,
+                          [&](const std::string &output) {
+                            return !consume_identity(
+                                output, expectation_identity_bytes);
+                          }) ||
+      std::ranges::any_of(
+          expectation.member_contexts,
+          [&](const FinalMemberContext &context) {
+            return !consume_identity(context.member_id,
+                                     expectation_identity_bytes) ||
+                   !consume_identity(context.context_digest,
+                                     expectation_identity_bytes);
+          }) ||
       std::ranges::any_of(expectation.required_scalars,
                           [&](const FinalScalarRequirement &scalar) {
                             return !consume_identity(
@@ -284,7 +367,6 @@ reduce_final_evaluation(const OperationFinalizationPolicy &operation_policy,
 
   std::vector<FinalMemberRecord> previous_records;
   std::map<std::string, std::uint64_t> highest_attempt;
-  std::map<std::string, std::string> member_contexts;
   std::set<std::string> successful;
   std::uint64_t previous_sequence = 0U;
   std::optional<std::string> selected_id;
@@ -295,7 +377,7 @@ reduce_final_evaluation(const OperationFinalizationPolicy &operation_policy,
   std::size_t aggregate_records = 0U;
   std::size_t aggregate_entries = 0U;
   std::size_t aggregate_identity_bytes = 0U;
-  bool policy_output_receipted = false;
+  std::set<std::string> receipted_output_names;
 
   for (std::size_t receipt_index = 0U; receipt_index < history.size();
        ++receipt_index) {
@@ -310,6 +392,29 @@ reduce_final_evaluation(const OperationFinalizationPolicy &operation_policy,
              .second) {
       return verdict(FinalizationDisposition::failed,
                      "final evaluation receipt durability is invalid");
+    }
+    if (receipt.durable_output_receipts != manifest.output_receipts) {
+      return verdict(FinalizationDisposition::failed,
+                     "worker output receipts disagree with durable parents");
+    }
+    if (!canonical_scalar_observations(receipt.durable_scalar_observations) ||
+        receipt.durable_scalar_observations.size() !=
+            expectation.required_scalars.size()) {
+      return verdict(FinalizationDisposition::failed,
+                     "terminal scalar durability is incomplete");
+    }
+    for (std::size_t scalar_index = 0U;
+         scalar_index < expectation.required_scalars.size(); ++scalar_index) {
+      const FinalScalarRequirement &required =
+          expectation.required_scalars[scalar_index];
+      const FinalScalarObservation &observed =
+          receipt.durable_scalar_observations[scalar_index];
+      if (observed.metric_name != required.metric_name ||
+          observed.step_domain != required.step_domain ||
+          observed.optimizer_step != expectation.optimizer_step) {
+        return verdict(FinalizationDisposition::failed,
+                       "terminal scalar durability disagrees with authority");
+      }
     }
     previous_sequence = receipt.durable_sequence;
     if (!consume_identity(receipt.artifact_id, aggregate_identity_bytes) ||
@@ -419,9 +524,7 @@ reduce_final_evaluation(const OperationFinalizationPolicy &operation_policy,
         return verdict(FinalizationDisposition::failed,
                        "final evaluation output receipts are invalid");
       }
-      if (output.output_name == expectation.output_name) {
-        policy_output_receipted = true;
-      }
+      receipted_output_names.insert(output.output_name);
     }
 
     if (manifest.records.size() < previous_records.size() ||
@@ -486,11 +589,15 @@ reduce_final_evaluation(const OperationFinalizationPolicy &operation_policy,
         return verdict(FinalizationDisposition::failed,
                        "final evaluation record is context-poisoned");
       }
-      const auto [context, inserted] =
-          member_contexts.emplace(record.member_id, record.context_digest);
-      if (!inserted && context->second != record.context_digest) {
-        return verdict(FinalizationDisposition::failed,
-                       "final evaluation member context changed");
+      const auto expected_context = std::ranges::lower_bound(
+          expectation.member_contexts, record.member_id, {},
+          &FinalMemberContext::member_id);
+      if (expected_context == expectation.member_contexts.end() ||
+          expected_context->member_id != record.member_id ||
+          expected_context->context_digest != record.context_digest) {
+        return verdict(
+            FinalizationDisposition::failed,
+            "final evaluation member context disagrees with authority");
       }
       const auto prior = highest_attempt.find(record.member_id);
       if (prior != highest_attempt.end() && record.attempt <= prior->second) {
@@ -568,10 +675,12 @@ reduce_final_evaluation(const OperationFinalizationPolicy &operation_policy,
       expectation.required_members,
       std::vector<std::string>(successful.begin(), successful.end()),
       std::back_inserter(unresolved));
-  if (!policy_output_receipted) {
-    return verdict(FinalizationDisposition::pending,
-                   "required final evaluation output is not durably receipted",
-                   expectation.required_members);
+  if (!std::ranges::includes(receipted_output_names,
+                             expectation.required_output_names)) {
+    return verdict(
+        FinalizationDisposition::pending,
+        "required final evaluation outputs are not durably receipted",
+        expectation.required_members);
   }
   if (!unresolved.empty()) {
     const bool all_error = successful.empty() && !previous_records.empty();
@@ -617,7 +726,23 @@ decode_final_evaluation_manifest(std::string_view bytes) {
   }
   nlohmann::json document;
   try {
-    document = nlohmann::json::parse(bytes.begin(), bytes.end());
+    std::size_t parser_nodes = 0U;
+    const nlohmann::json::parser_callback_t bounded_parser =
+        [&](int depth, nlohmann::json::parse_event_t event, nlohmann::json &) {
+          const bool allocates_node =
+              event == nlohmann::json::parse_event_t::object_start ||
+              event == nlohmann::json::parse_event_t::array_start ||
+              event == nlohmann::json::parse_event_t::value;
+          if (depth > kMaximumManifestParserDepth ||
+              (allocates_node &&
+               ++parser_nodes > kMaximumManifestParserNodes)) {
+            throw std::invalid_argument(
+                "final evaluation manifest JSON exceeds structural limits");
+          }
+          return true;
+        };
+    document =
+        nlohmann::json::parse(bytes.begin(), bytes.end(), bounded_parser);
   } catch (const nlohmann::json::exception &) {
     throw std::invalid_argument("final evaluation manifest JSON is invalid");
   }

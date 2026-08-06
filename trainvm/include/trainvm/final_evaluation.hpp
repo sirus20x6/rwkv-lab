@@ -107,11 +107,30 @@ struct FinalOutputReceipt final {
   auto operator<=>(const FinalOutputReceipt &) const = default;
 };
 
+struct FinalMemberContext final {
+  std::string member_id;
+  std::string context_digest;
+
+  auto operator<=>(const FinalMemberContext &) const = default;
+};
+
 struct FinalScalarRequirement final {
   std::string metric_name;
   std::string step_domain;
 
   auto operator<=>(const FinalScalarRequirement &) const = default;
+};
+
+// A controller-owned pointer to one durable terminal-step metric event.  The
+// worker manifest declares which scalar semantics it expects, but it cannot
+// assert that the corresponding journal event exists.
+struct FinalScalarObservation final {
+  std::string metric_name;
+  std::string step_domain;
+  std::uint64_t optimizer_step{};
+  std::string event_id;
+
+  auto operator<=>(const FinalScalarObservation &) const = default;
 };
 
 struct EvalOnlyRecoveryReceipt final {
@@ -153,6 +172,8 @@ struct FinalEvaluationReceipt final {
   std::string artifact_id;
   std::string artifact_fingerprint;
   std::uint64_t durable_sequence{};
+  std::vector<FinalOutputReceipt> durable_output_receipts;
+  std::vector<FinalScalarObservation> durable_scalar_observations;
   FinalEvaluationManifest manifest;
 
   auto operator<=>(const FinalEvaluationReceipt &) const = default;
@@ -163,11 +184,13 @@ struct FinalEvaluationReceipt final {
 // these values may be learned from a worker closure.
 struct FinalEvaluationExpectation final {
   std::string output_name;
+  std::vector<std::string> required_output_names;
   std::string policy_digest;
   std::uint64_t optimizer_step{};
   std::string checkpoint_artifact_id;
   std::string checkpoint_fingerprint;
   std::vector<std::string> required_members;
+  std::vector<FinalMemberContext> member_contexts;
   std::string membership_digest;
   std::uint64_t membership_count{};
   std::vector<FinalScalarRequirement> required_scalars;

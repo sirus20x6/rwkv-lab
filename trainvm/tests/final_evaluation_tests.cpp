@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "trainvm/document.hpp"
 #include "trainvm/eval_examples_contract.hpp"
 #include "trainvm/reflection_json.hpp"
 #include "trainvm/rwkv_lab_worker_contract.hpp"
@@ -85,27 +86,43 @@ receipt(const trainvm::OperationFinalizationPolicy &policy,
       resolved.insert(record.member_id);
     }
   }
-  return {.artifact_id = "artifact-eval-" + std::to_string(sequence),
-          .artifact_fingerprint = digest('e'),
-          .durable_sequence = sequence,
-          .manifest = {
-              .api_version = "rwkv-lab.final-evaluation/v1",
-              .policy_digest = trainvm::finalization_policy_digest(policy),
-              .optimizer_step = 745U,
-              .checkpoint_artifact_id = "checkpoint-step-745",
-              .checkpoint_fingerprint = digest('f'),
-              .membership_digest = trainvm::final_membership_digest(members),
-              .membership_count = members.size(),
-              .resolved_member_count = resolved.size(),
-              .failed_member_count = members.size() - resolved.size(),
-              .required_members = std::move(members),
-              .output_receipts = {{.output_name = std::move(output_name),
-                                   .artifact_id = "test-evidence-" +
-                                                  std::to_string(sequence),
-                                   .artifact_fingerprint = digest('4')}},
-              .required_scalars = {},
-              .records = std::move(records),
-              .recovery = std::nullopt}};
+  std::vector<trainvm::FinalOutputReceipt> output_receipts;
+  for (const auto &declared : policy.outputs) {
+    if (!declared.required && declared.output_name != output_name)
+      continue;
+    output_receipts.push_back(
+        {.output_name = declared.output_name,
+         .artifact_id =
+             declared.output_name + "-evidence-" + std::to_string(sequence),
+         .artifact_fingerprint =
+             "sha256:" + trainvm::sha256_hex(declared.output_name + ":" +
+                                             std::to_string(sequence))});
+  }
+  std::ranges::sort(output_receipts, {},
+                    &trainvm::FinalOutputReceipt::output_name);
+  trainvm::FinalEvaluationReceipt result{
+      .artifact_id = "artifact-eval-" + std::to_string(sequence),
+      .artifact_fingerprint = digest('e'),
+      .durable_sequence = sequence,
+      .durable_output_receipts = {},
+      .durable_scalar_observations = {},
+      .manifest = {.api_version = "rwkv-lab.final-evaluation/v1",
+                   .policy_digest = trainvm::finalization_policy_digest(policy),
+                   .optimizer_step = 745U,
+                   .checkpoint_artifact_id = "checkpoint-step-745",
+                   .checkpoint_fingerprint = digest('f'),
+                   .membership_digest =
+                       trainvm::final_membership_digest(members),
+                   .membership_count = members.size(),
+                   .resolved_member_count = resolved.size(),
+                   .failed_member_count = members.size() - resolved.size(),
+                   .required_members = std::move(members),
+                   .output_receipts = std::move(output_receipts),
+                   .required_scalars = {},
+                   .records = std::move(records),
+                   .recovery = std::nullopt}};
+  result.durable_output_receipts = result.manifest.output_receipts;
+  return result;
 }
 
 trainvm::FinalEvaluationExpectation
@@ -115,13 +132,30 @@ expectation(const trainvm::OperationFinalizationPolicy &policy,
             std::string output_name = "test_eval") {
   std::ranges::sort(members);
   std::ranges::sort(scalars, {}, &trainvm::FinalScalarRequirement::metric_name);
+  std::vector<std::string> required_output_names;
+  for (const auto &declared : policy.outputs) {
+    if (declared.required || declared.output_name == output_name)
+      required_output_names.push_back(declared.output_name);
+  }
+  std::ranges::sort(required_output_names);
   return {
       .output_name = std::move(output_name),
+      .required_output_names = std::move(required_output_names),
       .policy_digest = trainvm::finalization_policy_digest(policy),
       .optimizer_step = 745U,
       .checkpoint_artifact_id = "checkpoint-step-745",
       .checkpoint_fingerprint = digest('f'),
       .required_members = members,
+      .member_contexts =
+          [&members] {
+            std::vector<trainvm::FinalMemberContext> contexts;
+            contexts.reserve(members.size());
+            for (const std::string &member : members) {
+              contexts.push_back(
+                  {.member_id = member, .context_digest = digest('c')});
+            }
+            return contexts;
+          }(),
       .membership_digest = trainvm::final_membership_digest(members),
       .membership_count = members.size(),
       .required_scalars = std::move(scalars),
@@ -298,6 +332,7 @@ int main() {
         {.output_name = "test_eval",
          .artifact_id = "test-evidence-recovered",
          .artifact_fingerprint = digest('2')});
+    recovered.durable_output_receipts = recovered.manifest.output_receipts;
     for (const std::string &member : qwen_members) {
       recovered.manifest.records.push_back(success(member, 2U));
     }
@@ -409,6 +444,8 @@ int main() {
         {.output_name = "test_eval",
          .artifact_id = "test-evidence-poisoned",
          .artifact_fingerprint = digest('2')});
+    poisoned_retry.durable_output_receipts =
+        poisoned_retry.manifest.output_receipts;
     poisoned_retry.manifest.resolved_member_count = 2U;
     poisoned_retry.manifest.failed_member_count = 0U;
     poisoned_retry.manifest.recovery =
@@ -428,6 +465,8 @@ int main() {
         {.output_name = "test_eval",
          .artifact_id = "test-evidence-out-of-scope",
          .artifact_fingerprint = digest('2')});
+    out_of_scope_retry.durable_output_receipts =
+        out_of_scope_retry.manifest.output_receipts;
     out_of_scope_retry.manifest.recovery =
         trainvm::EvalOnlyRecoveryReceipt{.requested_members = {"b"},
                                          .optimizer_state_before = digest('8'),
@@ -451,6 +490,11 @@ int main() {
     auto scalar_base = partial;
     scalar_base.manifest.required_scalars = {
         {.metric_name = "eval.loss", .step_domain = "optimizer_step"}};
+    scalar_base.durable_scalar_observations = {
+        {.metric_name = "eval.loss",
+         .step_domain = "optimizer_step",
+         .optimizer_step = 745U,
+         .event_id = "metric-eval-loss-step-745"}};
     const auto scalar_expectation =
         expectation(strict, {"a", "b"}, scalar_base.manifest.required_scalars);
     auto scalar_drift = scalar_base;
@@ -467,6 +511,10 @@ int main() {
         {.output_name = "test_eval",
          .artifact_id = "test-evidence-scalar-drift",
          .artifact_fingerprint = digest('2')});
+    scalar_drift.durable_output_receipts =
+        scalar_drift.manifest.output_receipts;
+    scalar_drift.durable_scalar_observations =
+        scalar_base.durable_scalar_observations;
     scalar_drift.manifest.records.push_back(success("b", 2U));
     scalar_drift.manifest.resolved_member_count = 2U;
     scalar_drift.manifest.failed_member_count = 0U;
@@ -480,6 +528,8 @@ int main() {
         scalar_base.manifest.required_scalars;
     output_drift.manifest.output_receipts.front().artifact_id =
         "rewritten-parent";
+    output_drift.durable_output_receipts =
+        output_drift.manifest.output_receipts;
     require(trainvm::reduce_final_evaluation(strict, scalar_expectation,
                                              {scalar_base, output_drift})
                     .disposition == trainvm::FinalizationDisposition::failed,
@@ -500,7 +550,7 @@ int main() {
             "receipt history must have a hard pre-reduction bound");
 
     auto excessive_members = partial;
-    excessive_members.manifest.required_members.assign(100'001U, "x");
+    excessive_members.manifest.required_members.assign(10'001U, "x");
     require(trainvm::reduce_final_evaluation(strict, small_expectation,
                                              {excessive_members})
                     .disposition == trainvm::FinalizationDisposition::failed,
@@ -538,6 +588,45 @@ int main() {
     require(
         decoder_rejects(oversized_manifest),
         "raw semantic manifest bytes must be rejected before JSON allocation");
+    auto near_member_bound = all_error.manifest;
+    near_member_bound.required_members.clear();
+    near_member_bound.records.clear();
+    for (std::size_t index = 0U; index < 10'000U; ++index) {
+      const std::string member =
+          "member-" + std::string(5U - std::to_string(index).size(), '0') +
+          std::to_string(index);
+      near_member_bound.required_members.push_back(member);
+      near_member_bound.records.push_back(error(member));
+    }
+    near_member_bound.membership_count =
+        near_member_bound.required_members.size();
+    near_member_bound.membership_digest =
+        trainvm::final_membership_digest(near_member_bound.required_members);
+    near_member_bound.resolved_member_count = 0U;
+    near_member_bound.failed_member_count =
+        near_member_bound.required_members.size();
+    const std::string near_member_bound_bytes =
+        trainvm::final_evaluation_manifest_json(near_member_bound).dump();
+    require(near_member_bound_bytes.size() <
+                    trainvm::kMaximumFinalEvaluationManifestBytes &&
+                trainvm::decode_final_evaluation_manifest(
+                    near_member_bound_bytes) == near_member_bound,
+            "the parser bound must admit a canonical manifest at the explicit "
+            "10,000-member semantic maximum");
+    std::string structural_bomb = "[";
+    structural_bomb.reserve(1'200'002U);
+    for (std::size_t index = 0U; index < 600'000U; ++index)
+      structural_bomb += "0,";
+    structural_bomb += "0]";
+    require(structural_bomb.size() <
+                    trainvm::kMaximumFinalEvaluationManifestBytes &&
+                decoder_rejects(structural_bomb),
+            "in-budget JSON node bombs must fail during bounded parsing");
+    std::string depth_bomb(66U, '[');
+    depth_bomb += '0';
+    depth_bomb.append(66U, ']');
+    require(decoder_rejects(depth_bomb),
+            "in-budget JSON depth bombs must fail during bounded parsing");
     trainvm::FinalEvaluationManifest decoded_manifest;
     std::vector<trainvm::Diagnostic> manifest_diagnostics;
     require(trainvm::decode_json(manifest, decoded_manifest, "",
