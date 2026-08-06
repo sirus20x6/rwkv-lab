@@ -47,7 +47,7 @@ A run instance has schema `trainvm.recipe-instance/v1`:
   "run_identity": "qwen-caption-lora-r256",
   "overrides": {
     "model.path": "/models/Qwen3.6-35B-A3B",
-    "data.manifest": "/datasets/captions/train.jsonl",
+    "data.root": "/datasets/captions",
     "trainability.lora_rank": 256,
     "hyperparameters.learning_rate": 0.00002
   }
@@ -58,6 +58,26 @@ The complete compact Qwen caption instance is
 [qwen-caption-lora-r256.recipe-instance.v1.json](examples/qwen-caption-lora-r256.recipe-instance.v1.json).
 Changing its model, dataset, rank, learning rate, evaluation cadence, or
 checkpoint cadence does not change source code.
+
+The decoder-LM profiles in
+[lm-training.recipe-profiles.v1.json](examples/lm-training.recipe-profiles.v1.json)
+exercise the same mechanism for ordinary full-parameter training, LoRA SFT,
+and packed-token training. They select a frozen manifested token source and
+the existing causal-token processor, mapper, collation, optimizer, schedule,
+evaluation, and checkpoint components. The three example instances differ only
+through bounded recipe values; no experiment-specific handler is required.
+
+The registered RWKV equivalents live in
+[rwkv-lm.recipe-profiles.v1.json](examples/rwkv-lm.recipe-profiles.v1.json),
+with compact examples for
+[scratch training](examples/rwkv-lm-scratch.recipe-instance.v1.json) and
+checkpoint continuation. Continuation instances must name a real, immutable
+RWKV checkpoint under their declared read authority; the repository does not
+ship a fake checkpoint placeholder.
+Their model loader, activation, normalization, optimizer, learning-rate
+schedule, frozen train/validation/test splits, and full-trainability policy are
+finite registry selections. Architecture dimensions remain versioned in the
+profile template instead of becoming an unbounded run-authoring surface.
 
 The example's graph selects the registered `hf_multimodal` model loader and
 `lora` trainability policy as a required pair. Model path and fingerprint are
@@ -91,6 +111,8 @@ Targets are fail-closed. They may address only:
 
 - a declared parameter's `value`;
 - a declared training component's scalar `configuration` leaf;
+- a declared training component's `key.name` when the override is an
+  enumeration with a finite allow-list and the category and version stay fixed;
 - a declared control's `default`;
 - a small explicit list of resource sizing leaves.
 

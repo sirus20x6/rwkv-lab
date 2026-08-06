@@ -292,7 +292,18 @@ def test_component_catalog_and_runtime_dispatch_are_exactly_aligned():
         for component in document["components"]
     }
     assert grades["optimizer"] == "exact"
-    assert grades["model_loader"] == "exact"
+    assert all(
+        component["state_grade"] == "exact"
+        for component in document["components"]
+        if component["key"]["category"] == "model_loader"
+        and component["key"]["name"].startswith("hf_")
+    )
+    assert next(
+        component["state_grade"]
+        for component in document["components"]
+        if component["key"]["category"] == "model_loader"
+        and component["key"]["name"] == "rwkv_scratch"
+    ) == "stateless"
     assert grades["trainability"] == "exact"
     assert grades["checkpoint_policy"] == "exact"
     assert grades["data_source"] == "exact"

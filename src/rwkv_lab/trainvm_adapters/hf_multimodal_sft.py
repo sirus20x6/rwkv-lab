@@ -30,13 +30,16 @@ from rwkv_lab.training_components import (
     AssistantConversationMapperConfiguration,
     AssistantOnlyMapperConfiguration,
     CausalTokensMapperConfiguration,
+    CollatorImplementation,
     ImageCaptionProcessorConfiguration,
     JsonlFrozenImageSplitsConfiguration,
+    JsonlFrozenTokenSplitsConfiguration,
     JsonlImageCaptionConfiguration,
     MappedSample,
     PaddedCollatorConfiguration,
     ProcessedSample,
     RawSample,
+    RegisteredCollator,
 )
 
 _MULTIMODAL_TENSOR_KEYS = frozenset(
@@ -292,7 +295,26 @@ class HFForwardBatchCodec:
         | CausalTokensMapperConfiguration
     )
     processor_configuration: ImageCaptionProcessorConfiguration | Any
-    collator_configuration: PaddedCollatorConfiguration
+    collator: RegisteredCollator | PaddedCollatorConfiguration
+
+    @property
+    def collator_configuration(self) -> Any:
+        value = self.collator
+        if isinstance(value, RegisteredCollator):
+            return value.configuration
+        nested = getattr(value, "configuration", None)
+        if nested is not None:
+            return nested
+        return value
+
+    @property
+    def registered_collator(self) -> RegisteredCollator:
+        if isinstance(self.collator, RegisteredCollator):
+            return self.collator
+        configuration = self.collator_configuration
+        if not isinstance(configuration, PaddedCollatorConfiguration):
+            raise HFMultimodalSFTError("causal collator configuration is invalid")
+        return RegisteredCollator(CollatorImplementation.PADDED_V1, configuration)
 
     @property
     def multimodal(self) -> bool:
@@ -338,31 +360,16 @@ class HFForwardBatchCodec:
                 )
             values = tuple(tokens)
             mapped.append(MappedSample(sample.sample_id, values, values))
-        maximum = min(
-            max(item.token_length for item in mapped),
-            self.collator_configuration.maximum_sequence_length,
-        )
-        multiple = self.collator_configuration.pad_to_multiple
-        length = min(
-            ((maximum + multiple - 1) // multiple) * multiple,
-            self.collator_configuration.maximum_sequence_length,
-        )
-        input_ids = torch.full(
-            (len(mapped), length),
-            self.collator_configuration.pad_token_id,
-            dtype=torch.long,
-        )
-        labels = torch.full(
-            (len(mapped), length),
-            self.collator_configuration.label_pad_token_id,
-            dtype=torch.long,
-        )
-        attention = torch.zeros((len(mapped), length), dtype=torch.long)
-        for index, item in enumerate(mapped):
-            count = len(item.input_ids)
-            input_ids[index, :count] = torch.tensor(item.input_ids)
-            labels[index, :count] = torch.tensor(item.labels)
-            attention[index, :count] = 1
+        collated = self.registered_collator.collate(mapped)
+        input_ids = collated["input_ids"]
+        labels = collated["labels"]
+        attention = collated["attention_mask"]
+        sample_ids = collated["sample_ids"]
+        if not all(
+            isinstance(value, torch.Tensor)
+            for value in (input_ids, labels, attention)
+        ):
+            raise HFMultimodalSFTError("registered collator did not emit tensors")
         return HFForwardBatch(
             MappingProxyType(
                 {
@@ -371,13 +378,19 @@ class HFForwardBatchCodec:
                     "labels": labels,
                 }
             ),
-            tuple(item.sample_id for item in mapped),
-            tuple("" for _ in mapped),
+            tuple(sample_ids),
+            tuple("" for _ in sample_ids),
             (),
             int((labels != self.collator_configuration.label_pad_token_id).sum()),
         )
 
     def _encode_multimodal(self, samples: Sequence[ProcessedSample]) -> HFForwardBatch:
+        if not isinstance(
+            self.collator_configuration, PaddedCollatorConfiguration
+        ):
+            raise HFMultimodalSFTError(
+                "multimodal batches require padded collation"
+            )
         mapper = self.mapper_configuration
         if not isinstance(
             mapper,
@@ -604,7 +617,8 @@ class HFDataRuntime:
         # checked against workspace.input_content_roots by the operation
         # handler. The component state carries that same fingerprint.
         frozen = isinstance(
-            training.source.configuration, JsonlFrozenImageSplitsConfiguration
+            training.source.configuration,
+            (JsonlFrozenImageSplitsConfiguration, JsonlFrozenTokenSplitsConfiguration),
         )
         if frozen:
             test = components.data_pipeline(split_slot="test_split")
@@ -2822,7 +2836,7 @@ def run_hf_multimodal_sft(
         loaded.tokenizer_or_processor,
         data.training_pipeline.mapper.configuration,
         data.training_pipeline.processor.configuration,
-        data.training_pipeline.collator.configuration,
+        data.training_pipeline.collator,
     )
     precision = components.precision()
     inference_model = precision.convert_module(loaded.model, selected_device)

@@ -15,6 +15,7 @@ from rwkv_lab.training_components import (
     LoraTrainabilityConfiguration,
     ModelLoaderImplementation,
     NamedRulesTrainabilityConfiguration,
+    RWKVModelFactory,
     TrainabilityImplementation,
     TrainabilityResult,
     build_registered_model_loader,
@@ -389,3 +390,57 @@ def test_resolved_component_factories_dispatch_without_workload_imports(
     )
     assert loader.implementation is ModelLoaderImplementation.HF_MULTIMODAL_V1
     assert policy.implementation is TrainabilityImplementation.LORA_V1
+
+
+def test_registered_rwkv_model_factories_separate_scratch_and_continuation(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    descriptors = json.loads(
+        (root / "docs/experiment-vm/examples/training-components.v1.json").read_text()
+    )["components"]
+    checkpoint = tmp_path / "state.pt"
+    checkpoint.write_bytes(b"checkpoint")
+
+    def resolve(name: str, configuration: dict[str, object]) -> RWKVModelFactory:
+        descriptor = next(
+            item
+            for item in descriptors
+            if item["key"]["category"] == "model_loader"
+            and item["key"]["name"] == name
+        )
+        factory = model_loader_from_resolved_component(
+            {
+                "configuration": configuration,
+                "descriptor": descriptor,
+                "descriptor_digest": _digest(descriptor),
+            }
+        )
+        assert isinstance(factory, RWKVModelFactory)
+        return factory
+
+    scratch = resolve(
+        "rwkv_scratch",
+        {
+            "vocabulary_size": 65_536,
+            "d_model": 512,
+            "n_layers": 6,
+            "head_size": 64,
+            "seed": 7,
+        },
+    )
+    continuation = resolve(
+        "rwkv_checkpoint",
+        {
+            "vocabulary_size": 65_536,
+            "d_model": 512,
+            "n_layers": 6,
+            "head_size": 64,
+            "seed": 7,
+            "checkpoint_path": str(checkpoint),
+            "checkpoint_fingerprint": "sha256:" + "c" * 64,
+        },
+    )
+    assert not scratch.continuation
+    assert continuation.continuation
+    assert continuation.configuration.checkpoint_path == str(checkpoint)

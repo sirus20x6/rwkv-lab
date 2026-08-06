@@ -13,12 +13,15 @@ import torch.nn.functional as F
 from rwkv_lab.training_components import (
     AssistantOnlyMapperConfiguration,
     CausalTokensMapperConfiguration,
+    CollatorImplementation,
     ImageCaptionProcessorConfiguration,
-    JsonlFrozenImageSplitsConfiguration,
+    JsonlFrozenTokenSplitsConfiguration,
     LinearHeadCrossEntropyConfiguration,
     LinearHeadCrossEntropyObjective,
+    PackedTokenCollatorConfiguration,
     PaddedCollatorConfiguration,
     ProcessedSample,
+    RegisteredCollator,
 )
 from rwkv_lab.training_runtime.activation_memory import (
     HFGradientCheckpointing,
@@ -191,6 +194,31 @@ def test_causal_codec_rejects_over_limit_instead_of_truncating() -> None:
     sample = ProcessedSample("sample", 0, {"tokens": [1, 2, 3, 4]})
     with pytest.raises(HFMultimodalSFTError, match="exceeds"):
         _causal_codec(mapper_maximum=4, collator_maximum=3).encode((sample,))
+
+
+def test_causal_codec_uses_registered_packed_token_collator() -> None:
+    codec = HFForwardBatchCodec(
+        object(),
+        CausalTokensMapperConfiguration("tokens", 8),
+        object(),
+        RegisteredCollator(
+            CollatorImplementation.PACKED_TOKENS_V1,
+            PackedTokenCollatorConfiguration(0, -100, 1, 8, 2),
+        ),
+    )
+    batch = codec.encode(
+        (
+            ProcessedSample("first", 0, {"tokens": [10, 11]}),
+            ProcessedSample("second", 1, {"tokens": [20, 21, 22]}),
+        )
+    )
+
+    assert len(batch.sample_ids) == 1
+    assert batch.sample_ids[0].startswith("sha256:")
+    assert batch.tensors["input_ids"].tolist() == [
+        [10, 11, 2, 20, 21, 22, 0, 0]
+    ]
+    assert batch.supervised_tokens == 6
 
 
 class TinyCausalModel(torch.nn.Module):
@@ -860,12 +888,11 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
     dataset_root.mkdir()
     for name in ("manifest.json", "train.jsonl", "validation.jsonl", "test.jsonl"):
         (dataset_root / name).write_text("{}\n", encoding="utf-8")
-    frozen_configuration = JsonlFrozenImageSplitsConfiguration(
+    frozen_configuration = JsonlFrozenTokenSplitsConfiguration(
         dataset_root=str(dataset_root),
         content_fingerprint="sha256:" + "d" * 64,
-        declared_columns=("caption", "id", "image", "split"),
-        image_column="image",
-        caption_columns=("caption",),
+        declared_columns=("id", "split", "tokens"),
+        token_column="tokens",
         id_column="id",
     )
 
@@ -890,7 +917,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         configuration = object()
 
         def process(self, sample, *, image_root):
-            assert image_root == dataset_root
+            assert image_root is None
             return ProcessedSample(
                 sample.sample_id,
                 sample.ordinal,

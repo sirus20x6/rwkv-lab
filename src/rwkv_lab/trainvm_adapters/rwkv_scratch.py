@@ -3,7 +3,21 @@
 from __future__ import annotations
 
 import math
+from array import array
+from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType
+
+from rwkv_lab.training_runtime.model_loaders import RWKVModelFactory
+from rwkv_lab.training_runtime.schedules import (
+    LinearWarmupCosineConfiguration,
+    PowerCoolConfiguration,
+    ScheduleImplementation,
+)
+from rwkv_lab.training_runtime.trainability import TrainabilityImplementation
+
+from .components import WorkerTrainingComponents
 
 
 def _integer(value: object, label: str, minimum: int, maximum: int) -> int:
@@ -35,8 +49,6 @@ class RWKVScratchTrainConfig:
     optimizer state, and checkpoint identity are represented declaratively.
     """
 
-    data: str
-    output_dir: str
     steps: int
     d_model: int = 512
     n_layers: int = 6
@@ -55,17 +67,14 @@ class RWKVScratchTrainConfig:
     eval_every_steps: int = 50
     log_every_steps: int = 10
     seed: int = 0
-    resume: str | None = None
+    initial_checkpoint: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.data, str) or not self.data:
-            raise ValueError("data must be a nonempty path")
-        if not isinstance(self.output_dir, str) or not self.output_dir:
-            raise ValueError("output_dir must be a nonempty path")
-        if self.resume is not None and (
-            not isinstance(self.resume, str) or not self.resume
+        if self.initial_checkpoint is not None and (
+            not isinstance(self.initial_checkpoint, str)
+            or not self.initial_checkpoint
         ):
-            raise ValueError("resume must be a nonempty path when present")
+            raise ValueError("initial_checkpoint must be a nonempty path when present")
         _integer(self.steps, "steps", 1, 1_000_000_000)
         _integer(self.d_model, "d_model", 64, 65_536)
         _integer(self.n_layers, "n_layers", 1, 4_096)
@@ -105,6 +114,108 @@ class RWKVScratchTrainConfig:
         _integer(self.log_every_steps, "log_every_steps", 1, self.steps)
         _integer(self.seed, "seed", 0, (1 << 63) - 1)
 
+    @classmethod
+    def from_components(
+        cls, components: WorkerTrainingComponents
+    ) -> RWKVScratchTrainConfig:
+        model = components.model_loader()
+        if not isinstance(model, RWKVModelFactory):
+            raise TypeError("scratch-RWKV requires a registered RWKV model factory")
+        if model.configuration.vocabulary_size != 65_536:
+            raise ValueError("scratch-RWKV currently requires the 65536-token vocabulary")
+        if (
+            components.trainability().implementation
+            is not TrainabilityImplementation.FULL_V1
+        ):
+            raise ValueError("scratch-RWKV currently requires full trainability")
+        _, schedule = components.learning_rate_configuration()
+        if not isinstance(
+            schedule, (LinearWarmupCosineConfiguration, PowerCoolConfiguration)
+        ):
+            raise TypeError(
+                "scratch-RWKV requires a finite-horizon cosine or PowerCool schedule"
+            )
+        optimizer = dict(components.configuration("optimizer", category="optimizer"))
+        weight_decay = dict(
+            components.configuration("weight_decay", category="weight_decay_schedule")
+        )
+        clipping = dict(
+            components.configuration("gradient_clipping", category="gradient_clipping")
+        )
+        accumulation = components.gradient_accumulation()
+        curriculum = components.curriculum()
+        evaluator = components.evaluator()
+        evaluation = components.evaluation_schedule()
+        if evaluator.configuration.maximum_examples < 1:
+            raise ValueError("scratch-RWKV requires a bounded validation window count")
+        if evaluation.configuration.full_every_steps < 1:
+            raise ValueError("scratch-RWKV requires periodic full scalar evaluation")
+        if evaluation.configuration.qualitative_every_steps < 1:
+            raise ValueError("scratch-RWKV requires periodic qualitative evaluation")
+        if evaluation.configuration.full_every_steps != (
+            evaluation.configuration.qualitative_every_steps
+        ):
+            raise ValueError(
+                "scratch-RWKV currently evaluates scalar and text evidence together"
+            )
+        renderer = components.artifact_renderer()
+        if renderer.configuration.modality != "text":
+            raise ValueError("scratch-RWKV evaluation evidence must use text modality")
+        components.generation_policy()
+        checkpoint_policy = components.checkpoint_policy()
+        if not checkpoint_policy.configuration.publish_final:
+            raise ValueError("scratch-RWKV requires a final checkpoint publication")
+        sampler = dict(components.configuration("sampler", category="sampler"))
+        batching = dict(components.configuration("batching", category="batching"))
+        collation = dict(components.configuration("collation", category="collator"))
+        processor = dict(
+            components.configuration("processor", category="sample_processor")
+        )
+        if sampler["seed"] != model.configuration.seed:
+            raise ValueError("RWKV model and data sampler seeds must agree")
+        if batching["batch_size"] != curriculum.configuration.base_batch_size:
+            raise ValueError("RWKV batching and curriculum batch sizes must agree")
+        if (
+            collation["maximum_sequence_length"]
+            != curriculum.configuration.maximum_sequence_length
+        ):
+            raise ValueError("RWKV collation and curriculum context limits must agree")
+        if processor["vocabulary_size"] != model.configuration.vocabulary_size:
+            raise ValueError("RWKV processor and model vocabularies must agree")
+        minimum_ratio = schedule.minimum_ratio
+        return cls(
+            steps=schedule.max_steps,
+            d_model=model.configuration.d_model,
+            n_layers=model.configuration.n_layers,
+            head_size=model.configuration.head_size,
+            sequence_length=curriculum.configuration.maximum_sequence_length,
+            batch_size=curriculum.configuration.base_batch_size,
+            gradient_accumulation_steps=(
+                accumulation.microbatches_per_optimizer_step
+            ),
+            learning_rate=float(optimizer["learning_rate"]),
+            weight_decay=float(weight_decay["weight_decay"]),
+            max_gradient_norm=float(clipping["max_norm"]),
+            warmup_steps=schedule.warmup_steps,
+            minimum_learning_rate=float(optimizer["learning_rate"])
+            * minimum_ratio,
+            cooldown_fraction=(
+                schedule.cooldown_fraction
+                if isinstance(schedule, PowerCoolConfiguration)
+                else 1.0
+            ),
+            cooldown_power=(
+                schedule.power if isinstance(schedule, PowerCoolConfiguration) else 1.0
+            ),
+            validation_windows=evaluator.configuration.maximum_examples,
+            eval_every_steps=evaluation.configuration.full_every_steps,
+            log_every_steps=min(10, evaluation.configuration.full_every_steps),
+            seed=model.configuration.seed,
+            initial_checkpoint=(
+                model.configuration.checkpoint_path if model.continuation else None
+            ),
+        )
+
     def trainer_arguments(
         self,
         *,
@@ -112,6 +223,7 @@ class RWKVScratchTrainConfig:
         output_dir: str,
         checkpoint: str,
         resume: str | None,
+        schedule: ScheduleImplementation = ScheduleImplementation.POWERCOOL_V1,
     ) -> list[str]:
         values = {
             "--data": data,
@@ -129,6 +241,9 @@ class RWKVScratchTrainConfig:
             "--grad-clip": self.max_gradient_norm,
             "--warmup": self.warmup_steps,
             "--powercool-min-lr": self.minimum_learning_rate,
+            "--cosine-min-ratio": (
+                self.minimum_learning_rate / self.learning_rate
+            ),
             "--powercool-cooldown-fraction": self.cooldown_fraction,
             "--powercool-power": self.cooldown_power,
             "--val-windows": self.validation_windows,
@@ -139,12 +254,151 @@ class RWKVScratchTrainConfig:
         arguments: list[str] = []
         for flag, value in values.items():
             arguments.extend((flag, str(value)))
+        schedule_name = {
+            ScheduleImplementation.LINEAR_WARMUP_COSINE_V1: "cosine",
+            ScheduleImplementation.POWERCOOL_V1: "powercool",
+        }.get(schedule)
+        if schedule_name is None:
+            raise ValueError("scratch-RWKV schedule is not lowerable")
         arguments.extend(("--optimizer", "adamw"))
-        arguments.extend(("--lr-schedule", "powercool"))
+        arguments.extend(("--lr-schedule", schedule_name))
         arguments.extend(("--distributed", "none"))
         if resume is not None:
             arguments.extend(("--resume", resume))
+        if self.initial_checkpoint is not None:
+            if resume is not None:
+                raise ValueError(
+                    "controller resume and model-only initialization are mutually exclusive"
+                )
+            arguments.extend(("--init-checkpoint", self.initial_checkpoint))
         return arguments
 
 
-__all__ = ["RWKVScratchTrainConfig"]
+@dataclass(frozen=True, slots=True)
+class PreparedRWKVCorpus:
+    path: Path
+    heldout_tokens: Mapping[str, tuple[int, ...]]
+    identities_digest: str
+    selector_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class RWKVTextEvalPolicy:
+    heldout_tokens: Mapping[str, tuple[int, ...]]
+    identity_field: str
+    identities_digest: str
+    selector_digest: str
+    evaluator_component_digest: str
+    metric_names: tuple[str, ...]
+    generation_policy_digest: str
+
+    def __post_init__(self) -> None:
+        if not self.heldout_tokens or any(
+            not isinstance(identity, str)
+            or not identity
+            or len(tokens) < 2
+            or any(
+                not isinstance(token, int)
+                or isinstance(token, bool)
+                or not 0 <= token < 65_536
+                for token in tokens
+            )
+            for identity, tokens in self.heldout_tokens.items()
+        ):
+            raise ValueError("RWKV text eval heldout tokens are invalid")
+        digests = (
+            self.identities_digest,
+            self.selector_digest,
+            self.evaluator_component_digest,
+            self.generation_policy_digest,
+        )
+        if any(
+            not isinstance(digest, str)
+            or len(digest) != 71
+            or not digest.startswith("sha256:")
+            or any(character not in "0123456789abcdef" for character in digest[7:])
+            for digest in digests
+        ):
+            raise ValueError("RWKV text eval digests are invalid")
+        if (
+            not isinstance(self.identity_field, str)
+            or not self.identity_field
+            or len(self.identity_field.encode("utf-8")) > 256
+            or self.metric_names != tuple(sorted(set(self.metric_names)))
+            or any(
+                not isinstance(metric, str) or not metric
+                for metric in self.metric_names
+            )
+        ):
+            raise ValueError("RWKV text eval identities and metrics are required")
+
+
+def prepare_registered_corpus(
+    components: WorkerTrainingComponents,
+    destination: Path,
+    *,
+    authority_content_fingerprint: str,
+    validation_windows: int,
+    sequence_length: int,
+) -> PreparedRWKVCorpus:
+    training = components.data_pipeline(split_slot="split")
+    evaluation = components.data_pipeline(split_slot="evaluation_split")
+    training.validate_schema()
+    evaluation.validate_schema()
+    training.source.verify_content(
+        authority_content_fingerprint=authority_content_fingerprint
+    )
+    validation_rows = evaluation.source.records_for_split("validation")
+    training_rows = training.source.records_for_split("train")
+    qualitative = components.qualitative_samples()
+    sample_count = qualitative.configuration.sample_count
+    if len(validation_rows) < sample_count:
+        raise ValueError("validation split is smaller than the qualitative policy")
+    selection = evaluation.split_selector.select(
+        tuple(row.sample_id for row in validation_rows)
+    )
+    identities = selection.selected_ids[:sample_count]
+    binding = qualitative.bind(identities, selector_digest=selection.membership_digest)
+
+    def mapped_tokens(row) -> tuple[int, ...]:
+        processed = evaluation.processor.process(row)
+        mapped = evaluation.mapper.map(processed)
+        return tuple(mapped.input_ids)
+
+    rows_by_identity = {row.sample_id: row for row in validation_rows}
+    heldout = {
+        identity: mapped_tokens(rows_by_identity[identity]) for identity in identities
+    }
+    validation_tokens = array("H")
+    for row in validation_rows:
+        validation_tokens.extend(mapped_tokens(row))
+    required_validation = validation_windows * (sequence_length + 1)
+    if len(validation_tokens) < required_validation:
+        raise ValueError("validation split has too few tokens for declared evaluation")
+    training_tokens = array("H")
+    for row in training_rows:
+        processed = training.processor.process(row)
+        mapped = training.mapper.map(processed)
+        training_tokens.extend(mapped.input_ids)
+    if len(training_tokens) <= sequence_length + 1:
+        raise ValueError("training split has too few tokens for declared context")
+    try:
+        with destination.open("xb") as output:
+            validation_tokens[:required_validation].tofile(output)
+            training_tokens.tofile(output)
+    except OverflowError as error:
+        raise ValueError("RWKV token IDs must fit the uint16 corpus format") from error
+    return PreparedRWKVCorpus(
+        path=destination,
+        heldout_tokens=MappingProxyType(heldout),
+        identities_digest=binding.identities_digest,
+        selector_digest=binding.selector_digest,
+    )
+
+
+__all__ = [
+    "PreparedRWKVCorpus",
+    "RWKVScratchTrainConfig",
+    "RWKVTextEvalPolicy",
+    "prepare_registered_corpus",
+]

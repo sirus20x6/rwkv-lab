@@ -21,6 +21,8 @@ from rwkv_lab.training_components import (
     ImageCaptionProcessorConfiguration,
     JsonlImageCaptionConfiguration,
     JsonlTokenCorpusConfiguration,
+    MappedSample,
+    PackedTokenCollatorConfiguration,
     PaddedCollatorConfiguration,
     RegisteredBatching,
     RegisteredCollator,
@@ -138,6 +140,27 @@ def test_token_corpus_preflight_proves_target_and_batch_shape(tmp_path: Path) ->
     assert pipeline.sampler.component_state()["cursor"] == 0
     assert pipeline.batching.component_state()["batches_emitted"] == 0
     assert pipeline.batching.prefetch_workers == 3
+
+
+def test_packed_token_collator_combines_short_samples_with_separator() -> None:
+    collator = RegisteredCollator(
+        CollatorImplementation.PACKED_TOKENS_V1,
+        PackedTokenCollatorConfiguration(0, -100, 1, 8, 2),
+    )
+    batch = collator.collate(
+        (
+            MappedSample("first", (10, 11), (10, 11)),
+            MappedSample("second", (20, 21, 22), (20, 21, 22)),
+        ),
+        tensor_output=False,
+    )
+
+    assert len(batch["sample_ids"]) == 1
+    assert batch["sample_ids"][0].startswith("sha256:")
+    assert batch["packed_sample_members"] == (("first", "second"),)
+    assert batch["input_ids"] == [[10, 11, 2, 20, 21, 22, 0, 0]]
+    assert batch["labels"] == [[10, 11, 2, 20, 21, 22, -100, -100]]
+    assert batch["attention_mask"] == [[1, 1, 1, 1, 1, 1, 0, 0]]
 
 
 class _Tokenizer:

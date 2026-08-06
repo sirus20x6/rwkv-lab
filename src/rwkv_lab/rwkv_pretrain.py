@@ -17,13 +17,15 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 import os
 import random
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -40,7 +42,14 @@ from rwkv_lab.optimizer_speedups import (
     tie_embedding_head,
 )
 from rwkv_lab.rwkv8_deltanet import RWKV8ChannelMixDeltaNet, RWKV8TimeMixDeltaNet
-from rwkv_lab.trainvm_worker import ExecutionPhase, torch_trajectory_state
+from rwkv_lab.trainvm_worker import (
+    CheckpointPublicationRequest,
+    EvalEvidencePart,
+    EvalExample,
+    EvalExamplesPublicationRequest,
+    ExecutionPhase,
+    torch_trajectory_state,
+)
 from rwkv_lab.training_components import (
     AdamWConfiguration,
     ContextLengthCurriculumConfiguration,
@@ -56,6 +65,7 @@ from rwkv_lab.training_components import (
 if TYPE_CHECKING:
     from rwkv_lab.training_components import LayerNormFactory
     from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
+    from rwkv_lab.trainvm_adapters.rwkv_scratch import RWKVTextEvalPolicy
     from rwkv_lab.trainvm_worker import (
         WorkerControlRuntime,
         WorkerExecutionPhases,
@@ -717,9 +727,7 @@ def resolved_worker_component_contract(
     if worker_components is None:
         return powercool_configuration, None, None
     if args.optimizer != "adamw":
-        raise ValueError("RWKV worker composition currently requires AdamW")
-    if args.lr_schedule != "powercool" or powercool_configuration is None:
-        raise ValueError("RWKV worker composition currently requires PowerCool")
+        raise ValueError("RWKV worker composition currently requires AdamW lowering")
     if args.u_mup_base_width:
         raise ValueError("RWKV worker composition does not yet encode u-muP routing")
     if args.distributed != "none":
@@ -733,16 +741,7 @@ def resolved_worker_component_contract(
     optimizer_configuration = dict(
         worker_components.configuration("optimizer", category="optimizer")
     )
-    expected_optimizer = {
-        "learning_rate": args.lr,
-        "beta1": 0.9,
-        "beta2": 0.95,
-        "epsilon": 1.0e-8,
-    }
-    if any(
-        optimizer_configuration.get(name) != value
-        for name, value in expected_optimizer.items()
-    ):
+    if optimizer_configuration.get("learning_rate") != args.lr:
         raise ValueError(
             "authority optimizer composition disagrees with RWKV configuration"
         )
@@ -792,12 +791,7 @@ def resolved_worker_component_contract(
         raise ValueError(
             "authority precision composition disagrees with RWKV configuration"
         )
-    if dict(
-        worker_components.configuration("normalization", category="normalization")
-    ) != {"epsilon": 1.0e-5}:
-        raise ValueError(
-            "authority normalization composition disagrees with RWKV configuration"
-        )
+    worker_components.normalization()
     if dict(
         worker_components.configuration("curriculum", category="curriculum")
     ) != {
@@ -821,10 +815,21 @@ def resolved_worker_component_contract(
     implementation, resolved_schedule = (
         worker_components.learning_rate_configuration()
     )
-    if (
-        implementation is not ScheduleImplementation.POWERCOOL_V1
-        or resolved_schedule != powercool_configuration
-    ):
+    if implementation is ScheduleImplementation.POWERCOOL_V1:
+        schedule_matches = (
+            args.lr_schedule == "powercool"
+            and resolved_schedule == powercool_configuration
+        )
+    elif implementation is ScheduleImplementation.LINEAR_WARMUP_COSINE_V1:
+        schedule_matches = (
+            args.lr_schedule == "cosine"
+            and resolved_schedule.warmup_steps == args.warmup
+            and resolved_schedule.max_steps == (args.decay_steps or args.steps)
+            and resolved_schedule.minimum_ratio == args.cosine_min_ratio
+        )
+    else:
+        schedule_matches = False
+    if not schedule_matches:
         raise ValueError(
             "authority LR-schedule composition disagrees with RWKV configuration"
         )
@@ -835,6 +840,107 @@ def resolved_worker_component_contract(
     )
 
 
+def initialize_model_weights_from_checkpoint(
+    model: nn.Module, checkpoint_path: str
+) -> int:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    if not isinstance(checkpoint, Mapping) or not isinstance(
+        checkpoint.get("model"), Mapping
+    ):
+        raise TypeError("initial checkpoint has no model state")
+    model_state = checkpoint["model"]
+    if not model_state or any(
+        not isinstance(name, str) or not isinstance(value, torch.Tensor)
+        for name, value in model_state.items()
+    ):
+        raise TypeError("initial checkpoint model state is not tensor-only")
+    model.load_state_dict(model_state, strict=True)
+    source_step = checkpoint.get("step", 0)
+    if not isinstance(source_step, int) or isinstance(source_step, bool):
+        raise TypeError("initial checkpoint step is invalid")
+    return source_step
+
+
+def build_rwkv_text_eval_examples(
+    model: nn.Module,
+    policy: RWKVTextEvalPolicy,
+    *,
+    device: torch.device | str,
+    optimizer_step: int,
+) -> tuple[EvalExample, ...]:
+    if (
+        not isinstance(optimizer_step, int)
+        or isinstance(optimizer_step, bool)
+        or optimizer_step < 0
+    ):
+        raise ValueError("RWKV text eval optimizer step is invalid")
+    was_training = model.training
+    model.eval()
+    examples: list[EvalExample] = []
+    try:
+        with torch.no_grad():
+            for identity, tokens in policy.heldout_tokens.items():
+                prompt = tuple(tokens[:-1])
+                target = int(tokens[-1])
+                input_ids = torch.tensor(
+                    (prompt,), device=device, dtype=torch.long
+                )
+                logits = model(input_ids)
+                if (
+                    not isinstance(logits, torch.Tensor)
+                    or logits.ndim != 3
+                    or logits.shape[:2] != input_ids.shape
+                ):
+                    raise ValueError("RWKV text eval model emitted invalid logits")
+                prediction = int(logits[0, -1].argmax().item())
+                heldout_bytes = json.dumps(
+                    list(tokens), separators=(",", ":")
+                ).encode("utf-8")
+                examples.append(
+                    EvalExample(
+                        example_id=(
+                            "rwkv-"
+                            + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+                        ),
+                        heldout_item_id=identity,
+                        heldout_item_digest=(
+                            "sha256:" + hashlib.sha256(heldout_bytes).hexdigest()
+                        ),
+                        input=(
+                            EvalEvidencePart(
+                                kind="text",
+                                text="token_ids: " + " ".join(map(str, prompt)),
+                            ),
+                        ),
+                        target=(
+                            EvalEvidencePart(kind="text", text=f"token_id: {target}"),
+                        ),
+                        prediction=(
+                            EvalEvidencePart(
+                                kind="text", text=f"token_id: {prediction}"
+                            ),
+                        ),
+                    )
+                )
+    finally:
+        model.train(was_training)
+    return tuple(examples)
+
+
+def perform_rwkv_optimizer_step(
+    optimizer,
+    worker_controls,
+    *,
+    next_step: int,
+    control_applier,
+) -> None:
+    """Cross the authority gate immediately before mutating optimizer state."""
+
+    if worker_controls is not None:
+        worker_controls.pre_optimizer_step(next_step, control_applier)
+    optimizer.step()
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -843,6 +949,7 @@ def main(
     worker_observability: WorkerObservability | None = None,
     worker_controls: WorkerControlRuntime | None = None,
     worker_execution_phases: WorkerExecutionPhases | None = None,
+    worker_eval_examples: RWKVTextEvalPolicy | None = None,
 ):
     enable_fast_matmul()
     ap = argparse.ArgumentParser()
@@ -907,8 +1014,14 @@ def main(
     ap.add_argument("--powercool-cooldown-fraction", type=float, default=0.20)
     ap.add_argument("--powercool-power", type=float, default=2.0)
     ap.add_argument("--powercool-min-lr", type=float, default=0.0)
+    ap.add_argument("--cosine-min-ratio", type=float, default=0.1)
     ap.add_argument("--decay-steps", type=int, default=0)   # cosine horizon; 0 => use --steps
     ap.add_argument("--save", default=""); ap.add_argument("--resume", default="")
+    ap.add_argument(
+        "--init-checkpoint",
+        default="",
+        help="initialize model weights only; optimizer, RNG, and step start fresh",
+    )
     ap.add_argument("--init-g1g", default="", help="continue-train from a pretrained g1g .pth (dims forced to g1g)")
     # loop levers
     ap.add_argument("--loop-count", type=int, default=1)
@@ -1135,6 +1248,12 @@ def main(
         0, 1, 0, "cuda" if torch.cuda.is_available() else "cpu")
     if args.distributed == "fsdp2" and dist.world_size == 1:
         ap.error("--distributed fsdp2 must be launched with torchrun and WORLD_SIZE > 1")
+    if args.resume and args.init_checkpoint:
+        ap.error("--resume and --init-checkpoint are mutually exclusive")
+    if args.init_checkpoint and args.distributed == "fsdp2":
+        ap.error("--init-checkpoint is not supported with FSDP2")
+    if args.init_checkpoint and not os.path.isfile(args.init_checkpoint):
+        ap.error("--init-checkpoint must name an existing checkpoint file")
     os.makedirs(args.out, exist_ok=True)
     jl = open(os.path.join(args.out, "train.jsonl"), "w", buffering=1) if dist.is_primary \
         else open(os.devnull, "w")
@@ -1391,6 +1510,15 @@ def main(
                 ap.error(f"compiled online memory failed parity/performance qualification: {report}")
             else:
                 print(f"online-memory kernel: eager (compiled candidate rejected: {report})", flush=True)
+    if args.init_checkpoint:
+        source_step = initialize_model_weights_from_checkpoint(
+            model, args.init_checkpoint
+        )
+        print(
+            f"initialized model weights from {args.init_checkpoint} "
+            f"(source step {source_step}); optimizer and RNG start fresh",
+            flush=True,
+        )
     nparam = sum(p.numel() for p in model.parameters())
     seed_chain = bool(args.seed_chain) and not args.init_g1g  # g1g branch ignores the flag
     tag = f"scratch-L{args.n_layers}d{args.d_model}-loop{args.loop_count}" + \
@@ -1945,12 +2073,134 @@ def main(
             flush=True,
         )
 
+    # Construct the self-describing architecture before any checkpoint can be
+    # published.  Step-zero evaluation publishes a real resume-grade checkpoint
+    # before the first optimizer mutation, so this metadata cannot be deferred to
+    # the terminal-save path.
+    arch = {
+        "d_model": args.d_model,
+        "n_layers": args.n_layers,
+        "head_size": args.head_size,
+        "seed_chain": seed_chain,
+        "deepembed": bool(args.deepembed) and not args.init_g1g,
+        "de_dim": args.de_dim,
+        "de_mode": args.de_mode,
+        "de_shift": bool(args.de_shift),
+        "de_emb_res": bool(args.de_emb_res),
+        "u_mup_base_width": args.u_mup_base_width,
+        "u_mup_base_depth": args.u_mup_base_depth,
+        "online_memory": bool(args.online_memory) and not args.init_g1g,
+        "online_memory_mode": args.online_memory_mode,
+        "online_memory_dim": args.online_memory_dim,
+        "online_memory_lr": args.online_memory_lr,
+        "online_memory_retention": args.online_memory_retention,
+        "online_memory_window": args.online_memory_window,
+        "balance_state": bool(args.balance_state),
+        "state_offset": bool(args.state_offset) and not args.init_g1g,
+        "state_offset_interval": args.state_offset_interval,
+        "routing_free_moe": bool(args.routing_free_moe) and not args.init_g1g,
+        "routing_free_experts": args.routing_free_experts,
+        "routing_free_rank": args.routing_free_rank,
+        "routing_free_threshold": args.routing_free_threshold,
+        "routing_free_balance": args.routing_free_balance,
+        "byte_aware": bool(args.byte_aware_vocab) and not args.init_g1g,
+        "byte_aware_max_bytes": args.byte_aware_max_bytes,
+        "byte_aware_dim": args.byte_aware_dim,
+        "nvfp4": bool(args.nvfp4),
+        "nvfp4_rht": bool(args.nvfp4_rht),
+        "nvfp4_backend": args.nvfp4_backend,
+        "engram": lmb is not None,
+        "engram_sites": args.engram_sites,
+        "engram_drow": args.engram_drow,
+        "engram_rows": args.engram_rows,
+        "engram_boundary_id": lmb.boundary_id if lmb is not None else None,
+        "fused_channelmix": bool(args.fused_channelmix),
+        "cached_fp8_up": bool(args.cached_fp8_up),
+        "fp8_head": bool(args.fp8_head),
+        "tail_ema_start": args.tail_ema_start,
+        "tail_ema_horizon": args.tail_ema_horizon,
+        "tail_ema_blend": args.tail_ema_blend,
+        "tie_head_until": args.tie_head_until,
+        "lmtp_cooldown_fraction": args.lmtp_cooldown_fraction,
+        "loop_kw": lk,
+    }
+
     model.train(); t0 = time.time(); seen = 0; last_context_shape = None
     print(f"budget={'%.1f min' % args.minutes if not args.steps else str(args.steps)+' steps'}", flush=True)
 
     def reject_live_controls(_effective, assignments):
         if assignments:
             raise ValueError("scratch-RWKV controls require a replacement worker")
+
+    step_zero_examples_published = False
+
+    def publish_step_zero_examples() -> None:
+        if worker_controls is None or worker_eval_examples is None:
+            raise ValueError(
+                "RWKV worker requires controls and text examples for its step-zero gate"
+            )
+        staging = Path(args.out) / "checkpoint-step-zero"
+        staging.mkdir(mode=0o750, parents=True, exist_ok=False)
+        checkpoint_state = {
+            "step": 0,
+            "config": tag,
+            "arch": arch,
+            "head_tied": head_tied,
+            "numpy_rng": rng.bit_generator.state,
+            "torch_rng": torch.get_rng_state(),
+            "model": model.state_dict(),
+            "opt": opt.state_dict(),
+            "heads": heads.state_dict() if heads is not None else None,
+        }
+        if component_digest is not None:
+            checkpoint_state["component_composition_digest"] = component_digest
+        if precision_policy is not None:
+            checkpoint_state["precision_policy"] = precision_policy.state_dict()
+        checkpoint_state.update(worker_controls.checkpoint_state())
+        if torch.cuda.is_available():
+            checkpoint_state["cuda_rng"] = torch.cuda.get_rng_state(dev).cpu()
+        torch.save(checkpoint_state, staging / "state.pt")
+        published = worker_controls.publish_policy_checkpoint(
+            CheckpointPublicationRequest(
+                source_directory=staging,
+                optimizer_step=0,
+                resume_grade="terminal_checkpoint",
+                state_components=(
+                    "component_composition",
+                    "control_revision",
+                    "model",
+                    "optimizer",
+                    "rng_accelerator",
+                    "rng_numpy",
+                    "rng_torch",
+                ),
+            )
+        )
+        examples = build_rwkv_text_eval_examples(
+            model,
+            worker_eval_examples,
+            device=dev,
+            optimizer_step=0,
+        )
+        worker_controls.publish_evaluation_examples(
+            EvalExamplesPublicationRequest(
+                output_name="eval_examples",
+                optimizer_step=0,
+                series_id="rwkv-token-predictions",
+                identity_field=worker_eval_examples.identity_field,
+                identities_digest=worker_eval_examples.identities_digest,
+                selector_digest=worker_eval_examples.selector_digest,
+                evaluator_component_digest=(
+                    worker_eval_examples.evaluator_component_digest
+                ),
+                metric_names=worker_eval_examples.metric_names,
+                checkpoint_artifact_id=published.artifact_id,
+                checkpoint_manifest_digest=published.manifest_sha256,
+                policy_digest=worker_eval_examples.generation_policy_digest,
+                examples=examples,
+                parent_artifact_ids=(published.artifact_id,),
+            )
+        )
 
     while True:
         if args.steps and step >= args.steps: break
@@ -1960,6 +2210,9 @@ def main(
                 worker_controls.evaluation(step, reject_live_controls)
             vl = val_loss(); emit({"kind": "eval", "step": step, "loss": vl, "val_loss": vl, "ppl": math.exp(vl)})
             publish_eval(step, vl)
+            if step == 0 and not step_zero_examples_published:
+                publish_step_zero_examples()
+                step_zero_examples_published = True
             print(f"[{step}] val {vl:.4f} (ppl {math.exp(vl):.2f})  {(time.time()-t0)/60:.1f}min", flush=True)
         train_seq_len, train_batch_size = context_curriculum.for_step(
             step, context_horizon or 1
@@ -1998,8 +2251,11 @@ def main(
             if powercool_schedule is None:
                 raise RuntimeError("PowerCool schedule was not initialized")
             lr = args.lr * powercool_multiplier(step, powercool_schedule)
-        elif args.lr_schedule == "cosine" and horizon:                 # then cosine decay to 0.1x
-            lr *= 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(step, horizon) / horizon))
+        elif args.lr_schedule == "cosine" and horizon:
+            ratio = args.cosine_min_ratio
+            lr *= ratio + (1.0 - ratio) * 0.5 * (
+                1 + math.cos(math.pi * min(step, horizon) / horizon)
+            )
         for g in opt.param_groups:
             g["lr"] = lr * g.get("u_mup_lr_mult", 1.0)
         if lmb is not None:                  # ramp Engram injection in (gates learn on live recall)
@@ -2121,9 +2377,13 @@ def main(
             )
         if weight_decay_schedule is not None:
             weight_decay_schedule.step(step)
-        opt.step(); step += 1
-        if worker_controls is not None:
-            worker_controls.optimizer_step(step, reject_live_controls)
+        perform_rwkv_optimizer_step(
+            opt,
+            worker_controls,
+            next_step=step + 1,
+            control_applier=reject_live_controls,
+        )
+        step += 1
         if worker_step_profiler is not None:
             worker_step_profiler.step(step)
         if worker_observability is not None:
@@ -2158,45 +2418,6 @@ def main(
     if worker_controls is not None:
         worker_controls.checkpoint(step, reject_live_controls)
     if args.save:
-        # Self-describing architecture is shared by ordinary .pt and FSDP2/DCP checkpoints.
-        arch = {"d_model": args.d_model, "n_layers": args.n_layers,
-                         "head_size": args.head_size, "seed_chain": seed_chain,
-                         "deepembed": bool(args.deepembed) and not args.init_g1g,
-                         "de_dim": args.de_dim, "de_mode": args.de_mode,
-                         "de_shift": bool(args.de_shift), "de_emb_res": bool(args.de_emb_res),
-                         "u_mup_base_width": args.u_mup_base_width,
-                         "u_mup_base_depth": args.u_mup_base_depth,
-                         "online_memory": bool(args.online_memory) and not args.init_g1g,
-                         "online_memory_mode": args.online_memory_mode,
-                         "online_memory_dim": args.online_memory_dim,
-                         "online_memory_lr": args.online_memory_lr,
-                         "online_memory_retention": args.online_memory_retention,
-                         "online_memory_window": args.online_memory_window,
-                         "balance_state": bool(args.balance_state),
-                         "state_offset": bool(args.state_offset) and not args.init_g1g,
-                         "state_offset_interval": args.state_offset_interval,
-                         "routing_free_moe": bool(args.routing_free_moe) and not args.init_g1g,
-                         "routing_free_experts": args.routing_free_experts,
-                         "routing_free_rank": args.routing_free_rank,
-                         "routing_free_threshold": args.routing_free_threshold,
-                         "routing_free_balance": args.routing_free_balance,
-                         "byte_aware": bool(args.byte_aware_vocab) and not args.init_g1g,
-                         "byte_aware_max_bytes": args.byte_aware_max_bytes,
-                         "byte_aware_dim": args.byte_aware_dim,
-                         "nvfp4": bool(args.nvfp4), "nvfp4_rht": bool(args.nvfp4_rht),
-                         "nvfp4_backend": args.nvfp4_backend,
-                         "engram": lmb is not None, "engram_sites": args.engram_sites,
-                         "engram_drow": args.engram_drow, "engram_rows": args.engram_rows,
-                         "engram_boundary_id": (lmb.boundary_id if lmb is not None else None),
-                         "fused_channelmix": bool(args.fused_channelmix),
-                         "cached_fp8_up": bool(args.cached_fp8_up),
-                         "fp8_head": bool(args.fp8_head),
-                         "tail_ema_start": args.tail_ema_start,
-                         "tail_ema_horizon": args.tail_ema_horizon,
-                         "tail_ema_blend": args.tail_ema_blend,
-                         "tie_head_until": args.tie_head_until,
-                         "lmtp_cooldown_fraction": args.lmtp_cooldown_fraction,
-                         "loop_kw": lk}
         rng_extra = {"step": step, "config": tag, "arch": arch,
                      "head_tied": head_tied,
                      "numpy_rng": rng.bit_generator.state,

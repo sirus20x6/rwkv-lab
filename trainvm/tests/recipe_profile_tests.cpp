@@ -368,6 +368,57 @@ void checked_in_qwen_example_expands_without_source_changes() {
         "Qwen graph resolves registered model, data, evaluation, and checkpoint slots");
 }
 
+void registered_component_names_are_finite_recipe_choices() {
+  const std::filesystem::path root(TRAINVM_SOURCE_ROOT);
+  std::ifstream input(
+      root / "docs/experiment-vm/examples/"
+             "hf-multimodal-sft.recipe-profiles.v1.json");
+  if (!input) throw std::runtime_error("could not open recipe profile fixture");
+  auto document = nlohmann::json::parse(input);
+  auto& recipe = document.at("recipes").at(0);
+  recipe.at("overrides").push_back(
+      {{"name", "model.loader"},
+       {"domain", "model"},
+       {"type", "enumeration"},
+       {"target",
+        "/spec/workflow/nodes/train/invoke/training/components/model_loader/"
+        "key/name"},
+       {"required", false},
+       {"values", {"hf_causal@1.0.0", "hf_multimodal@1.0.0"}}});
+  const auto registry =
+      trainvm::RecipeProfileRegistry::from_json(document.dump());
+  nlohmann::json instance{
+      {"api_version", "trainvm.recipe-instance/v1"},
+      {"recipe", {{"name", "hf_multimodal_sft"}, {"version", "1"}}},
+      {"run_identity", "component-choice"},
+      {"overrides",
+       {{"model.path", "/thearray/git/moe-mla"},
+        {"data.root", "/thearray/git/moe-mla"},
+        {"model.target_manifest",
+         "/thearray/git/moe-mla/README.md"},
+        {"model.loader", "hf_causal@1.0.0"}}}};
+  const auto expanded = registry.expand_json(instance);
+  check(expanded.effective_overrides.at("model.loader") ==
+                "hf_causal@1.0.0" &&
+            expanded.plan.canonical_plan.at(nlohmann::json::json_pointer(
+                "/spec/workflow/nodes/train/invoke/training/components/"
+                "model_loader/key/name")) == "hf_causal" &&
+            expanded.plan.canonical_plan.at(nlohmann::json::json_pointer(
+                "/spec/workflow/nodes/train/invoke/training/components/"
+                "model_loader/key/version")) == "1.0.0",
+        "recipe instance selects one finite exact registered component key");
+
+  instance["overrides"]["model.loader"] = "operator_python_import";
+  check(rejects([&] { (void)registry.expand_json(instance); }),
+        "component name outside the recipe allow-list is rejected");
+
+  recipe.at("overrides").back()["domain"] = "resources";
+  check(rejects([&] {
+          (void)trainvm::RecipeProfileRegistry::from_json(document.dump());
+        }),
+        "component selection in a non-owning override domain is rejected");
+}
+
 }  // namespace
 
 int main() {
@@ -376,6 +427,7 @@ int main() {
   invalid_and_ambiguous_authoring_fails_closed();
   expanded_instances_have_source_aware_diffs();
   checked_in_qwen_example_expands_without_source_changes();
+  registered_component_names_are_finite_recipe_choices();
   if (failures == 0) {
     std::cout << "recipe profile tests passed\n";
     return 0;
