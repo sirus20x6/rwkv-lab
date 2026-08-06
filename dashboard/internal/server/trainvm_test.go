@@ -139,8 +139,9 @@ func TestTrainVMAuthorRunStreamsCanonicalDryRunWithoutRewritingSource(t *testing
 		{Stage: "resolving", Detail: "resolved profile", DryRun: true},
 		{
 			Stage: "complete", Detail: "preview complete", PlanHash: planHash,
-			CanonicalPlanJSON:    `{"api_version":"trainvm.experiment/v1"}`,
-			RecipeExpansionJSON:  fmt.Sprintf(`{"profile_key":"generic","final_plan_hash":%q}`, planHash),
+			CanonicalPlanJSON: `{"api_version":"trainvm.experiment/v1"}`,
+			RecipeExpansionJSON: fmt.Sprintf(`{"profile_key":"generic","final_plan_hash":%q,"derived_content_bindings":[{"path_target":"/model/path","fingerprint_target":"/model/fingerprint","path":"/models/base","tree_digest":"sha256:%s"}]}`,
+				planHash, strings.Repeat("1", 64)),
 			PreflightReceiptJSON: fmt.Sprintf(`{"passed":true,"plan_hash":%q}`, planHash), Terminal: true, DryRun: true,
 			Diagnostics: []trainvmstore.ControlDiagnostic{{
 				Severity: "WARNING", Code: "preview.notice", Path: "/overrides",
@@ -161,7 +162,8 @@ func TestTrainVMAuthorRunStreamsCanonicalDryRunWithoutRewritingSource(t *testing
 	updates := decodeAuthorRunUpdates(t, response.Body.String())
 	if len(updates) != 2 || updates[0].Terminal || !updates[1].Terminal ||
 		updates[1].PlanHash != planHash || len(updates[1].Diagnostics) != 1 ||
-		updates[1].Diagnostics[0].Help != "Review the canonical plan." {
+		updates[1].Diagnostics[0].Help != "Review the canonical plan." ||
+		!strings.Contains(updates[1].RecipeExpansionJSON, `"tree_digest":"sha256:`+strings.Repeat("1", 64)+`"`) {
 		t.Fatalf("unexpected streamed updates: %#v", updates)
 	}
 }
@@ -233,6 +235,18 @@ func TestTrainVMAuthorRunRejectsMissingOrMismatchedCompletionEvidence(t *testing
 		"mismatched receipt":   {receipt: fmt.Sprintf(`{"passed":true,"plan_hash":%q}`, otherHash), message: "preflight evidence"},
 		"malformed expansion":  {receipt: validReceipt, expansion: `{`, message: "recipe expansion"},
 		"mismatched expansion": {receipt: validReceipt, expansion: fmt.Sprintf(`{"final_plan_hash":%q}`, otherHash), message: "recipe expansion"},
+		"relative measured path": {
+			receipt: validReceipt,
+			expansion: fmt.Sprintf(`{"final_plan_hash":%q,"derived_content_bindings":[{"path_target":"/model/path","fingerprint_target":"/model/fingerprint","path":"relative/model","tree_digest":"sha256:%s"}]}`,
+				planHash, strings.Repeat("1", 64)),
+			message: "derived content evidence",
+		},
+		"malformed measured digest": {
+			receipt: validReceipt,
+			expansion: fmt.Sprintf(`{"final_plan_hash":%q,"derived_content_bindings":[{"path_target":"/data/path","fingerprint_target":"/data/fingerprint","path":"/datasets/train","tree_digest":"operator-supplied"}]}`,
+				planHash),
+			message: "derived content evidence",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			commander := &fakeTrainVMCommander{authorUpdates: []trainvmstore.AuthorRunUpdate{{
@@ -745,11 +759,16 @@ func TestTrainVMRecipeProfileDescriptorFailsClosed(t *testing.T) {
 			"template_document": map[string]any{
 				"api_version": "trainvm.rwkv-lab/v1alpha1",
 				"spec": map[string]any{"parameters": map[string]any{
-					"model":     map[string]any{"value": "/models/base"},
-					"precision": map[string]any{"value": "bf16"},
+					"model":             map[string]any{"value": "/models/base"},
+					"model_fingerprint": map[string]any{"value": "sha256:" + strings.Repeat("0", 64)},
+					"precision":         map[string]any{"value": "bf16"},
 				}},
 			},
 			"overrides": []any{
+				map[string]any{
+					"domain": "model", "name": "model.fingerprint", "required": true,
+					"target": "/spec/parameters/model_fingerprint/value", "type": "string",
+				},
 				map[string]any{
 					"domain": "model", "name": "model.path", "required": true,
 					"target": "/spec/parameters/model/value", "type": "path",
@@ -760,6 +779,10 @@ func TestTrainVMRecipeProfileDescriptorFailsClosed(t *testing.T) {
 					"values": []any{"bf16", "fp8"},
 				},
 			},
+			"content_bindings": []any{map[string]any{
+				"path_target":        "/spec/parameters/model/value",
+				"fingerprint_target": "/spec/parameters/model_fingerprint/value",
+			}},
 			"compatibility": []any{map[string]any{
 				"fields": []any{"precision.mode"}, "allowed": []any{[]any{"bf16"}, []any{"fp8"}},
 			}},
@@ -838,10 +861,22 @@ func TestTrainVMRecipeProfileDescriptorFailsClosed(t *testing.T) {
 			value["compatibility"].([]any)[0].(map[string]any)["allowed"] = []any{[]any{"bf16", 80}}
 		},
 		"missing override target": func(value map[string]any) {
-			value["overrides"].([]any)[0].(map[string]any)["target"] = "/spec/parameters/missing/value"
+			value["overrides"].([]any)[1].(map[string]any)["target"] = "/spec/parameters/missing/value"
 		},
 		"wrong target scalar type": func(value map[string]any) {
-			value["overrides"].([]any)[0].(map[string]any)["target"] = "/spec/parameters"
+			value["overrides"].([]any)[1].(map[string]any)["target"] = "/spec/parameters"
+		},
+		"unknown content binding field": func(value map[string]any) {
+			value["content_bindings"].([]any)[0].(map[string]any)["digest"] = "operator supplied"
+		},
+		"content path is not editable": func(value map[string]any) {
+			value["content_bindings"].([]any)[0].(map[string]any)["path_target"] = "/spec/parameters/precision/value"
+		},
+		"content fingerprint is missing": func(value map[string]any) {
+			value["content_bindings"].([]any)[0].(map[string]any)["fingerprint_target"] = "/spec/parameters/missing/value"
+		},
+		"malformed content pointer": func(value map[string]any) {
+			value["content_bindings"].([]any)[0].(map[string]any)["fingerprint_target"] = "/spec/parameters/~2/value"
 		},
 		"template is not an object": func(value map[string]any) { value["template_document"] = "unsafe" },
 	}

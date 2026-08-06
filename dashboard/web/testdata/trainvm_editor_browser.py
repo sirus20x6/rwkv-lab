@@ -128,22 +128,39 @@ OPERATIONS = {
 
 def recipe_profile(name: str, version: str = "1") -> dict[str, object]:
     template = copy.deepcopy(EXAMPLE)
+    template.setdefault("metadata", {}).setdefault("labels", {}).update({
+        "data_content_fingerprint": "sha256:" + "0" * 64,
+        "model_content_fingerprint": "sha256:" + "0" * 64,
+    })
+    overrides = [
+        {"domain": "model", "name": "model.fingerprint", "type": "string", "target": "/metadata/labels/model_content_fingerprint", "required": True},
+        {"domain": "model", "name": "model.path", "type": "path", "target": "/spec/parameters/source_config/value", "required": True},
+        {"domain": "data", "name": "data.content_fingerprint", "type": "string", "target": "/metadata/labels/data_content_fingerprint", "required": True},
+        {"domain": "data", "name": "data.manifest", "type": "path", "target": "/spec/parameters/cache_directory/value", "required": True},
+        {"domain": "trainability", "name": "trainability.rank", "type": "integer", "target": "/spec/parameters/target_step/value", "required": False, "minimum": 1, "maximum": 4096},
+        {"domain": "optimizer", "name": "optimizer.learning_rate", "type": "number", "target": "/spec/controls/catalog/learning_rate/default", "required": False, "minimum": 1e-8, "maximum": 0.1},
+        {"domain": "schedule", "name": "schedule.maximum_steps", "type": "integer", "target": "/spec/parameters/final_step/value", "required": False, "minimum": 1, "maximum": 10_000_000},
+        {"domain": "precision", "name": "precision.mode", "type": "enumeration", "target": "/spec/controls/catalog/mixed_precision/default", "required": False, "values": ["bf16", "fp16"]},
+        {"domain": "evaluation", "name": "evaluation.every", "type": "integer", "target": "/spec/controls/catalog/eval_every/default", "required": False, "minimum": 1, "maximum": 100_000},
+        {"domain": "checkpointing", "name": "checkpointing.enabled", "type": "boolean", "target": "/spec/resources/accelerators/exclusive", "required": False},
+        {"domain": "resources", "name": "resources.gpu_memory_gib", "type": "number", "target": "/spec/resources/accelerators/minimum_memory_gib", "required": False, "minimum": 24, "maximum": 192},
+        {"domain": "profiling", "name": "profiling.enabled", "type": "boolean", "target": "/spec/resources/accelerators/exclusive", "required": False},
+        {"domain": "controls", "name": "controls.caption_dropout", "type": "number", "target": "/spec/controls/catalog/caption_dropout/default", "required": False, "minimum": 0, "maximum": 1},
+    ]
     return {
         "key": {"name": name, "version": version},
         "description": f"Generic browser fixture for {name}.",
         "template_document": template,
-        "overrides": [
-            {"domain": "model", "name": "model.path", "type": "path", "target": "/spec/parameters/source_config/value", "required": True},
-            {"domain": "data", "name": "data.manifest", "type": "path", "target": "/spec/parameters/cache_directory/value", "required": True},
-            {"domain": "trainability", "name": "trainability.rank", "type": "integer", "target": "/spec/parameters/target_step/value", "required": False, "minimum": 1, "maximum": 4096},
-            {"domain": "optimizer", "name": "optimizer.learning_rate", "type": "number", "target": "/spec/controls/catalog/learning_rate/default", "required": False, "minimum": 1e-8, "maximum": 0.1},
-            {"domain": "schedule", "name": "schedule.maximum_steps", "type": "integer", "target": "/spec/parameters/final_step/value", "required": False, "minimum": 1, "maximum": 10_000_000},
-            {"domain": "precision", "name": "precision.mode", "type": "enumeration", "target": "/spec/controls/catalog/mixed_precision/default", "required": False, "values": ["bf16", "fp16"]},
-            {"domain": "evaluation", "name": "evaluation.every", "type": "integer", "target": "/spec/controls/catalog/eval_every/default", "required": False, "minimum": 1, "maximum": 100_000},
-            {"domain": "checkpointing", "name": "checkpointing.enabled", "type": "boolean", "target": "/spec/resources/accelerators/exclusive", "required": False},
-            {"domain": "resources", "name": "resources.gpu_memory_gib", "type": "number", "target": "/spec/resources/accelerators/minimum_memory_gib", "required": False, "minimum": 24, "maximum": 192},
-            {"domain": "profiling", "name": "profiling.enabled", "type": "boolean", "target": "/spec/resources/accelerators/exclusive", "required": False},
-            {"domain": "controls", "name": "controls.caption_dropout", "type": "number", "target": "/spec/controls/catalog/caption_dropout/default", "required": False, "minimum": 0, "maximum": 1},
+        "overrides": sorted(overrides, key=lambda field: field["name"]),
+        "content_bindings": [
+            {
+                "path_target": "/spec/parameters/cache_directory/value",
+                "fingerprint_target": "/metadata/labels/data_content_fingerprint",
+            },
+            {
+                "path_target": "/spec/parameters/source_config/value",
+                "fingerprint_target": "/metadata/labels/model_content_fingerprint",
+            },
         ],
         "compatibility": [{
             "fields": ["precision.mode", "resources.gpu_memory_gib"],
@@ -290,6 +307,19 @@ class Handler(BaseHTTPRequestHandler):
             plan_hash = ("2" * 64
                          if (not payload["dry_run"] and request_document["reason"] == "mismatch launch")
                          else "1" * 64)
+            profile = next(
+                item for item in RECIPES["recipes"]
+                if item["key"] == request_document["source"]["recipe"]["instance"]["recipe"]
+            )
+            fields_by_target = {field["target"]: field for field in profile["overrides"]}
+            derived_content_bindings = [
+                {
+                    **binding,
+                    "path": overrides[fields_by_target[binding["path_target"]]["name"]],
+                    "tree_digest": "sha256:" + str(index + 3) * 64,
+                }
+                for index, binding in enumerate(profile["content_bindings"])
+            ]
             updates = [
                 {"stage": "validating", "detail": "closed document accepted", "terminal": False, "dry_run": payload["dry_run"]},
                 {"stage": "resolving", "detail": "exact recipe expanded", "terminal": False, "dry_run": payload["dry_run"]},
@@ -307,6 +337,7 @@ class Handler(BaseHTTPRequestHandler):
                         "effective_overrides": overrides,
                         "final_plan_hash": plan_hash,
                         "provenance": provenance,
+                        "derived_content_bindings": derived_content_bindings,
                     }),
                     "preflight_receipt_json": json.dumps({
                         "passed": True,
@@ -376,6 +407,14 @@ def main() -> None:
                 assert exported["source"]["recipe"]["instance"]["recipe"]["name"] == family
                 assert exported["source"]["recipe"]["registry_path"] == "/etc/trainvm/recipe-profiles.json"
                 assert exported["source"]["recipe"]["instance"]["overrides"]["model.path"]
+                assert "input_content" not in exported
+                assert not any("fingerprint" in key for key in exported["source"]["recipe"]["instance"]["overrides"])
+                assert page.locator('[data-vm-recipe-field*="fingerprint"]').count() == 0
+                assert page.locator("#vm-recipe-roots").count() == 0
+                preview_text = page.locator("#vm-recipe-preview-panel").inner_text()
+                assert "authority_measured" in preview_text
+                assert "sha256:" + "3" * 64 in preview_text
+                assert exported["source"]["recipe"]["instance"]["overrides"]["data.manifest"] in preview_text
                 assert page.locator(".vm-recipe-domain").count() == 11
                 assert set(page.locator(".vm-recipe-domain .vm-editor-heading").all_inner_texts()) == {
                     "model", "data", "trainability", "optimizer", "schedule", "precision",
@@ -393,7 +432,7 @@ def main() -> None:
                     page.wait_for_function(
                         "document.querySelector('#vm-recipe-request-state').textContent.includes('ready')"
                     )
-                    diff_summary = page.locator("#vm-recipe-preview-panel details").nth(2).locator("summary").inner_text()
+                    diff_summary = page.locator("#vm-recipe-preview-panel summary", has_text="change from previous").inner_text()
                     assert not diff_summary.endswith("· 0")
                     page.locator(".vm-recipe-import").evaluate("node => node.open = true")
                     original = page.locator("#vm-recipe-source").input_value()
@@ -405,6 +444,11 @@ def main() -> None:
                     page.locator("#vm-recipe-source").fill(json.dumps(rejected))
                     page.click("#vm-recipe-import")
                     assert "import rejected" in page.locator("#vm-recipe-request-state").inner_text(), page.locator("#vm-recipe-request-state").inner_text()
+                    rejected = json.loads(original)
+                    rejected["source"]["recipe"]["instance"]["overrides"]["model.fingerprint"] = "sha256:" + "f" * 64
+                    page.locator("#vm-recipe-source").fill(json.dumps(rejected))
+                    page.click("#vm-recipe-import")
+                    assert "authority-derived" in page.locator("#vm-recipe-request-state").inner_text()
                     page.locator("#vm-recipe-source").fill(original)
                     page.click("#vm-recipe-import")
                     page.click("#vm-recipe-preview")

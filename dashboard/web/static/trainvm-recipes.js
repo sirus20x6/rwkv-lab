@@ -19,7 +19,6 @@
   let instance = null;
   let author = "";
   let reason = "";
-  let inputRoots = [];
   let preview = null;
   let requestView = null;
   let previousPlan = null;
@@ -76,9 +75,22 @@
     return clone(valueAtPointer(profile?.template_document, field.target));
   }
 
+  function targetContains(target, authorityTarget) {
+    return target === authorityTarget || target.startsWith(`${authorityTarget}/`);
+  }
+
+  function authorityDerivedField(profile, field) {
+    return (profile?.content_bindings || []).some((binding) =>
+      targetContains(field.target || "", binding.fingerprint_target || ""));
+  }
+
+  function editableFields(profile) {
+    return (profile?.overrides || []).filter((field) => !authorityDerivedField(profile, field));
+  }
+
   function newInstance(profile) {
     const overrides = {};
-    for (const field of profile?.overrides || []) {
+    for (const field of editableFields(profile)) {
       if (field.required) overrides[field.name] = effectiveValue(profile, field, {});
     }
     return {
@@ -147,13 +159,7 @@
     }
     if (!author.trim()) diagnostics.push({ path: "/author", message: "Author is required." });
     if (!reason.trim()) diagnostics.push({ path: "/reason", message: "Reason is required." });
-    const seenRoots = new Set();
-    for (const root of inputRoots) {
-      if (!canonicalAbsolutePath(root)) diagnostics.push({ path: "/input_content/paths", message: `Input root is not canonical and absolute: ${root}` });
-      else if (seenRoots.has(root)) diagnostics.push({ path: "/input_content/paths", message: `Input root is duplicated: ${root}` });
-      seenRoots.add(root);
-    }
-    for (const field of profile.overrides || []) {
+    for (const field of editableFields(profile)) {
       const present = Object.prototype.hasOwnProperty.call(instance.overrides || {}, field.name);
       const value = instance.overrides?.[field.name];
       if (field.required && !present) {
@@ -191,12 +197,6 @@
       author: author.trim(),
       reason: reason.trim(),
     };
-    if (inputRoots.length) {
-      documentValue.input_content = {
-        api_version: "trainvm.input-content-root-set/v1",
-        paths: [...inputRoots],
-      };
-    }
     return documentValue;
   }
 
@@ -273,7 +273,7 @@
     const profile = selectedProfile();
     const options = profiles.map((candidate) => `<option value="${escapeHTML(identityOf(candidate))}"${identityOf(candidate) === selectedIdentity ? " selected" : ""}>${escapeHTML(labelOf(candidate))}</option>`).join("");
     const domains = new Map();
-    for (const field of profile.overrides || []) {
+    for (const field of editableFields(profile)) {
       if (!domains.has(field.domain)) domains.set(field.domain, []);
       domains.get(field.domain).push(field);
     }
@@ -284,8 +284,7 @@
       `<div class="vm-component-input"><label>run identity</label><input id="vm-recipe-run" maxlength="128" value="${escapeHTML(instance.run_identity)}" /></div>` +
       `<div class="vm-component-input"><label>author</label><input id="vm-recipe-author" maxlength="192" value="${escapeHTML(author)}" /></div>` +
       `<div class="vm-component-input"><label>reason</label><input id="vm-recipe-reason" maxlength="2048" value="${escapeHTML(reason)}" /></div></div>` +
-      `<div class="vm-recipe-authority"><div class="vm-component-input"><label>authority recipe registry</label><input id="vm-recipe-path" maxlength="4096" value="${escapeHTML(registryPath)}" readonly /></div>` +
-      `<div class="vm-component-input"><label>content-lock roots · one absolute path per line</label><textarea id="vm-recipe-roots" rows="2">${escapeHTML(inputRoots.join("\n"))}</textarea></div></div>` +
+      `<div class="vm-recipe-authority"><div class="vm-component-input"><label>authority recipe registry</label><input id="vm-recipe-path" maxlength="4096" value="${escapeHTML(registryPath)}" readonly /></div></div>` +
       `<div class="vm-component-meta vm-recipe-description"><strong>${escapeHTML(labelOf(profile))}</strong>${escapeHTML(profile.description || "Exact-versioned authority-owned training recipe.")}</div>` +
       `<div class="vm-recipe-domains">${groups || '<div class="empty">this recipe exposes no overrides</div>'}</div>` +
       `<div id="vm-recipe-local-diagnostics" class="vm-diagnostics">${renderDiagnostics(local)}</div>` +
@@ -325,7 +324,11 @@
     }
     const expansion = shown.recipeExpansion || {};
     const provenance = expansion.provenance || shown.provenance || {};
+    const measuredBindings = Array.isArray(expansion.derived_content_bindings) ? expansion.derived_content_bindings : [];
     const provenanceRows = Object.entries(provenance).map(([path, source]) => `<div class="vm-recipe-provenance-row"><code>${escapeHTML(path)}</code><span>${escapeHTML(source?.kind || "authority")}</span><code>${escapeHTML(source?.reference || "")}</code></div>`).join("");
+    const measuredRows = measuredBindings.map((binding) => `<div class="vm-recipe-provenance-row vm-recipe-measured-binding">` +
+      `<code>${escapeHTML(binding.path_target || "")}</code><span>authority_measured</span>` +
+      `<code>${escapeHTML(binding.path || "")}</code><code>${escapeHTML(binding.tree_digest || "")}</code></div>`).join("");
     const diffs = shown.diff || [];
     const diffRows = diffs.map((change) => `<div class="vm-diff-op"><code>change</code><code>${escapeHTML(change.path)}</code><code>${escapeHTML(JSON.stringify(change.after))}</code></div>`).join("");
     const stages = (shown.updates || []).map((update) => `<div class="vm-recipe-stage ${update.terminal ? "terminal" : ""}"><code>${escapeHTML(update.stage || "update")}</code><span>${escapeHTML(update.detail || "")}</span></div>`).join("");
@@ -333,6 +336,7 @@
       `<section><div class="vm-editor-heading">authority diagnostics</div>${renderDiagnostics(shown.diagnostics || [])}</section></div>` +
       `<details class="vm-canonical" open><summary>canonical expanded plan · ${escapeHTML(shown.planHash || "pending")}</summary><pre>${escapeHTML(JSON.stringify(shown.plan, null, 2))}</pre></details>` +
       `<details class="vm-canonical"><summary>effective-value provenance · ${Object.keys(provenance).length}</summary>${provenanceRows || '<div class="empty">field-level template/override provenance is shown above; authority expansion provenance was not emitted</div>'}</details>` +
+      `<details class="vm-canonical" open><summary>authority-measured content · ${measuredBindings.length}</summary>${measuredRows || '<div class="empty">no authority-measured content bindings were emitted</div>'}</details>` +
       `<details class="vm-canonical"><summary>change from previous canonical preview · ${diffs.length}</summary>${diffRows || '<div class="empty">first preview or no canonical changes</div>'}</details>` +
       `${shown.preflight ? `<details class="vm-canonical"><summary>passive preflight receipt</summary><pre>${escapeHTML(JSON.stringify(shown.preflight, null, 2))}</pre></details>` : ""}`;
   }
@@ -460,7 +464,7 @@
     const exactKeys = (object, required, optional = []) => object && typeof object === "object" && !Array.isArray(object) &&
       required.every((key) => Object.prototype.hasOwnProperty.call(object, key)) &&
       Object.keys(object).every((key) => required.includes(key) || optional.includes(key));
-    if (!exactKeys(value, ["api_version", "author", "reason", "source"], ["input_content"]) || value.api_version !== API_VERSION ||
+    if (!exactKeys(value, ["api_version", "author", "reason", "source"]) || value.api_version !== API_VERSION ||
         !exactKeys(value.source, ["recipe"]) || !exactKeys(value.source.recipe, ["instance", "registry_path"]) ||
         !exactKeys(value.source.recipe.instance, ["api_version", "overrides", "recipe", "run_identity"]) ||
         value.source.recipe.instance.api_version !== INSTANCE_VERSION ||
@@ -476,20 +480,14 @@
     if (value.source.recipe.registry_path !== registryPath) {
       throw new Error("compact document must use the loaded authority recipe registry");
     }
-    if (value.input_content && (!exactKeys(value.input_content, ["api_version", "paths"]) ||
-        value.input_content.api_version !== "trainvm.input-content-root-set/v1" || !Array.isArray(value.input_content.paths) ||
-        value.input_content.paths.some((path) => !canonicalAbsolutePath(path)) ||
-        new Set(value.input_content.paths).size !== value.input_content.paths.length)) {
-      throw new Error("input_content does not match its closed root-set shape");
-    }
     const profileIdentity = JSON.stringify([value.source.recipe.instance.recipe.name, value.source.recipe.instance.recipe.version]);
     if (!(registry?.recipes || []).some((profile) => identityOf(profile) === profileIdentity)) {
       throw new Error("compact document selects an unavailable exact recipe");
     }
     const profile = registry.recipes.find((candidate) => identityOf(candidate) === profileIdentity);
-    const fields = new Set((profile.overrides || []).map((field) => field.name));
+    const fields = new Set(editableFields(profile).map((field) => field.name));
     if (Object.keys(value.source.recipe.instance.overrides).some((name) => !fields.has(name))) {
-      throw new Error("compact document contains an unknown recipe override");
+      throw new Error("compact document contains an unknown or authority-derived recipe override");
     }
     return clone(value);
   }
@@ -503,7 +501,6 @@
       registryPath = documentValue.source.recipe.registry_path;
       author = documentValue.author;
       reason = documentValue.reason;
-      inputRoots = documentValue.input_content?.paths || [];
       invalidatePreview();
       renderComposer();
       setRequestState("compact document imported exactly · preview required");
@@ -529,7 +526,6 @@
     instance.run_identity = byID("vm-recipe-run")?.value.trim() || "";
     author = byID("vm-recipe-author")?.value || "";
     reason = byID("vm-recipe-reason")?.value || "";
-    inputRoots = (byID("vm-recipe-roots")?.value || "").split("\n").map((value) => value.trim()).filter(Boolean);
   }
 
   function captureField(input) {

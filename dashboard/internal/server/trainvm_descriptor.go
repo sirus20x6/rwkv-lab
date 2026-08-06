@@ -169,7 +169,7 @@ func validateRecipeProfileDescriptors(items []any) error {
 		profile, ok := item.(map[string]any)
 		if !ok || !exactObjectKeys(profile,
 			[]string{"key", "overrides", "template_document"},
-			[]string{"compatibility", "description"}) {
+			[]string{"compatibility", "content_bindings", "description"}) {
 			return fmt.Errorf("recipe profile descriptor has the wrong shape")
 		}
 		key, ok := profile["key"].(map[string]any)
@@ -259,6 +259,46 @@ func validateRecipeProfileDescriptors(items []any) error {
 				return fmt.Errorf("recipe override target is missing or has the wrong scalar type")
 			}
 		}
+		if rawBindings, present := profile["content_bindings"]; present {
+			bindings, ok := rawBindings.([]any)
+			if !ok || len(bindings) == 0 || len(bindings) > 256 {
+				return fmt.Errorf("recipe content bindings are invalid or exceed their bound")
+			}
+			seenPaths := make(map[string]bool, len(bindings))
+			seenFingerprints := make(map[string]bool, len(bindings))
+			previousBinding := ""
+			for _, raw := range bindings {
+				binding, ok := raw.(map[string]any)
+				if !ok || !exactObjectKeys(binding,
+					[]string{"fingerprint_target", "path_target"}, nil) {
+					return fmt.Errorf("recipe content binding has the wrong shape")
+				}
+				pathTarget, pathOK := binding["path_target"].(string)
+				fingerprintTarget, fingerprintOK := binding["fingerprint_target"].(string)
+				identity := pathTarget + "\x00" + fingerprintTarget
+				if !pathOK || !fingerprintOK || pathTarget == fingerprintTarget ||
+					!validRecipePointerSyntax(pathTarget) || !validRecipePointerSyntax(fingerprintTarget) ||
+					seenPaths[pathTarget] || seenFingerprints[fingerprintTarget] ||
+					previousBinding != "" && identity <= previousBinding {
+					return fmt.Errorf("recipe content binding targets are invalid, duplicate, or noncanonical")
+				}
+				pathValue, pathExists := recipePointerValue(template, pathTarget)
+				fingerprintValue, fingerprintExists := recipePointerValue(template, fingerprintTarget)
+				_, pathValueOK := pathValue.(string)
+				_, fingerprintValueOK := fingerprintValue.(string)
+				pathOverride := false
+				for _, field := range fields {
+					if field["target"] == pathTarget && field["type"] == "path" {
+						pathOverride = true
+					}
+				}
+				if !pathExists || !fingerprintExists || !pathValueOK || !fingerprintValueOK || !pathOverride {
+					return fmt.Errorf("recipe content binding does not join an editable path to a derived fingerprint")
+				}
+				seenPaths[pathTarget], seenFingerprints[fingerprintTarget] = true, true
+				previousBinding = identity
+			}
+		}
 		if compatibility, present := profile["compatibility"]; present {
 			rules, ok := compatibility.([]any)
 			if !ok || len(rules) > 128 {
@@ -300,6 +340,24 @@ func validateRecipeProfileDescriptors(items []any) error {
 		}
 	}
 	return nil
+}
+
+func validRecipePointerSyntax(pointer string) bool {
+	if pointer == "" || len(pointer) > 4096 || !strings.HasPrefix(pointer, "/") {
+		return false
+	}
+	for _, encoded := range strings.Split(pointer[1:], "/") {
+		for index := 0; index < len(encoded); index++ {
+			if encoded[index] != '~' {
+				continue
+			}
+			if index+1 >= len(encoded) || encoded[index+1] != '0' && encoded[index+1] != '1' {
+				return false
+			}
+			index++
+		}
+	}
+	return true
 }
 
 func recipeValueValid(field map[string]any, value any) bool {

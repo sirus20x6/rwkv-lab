@@ -472,10 +472,12 @@ func TestTrainVMRecipeComposerUsesCanonicalAuthorRunContract(t *testing.T) {
 		`update.planHash !== expectedPlanHash`,
 		`launch completed without the previewed plan identity`,
 		`application/x-ndjson`, `profile.overrides || []`,
+		`profile?.content_bindings || []`, `authorityDerivedField`, `editableFields`,
 		`profile?.compatibility || []`, `field.minimum`, `field.maximum`,
-		`recipe_expansion_json`, `effective-value provenance`,
+		`recipe_expansion_json`, `derived_content_bindings`, `authority_measured`,
+		`effective-value provenance`,
 		`change from previous canonical preview`, `exactImportedDocument`,
-		`compact document contains an unknown recipe override`,
+		`compact document contains an unknown or authority-derived recipe override`,
 		`preview.source !== source`,
 	} {
 		if !strings.Contains(string(recipes), required) {
@@ -485,6 +487,11 @@ func TestTrainVMRecipeComposerUsesCanonicalAuthorRunContract(t *testing.T) {
 	for _, forbidden := range []string{"qwen", "rwkv", "mageflow", "transformer"} {
 		if strings.Contains(strings.ToLower(string(recipes)), forbidden) {
 			t.Fatalf("generic recipe composer contains family-specific branch %q", forbidden)
+		}
+	}
+	for _, forbidden := range []string{`vm-recipe-roots`, `trainvm.input-content-root-set/v1`} {
+		if strings.Contains(string(recipes), forbidden) {
+			t.Fatalf("recipe composer retains duplicate manual content input %q", forbidden)
 		}
 	}
 }

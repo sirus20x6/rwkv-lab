@@ -476,11 +476,32 @@ func validateAuthorRunCompletionEvidence(update trainvmstore.AuthorRunUpdate) er
 	}
 	if update.RecipeExpansionJSON != "" {
 		var expansion struct {
-			FinalPlanHash string `json:"final_plan_hash"`
+			FinalPlanHash          string `json:"final_plan_hash"`
+			DerivedContentBindings []struct {
+				PathTarget        string `json:"path_target"`
+				FingerprintTarget string `json:"fingerprint_target"`
+				Path              string `json:"path"`
+				TreeDigest        string `json:"tree_digest"`
+			} `json:"derived_content_bindings"`
 		}
 		if json.Unmarshal([]byte(update.RecipeExpansionJSON), &expansion) != nil ||
 			!canonicalHTTPPlanHash(expansion.FinalPlanHash) || expansion.FinalPlanHash != update.PlanHash {
 			return errors.New("native authority completed AuthorRun with mismatched recipe expansion evidence")
+		}
+		if len(expansion.DerivedContentBindings) > 256 {
+			return errors.New("native authority completed AuthorRun with excessive derived content evidence")
+		}
+		seenPaths := make(map[string]bool, len(expansion.DerivedContentBindings))
+		seenFingerprints := make(map[string]bool, len(expansion.DerivedContentBindings))
+		for _, binding := range expansion.DerivedContentBindings {
+			_, pathOK := canonicalDescriptorPath(binding.Path)
+			if !validRecipePointerSyntax(binding.PathTarget) ||
+				!validRecipePointerSyntax(binding.FingerprintTarget) || !pathOK ||
+				!canonicalSHA256(binding.TreeDigest) || seenPaths[binding.PathTarget] ||
+				seenFingerprints[binding.FingerprintTarget] {
+				return errors.New("native authority completed AuthorRun with malformed derived content evidence")
+			}
+			seenPaths[binding.PathTarget], seenFingerprints[binding.FingerprintTarget] = true, true
 		}
 	}
 	return nil
