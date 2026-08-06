@@ -12,8 +12,8 @@ from rwkv_lab.training_components import (
     ConstantWeightDecaySchedule,
     ContextLengthCurriculum,
     FixedGradientAccumulation,
-    FP32ParametersBFloat16ComputePolicy,
     Float8PrecisionPolicy,
+    FP32ParametersBFloat16ComputePolicy,
     LayerNormFactory,
     LinearHeadCrossEntropyObjective,
     LinearWarmupConstantConfiguration,
@@ -26,6 +26,7 @@ from rwkv_lab.training_components import (
     curriculum_from_resolved_component,
     gradient_accumulation_from_resolved_component,
     gradient_clipping_from_resolved_component,
+    model_loader_from_resolved_component,
     normalization_from_resolved_component,
     objective_from_resolved_component,
     optimizer_from_resolved_component,
@@ -33,6 +34,7 @@ from rwkv_lab.training_components import (
     precision_policy_from_resolved_component,
     schedule_configuration_from_resolved_component,
     schedule_from_resolved_component,
+    trainability_from_resolved_component,
     weight_decay_schedule_from_resolved_component,
 )
 from rwkv_lab.training_parameter_routing import ParameterRoutingResult
@@ -71,6 +73,14 @@ class WorkerTrainingComponents:
         return optimizer_from_resolved_component(
             component.runtime_envelope(), parameters
         )
+
+    def model_loader(self, *, slot: str = "model"):
+        component = self.composition.require(slot, category="model_loader")
+        return model_loader_from_resolved_component(component.runtime_envelope())
+
+    def trainability(self, *, slot: str = "trainability"):
+        component = self.composition.require(slot, category="trainability")
+        return trainability_from_resolved_component(component.runtime_envelope())
 
     def require_implementation(
         self,
@@ -138,13 +148,11 @@ class WorkerTrainingComponents:
         | NVFP4PrecisionPolicy
     ):
         component = self.composition.require(slot, category="precision")
-        return precision_policy_from_resolved_component(
-            component.runtime_envelope()
-        )
+        return precision_policy_from_resolved_component(component.runtime_envelope())
 
     def configuration(
         self, slot: str, *, category: str
-    ) -> Mapping[str, bool | int | float | str]:
+    ) -> Mapping[str, bool | int | float | str | tuple[str, ...]]:
         return self.composition.require(slot, category=category).configuration
 
     def learning_rate_schedule(
@@ -186,9 +194,7 @@ class WorkerTrainingComponents:
         *,
         slot: str = "gradient_accumulation",
     ) -> FixedGradientAccumulation:
-        component = self.composition.require(
-            slot, category="gradient_accumulation"
-        )
+        component = self.composition.require(slot, category="gradient_accumulation")
         return gradient_accumulation_from_resolved_component(
             component.runtime_envelope()
         )
@@ -199,9 +205,7 @@ class WorkerTrainingComponents:
         *,
         slot: str = "weight_decay",
     ) -> ConstantWeightDecaySchedule:
-        component = self.composition.require(
-            slot, category="weight_decay_schedule"
-        )
+        component = self.composition.require(slot, category="weight_decay_schedule")
         return weight_decay_schedule_from_resolved_component(
             component.runtime_envelope(), optimizer
         )

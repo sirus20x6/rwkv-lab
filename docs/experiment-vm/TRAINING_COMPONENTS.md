@@ -5,7 +5,8 @@ No layer is allowed to recreate the responsibilities of another layer.
 
 ## Control-plane authority (C++)
 
-`TrainingComponentRegistry` owns exact `(category, name, version)` keys, reflected scalar fields,
+`TrainingComponentRegistry` owns exact `(category, name, version)` keys, reflected scalar fields
+and bounded string lists,
 model-family compatibility, backend and symbolic implementation identity, required worker
 capabilities, schedule step domains, checkpoint-state schemas, and state grades. It resolves every
 node composition, applies defaults, rejects unknown fields, and freezes the result into the
@@ -33,7 +34,8 @@ Future categories follow the same rule: add a module only when a real adapter co
 descriptor. Do not create a placeholder module or advertise decorative configuration. The
 resolved-worker dispatch functions accept only the canonical envelope from
 TrainVM and fail on extra keys, unknown implementation IDs, wrong categories, missing defaults,
-nonfinite numbers, or incorrect scalar types.
+nonfinite numbers, or incorrect value types. String lists declare whether they are ordered or
+set-like; sets are sorted and deduplicated before the composition digest is made.
 
 Every category keeps its configuration, validation, construction, checkpoint codec, and tests
 together. Shared files contain protocols and resolved-envelope plumbing only; they are not a home
@@ -43,6 +45,13 @@ keeps new choices local: adding an optimizer, schedule, activation, or precision
 category, descriptor, and contract fixtures without requiring unrelated trainer or dashboard code.
 
 The initial concrete cross-family catalog contains:
+
+- exact Hugging Face causal and multimodal model loaders. Both consume a locked local model path
+  and checkpoint fingerprint, request loading information from Transformers, and refuse missing,
+  unexpected, mismatched, or errored checkpoint tensors when `exact_checkpoint` is enabled;
+- full, frozen, named freeze/unfreeze, and LoRA trainability policies. Parameter and module
+  selectors are bounded glob sets, every selector must match, and the selected trainable tensor
+  manifest is exact checkpoint state. LoRA additionally persists adapter-state and merge state;
 
 - Torch AdamW;
 - FP32-master AdamW for lower-precision live model weights;
@@ -131,6 +140,22 @@ does not add a Go endpoint or component-specific JavaScript.
 
 Passing schema tests makes a component selectable; it does not prove mathematical interchangeability
 or production fitness.
+
+### Adding a model architecture
+
+Prefer adding a descriptor for an existing loader implementation. A new architecture needs Python
+only when it cannot be instantiated through a registered Transformers auto class or needs a new
+checkpoint remap/attestation algorithm. In that case add one symbolic `model_loader` implementation,
+keep architecture imports inside `training_runtime/model_loaders.py` (or a new category-owned
+module when that file would mix independent loading mechanics), publish an exact load receipt, and
+add a tiny fixture proving every checkpoint key is accounted for. Do not add a workload trainer,
+adapter handler, import path, or argv escape hatch.
+
+A model loader and `trainability` policy are selected as a pair. The authority rejects multiple
+loaders or policies, a missing half of the pair, unavailable local model assets, malformed
+fingerprints/selectors, and full fine-tuning of a quantized load. `validate_resume_state` checks
+exact per-slot descriptor state before a worker restores tensors; omitted LoRA adapter or merge
+state therefore cannot turn into a partial resume.
 
 ## Scaled-precision qualification status
 

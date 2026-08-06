@@ -1064,6 +1064,8 @@
       "properties": {
         "category": {
           "enum": [
+            "model_loader",
+            "trainability",
             "optimizer",
             "parameter_router",
             "learning_rate_schedule",
@@ -1106,11 +1108,13 @@
             "$ref": "#/$defs/identifier"
           },
           "additionalProperties": {
-            "type": [
-              "boolean",
-              "integer",
-              "number",
-              "string"
+            "oneOf": [
+              {"type": ["boolean", "integer", "number", "string"]},
+              {
+                "type": "array",
+                "maxItems": 256,
+                "items": {"type": "string", "maxLength": 4096}
+              }
             ]
           }
         }

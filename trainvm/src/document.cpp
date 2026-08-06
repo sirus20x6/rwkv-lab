@@ -1098,15 +1098,20 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
           const std::string field_path = child_path(
               child_path(selection_path, "configuration"), field);
           validate_identifier(field, field_path, diagnostics);
-          const bool scalar = value.is_boolean() || value.is_number_integer() ||
-                              value.is_number_float() || value.is_string();
-          if (!scalar ||
+          const bool supported = value.is_boolean() || value.is_number_integer() ||
+                                 value.is_number_float() || value.is_string() ||
+                                 (value.is_array() && value.size() <= 256U &&
+                                  std::ranges::all_of(value, [](const Json& item) {
+                                    return item.is_string() &&
+                                           item.get_ref<const std::string&>().size() <= 4096U;
+                                  }));
+          if (!supported ||
               (value.is_number_float() &&
                !std::isfinite(value.get<double>())) ||
               (value.is_string() &&
                value.get_ref<const std::string&>().size() > 4096U)) {
             error(diagnostics, "training.configuration_value", field_path,
-                  "training component configuration values must be bounded finite scalars");
+                  "training component configuration values must be bounded finite scalars or string lists");
           }
         }
       }

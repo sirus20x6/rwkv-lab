@@ -4,12 +4,14 @@ from .activations import ActivationImplementation
 from .curricula import CurriculumImplementation
 from .gradient_accumulation import GradientAccumulationImplementation
 from .gradient_clipping import GradientClippingImplementation
+from .model_loaders import ModelLoaderImplementation
 from .normalizations import NormalizationImplementation
 from .objectives import ObjectiveImplementation
 from .optimizers import OptimizerImplementation
 from .precision import PrecisionImplementation
 from .routers import ParameterRouterImplementation
 from .schedules import ScheduleImplementation
+from .trainability import TrainabilityImplementation
 from .weight_decay_schedules import WeightDecayScheduleImplementation
 
 
@@ -18,6 +20,8 @@ def supported_implementation_ids() -> frozenset[str]:
         implementation.value
         for implementation in (
             *ActivationImplementation,
+            *ModelLoaderImplementation,
+            *TrainabilityImplementation,
             *CurriculumImplementation,
             *NormalizationImplementation,
             *OptimizerImplementation,
@@ -41,6 +45,12 @@ def supported_worker_capabilities() -> frozenset[str]:
     return frozenset(
         {
             "activation.silu.v1",
+            "model_loader.hf_causal.v1",
+            "model_loader.hf_multimodal.v1",
+            "trainability.full.v1",
+            "trainability.frozen.v1",
+            "trainability.named_rules.v1",
+            "trainability.lora.v1",
             "activation.squared_relu.v1",
             "curriculum.context_length.v1",
             "normalization.layer_norm.v1",

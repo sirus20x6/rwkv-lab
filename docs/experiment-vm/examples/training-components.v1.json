@@ -2,6 +2,112 @@
   "api_version": "trainvm.training-components/v1",
   "components": [
     {
+      "key": {"category": "model_loader", "name": "hf_causal", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.model_loader.hf_causal.v1",
+      "model_families": ["transformer"],
+      "required_capabilities": ["model_loader.hf_causal.v1"],
+      "configuration": [
+        {"name": "model_path", "type": "path", "required": true},
+        {"name": "checkpoint_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "revision", "type": "string", "required": false, "default": "main"},
+        {"name": "local_files_only", "type": "boolean", "required": false, "default": true},
+        {"name": "trust_remote_code", "type": "boolean", "required": false, "default": false},
+        {"name": "attention_implementation", "type": "enumeration", "required": false, "default": "sdpa", "values": ["eager", "flash_attention_2", "sdpa"]},
+        {"name": "quantization", "type": "enumeration", "required": false, "default": "none", "values": ["4bit", "8bit", "none"]},
+        {"name": "exact_checkpoint", "type": "boolean", "required": false, "default": true}
+      ],
+      "state": [
+        {"name": "base_checkpoint_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "load_receipt_digest", "type": "string", "required": true, "string_format": "sha256_digest"}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "model_loader", "name": "hf_multimodal", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.model_loader.hf_multimodal.v1",
+      "model_families": ["transformer", "vision"],
+      "required_capabilities": ["model_loader.hf_multimodal.v1"],
+      "configuration": [
+        {"name": "model_path", "type": "path", "required": true},
+        {"name": "checkpoint_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "revision", "type": "string", "required": false, "default": "main"},
+        {"name": "local_files_only", "type": "boolean", "required": false, "default": true},
+        {"name": "trust_remote_code", "type": "boolean", "required": false, "default": false},
+        {"name": "attention_implementation", "type": "enumeration", "required": false, "default": "sdpa", "values": ["eager", "flash_attention_2", "sdpa"]},
+        {"name": "quantization", "type": "enumeration", "required": false, "default": "none", "values": ["4bit", "8bit", "none"]},
+        {"name": "exact_checkpoint", "type": "boolean", "required": false, "default": true}
+      ],
+      "state": [
+        {"name": "base_checkpoint_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "load_receipt_digest", "type": "string", "required": true, "string_format": "sha256_digest"}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "trainability", "name": "full", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.trainability.full.v1",
+      "model_families": ["transformer", "vision"],
+      "required_capabilities": ["trainability.full.v1"],
+      "configuration": [],
+      "state": [{"name": "trainable_parameter_manifest", "type": "string", "required": true, "string_format": "sha256_digest"}],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "trainability", "name": "frozen", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.trainability.frozen.v1",
+      "model_families": ["transformer", "vision"],
+      "required_capabilities": ["trainability.frozen.v1"],
+      "configuration": [],
+      "state": [{"name": "trainable_parameter_manifest", "type": "string", "required": true, "string_format": "sha256_digest"}],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "trainability", "name": "named_rules", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.trainability.named_rules.v1",
+      "model_families": ["transformer", "vision"],
+      "required_capabilities": ["trainability.named_rules.v1"],
+      "configuration": [
+        {"name": "default_trainable", "type": "boolean", "required": false, "default": false},
+        {"name": "freeze_patterns", "type": "string_list", "required": false, "default": [], "collection_semantics": "set", "string_format": "parameter_selector"},
+        {"name": "unfreeze_patterns", "type": "string_list", "required": false, "default": [], "collection_semantics": "set", "string_format": "parameter_selector"}
+      ],
+      "state": [{"name": "trainable_parameter_manifest", "type": "string", "required": true, "string_format": "sha256_digest"}],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "trainability", "name": "lora", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.trainability.lora.v1",
+      "model_families": ["transformer", "vision"],
+      "required_capabilities": ["trainability.lora.v1"],
+      "configuration": [
+        {"name": "rank", "type": "integer", "required": true, "minimum": 1, "maximum": 4096},
+        {"name": "alpha", "type": "integer", "required": true, "minimum": 1, "maximum": 65536},
+        {"name": "dropout", "type": "number", "required": false, "default": 0.0, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "target_selectors", "type": "string_list", "required": true, "collection_semantics": "set", "string_format": "parameter_selector"},
+        {"name": "modules_to_save", "type": "string_list", "required": false, "default": [], "collection_semantics": "set", "string_format": "parameter_selector"},
+        {"name": "bias", "type": "enumeration", "required": false, "default": "none", "values": ["all", "lora_only", "none"]},
+        {"name": "merge_on_completion", "type": "boolean", "required": false, "default": false}
+      ],
+      "state": [
+        {"name": "adapter_state_manifest", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "merged", "type": "boolean", "required": true},
+        {"name": "trainable_parameter_manifest", "type": "string", "required": true, "string_format": "sha256_digest"}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
       "key": {
         "category": "activation",
         "name": "squared_relu",

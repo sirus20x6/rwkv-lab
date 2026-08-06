@@ -56,6 +56,8 @@ _KEY_FIELDS = frozenset({"category", "name", "version"})
 _CATEGORIES = frozenset(
     {
         "optimizer",
+        "model_loader",
+        "trainability",
         "parameter_router",
         "learning_rate_schedule",
         "weight_decay_schedule",
@@ -75,6 +77,35 @@ class TrainingCompositionError(ValueError):
     pass
 
 
+def _state_value(field: Mapping[str, Any], value: Any) -> bool:
+    field_type = field.get("type")
+    if field_type == "boolean":
+        valid = isinstance(value, bool)
+    elif field_type == "integer":
+        valid = isinstance(value, int) and not isinstance(value, bool)
+    elif field_type == "number":
+        valid = isinstance(value, (int, float)) and not isinstance(value, bool)
+    elif field_type in {"string", "path", "enumeration"}:
+        valid = isinstance(value, str) and len(value.encode("utf-8")) <= 4096
+    elif field_type == "string_list":
+        valid = (
+            isinstance(value, (tuple, list))
+            and len(value) <= 256
+            and all(
+                isinstance(item, str) and len(item.encode("utf-8")) <= 4096
+                for item in value
+            )
+        )
+    else:
+        return False
+    if not valid:
+        return False
+    if field.get("string_format") == "sha256_digest":
+        values = value if isinstance(value, (tuple, list)) else (value,)
+        return all(is_digest(item) for item in values)
+    return True
+
+
 def _symbolic(value: Any, *, leading_digit: bool = False) -> bool:
     if not is_bounded_text(value, 192):
         return False
@@ -90,18 +121,27 @@ def _symbolic(value: Any, *, leading_digit: bool = False) -> bool:
     )
 
 
-def _configuration_scalar(value: Any) -> bool:
+def _configuration_value(value: Any) -> bool:
     if isinstance(value, (bool, int)):
         return True
     if isinstance(value, float):
         return math.isfinite(value)
-    return isinstance(value, str) and len(value.encode("utf-8")) <= 4096
+    if isinstance(value, str):
+        return len(value.encode("utf-8")) <= 4096
+    return (
+        isinstance(value, list)
+        and len(value) <= 256
+        and all(
+            isinstance(item, str) and len(item.encode("utf-8")) <= 4096
+            for item in value
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class ResolvedTrainingComponent:
     descriptor: Mapping[str, Any]
-    configuration: Mapping[str, bool | int | float | str]
+    configuration: Mapping[str, bool | int | float | str | tuple[str, ...]]
     descriptor_digest: str
 
     @property
@@ -148,6 +188,32 @@ class ResolvedTrainingComposition:
             )
         return component
 
+    def validate_resume_state(self, state: Any) -> Mapping[str, Any]:
+        """Validate exact per-component state before a trainer restores tensors."""
+
+        stateful = {
+            slot: component
+            for slot, component in self.components.items()
+            if component.descriptor["state_grade"] != "stateless"
+        }
+        if not isinstance(state, dict) or set(state) != set(stateful):
+            raise TrainingCompositionError(
+                "training component resume state has incomplete slot coverage"
+            )
+        for slot, component in stateful.items():
+            slot_state = state[slot]
+            fields = {field["name"]: field for field in component.descriptor["state"]}
+            if not isinstance(slot_state, dict) or set(slot_state) != set(fields):
+                raise TrainingCompositionError(
+                    f"training component resume state for {slot!r} is incomplete"
+                )
+            for name, field in fields.items():
+                if not _state_value(field, slot_state[name]):
+                    raise TrainingCompositionError(
+                        f"training component resume field {slot}.{name} is invalid"
+                    )
+        return deep_freeze(state)
+
 
 def _load_component(value: Any, model_family: str) -> ResolvedTrainingComponent:
     if not isinstance(value, dict) or set(value) != _COMPONENT_FIELDS:
@@ -189,11 +255,11 @@ def _load_component(value: Any, model_family: str) -> ResolvedTrainingComponent:
             "resolved training component identity is invalid"
         )
     if not all(
-        _symbolic(name) and _configuration_scalar(item)
+        _symbolic(name) and _configuration_value(item)
         for name, item in configuration.items()
     ):
         raise TrainingCompositionError(
-            "resolved training configuration is not a flat scalar object"
+            "resolved training configuration contains an unsupported value"
         )
     if (
         not is_digest(descriptor_digest)
