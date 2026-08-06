@@ -63,6 +63,7 @@ fi
 
 # Portable halves, all runnable without the native toolchain.
 run_suite schema-golden python3 scripts/validate_experiment_documents.py
+run_suite authoring-matrix python3 scripts/validate_no_code_authoring_matrix.py
 run_suite coverage-gate python3 scripts/ci_coverage_gate.py -m "not gpu"
 run_suite python-cpu python3 -m pytest -q -n "${PYTEST_WORKERS:-auto}" \
   --dist worksteal -m "not gpu" tests \

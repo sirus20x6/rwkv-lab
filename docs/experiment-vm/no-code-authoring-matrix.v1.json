@@ -1,0 +1,193 @@
+{
+  "api_version": "trainvm.no-code-authoring-matrix/v1",
+  "authority": "qualification_declaration_only",
+  "comment": "This matrix declares the minimum no-code authoring release qualification. It cannot launch work or report an outcome. A sealed TrainVM qualification run produces the measured receipt after the registered recipes exist.",
+  "forbidden_mutations": [
+    "repository_source",
+    "adapter_registry",
+    "handler_dispatch",
+    "sealed_worker_deployment",
+    "dashboard_source",
+    "service_configuration"
+  ],
+  "required_evidence": [
+    "source_tree_unchanged",
+    "adapter_registry_unchanged",
+    "handler_dispatch_unchanged",
+    "worker_deployment_unchanged",
+    "dashboard_source_unchanged",
+    "service_configuration_unchanged",
+    "validated_before_accelerator_lease",
+    "immediate_dashboard_registration",
+    "step_zero_examples",
+    "bounded_training",
+    "checkpoint_publication",
+    "pause_resume",
+    "plan_identity",
+    "plan_diff",
+    "authoring_duration",
+    "unsupported_boundary"
+  ],
+  "scenarios": [
+    {
+      "id": "qwen.multimodal-caption-lora",
+      "family": "hf_multimodal_sft",
+      "recipe": "hf_multimodal_sft@1",
+      "step_zero_modality": "image_caption_triplet",
+      "variation_axes": [
+        "dataset",
+        "lora_rank",
+        "learning_rate",
+        "batching",
+        "evaluation_schedule"
+      ],
+      "variants": [
+        {
+          "id": "alternate-dataset",
+          "axis": "dataset",
+          "override_fields": [
+            "data.manifest"
+          ]
+        },
+        {
+          "id": "alternate-lora-rank",
+          "axis": "lora_rank",
+          "override_fields": [
+            "trainability.lora_rank",
+            "trainability.lora_alpha"
+          ]
+        },
+        {
+          "id": "alternate-learning-rate",
+          "axis": "learning_rate",
+          "override_fields": [
+            "hyperparameters.learning_rate"
+          ]
+        },
+        {
+          "id": "alternate-batching",
+          "axis": "batching",
+          "override_fields": [
+            "hyperparameters.gradient_accumulation",
+            "data.batch_size"
+          ]
+        },
+        {
+          "id": "alternate-eval-cadence",
+          "axis": "evaluation_schedule",
+          "override_fields": [
+            "evaluation.qualitative_every_steps",
+            "evaluation.full_every_steps"
+          ]
+        }
+      ],
+      "unsupported_request_disposition": "new_implementation_required"
+    },
+    {
+      "id": "transformer.causal-lm-sft",
+      "family": "transformer_lm",
+      "recipe": "transformer_lm@1",
+      "step_zero_modality": "text_completion",
+      "variation_axes": [
+        "dataset",
+        "trainability",
+        "objective"
+      ],
+      "variants": [
+        {
+          "id": "alternate-token-corpus",
+          "axis": "dataset",
+          "override_fields": [
+            "data.manifest"
+          ]
+        },
+        {
+          "id": "lora-to-full-finetune",
+          "axis": "trainability",
+          "override_fields": [
+            "trainability.policy"
+          ]
+        },
+        {
+          "id": "causal-to-assistant-only",
+          "axis": "objective",
+          "override_fields": [
+            "hyperparameters.objective"
+          ]
+        }
+      ],
+      "unsupported_request_disposition": "new_implementation_required"
+    },
+    {
+      "id": "rwkv.scratch-or-continuation",
+      "family": "rwkv_lm",
+      "recipe": "rwkv_lm@1",
+      "step_zero_modality": "text_completion",
+      "variation_axes": [
+        "optimizer",
+        "learning_rate_schedule",
+        "activation"
+      ],
+      "variants": [
+        {
+          "id": "alternate-optimizer",
+          "axis": "optimizer",
+          "override_fields": [
+            "hyperparameters.optimizer"
+          ]
+        },
+        {
+          "id": "alternate-schedule",
+          "axis": "learning_rate_schedule",
+          "override_fields": [
+            "hyperparameters.learning_rate_schedule"
+          ]
+        },
+        {
+          "id": "alternate-activation",
+          "axis": "activation",
+          "override_fields": [
+            "model.activation"
+          ]
+        }
+      ],
+      "unsupported_request_disposition": "new_implementation_required"
+    },
+    {
+      "id": "mageflow.expert-continuation",
+      "family": "mageflow",
+      "recipe": "mageflow_training@1",
+      "step_zero_modality": "source_generated_image_pair",
+      "variation_axes": [
+        "expert_route",
+        "freeze_policy",
+        "learning_rate_groups"
+      ],
+      "variants": [
+        {
+          "id": "photo-to-animation-route",
+          "axis": "expert_route",
+          "override_fields": [
+            "model.expert_route"
+          ]
+        },
+        {
+          "id": "alternate-backbone-freeze",
+          "axis": "freeze_policy",
+          "override_fields": [
+            "trainability.freeze_policy"
+          ]
+        },
+        {
+          "id": "alternate-expert-backbone-ratio",
+          "axis": "learning_rate_groups",
+          "override_fields": [
+            "hyperparameters.expert_learning_rate",
+            "hyperparameters.backbone_learning_rate_multiplier"
+          ]
+        }
+      ],
+      "unsupported_request_disposition": "new_implementation_required"
+    }
+  ]
+}
