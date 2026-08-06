@@ -2375,8 +2375,19 @@ HostdServeResult HostdStatusServer::serve_accepted(
     enable_passcred(connection.get());
     const ucred peer = peer_credentials(connection.get());
     if (peer.uid != peer_policy_.allowed_uid ||
-        peer.gid != peer_policy_.allowed_gid)
+        peer.gid != peer_policy_.allowed_gid) {
+      if (limits_.rejection_observer) {
+        try {
+          limits_.rejection_observer(
+              "peer credential mismatch: observed uid=" +
+              std::to_string(peer.uid) + " gid=" + std::to_string(peer.gid) +
+              ", allowed uid=" + std::to_string(peer_policy_.allowed_uid) +
+              " gid=" + std::to_string(peer_policy_.allowed_gid));
+        } catch (...) {
+        }
+      }
       return HostdServeResult::rejected;
+    }
     const std::int64_t now = hostd_monotonic_now_ns();
     const std::int64_t relative_deadline =
         limits_.per_session_timeout_ns >
