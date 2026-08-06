@@ -64,6 +64,13 @@
     return JSON.stringify(left) === JSON.stringify(right);
   }
 
+  function canonicalAbsolutePath(value) {
+    return typeof value === "string" && value.length > 1 && value.length <= 4096 &&
+      value.startsWith("/") && !value.endsWith("/") && !value.includes("\0") && !value.includes("//") &&
+      !value.includes("/./") && !value.includes("/../") &&
+      !value.endsWith("/.") && !value.endsWith("/..");
+  }
+
   function effectiveValue(profile, field, overrides = instance?.overrides || {}) {
     if (Object.prototype.hasOwnProperty.call(overrides, field.name)) return overrides[field.name];
     return clone(valueAtPointer(profile?.template_document, field.target));
@@ -140,6 +147,12 @@
     }
     if (!author.trim()) diagnostics.push({ path: "/author", message: "Author is required." });
     if (!reason.trim()) diagnostics.push({ path: "/reason", message: "Reason is required." });
+    const seenRoots = new Set();
+    for (const root of inputRoots) {
+      if (!canonicalAbsolutePath(root)) diagnostics.push({ path: "/input_content/paths", message: `Input root is not canonical and absolute: ${root}` });
+      else if (seenRoots.has(root)) diagnostics.push({ path: "/input_content/paths", message: `Input root is duplicated: ${root}` });
+      seenRoots.add(root);
+    }
     for (const field of profile.overrides || []) {
       const present = Object.prototype.hasOwnProperty.call(instance.overrides || {}, field.name);
       const value = instance.overrides?.[field.name];
@@ -153,6 +166,8 @@
           field.type === "number" && (typeof value !== "number" || !Number.isFinite(value)) ||
           (field.type === "string" || field.type === "path" || field.type === "enumeration") && typeof value !== "string") {
         diagnostics.push({ path: `/overrides/${field.name}`, message: `${field.name} has the wrong type.` });
+      } else if (field.type === "path" && !canonicalAbsolutePath(value)) {
+        diagnostics.push({ path: `/overrides/${field.name}`, message: `${field.name} must be a canonical absolute path.` });
       } else if (field.minimum !== undefined && value < Number(field.minimum) ||
                  field.maximum !== undefined && value > Number(field.maximum)) {
         diagnostics.push({ path: `/overrides/${field.name}`, message: `${field.name} is outside its declared bounds.` });
@@ -453,11 +468,18 @@
         !value.source.recipe.instance.overrides || typeof value.source.recipe.instance.overrides !== "object" || Array.isArray(value.source.recipe.instance.overrides)) {
       throw new Error("compact document does not match the closed AuthorRun recipe shape");
     }
+    if (typeof value.author !== "string" || !value.author.trim() || value.author.length > 192 ||
+        typeof value.reason !== "string" || !value.reason.trim() || value.reason.length > 2048 ||
+        typeof value.source.recipe.instance.run_identity !== "string") {
+      throw new Error("compact document author, reason, or run identity has the wrong type or bound");
+    }
     if (value.source.recipe.registry_path !== registryPath) {
       throw new Error("compact document must use the loaded authority recipe registry");
     }
     if (value.input_content && (!exactKeys(value.input_content, ["api_version", "paths"]) ||
-        value.input_content.api_version !== "trainvm.input-content-root-set/v1" || !Array.isArray(value.input_content.paths))) {
+        value.input_content.api_version !== "trainvm.input-content-root-set/v1" || !Array.isArray(value.input_content.paths) ||
+        value.input_content.paths.some((path) => !canonicalAbsolutePath(path)) ||
+        new Set(value.input_content.paths).size !== value.input_content.paths.length)) {
       throw new Error("input_content does not match its closed root-set shape");
     }
     const profileIdentity = JSON.stringify([value.source.recipe.instance.recipe.name, value.source.recipe.instance.recipe.version]);
