@@ -254,6 +254,56 @@ void root_sets_are_sorted_measured_and_nonoverlapping() {
       "root sets reject overlapping directory and child paths");
 }
 
+void warm_measurements_reuse_bytes_without_reusing_namespace() {
+  TemporaryDirectory temporary;
+  const auto root = temporary.path() / "cached-tree";
+  std::filesystem::create_directory(root);
+  const auto payload = root / "payload.bin";
+  write_file(payload, std::string(64U * 1024U, 'a'));
+
+  InputContentMeasurementStats cold_stats;
+  const auto cold = measure_input_content_root(root, &cold_stats);
+  require(cold_stats.cache_hits == 0U && cold_stats.cache_misses == 1U &&
+              cold_stats.cache_bypasses == 0U &&
+              cold_stats.bytes_hashed == 64U * 1024U,
+          "cold cache telemetry accounts for every hashed byte");
+
+  InputContentMeasurementStats warm_stats;
+  const auto warm = measure_input_content_root(root, &warm_stats);
+  require(warm == cold && warm_stats.cache_hits == 1U &&
+              warm_stats.cache_misses == 0U && warm_stats.bytes_hashed == 0U,
+          "warm measurement preserves identity without rereading file bytes");
+
+  const auto original_time = std::filesystem::last_write_time(payload);
+  write_file(payload, std::string(64U * 1024U, 'b'));
+  std::filesystem::last_write_time(payload, original_time);
+  InputContentMeasurementStats changed_stats;
+  const auto changed = measure_input_content_root(root, &changed_stats);
+  require(changed.tree_sha256 != warm.tree_sha256 &&
+              changed_stats.cache_hits == 0U &&
+              changed_stats.bytes_hashed == 64U * 1024U,
+          "same-size mutation with restored mtime cannot reuse cached bytes");
+
+  const auto replacement = root / "replacement.bin";
+  write_file(replacement, std::string(64U * 1024U, 'c'));
+  std::filesystem::rename(replacement, payload);
+  InputContentMeasurementStats replaced_stats;
+  const auto replaced = measure_input_content_root(root, &replaced_stats);
+  require(replaced.tree_sha256 != changed.tree_sha256 &&
+              replaced_stats.cache_hits == 0U &&
+              replaced_stats.bytes_hashed == 64U * 1024U,
+          "inode replacement cannot reuse cached bytes");
+
+  write_file(root / "new-member", "member");
+  InputContentMeasurementStats membership_stats;
+  const auto membership = measure_input_content_root(root, &membership_stats);
+  require(membership.file_count == 2U &&
+              membership.tree_sha256 != replaced.tree_sha256 &&
+              membership_stats.cache_hits == 1U &&
+              membership_stats.bytes_hashed == 6U,
+          "directory membership is always enumerated while unchanged leaves reuse");
+}
+
 }  // namespace
 
 // An ancestor directory is shared with the rest of the machine. Creating and
@@ -316,6 +366,8 @@ int main() {
     std::cout << "PASS empty-name-path\n";
     root_sets_are_sorted_measured_and_nonoverlapping();
     std::cout << "PASS root-set\n";
+    warm_measurements_reuse_bytes_without_reusing_namespace();
+    std::cout << "PASS warm-cache-mutation\n";
     return 0;
   } catch (const std::exception& error) {
     std::cerr << "input content authority test failure: " << error.what()

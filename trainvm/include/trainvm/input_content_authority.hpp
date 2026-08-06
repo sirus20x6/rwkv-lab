@@ -12,6 +12,8 @@ inline constexpr std::string_view kInputContentRootApiVersion =
     "trainvm.input-content-root/v1";
 inline constexpr std::string_view kInputContentRootSetApiVersion =
     "trainvm.input-content-root-set/v1";
+inline constexpr std::string_view kInputContentMeasurementCacheApiVersion =
+    "trainvm.input-content-measurement-cache/v1";
 
 enum class ContentRootKind {
   file,
@@ -36,10 +38,26 @@ struct InputContentRootSet final {
   bool operator==(const InputContentRootSet&) const = default;
 };
 
+// Operational telemetry is deliberately separate from the immutable content
+// identity. A cold preview and a warm fenced launch must compile to the same
+// plan hash even though the second measurement can reuse trusted process-local
+// evidence.
+struct InputContentMeasurementStats final {
+  std::uint64_t cache_hits{};
+  std::uint64_t cache_misses{};
+  std::uint64_t cache_bypasses{};
+  std::uint64_t bytes_hashed{};
+
+  bool operator==(const InputContentMeasurementStats&) const = default;
+};
+
 [[nodiscard]] InputContentRootIdentity measure_input_content_root(
-    const std::filesystem::path& path);
+    const std::filesystem::path& path,
+    InputContentMeasurementStats* measurement_stats = nullptr);
 
 [[nodiscard]] std::vector<InputContentRootIdentity>
-measure_input_content_root_set(const InputContentRootSet& root_set);
+measure_input_content_root_set(
+    const InputContentRootSet& root_set,
+    std::vector<InputContentMeasurementStats>* measurement_stats = nullptr);
 
 }  // namespace trainvm

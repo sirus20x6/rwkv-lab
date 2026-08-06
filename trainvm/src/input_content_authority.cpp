@@ -11,13 +11,18 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits>
+#include <linux/magic.h>
 #include <memory>
 #include <span>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
+#include <sys/vfs.h>
 #include <system_error>
+#include <unordered_map>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -34,6 +39,8 @@ constexpr std::size_t kDigestBytes = 32U;
 constexpr std::size_t kReadBufferBytes = 1024U * 1024U;
 constexpr char kFileDomain[] = "trainvm.input-content.file/v1";
 constexpr char kDirectoryDomain[] = "trainvm.input-content.directory/v1";
+constexpr std::size_t kMaximumCachedFiles = 1U << 20U;
+constexpr long kZfsSuperMagic = 0x2fc12fc1L;
 
 using Digest = std::array<unsigned char, kDigestBytes>;
 
@@ -107,6 +114,102 @@ struct NodeMeasurement final {
   std::uint64_t total_bytes{};
   Digest digest{};
 };
+
+struct FileCacheKey final {
+  std::uint64_t device{};
+  std::uint64_t inode{};
+  std::uint64_t mode{};
+  std::uint64_t links{};
+  std::uint64_t owner{};
+  std::uint64_t group{};
+  std::uint64_t size{};
+  std::int64_t modified_seconds{};
+  std::int64_t modified_nanoseconds{};
+  std::int64_t changed_seconds{};
+  std::int64_t changed_nanoseconds{};
+
+  bool operator==(const FileCacheKey&) const = default;
+};
+
+void hash_combine(std::size_t& seed, std::uint64_t value) noexcept {
+  seed ^= std::hash<std::uint64_t>{}(value) + 0x9e3779b97f4a7c15ULL +
+          (seed << 6U) + (seed >> 2U);
+}
+
+struct FileCacheKeyHash final {
+  std::size_t operator()(const FileCacheKey& key) const noexcept {
+    std::size_t result = 0U;
+    hash_combine(result, key.device);
+    hash_combine(result, key.inode);
+    hash_combine(result, key.mode);
+    hash_combine(result, key.links);
+    hash_combine(result, key.owner);
+    hash_combine(result, key.group);
+    hash_combine(result, key.size);
+    hash_combine(result, static_cast<std::uint64_t>(key.modified_seconds));
+    hash_combine(result, static_cast<std::uint64_t>(key.modified_nanoseconds));
+    hash_combine(result, static_cast<std::uint64_t>(key.changed_seconds));
+    hash_combine(result, static_cast<std::uint64_t>(key.changed_nanoseconds));
+    return result;
+  }
+};
+
+FileCacheKey file_cache_key(const struct stat& value) {
+  return {
+      .device = static_cast<std::uint64_t>(value.st_dev),
+      .inode = static_cast<std::uint64_t>(value.st_ino),
+      .mode = static_cast<std::uint64_t>(value.st_mode),
+      .links = static_cast<std::uint64_t>(value.st_nlink),
+      .owner = static_cast<std::uint64_t>(value.st_uid),
+      .group = static_cast<std::uint64_t>(value.st_gid),
+      .size = static_cast<std::uint64_t>(value.st_size),
+      .modified_seconds = static_cast<std::int64_t>(value.st_mtim.tv_sec),
+      .modified_nanoseconds = static_cast<std::int64_t>(value.st_mtim.tv_nsec),
+      .changed_seconds = static_cast<std::int64_t>(value.st_ctim.tv_sec),
+      .changed_nanoseconds = static_cast<std::int64_t>(value.st_ctim.tv_nsec),
+  };
+}
+
+class FileMeasurementCache final {
+ public:
+  std::optional<NodeMeasurement> find(const FileCacheKey& key) {
+    std::scoped_lock lock(mutex_);
+    const auto found = entries_.find(key);
+    if (found == entries_.end()) return std::nullopt;
+    return found->second;
+  }
+
+  void insert(const FileCacheKey& key, const NodeMeasurement& value) {
+    std::scoped_lock lock(mutex_);
+    if (entries_.contains(key) || entries_.size() >= kMaximumCachedFiles) return;
+    entries_.emplace(key, value);
+  }
+
+ private:
+  std::mutex mutex_;
+  std::unordered_map<FileCacheKey, NodeMeasurement, FileCacheKeyHash> entries_;
+};
+
+FileMeasurementCache& file_measurement_cache() {
+  static FileMeasurementCache cache;
+  return cache;
+}
+
+bool supports_metadata_cache(int descriptor) noexcept {
+  struct statfs filesystem {};
+  if (::fstatfs(descriptor, &filesystem) != 0) return false;
+  switch (filesystem.f_type) {
+    case EXT4_SUPER_MAGIC:
+    case BTRFS_SUPER_MAGIC:
+    case XFS_SUPER_MAGIC:
+    case TMPFS_MAGIC:
+    case OVERLAYFS_SUPER_MAGIC:
+    case kZfsSuperMagic:
+      return true;
+    default:
+      return false;
+  }
+}
 
 struct Child final {
   std::string name;
@@ -291,7 +394,8 @@ void add_totals(NodeMeasurement& parent, const NodeMeasurement& child) {
 }
 
 NodeMeasurement measure_node(Descriptor descriptor, std::size_t depth,
-                             std::span<unsigned char> read_buffer) {
+                             std::span<unsigned char> read_buffer,
+                             InputContentMeasurementStats* stats) {
   if (depth > kMaximumDepth)
     throw std::runtime_error("input content root exceeds the depth bound");
   struct stat before {};
@@ -304,6 +408,23 @@ NodeMeasurement measure_node(Descriptor descriptor, std::size_t depth,
     const auto size = static_cast<std::uint64_t>(before.st_size);
     if (size > kMaximumBytes)
       throw std::runtime_error("input content root exceeds the byte bound");
+    const bool cacheable = supports_metadata_cache(descriptor.get());
+    const FileCacheKey cache_key = file_cache_key(before);
+    if (cacheable) {
+      if (const auto cached = file_measurement_cache().find(cache_key)) {
+        struct stat after {};
+        if (::fstat(descriptor.get(), &after) != 0)
+          fail_system("could not reinspect cached input content file");
+        if (!same_stat(before, after))
+          throw std::runtime_error(
+              "input content file changed while reusing its measurement");
+        if (stats != nullptr) ++stats->cache_hits;
+        return *cached;
+      }
+      if (stats != nullptr) ++stats->cache_misses;
+    } else if (stats != nullptr) {
+      ++stats->cache_bypasses;
+    }
     DigestContext content;
     std::uint64_t observed = 0U;
     for (;;) {
@@ -319,6 +440,7 @@ NodeMeasurement measure_node(Descriptor descriptor, std::size_t depth,
         throw std::runtime_error("input content file changed while hashing");
       content.update(read_buffer.data(), bytes);
       observed += static_cast<std::uint64_t>(bytes);
+      if (stats != nullptr) stats->bytes_hashed += bytes;
     }
     struct stat after {};
     if (::fstat(descriptor.get(), &after) != 0)
@@ -330,10 +452,12 @@ NodeMeasurement measure_node(Descriptor descriptor, std::size_t depth,
     node.update(kFileDomain, sizeof(kFileDomain));
     node.update(big_endian_64(size));
     node.update(content_digest);
-    return {.kind = ContentRootKind::file,
-            .file_count = 1U,
-            .total_bytes = size,
-            .digest = node.finish()};
+    const NodeMeasurement measured{.kind = ContentRootKind::file,
+                                   .file_count = 1U,
+                                   .total_bytes = size,
+                                   .digest = node.finish()};
+    if (cacheable) file_measurement_cache().insert(cache_key, measured);
+    return measured;
   }
 
   if (!S_ISDIR(before.st_mode))
@@ -409,8 +533,8 @@ NodeMeasurement measure_node(Descriptor descriptor, std::size_t depth,
       (void)::close(child_fd);
       throw std::runtime_error("input content child changed while opening");
     }
-    NodeMeasurement child =
-        measure_node(Descriptor(child_fd), depth + 1U, read_buffer);
+    NodeMeasurement child = measure_node(Descriptor(child_fd), depth + 1U,
+                                         read_buffer, stats);
     struct stat child_after {};
     if (::fstatat(descriptor.get(), name.c_str(), &child_after,
                   AT_SYMLINK_NOFOLLOW) != 0)
@@ -470,7 +594,8 @@ bool path_within(const std::filesystem::path& child,
 }  // namespace
 
 InputContentRootIdentity measure_input_content_root(
-    const std::filesystem::path& path) {
+    const std::filesystem::path& path,
+    InputContentMeasurementStats* measurement_stats) {
   if (!path.is_absolute() || path.empty() || path.lexically_normal() != path)
     throw std::invalid_argument(
         "input content root path must be absolute and lexically normalized");
@@ -483,12 +608,13 @@ InputContentRootIdentity measure_input_content_root(
         "input content root path must be bounded strict UTF-8");
 
   OpenedRoot opened = open_root_by_components(path);
+  if (measurement_stats != nullptr) *measurement_stats = {};
   // Authoring runs on a gRPC worker whose stack is deliberately bounded. Keep
   // the large streaming buffer on the heap and reuse it through recursion so
   // deep trees neither overflow that stack nor allocate once per file.
   std::vector<unsigned char> read_buffer(kReadBufferBytes);
-  NodeMeasurement root =
-      measure_node(std::move(opened.descriptor), 0U, read_buffer);
+  NodeMeasurement root = measure_node(std::move(opened.descriptor), 0U,
+                                      read_buffer, measurement_stats);
   require_unchanged_links(opened.links);
   if (root.kind == ContentRootKind::directory && root.file_count == 0U)
     throw std::runtime_error("input content directory root is empty");
@@ -501,7 +627,8 @@ InputContentRootIdentity measure_input_content_root(
 }
 
 std::vector<InputContentRootIdentity> measure_input_content_root_set(
-    const InputContentRootSet& root_set) {
+    const InputContentRootSet& root_set,
+    std::vector<InputContentMeasurementStats>* measurement_stats) {
   if (root_set.api_version != kInputContentRootSetApiVersion)
     throw std::invalid_argument("input content root set API version is unsupported");
   if (root_set.paths.empty() || root_set.paths.size() > 256U)
@@ -528,8 +655,16 @@ std::vector<InputContentRootIdentity> measure_input_content_root_set(
   }
   std::vector<InputContentRootIdentity> identities;
   identities.reserve(paths.size());
-  for (const auto& path : paths)
-    identities.push_back(measure_input_content_root(path));
+  if (measurement_stats != nullptr) {
+    measurement_stats->clear();
+    measurement_stats->reserve(paths.size());
+  }
+  for (const auto& path : paths) {
+    InputContentMeasurementStats stats;
+    identities.push_back(measure_input_content_root(
+        path, measurement_stats != nullptr ? &stats : nullptr));
+    if (measurement_stats != nullptr) measurement_stats->push_back(stats);
+  }
   return identities;
 }
 
