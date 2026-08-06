@@ -127,6 +127,58 @@
                       "precision": {
                         "key": {"category": "precision", "name": "bf16_parameters_fp32_reductions", "version": "1.0.0"},
                         "configuration": {"parameter_dtype": "bfloat16", "compute_dtype": "bfloat16", "reduction_dtype": "float32", "gradient_scaling": false}
+                      },
+                      "data": {
+                        "key": {"category": "data_source", "name": "jsonl_image_caption", "version": "1.0.0"},
+                        "configuration": {"manifest_path": "/thearray/git/datasets/captiontest/train.jsonl", "image_root": "/thearray/git/datasets/captiontest", "content_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "declared_columns": ["caption", "image", "source_relative_path"], "image_column": "image", "caption_columns": ["caption"], "id_column": "source_relative_path"}
+                      },
+                      "processor": {
+                        "key": {"category": "sample_processor", "name": "image_caption", "version": "1.0.0"},
+                        "configuration": {"image_column": "image", "caption_columns": ["caption"], "minimum_pixels": 1024, "maximum_pixels": 4194304, "maximum_edge": 2048, "oversize_policy": "downscale"}
+                      },
+                      "sample_mapping": {
+                        "key": {"category": "sample_mapper", "name": "assistant_only", "version": "1.0.0"},
+                        "configuration": {"prompt_column": "", "fixed_prompt": "Describe the image.", "target_column": "caption", "maximum_tokens": 2048, "append_eos": true}
+                      },
+                      "collation": {
+                        "key": {"category": "collator", "name": "padded", "version": "1.0.0"},
+                        "configuration": {"pad_token_id": 0, "label_pad_token_id": -100, "pad_to_multiple": 8, "maximum_sequence_length": 2048}
+                      },
+                      "sampler": {
+                        "key": {"category": "sampler", "name": "deterministic", "version": "1.0.0"},
+                        "configuration": {"seed": 38051, "shuffle": true}
+                      },
+                      "batching": {
+                        "key": {"category": "batching", "name": "fixed", "version": "1.0.0"},
+                        "configuration": {"batch_size": 1, "drop_last": false, "prefetch_workers": 8}
+                      },
+                      "split": {
+                        "key": {"category": "split_selector", "name": "deterministic_holdout", "version": "1.0.0"},
+                        "configuration": {"seed": 38051, "held_out_count": 10, "selection": "train"}
+                      },
+                      "evaluation_split": {
+                        "key": {"category": "split_selector", "name": "deterministic_holdout", "version": "1.0.0"},
+                        "configuration": {"seed": 38051, "held_out_count": 10, "selection": "held_out"}
+                      },
+                      "evaluator": {
+                        "key": {"category": "evaluator", "name": "scalar_loss", "version": "1.0.0"},
+                        "configuration": {"split_slot": "evaluation_split", "metrics": ["loss"], "reduction": "weighted_mean", "maximum_examples": 0}
+                      },
+                      "evaluation_schedule": {
+                        "key": {"category": "evaluation_schedule", "name": "launch_gate_periodic", "version": "1.0.0"},
+                        "configuration": {"launch_gate_examples": 10, "full_step_zero": true, "qualitative_every_steps": 100, "full_every_steps": 100, "defer_full_scalar": true, "final": true}
+                      },
+                      "qualitative_samples": {
+                        "key": {"category": "qualitative_sample", "name": "fixed_held_out", "version": "1.0.0"},
+                        "configuration": {"identity_field": "source_relative_path", "identities_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "selector_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "sample_count": 10}
+                      },
+                      "artifact_renderer": {
+                        "key": {"category": "artifact_renderer", "name": "caption_triplet", "version": "1.0.0"},
+                        "configuration": {"modality": "multimodal", "schema": "trainvm.caption-triplet.v1"}
+                      },
+                      "checkpoint_policy": {
+                        "key": {"category": "checkpoint_policy", "name": "atomic_retained", "version": "1.0.0"},
+                        "configuration": {"every_steps": 250, "keep_last": 3, "keep_best": 1, "publish_final": true, "resume_grade": "exact"}
                       }
                     }
                   }

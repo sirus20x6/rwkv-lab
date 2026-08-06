@@ -327,6 +327,13 @@ void checked_in_qwen_example_expands_without_source_changes() {
   locally_resolvable[nlohmann::json::json_pointer(
       "/spec/workflow/nodes/train/invoke/training/components/model_loader/"
       "configuration/model_path")] = std::filesystem::canonical(root).string();
+  locally_resolvable[nlohmann::json::json_pointer(
+      "/spec/workflow/nodes/train/invoke/training/components/data/"
+      "configuration/manifest_path")] =
+      std::filesystem::canonical(root / "README.md").string();
+  locally_resolvable[nlohmann::json::json_pointer(
+      "/spec/workflow/nodes/train/invoke/training/components/data/"
+      "configuration/image_root")] = std::filesystem::canonical(root).string();
   const auto local_plan = trainvm::compile_document(locally_resolvable);
   if (!local_plan.valid())
     throw std::runtime_error("locally resolvable recipe plan did not compile");
@@ -334,7 +341,7 @@ void checked_in_qwen_example_expands_without_source_changes() {
       root / "docs/experiment-vm/examples/training-components.v1.json");
   components.validate_plan(*local_plan.plan);
   check(true,
-        "Qwen graph resolves registered model-loader and LoRA policy slots");
+        "Qwen graph resolves registered model, data, evaluation, and checkpoint slots");
 }
 
 }  // namespace

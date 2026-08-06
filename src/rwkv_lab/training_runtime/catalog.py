@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from .activations import ActivationImplementation
+from .artifact_renderers import ArtifactRendererImplementation
+from .checkpoint_policies import CheckpointPolicyImplementation
 from .curricula import CurriculumImplementation
 from .data_pipeline import (
     BatchingImplementation,
@@ -11,6 +13,8 @@ from .data_pipeline import (
     SamplerImplementation,
     SplitSelectorImplementation,
 )
+from .evaluation_schedules import EvaluationScheduleImplementation
+from .evaluators import EvaluatorImplementation
 from .gradient_accumulation import GradientAccumulationImplementation
 from .gradient_clipping import GradientClippingImplementation
 from .model_loaders import ModelLoaderImplementation
@@ -18,6 +22,7 @@ from .normalizations import NormalizationImplementation
 from .objectives import ObjectiveImplementation
 from .optimizers import OptimizerImplementation
 from .precision import PrecisionImplementation
+from .qualitative_samples import QualitativeSampleImplementation
 from .routers import ParameterRouterImplementation
 from .schedules import ScheduleImplementation
 from .trainability import TrainabilityImplementation
@@ -29,6 +34,8 @@ def supported_implementation_ids() -> frozenset[str]:
         implementation.value
         for implementation in (
             *ActivationImplementation,
+            *ArtifactRendererImplementation,
+            *CheckpointPolicyImplementation,
             *DataSourceImplementation,
             *SampleProcessorImplementation,
             *SampleMapperImplementation,
@@ -36,6 +43,8 @@ def supported_implementation_ids() -> frozenset[str]:
             *SamplerImplementation,
             *BatchingImplementation,
             *SplitSelectorImplementation,
+            *EvaluationScheduleImplementation,
+            *EvaluatorImplementation,
             *ModelLoaderImplementation,
             *TrainabilityImplementation,
             *CurriculumImplementation,
@@ -48,6 +57,7 @@ def supported_implementation_ids() -> frozenset[str]:
             # policies are registered natively and must be.
             PrecisionImplementation.BF16_PARAMETERS_FP32_REDUCTIONS_V1,
             PrecisionImplementation.FP32_PARAMETERS_BF16_COMPUTE_V1,
+            *QualitativeSampleImplementation,
             *ScheduleImplementation,
             *ParameterRouterImplementation,
             *GradientClippingImplementation,
@@ -61,6 +71,9 @@ def supported_worker_capabilities() -> frozenset[str]:
     return frozenset(
         {
             "activation.silu.v1",
+            "artifact_renderer.caption_triplet.v1",
+            "artifact_renderer.evidence_envelope.v1",
+            "checkpoint_policy.atomic_retained.v1",
             "data_source.jsonl_image_caption.v1",
             "data_source.jsonl_token_corpus.v1",
             "sample_processor.image_caption.v1",
@@ -72,6 +85,8 @@ def supported_worker_capabilities() -> frozenset[str]:
             "batching.fixed.v1",
             "batching.bucketed.v1",
             "split_selector.deterministic_holdout.v1",
+            "evaluation_schedule.launch_gate_periodic.v1",
+            "evaluator.scalar_loss.v1",
             "model_loader.hf_causal.v1",
             "model_loader.hf_multimodal.v1",
             "trainability.full.v1",
@@ -99,5 +114,6 @@ def supported_worker_capabilities() -> frozenset[str]:
             "objective.linear_head_cross_entropy.v1",
             "precision.bf16_parameters_fp32_reductions.v1",
             "precision.fp32_parameters_bf16_compute.v1",
+            "qualitative_sample.fixed_held_out.v1",
         }
     )

@@ -737,6 +737,107 @@
       "step_domain": "optimizer_step",
       "state_grade": "stateless",
       "reference_implementation": true
+    },
+    {
+      "key": {"category": "evaluator", "name": "scalar_loss", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.evaluator.scalar_loss.v1",
+      "model_families": ["*"],
+      "required_capabilities": ["evaluator.scalar_loss.v1"],
+      "configuration": [
+        {"name": "split_slot", "type": "string", "required": false, "default": "evaluation_split"},
+        {"name": "metrics", "type": "string_list", "required": true, "collection_semantics": "set"},
+        {"name": "reduction", "type": "enumeration", "required": false, "default": "weighted_mean", "values": ["mean", "sum", "weighted_mean"]},
+        {"name": "maximum_examples", "type": "integer", "required": false, "default": 0, "minimum": 0, "maximum": 1000000000, "unit": "samples"}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "evaluation_schedule", "name": "launch_gate_periodic", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.evaluation_schedule.launch_gate_periodic.v1",
+      "model_families": ["*"],
+      "required_capabilities": ["evaluation_schedule.launch_gate_periodic.v1"],
+      "configuration": [
+        {"name": "launch_gate_examples", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000, "unit": "samples"},
+        {"name": "full_step_zero", "type": "boolean", "required": false, "default": true},
+        {"name": "qualitative_every_steps", "type": "integer", "required": false, "default": 0, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"},
+        {"name": "full_every_steps", "type": "integer", "required": false, "default": 0, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"},
+        {"name": "defer_full_scalar", "type": "boolean", "required": false, "default": true},
+        {"name": "final", "type": "boolean", "required": false, "default": true}
+      ],
+      "state": [],
+      "step_domain": "optimizer_step",
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "qualitative_sample", "name": "fixed_held_out", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.qualitative_sample.fixed_held_out.v1",
+      "model_families": ["*"],
+      "required_capabilities": ["qualitative_sample.fixed_held_out.v1"],
+      "configuration": [
+        {"name": "identity_field", "type": "string", "required": true},
+        {"name": "identities_digest", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "selector_digest", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "sample_count", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000, "unit": "samples"}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "artifact_renderer", "name": "evidence_envelope", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.artifact_renderer.evidence_envelope.v1",
+      "model_families": ["*"],
+      "required_capabilities": ["artifact_renderer.evidence_envelope.v1"],
+      "configuration": [
+        {"name": "modality", "type": "enumeration", "required": true, "values": ["audio", "image", "multimodal", "text", "video"]},
+        {"name": "schema", "type": "enumeration", "required": false, "default": "trainvm.eval-evidence.v1", "values": ["trainvm.eval-evidence.v1"]}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "artifact_renderer", "name": "caption_triplet", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.artifact_renderer.caption_triplet.v1",
+      "model_families": ["transformer", "vision"],
+      "required_capabilities": ["artifact_renderer.caption_triplet.v1"],
+      "configuration": [
+        {"name": "modality", "type": "enumeration", "required": false, "default": "multimodal", "values": ["multimodal"]},
+        {"name": "schema", "type": "enumeration", "required": false, "default": "trainvm.caption-triplet.v1", "values": ["trainvm.caption-triplet.v1"]}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {"category": "checkpoint_policy", "name": "atomic_retained", "version": "1.0.0"},
+      "backend": "python",
+      "implementation": "rwkv_lab.checkpoint_policy.atomic_retained.v1",
+      "model_families": ["*"],
+      "required_capabilities": ["checkpoint_policy.atomic_retained.v1"],
+      "configuration": [
+        {"name": "every_steps", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000000, "unit": "optimizer_step"},
+        {"name": "keep_last", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000, "unit": "count"},
+        {"name": "keep_best", "type": "integer", "required": false, "default": 0, "minimum": 0, "maximum": 1000000, "unit": "count"},
+        {"name": "publish_final", "type": "boolean", "required": false, "default": true},
+        {"name": "resume_grade", "type": "enumeration", "required": true, "values": ["compatible", "exact", "restart_only"]}
+      ],
+      "state": [
+        {"name": "last_published_step", "type": "integer", "required": true},
+        {"name": "publication_manifest", "type": "string", "required": true, "string_format": "sha256_digest"},
+        {"name": "retention_manifest", "type": "string", "required": true, "string_format": "sha256_digest"}
+      ],
+      "step_domain": "optimizer_step",
+      "state_grade": "exact",
+      "reference_implementation": true
     }
   ]
 }

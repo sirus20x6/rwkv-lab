@@ -59,6 +59,11 @@ enum class TrainingComponentCategory {
   gradient_accumulation,
   curriculum,
   metric_reducer,
+  evaluator,
+  evaluation_schedule,
+  qualitative_sample,
+  artifact_renderer,
+  checkpoint_policy,
 };
 enum class ReconcilePolicy { fail_closed, adopt_if_fingerprint_matches, restart_from_checkpoint };
 enum class OrphanPolicy { leave_and_block, adopt_if_identity_matches, terminate_and_recover };

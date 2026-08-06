@@ -76,6 +76,11 @@ _CATEGORIES = frozenset(
         "sampler",
         "batching",
         "split_selector",
+        "evaluator",
+        "evaluation_schedule",
+        "qualitative_sample",
+        "artifact_renderer",
+        "checkpoint_policy",
     }
 )
 

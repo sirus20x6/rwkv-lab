@@ -11,9 +11,21 @@ from rwkv_lab.training_runtime.activations import (
     activation_from_resolved_component,
     build_registered_activation,
 )
+from rwkv_lab.training_runtime.artifact_renderers import (
+    ArtifactRenderer,
+    ArtifactRendererConfiguration,
+    ArtifactRendererImplementation,
+    artifact_renderer_from_resolved_component,
+)
 from rwkv_lab.training_runtime.catalog import (
     supported_implementation_ids,
     supported_worker_capabilities,
+)
+from rwkv_lab.training_runtime.checkpoint_policies import (
+    AtomicCheckpointPolicy,
+    AtomicCheckpointPolicyConfiguration,
+    CheckpointPolicyImplementation,
+    checkpoint_policy_from_resolved_component,
 )
 from rwkv_lab.training_runtime.curricula import (
     ContextLengthCurriculum,
@@ -66,6 +78,19 @@ from rwkv_lab.training_runtime.data_pipeline import (
     sample_processor_from_resolved_component,
     sampler_from_resolved_component,
     split_selector_from_resolved_component,
+)
+from rwkv_lab.training_runtime.evaluation_schedules import (
+    EvaluationDecision,
+    EvaluationSchedule,
+    EvaluationScheduleConfiguration,
+    EvaluationScheduleImplementation,
+    evaluation_schedule_from_resolved_component,
+)
+from rwkv_lab.training_runtime.evaluators import (
+    EvaluatorImplementation,
+    ScalarLossEvaluator,
+    ScalarLossEvaluatorConfiguration,
+    evaluator_from_resolved_component,
 )
 from rwkv_lab.training_runtime.gradient_accumulation import (
     FixedGradientAccumulation,
@@ -125,6 +150,12 @@ from rwkv_lab.training_runtime.precision import (
     build_registered_precision_policy,
     precision_policy_from_resolved_component,
 )
+from rwkv_lab.training_runtime.qualitative_samples import (
+    FixedHeldOutConfiguration,
+    FixedHeldOutSamples,
+    QualitativeSampleImplementation,
+    qualitative_sample_from_resolved_component,
+)
 from rwkv_lab.training_runtime.routers import (
     AppearanceExpertRoutingConfiguration,
     FullBackboneRoutingConfiguration,
@@ -173,12 +204,18 @@ __all__ = [
     "AdamWConfiguration",
     "AdamWNoDecayConfiguration",
     "AppearanceExpertRoutingConfiguration",
+    "ArtifactRenderer",
+    "ArtifactRendererConfiguration",
+    "ArtifactRendererImplementation",
     "AssistantOnlyMapperConfiguration",
+    "AtomicCheckpointPolicy",
+    "AtomicCheckpointPolicyConfiguration",
     "BFloat16PrecisionConfiguration",
     "BFloat16PrecisionPolicy",
     "BatchingImplementation",
     "BucketedBatchingConfiguration",
     "CausalTokensMapperConfiguration",
+    "CheckpointPolicyImplementation",
     "CollatorImplementation",
     "ConstantLearningRateConfiguration",
     "ConstantWeightDecayConfiguration",
@@ -193,11 +230,18 @@ __all__ = [
     "DeclarativeDataPipeline",
     "DeterministicHoldoutConfiguration",
     "DeterministicSamplerConfiguration",
+    "EvaluationDecision",
+    "EvaluationSchedule",
+    "EvaluationScheduleConfiguration",
+    "EvaluationScheduleImplementation",
+    "EvaluatorImplementation",
     "FP32ParametersBFloat16ComputeConfiguration",
     "FP32ParametersBFloat16ComputePolicy",
     "FixedBatchingConfiguration",
     "FixedGradientAccumulation",
     "FixedGradientAccumulationConfiguration",
+    "FixedHeldOutConfiguration",
+    "FixedHeldOutSamples",
     "Float8PrecisionConfiguration",
     "Float8PrecisionPolicy",
     "FrozenTrainabilityConfiguration",
@@ -233,6 +277,7 @@ __all__ = [
     "PrecisionImplementation",
     "PrecisionUnavailableError",
     "ProcessedSample",
+    "QualitativeSampleImplementation",
     "RawSample",
     "RegisteredActivation",
     "RegisteredBatching",
@@ -247,6 +292,8 @@ __all__ = [
     "SampleMapperImplementation",
     "SampleProcessorImplementation",
     "SamplerImplementation",
+    "ScalarLossEvaluator",
+    "ScalarLossEvaluatorConfiguration",
     "ScheduleImplementation",
     "SparseAdamConfiguration",
     "SplitSelection",
@@ -257,6 +304,7 @@ __all__ = [
     "TrainabilityResult",
     "WeightDecayScheduleImplementation",
     "activation_from_resolved_component",
+    "artifact_renderer_from_resolved_component",
     "batching_from_resolved_component",
     "build_data_pipeline",
     "build_registered_activation",
@@ -272,11 +320,14 @@ __all__ = [
     "build_registered_schedule",
     "build_registered_trainability",
     "build_registered_weight_decay_schedule",
+    "checkpoint_policy_from_resolved_component",
     "collator_from_resolved_component",
     "constant_learning_rate_multiplier",
     "context_batch_for_stages",
     "curriculum_from_resolved_component",
     "data_source_from_resolved_component",
+    "evaluation_schedule_from_resolved_component",
+    "evaluator_from_resolved_component",
     "gradient_accumulation_from_resolved_component",
     "gradient_clipping_from_resolved_component",
     "linear_warmup_constant_multiplier",
@@ -289,6 +340,7 @@ __all__ = [
     "parse_context_stages",
     "powercool_multiplier",
     "precision_policy_from_resolved_component",
+    "qualitative_sample_from_resolved_component",
     "rebase_learning_rate_schedule",
     "resolve_lora_targets",
     "sample_mapper_from_resolved_component",

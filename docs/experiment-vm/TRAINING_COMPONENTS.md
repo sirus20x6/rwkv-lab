@@ -23,8 +23,10 @@ Tensor code stays in the runtime that implements it well. `rwkv_lab.training_com
 stable compatibility facade; implementations are physically separated under
 `rwkv_lab.training_runtime` into `optimizers.py`, `schedules.py`, `routers.py`, `activations.py`,
 `normalizations.py`, `curricula.py`, `gradient_clipping.py`, `gradient_accumulation.py`,
-`objectives.py`, `precision.py`, `data_pipeline.py`, and `weight_decay_schedules.py`, with only the shared
-resolved-envelope decoder at the package root.
+`objectives.py`, `precision.py`, `data_pipeline.py`, `evaluators.py`,
+`evaluation_schedules.py`, `qualitative_samples.py`, `artifact_renderers.py`,
+`checkpoint_policies.py`, and `weight_decay_schedules.py`, with only the shared resolved-envelope
+decoder at the package root.
 Each category owns its closed enum, typed
 immutable configuration, validation, construction, and resolved dispatch. Category modules do not
 import one another or any family trainer. The facade has no implementation logic and trainers do
@@ -60,9 +62,9 @@ The initial concrete cross-family catalog contains:
   publishes a digest that qualitative evaluation can bind;
 - deterministic sampling and fixed or resolution/token-length bucketed batching with explicit
   prefetch-worker policy. Sampler cursor, epoch, derived RNG/order digests, pending bucket members,
-  source cursor, and emitted-batch counts are exact checkpoint state. A resume must reconstruct the same next
-  sample and pending batch rather than restarting an epoch. `batching` owns sample grouping and
-  compatible shapes only; `gradient_accumulation` independently owns how microbatches form an
+  source cursor, and emitted-batch counts are exact checkpoint state. A resume must reconstruct the
+  same next sample and pending batch rather than restarting an epoch. `batching` owns sample grouping
+  and compatible shapes only; `gradient_accumulation` independently owns how microbatches form an
   optimizer step;
 
 - Torch AdamW;
@@ -94,7 +96,44 @@ The initial concrete cross-family catalog contains:
   token budget by adjusting batch size; the optimizer cursor derives its phase on exact resume;
 - a constant optimizer-step weight-decay schedule, paired with v2 AdamW implementations whose
   mechanics contain no decay configuration; v1 AdamW remains registered only for checkpoint and
-  experiment compatibility.
+  experiment compatibility;
+- one complete declarative evaluation suite: semantic scalar evaluators, optimizer-step evaluation
+  schedules, immutable fixed-held-out identity selection, and modality/schema-only artifact
+  renderers. Selecting any one of these requires all four. Step zero always produces nonempty
+  qualitative launch evidence and the true full scalar baseline; the latter may execute after the
+  launch evidence and may be deferred safely, but it is never replaced by the small sample;
+- a caption-triplet renderer whose dashboard envelope binds one immutable sample identity to the
+  teacher target, step-zero baseline, and current-step caption. Runtime evidence must contain all
+  three nonempty strings. Neither descriptor nor experiment contains generated captions or paths;
+- an exact-state atomic checkpoint policy with independent optimizer-step cadence, final
+  publication, last/best retention counts, and an honest `exact | compatible | restart_only`
+  resume grade. A handler applies this policy to the existing `CheckpointPublisher`; component
+  state cannot be emitted until atomic publication has completed.
+
+## Evaluation and checkpoint invariants
+
+Evaluation scheduling has two deliberately independent paths. The launch gate uses a bounded
+prefix of the locked qualitative identities so a dashboard can show representative evidence before
+a long scalar pass completes. The full scalar evaluator retains a real step-zero decision and its
+own periodic cadence. `qualitative_every_steps: 0` or `full_every_steps: 0` disables only that
+periodic path; it cannot disable either mandatory step-zero path. A final decision is separately
+declared.
+
+`qualitative_sample.fixed_held_out@1.0.0` binds the identity-field name, ordered identity-list
+digest, sample count, and selector digest. The worker verifies count, uniqueness, order, and digest
+before evaluating. The evaluator also names an in-composition `split_selector` slot, and authority
+resolution requires that slot to select the deterministic held-out arm. Evaluation therefore
+cannot accidentally consume the training membership or invent a second split convention. This
+prevents a resumed or later evaluation from silently changing examples.
+The renderer binds each published evidence envelope to one of those identities and an optimizer
+step, so caption/image/video evidence remains aligned and dashboard-readable through time.
+
+`checkpoint_policy.atomic_retained@1.0.0` is schedule-like over optimizer steps and carries exact
+publication/retention manifests as checkpoint component state. Retention computes survivors only
+after the independent publisher has sealed the new snapshot. An exact-resume experiment is refused
+when either the descriptor state grade or the policy's declared resume grade is weaker than exact;
+changing cadence or retention therefore changes the composition lock without changing trainer
+code.
 
 The three MageFlow training paths, RWKV AdamW path, and Qwen transformer AdamW/PowerCool path use
 the common tensor boundary. The MageFlow appearance/terminal expert trainers and Qwen AO3
