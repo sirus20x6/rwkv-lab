@@ -533,9 +533,15 @@ func TestTrainVMRecipeProfilesComeFromNativeAuthority(t *testing.T) {
 func TestTrainVMRecipeProfileDescriptorFailsClosed(t *testing.T) {
 	profile := func() map[string]any {
 		return map[string]any{
-			"key":               map[string]any{"name": "generic_train", "version": "1"},
-			"description":       "Generic training recipe.",
-			"template_document": map[string]any{"api_version": "trainvm.rwkv-lab/v1alpha1"},
+			"key":         map[string]any{"name": "generic_train", "version": "1"},
+			"description": "Generic training recipe.",
+			"template_document": map[string]any{
+				"api_version": "trainvm.rwkv-lab/v1alpha1",
+				"spec": map[string]any{"parameters": map[string]any{
+					"model":     map[string]any{"value": "/models/base"},
+					"precision": map[string]any{"value": "bf16"},
+				}},
+			},
 			"overrides": []any{
 				map[string]any{
 					"domain": "model", "name": "model.path", "required": true,
@@ -623,6 +629,12 @@ func TestTrainVMRecipeProfileDescriptorFailsClosed(t *testing.T) {
 		},
 		"wrong tuple arity": func(value map[string]any) {
 			value["compatibility"].([]any)[0].(map[string]any)["allowed"] = []any{[]any{"bf16", 80}}
+		},
+		"missing override target": func(value map[string]any) {
+			value["overrides"].([]any)[0].(map[string]any)["target"] = "/spec/parameters/missing/value"
+		},
+		"wrong target scalar type": func(value map[string]any) {
+			value["overrides"].([]any)[0].(map[string]any)["target"] = "/spec/parameters"
 		},
 		"template is not an object": func(value map[string]any) { value["template_document"] = "unsafe" },
 	}

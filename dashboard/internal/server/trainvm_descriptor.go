@@ -189,7 +189,8 @@ func validateRecipeProfileDescriptors(items []any) error {
 				return fmt.Errorf("recipe profile description is malformed")
 			}
 		}
-		if _, ok := profile["template_document"].(map[string]any); !ok {
+		template, ok := profile["template_document"].(map[string]any)
+		if !ok {
 			return fmt.Errorf("recipe template document is not an object")
 		}
 		rawOverrides, ok := profile["overrides"].([]any)
@@ -198,6 +199,7 @@ func validateRecipeProfileDescriptors(items []any) error {
 		}
 		fieldNames := make(map[string]bool, len(rawOverrides))
 		fields := make(map[string]map[string]any, len(rawOverrides))
+		targets := make(map[string]bool, len(rawOverrides))
 		previousField := ""
 		for _, raw := range rawOverrides {
 			field, ok := raw.(map[string]any)
@@ -217,6 +219,10 @@ func validateRecipeProfileDescriptors(items []any) error {
 				previousField != "" && fieldName <= previousField {
 				return fmt.Errorf("recipe override identity, target, or type is invalid")
 			}
+			if targets[target] {
+				return fmt.Errorf("recipe override targets are duplicate")
+			}
+			targets[target] = true
 			previousField, fieldNames[fieldName] = fieldName, true
 			fields[fieldName] = field
 			minimum, hasMinimum := finiteJSONNumber(field["minimum"])
@@ -247,6 +253,10 @@ func validateRecipeProfileDescriptors(items []any) error {
 				}
 			} else if hasValues {
 				return fmt.Errorf("non-enumeration recipe override carries values")
+			}
+			base, ok := recipePointerValue(template, target)
+			if !ok || !recipeValueValid(field, base) {
+				return fmt.Errorf("recipe override target is missing or has the wrong scalar type")
 			}
 		}
 		if compatibility, present := profile["compatibility"]; present {
@@ -316,7 +326,11 @@ func recipeValueValid(field map[string]any, value any) bool {
 		return (!hasMinimum || number >= minimum) && (!hasMaximum || number <= maximum)
 	case "string", "path":
 		text, ok := value.(string)
-		return ok && text != "" && len(text) <= 4096
+		if !ok || len(text) > 4096 {
+			return false
+		}
+		return fieldType != "path" || text != "" && text != string(filepath.Separator) &&
+			filepath.IsAbs(text) && filepath.Clean(text) == text && !strings.Contains(text, "\x00")
 	case "enumeration":
 		text, ok := value.(string)
 		if !ok {
@@ -329,6 +343,50 @@ func recipeValueValid(field map[string]any, value any) bool {
 		}
 	}
 	return false
+}
+
+func recipePointerValue(document map[string]any, pointer string) (any, bool) {
+	if pointer == "" {
+		return document, true
+	}
+	if !strings.HasPrefix(pointer, "/") {
+		return nil, false
+	}
+	var current any = document
+	for _, encoded := range strings.Split(pointer[1:], "/") {
+		var key strings.Builder
+		for index := 0; index < len(encoded); index++ {
+			if encoded[index] != '~' {
+				key.WriteByte(encoded[index])
+				continue
+			}
+			if index+1 >= len(encoded) || encoded[index+1] != '0' && encoded[index+1] != '1' {
+				return nil, false
+			}
+			index++
+			if encoded[index] == '0' {
+				key.WriteByte('~')
+			} else {
+				key.WriteByte('/')
+			}
+		}
+		object, ok := current.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		current, ok = object[key.String()]
+		if !ok {
+			return nil, false
+		}
+	}
+	if current == nil {
+		return nil, false
+	}
+	switch current.(type) {
+	case map[string]any, []any:
+		return nil, false
+	}
+	return current, true
 }
 
 func recipeFieldName(value any) (string, bool) {
