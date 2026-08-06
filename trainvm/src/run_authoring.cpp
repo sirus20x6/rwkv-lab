@@ -250,6 +250,21 @@ PassiveFile read_passive_file(const std::filesystem::path &path,
                                path.string());
     offset += static_cast<std::size_t>(count);
   }
+  char trailing{};
+  ssize_t trailing_count;
+  do {
+    trailing_count = ::read(file.get(), &trailing, 1U);
+  } while (trailing_count < 0 && errno == EINTR);
+  struct stat after {};
+  if (trailing_count != 0 || ::fstat(file.get(), &after) != 0 ||
+      status.st_dev != after.st_dev || status.st_ino != after.st_ino ||
+      status.st_size != after.st_size ||
+      status.st_mtim.tv_sec != after.st_mtim.tv_sec ||
+      status.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+      status.st_ctim.tv_sec != after.st_ctim.tv_sec ||
+      status.st_ctim.tv_nsec != after.st_ctim.tv_nsec)
+    throw std::runtime_error("passive preflight file changed while read: " +
+                             path.string());
   const std::string digest = "sha256:" + sha256_hex(bytes);
   return {.bytes = std::move(bytes), .digest = digest};
 }
@@ -979,11 +994,32 @@ TrainingNodeProbe make_hf_multimodal_sft_training_node_probe(
                                std::string_view expected_version = "1.0.0")
         -> const nlohmann::json & {
       const auto found = components.find(std::string(slot));
+      const std::string selected_version =
+          found != components.end() && found->is_object() &&
+                  found->contains("key") && found->at("key").is_object()
+              ? found->at("key").value("version", "")
+              : "";
+      const std::string selected_name =
+          found != components.end() && found->is_object() &&
+                  found->contains("key") && found->at("key").is_object()
+              ? found->at("key").value("name", "")
+              : "";
+      const bool fixed_manifest_alternative =
+          expected_category == "qualitative_sample" &&
+          expected_name == "fixed_held_out" && expected_version == "2.0.0" &&
+          selected_name == "fixed_manifest" && selected_version == "1.0.0";
+      const bool name_matches =
+          selected_name == expected_name || fixed_manifest_alternative;
+      const bool version_matches =
+          selected_version == expected_version || fixed_manifest_alternative ||
+          (expected_category == "model_loader" &&
+           expected_name == "hf_multimodal" &&
+           expected_version == "1.0.0" &&
+           selected_version == "2.0.0");
       if (found == components.end() || !found->is_object() ||
           !found->contains("key") || !found->at("key").is_object() ||
           found->at("key").value("category", "") != expected_category ||
-          found->at("key").value("name", "") != expected_name ||
-          found->at("key").value("version", "") != expected_version ||
+          !name_matches || !version_matches ||
           !found->contains("configuration") ||
           !found->at("configuration").is_object())
         throw std::runtime_error("HF multimodal passive probe requires exact " +
@@ -1080,6 +1116,9 @@ TrainingNodeProbe make_hf_multimodal_sft_training_node_probe(
         !split_receipt.contains("files") ||
         !split_receipt.at("files").is_object())
       throw std::runtime_error("HF frozen split receipt is incomplete");
+    const std::string id_column =
+        data_config.at("id_column").get<std::string>();
+    std::set<std::string, std::less<>> validation_identities;
     for (const std::string_view split : {"train", "validation", "test"}) {
       const std::string name = std::string(split) + ".jsonl";
       if (!split_receipt.at("counts").contains(split) ||
@@ -1094,6 +1133,29 @@ TrainingNodeProbe make_hf_multimodal_sft_training_node_probe(
           claimed.value("rows", 0) !=
               split_receipt.at("counts").at(split).get<std::int64_t>())
         throw std::runtime_error("HF frozen split receipt digest disagrees");
+      if (split == "validation") {
+        std::istringstream rows(payload.bytes);
+        std::string line;
+        std::int64_t parsed{};
+        while (std::getline(rows, line)) {
+          if (line.empty())
+            throw std::runtime_error(
+                "HF validation split contains an empty JSONL row");
+          const auto row = nlohmann::json::parse(line);
+          if (!row.is_object() || !row.contains(id_column) ||
+              !row.at(id_column).is_string() ||
+              row.at(id_column).get_ref<const std::string &>().empty() ||
+              !validation_identities
+                   .insert(row.at(id_column).get<std::string>())
+                   .second)
+            throw std::runtime_error(
+                "HF validation split identities are invalid");
+          ++parsed;
+        }
+        if (parsed != split_receipt.at("counts").at(split).get<std::int64_t>())
+          throw std::runtime_error(
+              "HF validation split parsed row count disagrees");
+      }
     }
     const std::filesystem::path manifest = dataset_root / "train.jsonl";
     std::ifstream manifest_stream(manifest, std::ios::binary);
@@ -1241,8 +1303,65 @@ TrainingNodeProbe make_hf_multimodal_sft_training_node_probe(
         !schedule.at("configuration").value("final", false))
       throw std::runtime_error(
           "HF evaluation schedule does not require step-zero and final evidence");
-    (void)component("qualitative_samples", "qualitative_sample",
-                    "fixed_held_out", "2.0.0");
+    const auto &qualitative =
+        component("qualitative_samples", "qualitative_sample",
+                  "fixed_held_out", "2.0.0");
+    std::string qualitative_manifest_digest;
+    if (qualitative.at("key").value("name", "") == "fixed_manifest") {
+      const auto &configuration = qualitative.at("configuration");
+      const std::string manifest_name =
+          configuration.value("manifest_name", "");
+      const std::string identity_field =
+          configuration.value("identity_field", "");
+      const std::int64_t sample_count =
+          configuration.value("sample_count", 0);
+      const std::filesystem::path manifest_path(manifest_name);
+      const bool symbolic_identity_field =
+          !identity_field.empty() &&
+          ((identity_field.front() >= 'a' && identity_field.front() <= 'z') ||
+           (identity_field.front() >= 'A' && identity_field.front() <= 'Z')) &&
+          std::ranges::all_of(identity_field, [](const char character) {
+            return (character >= 'a' && character <= 'z') ||
+                   (character >= 'A' && character <= 'Z') ||
+                   (character >= '0' && character <= '9') ||
+                   character == '_' || character == '-' || character == '.' ||
+                   character == ':';
+          });
+      if (!manifest_name.ends_with(".jsonl") || manifest_path.is_absolute() ||
+          manifest_path.filename() != manifest_path ||
+          !symbolic_identity_field || sample_count <= 0)
+        throw std::runtime_error(
+            "HF fixed qualitative manifest configuration is unsafe");
+      const auto payload = read_passive_file(
+          dataset_root / manifest_path, 256U * 1024U * 1024U);
+      if (payload.digest != configuration.value("manifest_sha256", ""))
+        throw std::runtime_error(
+            "HF fixed qualitative manifest digest disagrees");
+      std::istringstream rows(payload.bytes);
+      std::set<std::string, std::less<>> identities;
+      std::string line;
+      while (identities.size() < static_cast<std::size_t>(sample_count) &&
+             std::getline(rows, line)) {
+        if (line.empty())
+          throw std::runtime_error(
+              "HF fixed qualitative manifest contains an empty row");
+        const auto row = nlohmann::json::parse(line);
+        if (!row.is_object() || !row.contains(identity_field) ||
+            !row.at(identity_field).is_string() ||
+            row.at(identity_field).get_ref<const std::string &>().empty() ||
+            !validation_identities.contains(
+                row.at(identity_field).get_ref<const std::string &>()) ||
+            !identities
+                 .insert(row.at(identity_field).get<std::string>())
+                 .second)
+          throw std::runtime_error(
+              "HF fixed qualitative manifest identities are invalid");
+      }
+      if (identities.size() != static_cast<std::size_t>(sample_count))
+        throw std::runtime_error(
+            "HF fixed qualitative manifest has too few identities");
+      qualitative_manifest_digest = payload.digest;
+    }
     const auto &renderer =
         component("artifact_renderer", "artifact_renderer",
                   "caption_triplet");
@@ -1300,6 +1419,7 @@ TrainingNodeProbe make_hf_multimodal_sft_training_node_probe(
         {"target_manifest_digest", target_manifest_digest},
         {"tensor_index_digest", tensor_index_digest},
         {"evaluation_schedule", schedule.at("configuration")},
+        {"qualitative_manifest_digest", qualitative_manifest_digest},
         {"renderer", renderer.at("configuration")},
         {"checkpoint", checkpoint.at("configuration")},
         {"runtime_profile_digest", runtime.profile_digest},

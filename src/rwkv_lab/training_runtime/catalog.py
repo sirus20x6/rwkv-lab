@@ -98,6 +98,7 @@ def supported_worker_capabilities() -> frozenset[str]:
             "evaluator.scalar_loss.v1",
             "model_loader.hf_causal.v1",
             "model_loader.hf_multimodal.v1",
+            "model_loader.hf_multimodal.v2",
             "trainability.full.v1",
             "trainability.frozen.v1",
             "trainability.named_rules.v1",
@@ -127,5 +128,6 @@ def supported_worker_capabilities() -> frozenset[str]:
             "precision.fp32_parameters_bf16_compute.v1",
             "qualitative_sample.fixed_held_out.v1",
             "qualitative_sample.fixed_held_out.v2",
+            "qualitative_sample.fixed_manifest.v1",
         }
     )

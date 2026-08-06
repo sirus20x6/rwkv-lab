@@ -18,7 +18,10 @@ from rwkv_lab.training_components import (
     evaluator_from_resolved_component,
     qualitative_sample_from_resolved_component,
 )
-from rwkv_lab.training_runtime.qualitative_samples import DerivedFixedHeldOutSamples
+from rwkv_lab.training_runtime.qualitative_samples import (
+    DerivedFixedHeldOutSamples,
+    FixedManifestSamples,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG = json.loads(
@@ -143,6 +146,90 @@ def test_derived_fixed_held_out_receipts_authority_selected_identities() -> None
     assert binding.identities == identities
     assert binding.identities_digest == _identity_digest(identities)
     assert binding.selector_digest == "sha256:" + "a" * 64
+
+
+def test_fixed_manifest_selects_ordered_membership_inside_dataset_root(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "balanced-validation.jsonl"
+    encoded = b'{"id":"image-042"}\n{"id":"image-001"}\n{"id":"unused"}\n'
+    manifest.write_bytes(encoded)
+    samples = qualitative_sample_from_resolved_component(
+        _envelope(
+            "qualitative_sample",
+            "fixed_manifest",
+            {
+                "identity_field": "id",
+                "manifest_name": manifest.name,
+                "manifest_sha256": "sha256:" + hashlib.sha256(encoded).hexdigest(),
+                "sample_count": 2,
+            },
+        )
+    )
+    assert isinstance(samples, FixedManifestSamples)
+    binding = samples.select(
+        ("image-001", "image-017", "image-042"),
+        selector_digest="sha256:" + "a" * 64,
+        dataset_root=tmp_path,
+    )
+    assert binding.identities == ("image-042", "image-001")
+    assert binding.identities_digest == _identity_digest(binding.identities)
+
+    manifest.write_bytes(encoded + b'{"id":"changed"}\n')
+    with pytest.raises(ValueError, match="content digest changed"):
+        samples.select(
+            ("image-001", "image-017", "image-042"),
+            selector_digest="sha256:" + "a" * 64,
+            dataset_root=tmp_path,
+        )
+
+
+def test_fixed_manifest_reads_from_pinned_nofollow_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import rwkv_lab.training_runtime.qualitative_samples as module
+
+    manifest = tmp_path / "held-out.jsonl"
+    original = b'{"id":"stable"}\n'
+    manifest.write_bytes(original)
+    samples = qualitative_sample_from_resolved_component(
+        _envelope(
+            "qualitative_sample",
+            "fixed_manifest",
+            {
+                "identity_field": "id",
+                "manifest_name": manifest.name,
+                "manifest_sha256": "sha256:" + hashlib.sha256(original).hexdigest(),
+                "sample_count": 1,
+            },
+        )
+    )
+    replacement = tmp_path / "replacement.jsonl"
+    replacement.write_bytes(b'{"id":"attacker"}\n')
+    real_fdopen = module.os.fdopen
+
+    def replace_after_open(descriptor, *args, **kwargs):
+        replacement.replace(manifest)
+        return real_fdopen(descriptor, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "fdopen", replace_after_open)
+    binding = samples.select(
+        ("stable", "attacker"),
+        selector_digest="sha256:" + "a" * 64,
+        dataset_root=tmp_path,
+    )
+    assert binding.identities == ("stable",)
+
+    manifest.unlink()
+    manifest.symlink_to(tmp_path / "replacement-target.jsonl")
+    (tmp_path / "replacement-target.jsonl").write_bytes(original)
+    monkeypatch.setattr(module.os, "fdopen", real_fdopen)
+    with pytest.raises(ValueError, match="unavailable"):
+        samples.select(
+            ("stable",),
+            selector_digest="sha256:" + "a" * 64,
+            dataset_root=tmp_path,
+        )
 
 
 def test_caption_renderer_requires_aligned_target_baseline_current_triplet() -> None:

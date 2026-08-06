@@ -669,12 +669,17 @@ class HFDataRuntime:
         test_by_id = {sample.sample_id: sample for sample in test_raw}
         training.sampler.bind(training_split.selected_ids)
         qualitative = components.qualitative_samples()
-        count = qualitative.configuration.sample_count
-        qualitative_ids = tuple(evaluation_split.selected_ids[:count])
-        binding = qualitative.bind(
-            qualitative_ids, selector_digest=evaluation_split.membership_digest
+        binding = qualitative.select(
+            evaluation_split.selected_ids,
+            selector_digest=evaluation_split.membership_digest,
+            dataset_root=(
+                Path(training.source.configuration.dataset_root)
+                if frozen
+                else None
+            ),
         )
-        measured_identities_digest = getattr(binding, "identities_digest", None)
+        qualitative_ids = binding.identities
+        measured_identities_digest = binding.identities_digest
         return cls(
             training_pipeline=training,
             evaluation_pipeline=evaluation,
