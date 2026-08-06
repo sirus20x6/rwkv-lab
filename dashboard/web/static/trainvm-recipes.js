@@ -64,8 +64,8 @@
   }
 
   function canonicalAbsolutePath(value) {
-    return typeof value === "string" && value.length > 1 && value.length <= 4096 &&
-      value.startsWith("/") && !value.endsWith("/") && !value.includes("\0") && !value.includes("//") &&
+    return typeof value === "string" && value.length > 0 && value.length <= 4096 &&
+      value.startsWith("/") && (value === "/" || !value.endsWith("/")) && !value.includes("\0") && !value.includes("//") &&
       !value.includes("/./") && !value.includes("/../") &&
       !value.endsWith("/.") && !value.endsWith("/..");
   }

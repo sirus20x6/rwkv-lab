@@ -402,6 +402,10 @@ def main() -> None:
             ]
             for index, family in enumerate(authored_families):
                 page.select_option("#vm-recipe-select", tuple_identity(family, "1"))
+                model_path = "/" if index == 0 else f"/models/browser/{family}/checkpoint"
+                manifest_path = f"/datasets/browser/{family}/train.jsonl"
+                page.locator('[data-vm-recipe-field="model.path"]').fill(model_path)
+                page.locator('[data-vm-recipe-field="data.manifest"]').fill(manifest_path)
                 page.locator("#vm-recipe-run").fill(f"browser-{family.replace('_', '-')}")
                 page.locator("#vm-recipe-author").fill("browser-agent")
                 page.locator("#vm-recipe-reason").fill(f"author {family}")
@@ -416,7 +420,8 @@ def main() -> None:
                 exported = json.loads(page.locator("#vm-recipe-source").input_value())
                 assert exported["source"]["recipe"]["instance"]["recipe"]["name"] == family
                 assert exported["source"]["recipe"]["registry_path"] == "/etc/trainvm/recipe-profiles.json"
-                assert exported["source"]["recipe"]["instance"]["overrides"]["model.path"]
+                assert exported["source"]["recipe"]["instance"]["overrides"]["model.path"] == model_path
+                assert exported["source"]["recipe"]["instance"]["overrides"]["data.manifest"] == manifest_path
                 assert "input_content" not in exported
                 assert not any("fingerprint" in key for key in exported["source"]["recipe"]["instance"]["overrides"])
                 assert page.locator('[data-vm-recipe-field*="fingerprint"]').count() == 0
@@ -424,7 +429,8 @@ def main() -> None:
                 preview_text = page.locator("#vm-recipe-preview-panel").inner_text()
                 assert "authority_measured" in preview_text
                 assert "sha256:" + "3" * 64 in preview_text
-                assert exported["source"]["recipe"]["instance"]["overrides"]["data.manifest"] in preview_text
+                assert model_path in preview_text
+                assert manifest_path in preview_text
                 assert page.locator(".vm-recipe-domain").count() == 11
                 assert set(page.locator(".vm-recipe-domain .vm-editor-heading").all_inner_texts()) == {
                     "model", "data", "trainability", "optimizer", "schedule", "precision",
