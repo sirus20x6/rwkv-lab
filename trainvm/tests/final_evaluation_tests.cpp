@@ -298,6 +298,30 @@ int main() {
                              trainvm::FinalErrorPolicy::zero_unresolved_errors;
                 }),
             "Qwen/HF test evidence must be a strict final completion barrier");
+    auto telemetry_profile = *std::ranges::find_if(
+        worker.adapter_registry.profiles, [](const auto &profile) {
+          return profile.key.adapter == "rwkv-lab.hf-multimodal-sft";
+        });
+    telemetry_profile.authoring->outputs.emplace(
+        "metrics", trainvm::OperationPortDescriptor{
+                       .type = trainvm::OperationPortType::artifact,
+                       .required = false,
+                       .artifact_type = trainvm::ArtifactType::metrics,
+                       .artifact_schema = "test.append-only-metrics.v1",
+                       .description = std::nullopt});
+    const trainvm::FinalizationPolicyRegistry telemetry_registry(
+        {telemetry_profile});
+    const auto &telemetry_policy =
+        telemetry_registry.resolve(telemetry_profile.key);
+    require(std::ranges::any_of(
+                telemetry_policy.outputs,
+                [](const auto &output) {
+                  return output.output_name == "metrics" &&
+                         output.evidence_kind ==
+                             trainvm::FinalEvidenceKind::audit &&
+                         !output.required_when_declared;
+                }),
+            "append-only metrics must not impersonate terminal evidence");
     require(hf.closure_required && !hf.migration_pending &&
                 hf.closure_output_name ==
                     std::optional<std::string>{"final_evaluation"},
@@ -326,6 +350,7 @@ int main() {
         .publishes =
             {{"checkpoint", {{"logical_name", "checkpoint"}}},
              {"eval_gallery", {{"logical_name", "eval_gallery"}}},
+             {"metrics", {{"logical_name", "metrics"}}},
              {"test_eval", {{"logical_name", "test_eval"}}},
              {"final_evaluation",
               {{"logical_name", "final_evaluation"}}}},
@@ -410,7 +435,8 @@ int main() {
     seal_authority_dataset(valid_test_row);
     const auto authority_expectation =
         trainvm::derive_hf_final_evaluation_expectation(
-            hf, authority_invocation, 745U, {terminal_checkpoint});
+            telemetry_policy, authority_invocation, 745U,
+            {terminal_checkpoint});
     const std::vector<trainvm::FinalScalarRequirement>
         expected_authority_scalars{
             {.metric_name = "eval.loss",
@@ -437,6 +463,9 @@ int main() {
                 !std::ranges::binary_search(
                     authority_expectation.required_output_names,
                     std::string("final_evaluation")) &&
+                !std::ranges::binary_search(
+                    authority_expectation.required_output_names,
+                    std::string("metrics")) &&
                 !authority_expectation.terminal_optimizer_fingerprint,
             "HF authority freezes test membership and evaluator metrics while "
             "ignoring worker-only observable extras and closure self-parents");
@@ -456,7 +485,8 @@ int main() {
          {"resume_command_id", "resume-1"}};
     const auto resumed_expectation =
         trainvm::derive_hf_final_evaluation_expectation(
-            hf, resume_invocation, 745U, {resume_checkpoint_event});
+            telemetry_policy, resume_invocation, 745U,
+            {resume_checkpoint_event});
     require(resumed_expectation.checkpoint_artifact_id ==
                     authority_expectation.checkpoint_artifact_id &&
                 resumed_expectation.checkpoint_fingerprint ==
@@ -469,7 +499,8 @@ int main() {
       seal_authority_dataset(test_bytes, std::move(receipt_override));
       try {
         (void)trainvm::derive_hf_final_evaluation_expectation(
-            hf, authority_invocation, 745U, {terminal_checkpoint});
+            telemetry_policy, authority_invocation, 745U,
+            {terminal_checkpoint});
         return false;
       } catch (const std::invalid_argument&) {
         return true;

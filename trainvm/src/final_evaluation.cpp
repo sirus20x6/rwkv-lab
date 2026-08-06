@@ -184,7 +184,7 @@ FinalOutputPolicy classify_output(const std::string &name,
   FinalOutputPolicy policy{
       .output_name = name,
       .required = output.required,
-      .required_when_declared = !output.required,
+      .required_when_declared = false,
       .coverage = FinalCoveragePolicy::durable_nonempty,
       .errors = FinalErrorPolicy::not_applicable,
       .artifact_schema = output.artifact_schema,
@@ -192,17 +192,20 @@ FinalOutputPolicy classify_output(const std::string &name,
   switch (*output.artifact_type) {
   case ArtifactType::checkpoint:
     policy.evidence_kind = FinalEvidenceKind::checkpoint;
+    policy.required_when_declared = !output.required;
     policy.exact_optimizer_step = true;
     return policy;
   case ArtifactType::image_gallery:
   case ArtifactType::eval_examples:
     policy.evidence_kind = FinalEvidenceKind::examples;
+    policy.required_when_declared = !output.required;
     policy.exact_optimizer_step = true;
     policy.checkpoint_bound = true;
     policy.coverage = FinalCoveragePolicy::full_membership;
     policy.errors = FinalErrorPolicy::zero_unresolved_errors;
     return policy;
   case ArtifactType::report:
+    policy.required_when_declared = !output.required;
     if (output.artifact_schema == "rwkv-lab.final-evaluation.v1") {
       policy.evidence_kind = FinalEvidenceKind::closure;
       policy.exact_optimizer_step = true;

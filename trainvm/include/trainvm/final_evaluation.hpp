@@ -45,9 +45,9 @@ struct FinalOutputPolicy final {
   std::string output_name;
   FinalEvidenceKind evidence_kind{};
   bool required{};
-  // Optional outputs become finalization requirements whenever the immutable
-  // invocation declares them. This covers conditional galleries without
-  // silently weakening adapters that do declare one.
+  // Optional terminal evidence becomes a finalization requirement whenever
+  // the immutable invocation declares it. Append-only telemetry/log outputs
+  // are never promoted into terminal evidence by declaration alone.
   bool required_when_declared{};
   bool exact_optimizer_step{};
   bool checkpoint_bound{};
