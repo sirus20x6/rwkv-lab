@@ -438,10 +438,12 @@ struct HostdDaemonRuntime::Implementation final {
     service_identity = std::make_shared<HostdLinuxServiceIdentityAuthority>(
         configuration.service_identity());
     cgroups = std::make_unique<LinuxCgroupAuthority>(configuration.cgroup());
+    // hostd attests the established controller journal; it must never become a
+    // second writer, so it opens read-only and without exclusive WAL ownership.
     journal = std::make_unique<Journal>(
         configuration.journal_path(), configuration.document().journal_identity,
         HostGrantEnforcement::required, configuration.journal_host(), nullptr,
-        true);
+        false, JournalAccessMode::read_only);
 
     ledger_authority = std::make_shared<SqliteFilesystemAuthority>(
         SqliteFilesystemAuthority::acquire(
@@ -465,7 +467,6 @@ struct HostdDaemonRuntime::Implementation final {
     inventory_kernel = std::make_unique<LinuxNvidiaInventoryCollector>(
         std::move(inventory_configuration));
     inventory = capture_host_inventory(*inventory_kernel);
-    inventory_observed_at_ns = hostd_monotonic_now_ns();
     require_inventory_identity(configuration.document(), inventory,
                                clock->sample());
     ledger = std::make_shared<SQLiteHostLedger>(
