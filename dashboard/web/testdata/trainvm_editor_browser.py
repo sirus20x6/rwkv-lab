@@ -303,11 +303,19 @@ class Handler(BaseHTTPRequestHandler):
                     "stage": "failed" if (not payload["dry_run"] and request_document["reason"] == "fail launch") else "complete",
                     "detail": "synthetic launch failure" if (not payload["dry_run"] and request_document["reason"] == "fail launch") else ("canonical dry-run complete" if payload["dry_run"] else "queued"),
                     "plan_hash": plan_hash, "canonical_plan_json": json.dumps(plan),
-                    "recipe_expansion_json": json.dumps({"effective_overrides": overrides, "provenance": provenance}),
-                    "preflight_receipt_json": json.dumps({"passed": True}),
+                    "recipe_expansion_json": json.dumps({
+                        "effective_overrides": overrides,
+                        "final_plan_hash": plan_hash,
+                        "provenance": provenance,
+                    }),
+                    "preflight_receipt_json": json.dumps({
+                        "passed": True,
+                        "plan_hash": plan_hash,
+                    }),
                     "diagnostics": ([{"severity": "error", "path": "/submission", "message": "synthetic launch failure"}]
                                     if (not payload["dry_run"] and request_document["reason"] == "fail launch") else []),
-                    "run": {"run_id": "browser-recipe-run"}, "terminal": True, "dry_run": payload["dry_run"],
+                    "run": {"run_id": "browser-recipe-run", "plan_hash": plan_hash},
+                    "terminal": True, "dry_run": payload["dry_run"],
                 },
             ]
             body = b"".join(json.dumps(update).encode() + b"\n" for update in updates)
