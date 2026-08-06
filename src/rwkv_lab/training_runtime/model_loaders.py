@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol
+
+_MAXIMUM_AUXILIARY_IDENTITY_BYTES = 1024 * 1024
 
 
 class ModelLoaderImplementation(str, Enum):
@@ -70,6 +73,8 @@ class ModelLoadReceipt:
     checkpoint_fingerprint: str
     model_class: str
     checkpoint_tensor_count: int
+    auxiliary_class: str
+    auxiliary_fingerprint: str
     missing_keys: tuple[str, ...]
     unexpected_keys: tuple[str, ...]
     mismatched_keys: tuple[str, ...]
@@ -129,6 +134,7 @@ def _receipt(
     configuration: HuggingFaceModelConfiguration,
     model: Any,
     loading_info: dict[str, Any],
+    auxiliary: Any,
 ) -> ModelLoadReceipt:
     missing = tuple(sorted(loading_info.get("missing_keys", ())))
     unexpected = tuple(sorted(loading_info.get("unexpected_keys", ())))
@@ -148,12 +154,102 @@ def _receipt(
         checkpoint_fingerprint=configuration.checkpoint_fingerprint,
         model_class=f"{type(model).__module__}.{type(model).__qualname__}",
         checkpoint_tensor_count=len(model.state_dict()),
+        auxiliary_class=f"{type(auxiliary).__module__}.{type(auxiliary).__qualname__}",
+        auxiliary_fingerprint=_auxiliary_fingerprint(auxiliary),
         missing_keys=missing,
         unexpected_keys=unexpected,
         mismatched_keys=mismatched,
         error_messages=errors,
         exact=exact,
     )
+
+
+def _identity_value(value: Any, *, depth: int = 0) -> Any:
+    """Reduce processor/tokenizer configuration to bounded canonical JSON.
+
+    Hugging Face processors expose ordinary mappings plus token wrapper objects.
+    Token wrappers have stable string forms; arbitrary runtime objects do not enter
+    the receipt.  This keeps the model-loader receipt generic while ensuring a
+    changed chat template, special-token policy, tokenizer configuration, or image
+    preprocessing configuration changes exact-resume identity.
+    """
+
+    if depth > 8:
+        raise ValueError("Hugging Face auxiliary identity is too deeply nested")
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Mapping):
+        if len(value) > 4096 or any(not isinstance(key, str) for key in value):
+            raise ValueError("Hugging Face auxiliary identity mapping is invalid")
+        return {
+            key: _identity_value(item, depth=depth + 1)
+            for key, item in sorted(value.items())
+        }
+    if isinstance(value, (list, tuple)):
+        if len(value) > 4096:
+            raise ValueError("Hugging Face auxiliary identity list is oversized")
+        return [_identity_value(item, depth=depth + 1) for item in value]
+    token_fields = (
+        "content",
+        "single_word",
+        "lstrip",
+        "rstrip",
+        "normalized",
+        "special",
+    )
+    if all(hasattr(value, name) for name in token_fields):
+        token = {name: getattr(value, name) for name in token_fields}
+        if not isinstance(token["content"], str) or any(
+            not isinstance(token[name], bool) for name in token_fields[1:]
+        ):
+            raise ValueError("Hugging Face token-wrapper identity is invalid")
+        return {"added_token": token}
+    raise ValueError("Hugging Face auxiliary identity contains a noncanonical object")
+
+
+def _configuration(value: Any) -> Mapping[str, Any]:
+    to_dict = getattr(value, "to_dict", None)
+    if not callable(to_dict):
+        return {}
+    configuration = to_dict()
+    if not isinstance(configuration, Mapping):
+        raise TypeError("Hugging Face auxiliary to_dict result is not a mapping")
+    return configuration
+
+
+def _auxiliary_fingerprint(auxiliary: Any) -> str:
+    tokenizer = getattr(auxiliary, "tokenizer", auxiliary)
+    image_processor = getattr(auxiliary, "image_processor", None)
+    chat_template = getattr(auxiliary, "chat_template", None)
+    if chat_template is None:
+        chat_template = getattr(tokenizer, "chat_template", None)
+    body = {
+        "api_version": "rwkv-lab.hf-auxiliary-identity/v1",
+        "auxiliary_class": f"{type(auxiliary).__module__}.{type(auxiliary).__qualname__}",
+        "auxiliary_configuration": _configuration(auxiliary),
+        "chat_template": chat_template,
+        "image_processor_class": (
+            f"{type(image_processor).__module__}.{type(image_processor).__qualname__}"
+            if image_processor is not None
+            else None
+        ),
+        "image_processor_configuration": (
+            _configuration(image_processor) if image_processor is not None else {}
+        ),
+        "special_tokens_map": getattr(tokenizer, "special_tokens_map", {}),
+        "tokenizer_class": f"{type(tokenizer).__module__}.{type(tokenizer).__qualname__}",
+        "tokenizer_configuration": _configuration(tokenizer),
+    }
+    encoded = json.dumps(
+        _identity_value(body),
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if not encoded or len(encoded) > _MAXIMUM_AUXILIARY_IDENTITY_BYTES:
+        raise ValueError("Hugging Face auxiliary identity exceeds its byte bound")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,7 +286,11 @@ class RegisteredModelLoader:
             model=model,
             tokenizer_or_processor=auxiliary,
             receipt=_receipt(
-                self.implementation, self.configuration, model, loading_info
+                self.implementation,
+                self.configuration,
+                model,
+                loading_info,
+                auxiliary,
             ),
         )
 
