@@ -1,8 +1,8 @@
 {
   "api_version": "trainvm.compatibility-workflows/v1",
   "authority": "compatibility_evidence_only",
-  "classification_surface_digest": "sha256:93a6b92fecce5cae501cea910e6410c2ed79cddb8208cb307c435acffc9d2483",
-  "source_tree_digest": "sha256:f490e63fa0815f5bb4464ffd0a88b1c078da33a4e9f03f7fce142ef02533a286",
+  "classification_surface_digest": "sha256:9534d0c930f2b84f1a6a2c6d8549ed7c71ee4daa95a24bfabd2fb2d7a7d866ac",
+  "source_tree_digest": "sha256:294dc2192c574f84c13de78ac260fe2ed5bd4aefbee1c8ced6a1abe91f08b9e6",
   "entries": [
     {
       "stable_id": "rwkv.synthetic-campaign",

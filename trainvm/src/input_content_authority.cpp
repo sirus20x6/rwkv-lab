@@ -822,12 +822,27 @@ InputContentMeasurementTransaction::commit() {
   // abandoning a transaction is therefore a complete cache no-op. This hot
   // path does not copy the potentially million-entry LRU list.
   if (keys.empty()) {
+    using EntryMap = decltype(owner.entries);
+    std::vector<EntryMap::iterator> touches;
+    touches.reserve(impl_->touch_order.size());
     for (const auto &key : impl_->touch_order) {
       const auto entry = owner.entries.find(key);
       if (entry != owner.entries.end() &&
           valid_cached_record(key, entry->second.value, entry->second.seal))
-        owner.recency.splice(owner.recency.begin(), owner.recency,
-                             entry->second.recency);
+        touches.push_back(entry);
+    }
+    // Fault injection and every potentially throwing record validation finish
+    // before the first splice. Once publication starts, it consists only of
+    // no-throw list operations while the owner mutex excludes replacement.
+    if (owner.publication_fault_for_testing) {
+      for (std::size_t index = 0U; index < touches.size(); ++index) {
+        if (owner.publication_fault_for_testing())
+          throw std::bad_alloc();
+      }
+    }
+    for (const auto entry : touches) {
+      owner.recency.splice(owner.recency.begin(), owner.recency,
+                           entry->second.recency);
     }
     result.entries_after = static_cast<std::uint64_t>(owner.entries.size());
     impl_->committed = true;

@@ -297,6 +297,17 @@ models that remaining verification is substantial startup work and currently hap
 acquisition. A future sealed-manifest/load-stream design may fuse verification with model loading or
 move it before accelerator acquisition, but it must preserve exact nested-object byte verification.
 
+The controller warm-commit microbenchmark is reproducible without adding it to the normal build or
+test workload:
+
+```bash
+cmake --build trainvm/build --target input_content_cache_benchmark
+trainvm/build/input_content_cache_benchmark 20000
+```
+
+It creates the requested number of temporary zero-byte files, cold-populates the authority cache,
+then reports warm measurement and transaction-commit microseconds separately.
+
 The fixed runner returns an already-completed replay without executing tensor work, publishes a
 durably receipted terminal result on success, freezes any declared checkpoint before that terminal
 result, and converts trainer exceptions to a bounded

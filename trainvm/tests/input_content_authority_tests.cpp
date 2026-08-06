@@ -562,6 +562,51 @@ void failed_publication_is_atomic() {
       "rollback preserves exact LRU order for later capacity eviction");
 }
 
+void failed_warm_touch_publication_is_atomic() {
+  TemporaryDirectory temporary;
+  const auto first = temporary.path() / "first";
+  const auto second = temporary.path() / "second";
+  const auto third = temporary.path() / "third";
+  const auto fourth = temporary.path() / "fourth";
+  write_file(first, "first");
+  write_file(second, "second");
+  write_file(third, "third");
+  write_file(fourth, "fourth");
+  bool fail_publication = false;
+  std::uint64_t validations = 0U;
+  InputContentMeasurementCache cache(
+      3U, [](int) { return test_filesystem(); }, {}, [&] {
+        return fail_publication && ++validations == 2U;
+      });
+  InputContentMeasurementStats ignored;
+  (void)measure_cached(cache, first, ignored);
+  (void)measure_cached(cache, second, ignored);
+  (void)measure_cached(cache, third, ignored);
+
+  bool failed = false;
+  try {
+    auto transaction = cache.begin_transaction();
+    (void)measure_input_content_root(first, &ignored, &transaction);
+    (void)measure_input_content_root(second, &ignored, &transaction);
+    fail_publication = true;
+    (void)transaction.commit();
+  } catch (const std::bad_alloc &) {
+    failed = true;
+  }
+  fail_publication = false;
+  require(failed && validations == 2U,
+          "the second warm-touch publication preflight failed deterministically");
+
+  (void)measure_cached(cache, fourth, ignored);
+  auto first_probe = cache.begin_transaction();
+  InputContentMeasurementStats first_after;
+  (void)measure_input_content_root(first, &first_after, &first_probe);
+  InputContentMeasurementStats second_after;
+  (void)measure_cached(cache, second, second_after);
+  require(first_after.cache_misses == 1U && second_after.cache_hits == 1U,
+          "failed warm-touch publication preserves exact pre-commit LRU order");
+}
+
 }  // namespace
 
 // An ancestor directory is shared with the rest of the machine. Creating and
@@ -638,6 +683,8 @@ int main() {
     std::cout << "PASS cache-concurrent-mutation\n";
     failed_publication_is_atomic();
     std::cout << "PASS cache-atomic-publication\n";
+    failed_warm_touch_publication_is_atomic();
+    std::cout << "PASS cache-atomic-warm-touch\n";
     return 0;
   } catch (const std::exception& error) {
     std::cerr << "input content authority test failure: " << error.what()

@@ -832,6 +832,13 @@ target_compile_options(input_content_authority_tests PRIVATE
 )
 target_link_libraries(input_content_authority_tests PRIVATE trainvm_core)
 add_test(NAME input_content_authority_tests COMMAND input_content_authority_tests)
+add_executable(input_content_cache_benchmark EXCLUDE_FROM_ALL
+  benchmarks/input_content_cache_benchmark.cpp
+)
+target_compile_options(input_content_cache_benchmark PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(input_content_cache_benchmark PRIVATE trainvm_core)
 add_executable(json_optional_tests
   tests/json_optional_tests.cpp
 )
