@@ -6,10 +6,14 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 
+import numpy as np
 import pytest
+import torch
 from test_trainvm_worker_documents import bootstrap_document, invocation_document
 
+from rwkv_lab import rwkv_pretrain
 from rwkv_lab.rwkv_pretrain import perform_rwkv_optimizer_step
+from rwkv_lab.trainvm_adapters.rwkv_scratch import RWKVTextEvalPolicy
 from rwkv_lab.trainvm_worker import (
     CheckpointDisposition,
     CheckpointPublisher,
@@ -448,6 +452,135 @@ def test_checkpoint_artifact_requires_authoritative_optimizer_step() -> None:
     with pytest.raises(WorkerSessionError, match="require an optimizer step"):
         session.artifact(**values)
     session.finish("node.completed", {"ok": True}, optimizer_step=0)
+    session.close()
+
+
+def test_real_rwkv_main_publishes_complete_step_zero_before_first_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller = FakeController(
+        invocation=step_zero_invocation(tmp_path),
+        step_zero_eval_gate_required=True,
+    )
+    session = WorkerSession(
+        load_worker_bootstrap(bootstrap_document()), connector=controller
+    )
+    invocation = session.start()
+    controls = controls_from_invocation(session, invocation)
+    observability = observability_from_invocation(session, invocation)
+    optimizer_events: list[str] = []
+    real_build_optimizer = rwkv_pretrain.build_optimizer
+
+    class RecordingOptimizer:
+        def __init__(self, optimizer) -> None:
+            self._optimizer = optimizer
+
+        def __getattr__(self, name):
+            return getattr(self._optimizer, name)
+
+        def step(self, *args, **kwargs):
+            message_types = [
+                message.WhichOneof("message") for message in controller.received
+            ]
+            assert message_types[:5] == [
+                "hello",
+                "metric",
+                "metric",
+                "artifact",
+                "artifact",
+            ]
+            assert [
+                (message.metric.name, message.metric.step)
+                for message in controller.received[1:3]
+            ] == [("validation_loss", 0), ("perplexity", 0)]
+            checkpoint_artifact = controller.received[3].artifact
+            examples_artifact = controller.received[4].artifact
+            assert checkpoint_artifact.kind == wire.ARTIFACT_KIND_CHECKPOINT
+            assert examples_artifact.kind == wire.ARTIFACT_KIND_EVAL_EXAMPLES
+            assert examples_artifact.parent_artifact_ids == [
+                checkpoint_artifact.artifact_id
+            ]
+            assert session.step_zero_eval_gate_satisfied
+            assert session.acknowledged_worker_sequence >= (
+                controller.received[4].artifact.worker_sequence
+            )
+            optimizer_events.append("optimizer.step")
+            return self._optimizer.step(*args, **kwargs)
+
+    def build_recording_optimizer(*args, **kwargs):
+        return RecordingOptimizer(real_build_optimizer(*args, **kwargs))
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(rwkv_pretrain, "build_optimizer", build_recording_optimizer)
+    tokens = tmp_path / "tokens.uint16"
+    np.arange(32, dtype=np.uint16).tofile(tokens)
+    final_checkpoint = tmp_path / "checkpoint-final.pt"
+    policy = RWKVTextEvalPolicy(
+        heldout_tokens={"heldout-1": (3, 4, 5)},
+        identity_field="id",
+        identities_digest="sha256:" + "1" * 64,
+        selector_digest="sha256:" + "2" * 64,
+        evaluator_component_digest="sha256:" + "3" * 64,
+        metric_names=("perplexity", "validation_loss"),
+        generation_policy_digest="sha256:" + "4" * 64,
+    )
+
+    result = rwkv_pretrain.main(
+        [
+            "--data",
+            str(tokens),
+            "--out",
+            str(tmp_path),
+            "--save",
+            str(final_checkpoint),
+            "--steps",
+            "1",
+            "--d-model",
+            "8",
+            "--n-layers",
+            "1",
+            "--head-size",
+            "8",
+            "--seq-len",
+            "2",
+            "--batch",
+            "1",
+            "--val-windows",
+            "1",
+            "--eval-every",
+            "50",
+            "--log-every",
+            "1",
+            "--warmup",
+            "0",
+            "--gpu-data",
+            "off",
+            "--no-cpu-prefetch",
+        ],
+        worker_observability=observability,
+        worker_controls=controls,
+        worker_eval_examples=policy,
+    )
+
+    assert result["step"] == 1
+    assert optimizer_events == ["optimizer.step"]
+    step_zero_state = torch.load(
+        tmp_path / "checkpoint-step-zero" / "state.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    assert step_zero_state["step"] == 0
+    assert step_zero_state["arch"]["d_model"] == 8
+    assert step_zero_state["arch"]["n_layers"] == 1
+    assert step_zero_state["arch"]["head_size"] == 8
+    assert [
+        controller.received[index].artifact.optimizer_step for index in (3, 4)
+    ] == [0, 0]
+    assert all(
+        controller.received[index].artifact.producer_attempt_id == "attempt-1"
+        for index in (3, 4)
+    )
+    session.finish("node.completed", {"ok": True}, optimizer_step=1)
     session.close()
 
 

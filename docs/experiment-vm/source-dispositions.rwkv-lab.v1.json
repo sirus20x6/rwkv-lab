@@ -10,7 +10,7 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:2abe626094997e840990eef9ffae4c0158f968a7c450df6387d0a9eca5d778b4",
+  "source_tree_digest": "sha256:51a0b8098c887815402cf6c12e8b67d158904788e36d2eae03874ab04c26ef7f",
   "entries": [
     {
       "source_path": "src/rwkv_lab/__init__.py",
@@ -2442,7 +2442,7 @@
       ],
       "resume_relevance": "terminal_checkpoint",
       "compatibility_workflow_id": "rwkv.scratch-pretrain",
-      "source_sha256": "sha256:33f04b665508e7062fc0a54e717b4cf9c540dcf1429f9fa5ffebf6afa0895c70",
+      "source_sha256": "sha256:7effe6aabe915379260fbbca43c74d7a81b7dbc2eaf04d06141d0fdaa77086eb",
       "family": "rwkv",
       "coverage": "direct",
       "consumers": [
