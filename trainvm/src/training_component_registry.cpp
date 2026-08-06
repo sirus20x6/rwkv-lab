@@ -4,6 +4,7 @@
 #include "trainvm/rwkv_scratch_profiles.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <ranges>
 #include <set>
@@ -366,6 +367,84 @@ void validate_model_trainability_relationships(
     reject("full trainability is incompatible with a quantized model loader");
 }
 
+void validate_data_pipeline_relationships(
+    const ResolvedTrainingComposition& composition) {
+  const auto grouped = components_by_category(composition);
+  constexpr std::array categories{
+      TrainingComponentCategory::data_source,
+      TrainingComponentCategory::sample_processor,
+      TrainingComponentCategory::sample_mapper,
+      TrainingComponentCategory::collator,
+      TrainingComponentCategory::sampler,
+      TrainingComponentCategory::batching,
+      TrainingComponentCategory::split_selector,
+  };
+  std::size_t selected = 0U;
+  for (const auto category : categories) {
+    const auto components = grouped.find(category);
+    const std::size_t count =
+        components == grouped.end() ? 0U : components->second.size();
+    if (count > 1U)
+      reject("training composition may select only one component per data-pipeline category");
+    selected += count;
+  }
+  if (selected == 0U) return;
+  if (selected != categories.size())
+    reject("training composition must select the complete declarative data pipeline");
+
+  const auto& source =
+      *grouped.at(TrainingComponentCategory::data_source).front();
+  const auto& processor =
+      *grouped.at(TrainingComponentCategory::sample_processor).front();
+  const auto& mapper =
+      *grouped.at(TrainingComponentCategory::sample_mapper).front();
+  const auto& batching =
+      *grouped.at(TrainingComponentCategory::batching).front();
+
+  const bool image_source = source.descriptor.implementation ==
+                            "rwkv_lab.data_source.jsonl_image_caption.v1";
+  const bool image_processor = processor.descriptor.implementation ==
+                               "rwkv_lab.sample_processor.image_caption.v1";
+  const bool assistant_mapper = mapper.descriptor.implementation ==
+                                "rwkv_lab.sample_mapper.assistant_only.v1";
+  if (image_source != image_processor || image_processor != assistant_mapper)
+    reject("training data source, processor and mapper modalities are incompatible");
+  if (batching.configuration.value("bucket_by", std::string{"token_length"}) ==
+          "image_area" &&
+      !image_source)
+    reject("image-area bucketing requires an image-caption data source");
+
+  const auto declared =
+      source.configuration.at("declared_columns").get<std::vector<std::string>>();
+  const auto has_column = [&declared](const std::string& column) {
+    return column.empty() || std::ranges::contains(declared, column);
+  };
+  std::vector<std::string> referenced;
+  if (image_source) {
+    referenced.push_back(source.configuration.at("image_column"));
+    for (const auto& column : source.configuration.at("caption_columns"))
+      referenced.push_back(column.get<std::string>());
+    referenced.push_back(processor.configuration.at("image_column"));
+    for (const auto& column : processor.configuration.at("caption_columns"))
+      referenced.push_back(column.get<std::string>());
+    referenced.push_back(mapper.configuration.at("prompt_column"));
+    referenced.push_back(mapper.configuration.at("target_column"));
+    const bool has_prompt_column =
+        !mapper.configuration.at("prompt_column").get<std::string>().empty();
+    const bool has_fixed_prompt =
+        !mapper.configuration.at("fixed_prompt").get<std::string>().empty();
+    if (has_prompt_column == has_fixed_prompt)
+      reject("assistant-only mapping must select exactly one prompt source");
+  } else {
+    referenced.push_back(source.configuration.at("token_column"));
+    referenced.push_back(processor.configuration.at("token_column"));
+    referenced.push_back(mapper.configuration.at("token_column"));
+  }
+  referenced.push_back(source.configuration.at("id_column"));
+  if (!std::ranges::all_of(referenced, has_column))
+    reject("data pipeline references a column absent from declared_columns");
+}
+
 Json composition_body(const ResolvedTrainingComposition& composition) {
   Json components = Json::object();
   for (const auto& [slot, component] : composition.components) {
@@ -534,6 +613,7 @@ ResolvedTrainingComposition TrainingComponentRegistry::resolve_composition(
                        .configuration = selection.configuration}));
   }
   validate_model_trainability_relationships(resolved);
+  validate_data_pipeline_relationships(resolved);
   const std::string canonical_composition = composition_body(resolved).dump();
   if (canonical_composition.size() > kMaximumCompositionBytes)
     reject("resolved training composition exceeds its canonical byte bound");

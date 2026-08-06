@@ -23,7 +23,7 @@ Tensor code stays in the runtime that implements it well. `rwkv_lab.training_com
 stable compatibility facade; implementations are physically separated under
 `rwkv_lab.training_runtime` into `optimizers.py`, `schedules.py`, `routers.py`, `activations.py`,
 `normalizations.py`, `curricula.py`, `gradient_clipping.py`, `gradient_accumulation.py`,
-`objectives.py`, `precision.py`, and `weight_decay_schedules.py`, with only the shared
+`objectives.py`, `precision.py`, `data_pipeline.py`, and `weight_decay_schedules.py`, with only the shared
 resolved-envelope decoder at the package root.
 Each category owns its closed enum, typed
 immutable configuration, validation, construction, and resolved dispatch. Category modules do not
@@ -52,6 +52,18 @@ The initial concrete cross-family catalog contains:
 - full, frozen, named freeze/unfreeze, and LoRA trainability policies. Parameter and module
   selectors are bounded glob sets, every selector must match, and the selected trainable tensor
   manifest is exact checkpoint state. LoRA additionally persists adapter-state and merge state;
+- complete declarative data pipelines made from independently versioned `data_source`,
+  `sample_processor`, `sample_mapper`, `collator`, `sampler`, `batching`, and `split_selector`
+  components. Initial sources cover locked JSONL image-caption manifests and JSONL token corpora;
+  processors prove bounded image decoding or token ranges; mappers construct assistant-only or
+  causal labels; the collator proves padded batch shapes; and deterministic holdout membership
+  publishes a digest that qualitative evaluation can bind;
+- deterministic sampling and fixed or resolution/token-length bucketed batching with explicit
+  prefetch-worker policy. Sampler cursor, epoch, derived RNG/order digests, pending bucket members,
+  source cursor, and emitted-batch counts are exact checkpoint state. A resume must reconstruct the same next
+  sample and pending batch rather than restarting an epoch. `batching` owns sample grouping and
+  compatible shapes only; `gradient_accumulation` independently owns how microbatches form an
+  optimizer step;
 
 - Torch AdamW;
 - FP32-master AdamW for lower-precision live model weights;
@@ -156,6 +168,22 @@ loaders or policies, a missing half of the pair, unavailable local model assets,
 fingerprints/selectors, and full fine-tuning of a quantized load. `validate_resume_state` checks
 exact per-slot descriptor state before a worker restores tensors; omitted LoRA adapter or merge
 state therefore cannot turn into a partial resume.
+
+### Adding a dataset
+
+Prefer composing an existing source, processor, mapper, collator, sampler, batching policy, and
+split selector. A manifest path, content fingerprint, declared columns, typed column mappings,
+numeric preprocessing bounds, and symbolic implementation identities are data; Python imports,
+Jinja templates, and experiment-supplied callbacks are not. Native composition validation rejects
+partial pipelines, undeclared columns, modality mismatches, and image-area bucketing of token
+corpora. Before accelerator allocation, the worker hashes the source and reads at most the declared
+preflight bound to prove decoding, target construction, held-out identity, and batch shape.
+
+The deterministic holdout selector ranks stable sample IDs by a versioned SHA-256 algorithm and
+exposes a membership digest. Evaluation components consume that identity rather than inventing a
+second split. Changing source order, seed, count, or membership changes the digest. The generic
+`WorkerTrainingComponents.data_pipeline()` bridge means a Qwen-style image-caption dataset changes
+only component configuration; no dataset-specific training loop or adapter handler is required.
 
 ## Scaled-precision qualification status
 

@@ -40,6 +40,13 @@ enum class Aggregation { last, sum, mean, weighted_mean, min, max, histogram };
 enum class TrainingComponentCategory {
   model_loader,
   trainability,
+  data_source,
+  sample_processor,
+  sample_mapper,
+  collator,
+  sampler,
+  batching,
+  split_selector,
   optimizer,
   parameter_router,
   learning_rate_schedule,

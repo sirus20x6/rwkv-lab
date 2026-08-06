@@ -277,10 +277,13 @@ func trainingSymbolicIdentity(value any, allowWildcard, allowLeadingDigit bool) 
 }
 
 var trainingComponentCategoryOrder = map[string]int{
-	"optimizer": 0, "parameter_router": 1, "learning_rate_schedule": 2,
-	"weight_decay_schedule": 3, "activation": 4, "normalization": 5,
-	"objective": 6, "precision": 7, "gradient_clipping": 8,
-	"gradient_accumulation": 9, "curriculum": 10, "metric_reducer": 11,
+	"model_loader": 0, "trainability": 1, "data_source": 2,
+	"sample_processor": 3, "sample_mapper": 4, "collator": 5,
+	"sampler": 6, "batching": 7, "split_selector": 8,
+	"optimizer": 9, "parameter_router": 10, "learning_rate_schedule": 11,
+	"weight_decay_schedule": 12, "activation": 13, "normalization": 14,
+	"objective": 15, "precision": 16, "gradient_clipping": 17,
+	"gradient_accumulation": 18, "curriculum": 19, "metric_reducer": 20,
 }
 
 func validateTrainingComponentDescriptors(items []any) error {
