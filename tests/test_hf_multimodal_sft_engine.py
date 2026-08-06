@@ -1334,6 +1334,26 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         "gallery",
         "final_evaluation",
     ]
+    closure_request = final_controls.events[2][1]
+    expected_context = {
+        "api_version": "rwkv-lab.hf-final-member-context/v1",
+        "components": {
+            "artifact_renderer": "sha256:" + "3" * 64,
+            "data": "sha256:" + "6" * 64,
+            "evaluator": "sha256:" + "2" * 64,
+            "generation_policy": "sha256:" + "6" * 64,
+            "processor": "sha256:" + "6" * 64,
+            "sample_mapping": "sha256:" + "6" * 64,
+            "test_split": "sha256:" + "6" * 64,
+        },
+        "member_id": "test",
+    }
+    expected_context_digest = "sha256:" + hashlib.sha256(
+        json.dumps(expected_context, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert closure_request.member_context_digests == {
+        "test": expected_context_digest
+    }
     assert not torch.equal(generation_weights[0], generation_weights[1])
     assert torch.equal(failed_controls.events[0][2], generation_weights[1])
     assert torch.equal(controls.events[0][2], generation_weights[2])

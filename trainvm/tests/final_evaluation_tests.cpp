@@ -415,8 +415,23 @@ int main() {
         expected_authority_scalars{
             {.metric_name = "eval.loss",
              .step_domain = "optimizer_step"}};
+    nlohmann::json expected_component_digests = nlohmann::json::object();
+    for (const std::string slot :
+         {"artifact_renderer", "data", "evaluator", "generation_policy",
+          "processor", "sample_mapping", "test_split"})
+      expected_component_digests[slot] = digest('3');
+    const std::string expected_member_context =
+        "sha256:" + trainvm::sha256_hex(
+                        nlohmann::json(
+                            {{"api_version",
+                              "rwkv-lab.hf-final-member-context/v1"},
+                             {"components", expected_component_digests},
+                             {"member_id", "member-a"}})
+                            .dump());
     require(authority_expectation.required_members ==
                     std::vector<std::string>{"member-a"} &&
+                authority_expectation.member_contexts.front().context_digest ==
+                    expected_member_context &&
                 authority_expectation.required_scalars ==
                     expected_authority_scalars &&
                 !std::ranges::binary_search(

@@ -1103,11 +1103,13 @@ FinalEvaluationExpectation derive_hf_final_evaluation_expectation(
         !bounded_identity(member) || !seen_members.insert(member).second)
       throw std::invalid_argument(
           "HF frozen test membership is invalid or duplicated");
+    // The data descriptor commits the entire admitted root.  Binding its
+    // digest and the member ID avoids asking controller C++ to reproduce a
+    // Python processor merely to establish completion authority.
     const nlohmann::json context{
         {"api_version", "rwkv-lab.hf-final-member-context/v1"},
         {"components", component_digests},
         {"member_id", member},
-        {"raw_sample", row},
     };
     member_contexts.push_back(
         {.member_id = member,

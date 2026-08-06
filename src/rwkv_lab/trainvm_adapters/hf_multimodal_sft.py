@@ -187,7 +187,12 @@ _FINAL_CONTEXT_COMPONENT_SLOTS = (
 
 
 def _final_member_context_digest(sample: ProcessedSample, components: Any) -> str:
-    """Bind one member to the exact immutable transform/evaluator semantics."""
+    """Bind a frozen member ID to admitted data and transform semantics.
+
+    The data descriptor already commits the complete frozen content root.  Do
+    not hash processor output here: the controller intentionally does not run
+    worker transformations while deciding completion.
+    """
 
     descriptors = components.composition.components
     try:
@@ -208,7 +213,6 @@ def _final_member_context_digest(sample: ProcessedSample, components: Any) -> st
             "api_version": "rwkv-lab.hf-final-member-context/v1",
             "components": component_digests,
             "member_id": sample.sample_id,
-            "raw_sample": sample.values,
         }
     )
 
