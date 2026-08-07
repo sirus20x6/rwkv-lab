@@ -7,7 +7,9 @@
 #include <iostream>
 #include <stdexcept>
 #include <string_view>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -377,7 +379,8 @@ void checked_in_qwen_dpo_example_resolves_exact_preference_graph() {
       root / "docs/experiment-vm/examples/"
              "qwen36-caption-dpo-lora-r256.recipe-instance.v1.json");
   if (!input) throw std::runtime_error("could not open DPO recipe instance fixture");
-  const auto expanded = registry.expand_json(nlohmann::json::parse(input));
+  const nlohmann::json declared = nlohmann::json::parse(input);
+  const auto expanded = registry.expand_json(declared);
   const auto &components = expanded.plan.canonical_plan.at("spec")
                                .at("workflow")
                                .at("nodes")
@@ -393,6 +396,30 @@ void checked_in_qwen_dpo_example_resolves_exact_preference_graph() {
             components.at("sample_mapping").at("configuration").at(
                 "enable_thinking") == false,
         "compact DPO instance selects the exact cached-reference policy and token template");
+  // Plan validation calls filesystem::exists on every field of type `path`, and
+  // this instance names the deployment host's real model directory and dataset
+  // — inside read roots the recipe itself pins to that host, so redirecting the
+  // paths elsewhere is rejected before validation is even reached. Validating
+  // unconditionally therefore asserted the contents of whichever machine ran the
+  // suite: it passed on the deployment host and failed everywhere else. The
+  // assertions above are the portable ones and always run. This half runs only
+  // where its inputs exist, and says so when it does not, because a check that
+  // quietly evaporates off-host reads exactly like one that passed.
+  std::vector<std::string> absent;
+  for (const auto &[name, value] : declared.at("overrides").items()) {
+    if (!value.is_string()) continue;
+    const std::filesystem::path candidate(value.get<std::string>());
+    if (candidate.is_absolute() && !std::filesystem::exists(candidate))
+      absent.push_back(name);
+  }
+  if (!absent.empty()) {
+    std::cerr << "SKIP: DPO graph catalog validation needs inputs this host "
+                 "does not have:";
+    for (const std::string &name : absent) std::cerr << ' ' << name;
+    std::cerr << '\n';
+    return;
+  }
+
   const auto catalog = trainvm::TrainingComponentRegistry::load_file(
       root / "docs/experiment-vm/examples/training-components.v1.json");
   catalog.validate_plan(expanded.plan);

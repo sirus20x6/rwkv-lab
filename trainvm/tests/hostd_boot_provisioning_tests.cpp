@@ -44,9 +44,19 @@ HostdLinuxHostNamespacePolicy namespaces(std::uint64_t base) {
   };
 }
 
+// The simulated authority identity. These documents describe a host that is not
+// the one running the test — every device, inode and owner in them is invented —
+// so they must not be derived from the ambient euid: an unprivileged authority
+// is now a validity rule, and deriving from the ambient identity made the whole
+// fixture invalid whenever the suite ran as root, as CI does.
+constexpr std::uint32_t kAuthorityUid = 1000U;
+constexpr std::uint32_t kAuthorityGid = 1000U;
+constexpr std::uint32_t kWorkerUid = 1001U;
+constexpr std::uint32_t kWorkerGid = 1001U;
+
 HostdDaemonConfigurationDocument daemon_document() {
-  const auto uid = static_cast<std::uint32_t>(::geteuid());
-  const auto gid = static_cast<std::uint32_t>(::getegid());
+  constexpr std::uint32_t uid = kAuthorityUid;
+  constexpr std::uint32_t gid = kAuthorityGid;
   return {
       .api_version = std::string(kHostdDaemonConfigurationApiVersion),
       .host_id = "host-boot-provisioning",
@@ -55,8 +65,8 @@ HostdDaemonConfigurationDocument daemon_document() {
       .broker_instance_id = "hostd-boot-provisioning",
       .authority_uid = uid,
       .authority_gid = gid,
-      .worker_identity = {.uid = uid == 1000U ? 1001U : 1000U,
-                          .gid = gid == 1000U ? 1001U : 1000U,
+      .worker_identity = {.uid = kWorkerUid,
+                          .gid = kWorkerGid,
                           .no_new_privileges = true,
                           .inherit_authority_supplementary_groups =
                               std::nullopt},
@@ -121,13 +131,13 @@ HostdSocketIdentity endpoint(std::uint64_t path_inode) {
       .parent_mode = 0750U,
       // The socket is owned by the unprivileged authority that bound it, which
       // is what the published client document pins as the expected server.
-      .parent_owner_uid = static_cast<std::uint32_t>(::geteuid()),
-      .parent_owner_gid = static_cast<std::uint32_t>(::getegid()),
+      .parent_owner_uid = kAuthorityUid,
+      .parent_owner_gid = kAuthorityGid,
       .path_device = 41U,
       .path_inode = path_inode,
       .path_mode = 0660U,
-      .owner_uid = static_cast<std::uint32_t>(::geteuid()),
-      .owner_gid = static_cast<std::uint32_t>(::getegid()),
+      .owner_uid = kAuthorityUid,
+      .owner_gid = kAuthorityGid,
       .link_count = 1U,
   };
 }

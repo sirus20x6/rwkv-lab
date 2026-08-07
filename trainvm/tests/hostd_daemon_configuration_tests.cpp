@@ -32,9 +32,19 @@ void require_throws(Callable &&callable, std::string_view message) {
   throw std::runtime_error(std::string(message));
 }
 
+// The simulated authority identity. This document describes a host that is not
+// the one running the test — every device, inode and owner in it is invented —
+// so it must not be derived from the ambient euid: an unprivileged authority is
+// now a validity rule, and deriving from the ambient identity made the whole
+// fixture invalid whenever the suite ran as root, as CI does.
+constexpr std::uint32_t kAuthorityUid = 1000U;
+constexpr std::uint32_t kAuthorityGid = 1000U;
+constexpr std::uint32_t kWorkerUid = 1001U;
+constexpr std::uint32_t kWorkerGid = 1001U;
+
 HostdDaemonConfigurationDocument document() {
-  const std::uint32_t uid = static_cast<std::uint32_t>(::geteuid());
-  const std::uint32_t gid = static_cast<std::uint32_t>(::getegid());
+  constexpr std::uint32_t uid = kAuthorityUid;
+  constexpr std::uint32_t gid = kAuthorityGid;
   return {
       .api_version = std::string(kHostdDaemonConfigurationApiVersion),
       .host_id = "host-daemon",
@@ -43,8 +53,8 @@ HostdDaemonConfigurationDocument document() {
       .broker_instance_id = "hostd-instance-daemon",
       .authority_uid = uid,
       .authority_gid = gid,
-      .worker_identity = {.uid = uid == 1000U ? 1001U : 1000U,
-                          .gid = gid == 1000U ? 1001U : 1000U,
+      .worker_identity = {.uid = kWorkerUid,
+                          .gid = kWorkerGid,
                           .no_new_privileges = true,
                           .inherit_authority_supplementary_groups =
                               std::nullopt},
