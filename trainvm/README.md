@@ -406,8 +406,8 @@ trainvm/build/trainvm inspect-rwkv-lab-worker \
 trainvm/build/trainvm inspect-registry "$PWD/experiments.db" \
   --task recall:16 --metric acc --baseline baseline --limit 20
 trainvm/build/trainvm serve --journal /tmp/trainvm.db --socket /tmp/trainvm.sock \
-  --registry /etc/trainvm/adapters.json \
-  --host-launch-registry /etc/trainvm/host-launches.json \
+  --registry /opt/trainvm/adapters.json \
+  --host-launch-registry /opt/trainvm/host-launches.json \
   --training-component-registry \
   "$PWD/docs/experiment-vm/examples/empty-training-components.json"
 trainvm/build/trainvm simulate \
