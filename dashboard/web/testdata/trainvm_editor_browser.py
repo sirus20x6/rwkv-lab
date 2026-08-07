@@ -181,9 +181,9 @@ def recipe_profile(name: str, version: str = "1") -> dict[str, object]:
 
 RECIPES = {
     "api_version": "trainvm.recipe-profiles/v1",
-    "default_registry_path": "/etc/trainvm/recipe-profiles.json",
+    "default_registry_path": "/opt/trainvm/recipe-profiles.json",
     "registry_digest": "sha256:" + "a" * 64,
-    "registry_path": "/etc/trainvm/recipe-profiles.json",
+    "registry_path": "/opt/trainvm/recipe-profiles.json",
     "recipes": [
         recipe_profile("hf_multimodal_sft"),
         recipe_profile("mageflow_flow_matching"),
@@ -419,7 +419,7 @@ def main() -> None:
                 )
                 exported = json.loads(page.locator("#vm-recipe-source").input_value())
                 assert exported["source"]["recipe"]["instance"]["recipe"]["name"] == family
-                assert exported["source"]["recipe"]["registry_path"] == "/etc/trainvm/recipe-profiles.json"
+                assert exported["source"]["recipe"]["registry_path"] == "/opt/trainvm/recipe-profiles.json"
                 assert exported["source"]["recipe"]["instance"]["overrides"]["model.path"] == model_path
                 assert exported["source"]["recipe"]["instance"]["overrides"]["data.manifest"] == manifest_path
                 assert "input_content" not in exported

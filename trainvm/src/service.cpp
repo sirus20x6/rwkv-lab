@@ -5685,7 +5685,8 @@ int serve(const std::filesystem::path& journal_path,
           AdapterRegistry adapter_registry,
           HostLaunchRegistry host_launch_registry,
           TrainingComponentRegistry training_components,
-          std::optional<HostdClientConfiguration> hostd_configuration) {
+          std::optional<HostdClientConfiguration> hostd_configuration,
+          std::filesystem::path recipe_registry_path) {
   if (journal_path.empty() || socket_path.empty()) {
     throw std::invalid_argument("serve requires journal and socket paths");
   }
@@ -5704,7 +5705,8 @@ int serve(const std::filesystem::path& journal_path,
                          std::move(training_components),
                          std::move(hostd_configuration),
                          "unix:" + absolute_socket.string(), nullptr,
-                         SqliteAuthorityEnforcementGrade::strict_filesystem);
+                         SqliteAuthorityEnforcementGrade::strict_filesystem, {},
+                         std::move(recipe_registry_path));
   SocketAuthorityLock socket_authority(absolute_socket);
   remove_stale_socket(absolute_socket);
   SocketCleanupGuard socket_cleanup(absolute_socket);

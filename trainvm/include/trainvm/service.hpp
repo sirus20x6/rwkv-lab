@@ -298,6 +298,8 @@ int serve(const std::filesystem::path& journal_path,
           TrainingComponentRegistry training_components =
               TrainingComponentRegistry({}),
           std::optional<HostdClientConfiguration> hostd_configuration =
-              std::nullopt);
+              std::nullopt,
+          std::filesystem::path recipe_registry_path =
+              std::filesystem::path(std::string(kInstalledRecipeProfilePath)));
 
 }  // namespace trainvm
