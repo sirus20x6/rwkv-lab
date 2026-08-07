@@ -196,10 +196,10 @@
                           "version": "2.0.0"
                         },
                         "configuration": {
-                          "learning_rate": 0.00002,
+                          "learning_rate": 2e-05,
                           "beta1": 0.9,
                           "beta2": 0.95,
-                          "epsilon": 1E-8,
+                          "epsilon": 1e-08,
                           "foreach": true,
                           "fused": false
                         }
@@ -649,7 +649,7 @@
           "type": "number",
           "target": "/spec/workflow/nodes/train/invoke/training/components/optimizer/configuration/learning_rate",
           "required": false,
-          "minimum": 1E-8,
+          "minimum": 1e-08,
           "maximum": 0.01
         },
         {
@@ -942,10 +942,10 @@
                           "version": "2.0.0"
                         },
                         "configuration": {
-                          "learning_rate": 0.00002,
+                          "learning_rate": 2e-05,
                           "beta1": 0.9,
                           "beta2": 0.95,
-                          "epsilon": 1E-8,
+                          "epsilon": 1e-08,
                           "foreach": false,
                           "fused": true
                         }
@@ -1397,7 +1397,7 @@
           "type": "number",
           "target": "/spec/workflow/nodes/train/invoke/training/components/optimizer/configuration/learning_rate",
           "required": false,
-          "minimum": 1E-8,
+          "minimum": 1e-08,
           "maximum": 0.01
         },
         {
@@ -1656,7 +1656,10 @@
                           "attention_implementation": "flash_attention_2",
                           "experts_implementation": "grouped_mm",
                           "quantization": "none",
-                          "exact_checkpoint": true
+                          "exact_checkpoint": true,
+                          "checkpoint_key_remap": [
+                            "model.language_model.visual.=>model.visual."
+                          ]
                         }
                       },
                       "trainability": {
@@ -1714,10 +1717,10 @@
                           "version": "2.0.0"
                         },
                         "configuration": {
-                          "learning_rate": 0.000005,
+                          "learning_rate": 5e-06,
                           "beta1": 0.9,
                           "beta2": 0.95,
-                          "epsilon": 1E-8,
+                          "epsilon": 1e-08,
                           "foreach": false,
                           "fused": true
                         }
@@ -2226,7 +2229,7 @@
           "type": "number",
           "target": "/spec/workflow/nodes/train/invoke/training/components/optimizer/configuration/learning_rate",
           "required": false,
-          "minimum": 1E-8,
+          "minimum": 1e-08,
           "maximum": 0.01
         },
         {
@@ -2312,7 +2315,7 @@
           "type": "number",
           "target": "/spec/workflow/nodes/train/invoke/training/components/objective/configuration/beta",
           "required": false,
-          "minimum": 1E-12,
+          "minimum": 1e-12,
           "maximum": 10.0
         },
         {
@@ -2339,7 +2342,7 @@
           "type": "number",
           "target": "/spec/workflow/nodes/train/invoke/training/components/objective/configuration/reference_drift_tolerance",
           "required": false,
-          "minimum": 1E-12,
+          "minimum": 1e-12,
           "maximum": 100.0
         }
       ],
