@@ -29,6 +29,23 @@ class HuggingFaceModelConfiguration:
     experts_implementation: str = "auto"
     quantization: str = "none"
     exact_checkpoint: bool = True
+    # Prefixes of checkpoint keys this configuration knowingly declines to load.
+    # A blanket exact_checkpoint gate can only be satisfied or switched off
+    # wholesale, so one genuinely ignorable family (an unused prediction head,
+    # say) pushes a deployment into switching the gate off entirely — and then
+    # an entire parameter family can go unbound without anything failing.
+    # Naming the exclusions keeps everything else fail-closed.
+    ignorable_unexpected_prefixes: tuple[str, ...] = ()
+    # Prefixes of model parameters that MUST be populated from the checkpoint.
+    # A family listed here that loses even one tensor fails the load by name,
+    # rather than contributing anonymous entries to a missing-key count.
+    required_tensor_families: tuple[str, ...] = ()
+    # Checkpoint-to-model weight renames, each "source=>target", for a
+    # checkpoint that matches a Transformers architecture but was not converted
+    # to its key layout. Declared here rather than inferred from the model path,
+    # so the remap is configuration a reader can see and a receipt can record
+    # instead of a special case hidden behind a name match.
+    checkpoint_key_remap: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         path = Path(self.model_path)
@@ -53,6 +70,29 @@ class HuggingFaceModelConfiguration:
             raise ValueError("unsupported experts implementation")
         if self.quantization not in {"none", "4bit", "8bit"}:
             raise ValueError("unsupported model quantization")
+        for prefixes, label in (
+            (self.ignorable_unexpected_prefixes, "ignorable unexpected"),
+            (self.required_tensor_families, "required tensor family"),
+        ):
+            if len(set(prefixes)) != len(prefixes):
+                raise ValueError(f"{label} prefixes must be unique")
+            if any(not prefix for prefix in prefixes):
+                raise ValueError(f"{label} prefixes must be non-empty")
+        sources: set[str] = set()
+        for entry in self.checkpoint_key_remap:
+            source, separator, target = entry.partition("=>")
+            if not separator or not source or not target:
+                raise ValueError(
+                    "checkpoint key remap entries must be 'source=>target'"
+                )
+            if source in sources:
+                raise ValueError("checkpoint key remap sources must be unique")
+            sources.add(source)
+
+    def remap_pairs(self) -> dict[str, str]:
+        return dict(
+            entry.split("=>", 1) for entry in self.checkpoint_key_remap
+        )
 
     @classmethod
     def from_resolved(cls, value: dict[str, Any]) -> HuggingFaceModelConfiguration:
@@ -65,11 +105,21 @@ class HuggingFaceModelConfiguration:
             "attention_implementation",
             "quantization",
             "exact_checkpoint",
+            "ignorable_unexpected_prefixes",
+            "required_tensor_families",
+            "checkpoint_key_remap",
         }
         v2 = {*v1, "experts_implementation"}
         if frozenset(value) not in {frozenset(v1), frozenset(v2)}:
             raise ValueError("resolved Hugging Face model configuration is inexact")
-        return cls(**value)
+        resolved = dict(value)
+        for field in (
+            "ignorable_unexpected_prefixes",
+            "required_tensor_families",
+            "checkpoint_key_remap",
+        ):
+            resolved[field] = tuple(resolved[field])
+        return cls(**resolved)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +135,15 @@ class ModelLoadReceipt:
     unexpected_keys: tuple[str, ...]
     mismatched_keys: tuple[str, ...]
     error_messages: tuple[str, ...]
+    # Checkpoint keys dropped under a declared exclusion, recorded so an
+    # exclusion is auditable evidence rather than an invisible allowance.
+    ignored_unexpected_keys: tuple[str, ...]
+    # Per required family: how many of the model's parameters in that family
+    # came from the checkpoint, out of how many the model has.
+    family_binding: tuple[tuple[str, int, int], ...]
+    # The checkpoint-to-model renames this load applied, so a receipt states
+    # which key layout the weights actually came from.
+    applied_key_remap: tuple[str, ...]
     exact: bool
 
     def canonical_dict(self) -> dict[str, Any]:
@@ -139,6 +198,11 @@ def _loading_arguments(configuration: HuggingFaceModelConfiguration) -> dict[str
         arguments["load_in_4bit"] = True
     elif configuration.quantization == "8bit":
         arguments["load_in_8bit"] = True
+    # Per-call, so a remap never leaks into another load through global
+    # conversion-mapping registry state.
+    remap = configuration.remap_pairs()
+    if remap:
+        arguments["key_mapping"] = remap
     return arguments
 
 
@@ -150,17 +214,46 @@ def _receipt(
     auxiliary: Any,
 ) -> ModelLoadReceipt:
     missing = tuple(sorted(loading_info.get("missing_keys", ())))
-    unexpected = tuple(sorted(loading_info.get("unexpected_keys", ())))
+    all_unexpected = tuple(sorted(loading_info.get("unexpected_keys", ())))
     mismatched = tuple(
         sorted(str(item) for item in loading_info.get("mismatched_keys", ()))
     )
     errors = tuple(str(item) for item in loading_info.get("error_msgs", ()))
+
+    ignored = tuple(
+        key
+        for key in all_unexpected
+        if key.startswith(configuration.ignorable_unexpected_prefixes)
+    )
+    unexpected = tuple(key for key in all_unexpected if key not in set(ignored))
+
+    # A family is source-bound only when every parameter the model declares
+    # under that prefix was populated from the checkpoint. Counting from the
+    # model's own state_dict means a family that is absent entirely — the
+    # checkpoint nesting it somewhere the class never looks — is a binding of
+    # zero rather than a silently satisfied constraint.
+    missing_set = set(missing)
+    binding: list[tuple[str, int, int]] = []
+    unbound: list[str] = []
+    for family in configuration.required_tensor_families:
+        declared = [key for key in model.state_dict() if key.startswith(family)]
+        bound = [key for key in declared if key not in missing_set]
+        binding.append((family, len(bound), len(declared)))
+        if not declared or len(bound) != len(declared):
+            unbound.append(f"{family} ({len(bound)}/{len(declared)} bound)")
+
     exact = not (missing or unexpected or mismatched or errors)
     if configuration.exact_checkpoint and not exact:
         raise RuntimeError(
             "Hugging Face checkpoint did not load exactly: "
-            f"{len(missing)} missing, {len(unexpected)} unexpected, "
+            f"{len(missing)} missing, {len(unexpected)} unexpected "
+            f"({len(ignored)} ignored by declaration), "
             f"{len(mismatched)} mismatched, {len(errors)} errors"
+        )
+    if unbound:
+        raise RuntimeError(
+            "required frozen base tensor families are not source-bound: "
+            + ", ".join(unbound)
         )
     return ModelLoadReceipt(
         implementation=implementation.value,
@@ -183,6 +276,9 @@ def _receipt(
         unexpected_keys=unexpected,
         mismatched_keys=mismatched,
         error_messages=errors,
+        ignored_unexpected_keys=ignored,
+        family_binding=tuple(binding),
+        applied_key_remap=configuration.checkpoint_key_remap,
         exact=exact,
     )
 

@@ -2,441 +2,1549 @@
   "api_version": "trainvm.training-components/v1",
   "components": [
     {
-      "key": {"category": "model_loader", "name": "hf_causal", "version": "1.0.0"},
+      "key": {
+        "category": "model_loader",
+        "name": "hf_causal",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.model_loader.hf_causal.v1",
-      "model_families": ["transformer"],
-      "required_capabilities": ["model_loader.hf_causal.v1"],
+      "model_families": [
+        "transformer"
+      ],
+      "required_capabilities": [
+        "model_loader.hf_causal.v1"
+      ],
       "configuration": [
-        {"name": "model_path", "type": "path", "required": true},
-        {"name": "checkpoint_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "revision", "type": "string", "required": false, "default": "main"},
-        {"name": "local_files_only", "type": "boolean", "required": false, "default": true},
-        {"name": "trust_remote_code", "type": "boolean", "required": false, "default": false},
-        {"name": "attention_implementation", "type": "enumeration", "required": false, "default": "sdpa", "values": ["eager", "flash_attention_2", "sdpa"]},
-        {"name": "quantization", "type": "enumeration", "required": false, "default": "none", "values": ["4bit", "8bit", "none"]},
-        {"name": "exact_checkpoint", "type": "boolean", "required": false, "default": true}
+        {
+          "name": "model_path",
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "checkpoint_fingerprint",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "revision",
+          "type": "string",
+          "required": false,
+          "default": "main"
+        },
+        {
+          "name": "local_files_only",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "trust_remote_code",
+          "type": "boolean",
+          "required": false,
+          "default": false
+        },
+        {
+          "name": "attention_implementation",
+          "type": "enumeration",
+          "required": false,
+          "default": "sdpa",
+          "values": [
+            "eager",
+            "flash_attention_2",
+            "sdpa"
+          ]
+        },
+        {
+          "name": "quantization",
+          "type": "enumeration",
+          "required": false,
+          "default": "none",
+          "values": [
+            "4bit",
+            "8bit",
+            "none"
+          ]
+        },
+        {
+          "name": "exact_checkpoint",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "ignorable_unexpected_prefixes",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "set"
+        },
+        {
+          "name": "required_tensor_families",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "set"
+        },
+        {
+          "name": "checkpoint_key_remap",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "ordered"
+        }
       ],
       "state": [
-        {"name": "base_checkpoint_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "load_receipt_digest", "type": "string", "required": true, "string_format": "sha256_digest"}
+        {
+          "name": "base_checkpoint_fingerprint",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "load_receipt_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        }
       ],
       "state_grade": "exact",
       "reference_implementation": true
     },
     {
-      "key": {"category": "model_loader", "name": "hf_multimodal", "version": "1.0.0"},
+      "key": {
+        "category": "model_loader",
+        "name": "hf_multimodal",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.model_loader.hf_multimodal.v1",
-      "model_families": ["transformer", "vision"],
-      "required_capabilities": ["model_loader.hf_multimodal.v1"],
+      "model_families": [
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "model_loader.hf_multimodal.v1"
+      ],
       "configuration": [
-        {"name": "model_path", "type": "path", "required": true},
-        {"name": "checkpoint_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "revision", "type": "string", "required": false, "default": "main"},
-        {"name": "local_files_only", "type": "boolean", "required": false, "default": true},
-        {"name": "trust_remote_code", "type": "boolean", "required": false, "default": false},
-        {"name": "attention_implementation", "type": "enumeration", "required": false, "default": "sdpa", "values": ["eager", "flash_attention_2", "sdpa"]},
-        {"name": "quantization", "type": "enumeration", "required": false, "default": "none", "values": ["4bit", "8bit", "none"]},
-        {"name": "exact_checkpoint", "type": "boolean", "required": false, "default": true}
+        {
+          "name": "model_path",
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "checkpoint_fingerprint",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "revision",
+          "type": "string",
+          "required": false,
+          "default": "main"
+        },
+        {
+          "name": "local_files_only",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "trust_remote_code",
+          "type": "boolean",
+          "required": false,
+          "default": false
+        },
+        {
+          "name": "attention_implementation",
+          "type": "enumeration",
+          "required": false,
+          "default": "sdpa",
+          "values": [
+            "eager",
+            "flash_attention_2",
+            "sdpa"
+          ]
+        },
+        {
+          "name": "quantization",
+          "type": "enumeration",
+          "required": false,
+          "default": "none",
+          "values": [
+            "4bit",
+            "8bit",
+            "none"
+          ]
+        },
+        {
+          "name": "exact_checkpoint",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "ignorable_unexpected_prefixes",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "set"
+        },
+        {
+          "name": "required_tensor_families",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "set"
+        },
+        {
+          "name": "checkpoint_key_remap",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "ordered"
+        }
       ],
       "state": [
-        {"name": "base_checkpoint_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "load_receipt_digest", "type": "string", "required": true, "string_format": "sha256_digest"}
+        {
+          "name": "base_checkpoint_fingerprint",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "load_receipt_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        }
       ],
       "state_grade": "exact",
       "reference_implementation": true
     },
     {
-      "key": {"category": "model_loader", "name": "hf_multimodal", "version": "2.0.0"},
+      "key": {
+        "category": "model_loader",
+        "name": "hf_multimodal",
+        "version": "2.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.model_loader.hf_multimodal.v2",
-      "model_families": ["transformer", "vision"],
-      "required_capabilities": ["model_loader.hf_multimodal.v2"],
+      "model_families": [
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "model_loader.hf_multimodal.v2"
+      ],
       "configuration": [
-        {"name": "model_path", "type": "path", "required": true},
-        {"name": "checkpoint_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "revision", "type": "string", "required": false, "default": "main"},
-        {"name": "local_files_only", "type": "boolean", "required": false, "default": true},
-        {"name": "trust_remote_code", "type": "boolean", "required": false, "default": false},
-        {"name": "attention_implementation", "type": "enumeration", "required": false, "default": "sdpa", "values": ["eager", "flash_attention_2", "sdpa"]},
-        {"name": "experts_implementation", "type": "enumeration", "required": false, "default": "auto", "values": ["auto", "grouped_mm"]},
-        {"name": "quantization", "type": "enumeration", "required": false, "default": "none", "values": ["4bit", "8bit", "none"]},
-        {"name": "exact_checkpoint", "type": "boolean", "required": false, "default": true}
+        {
+          "name": "model_path",
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "checkpoint_fingerprint",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "revision",
+          "type": "string",
+          "required": false,
+          "default": "main"
+        },
+        {
+          "name": "local_files_only",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "trust_remote_code",
+          "type": "boolean",
+          "required": false,
+          "default": false
+        },
+        {
+          "name": "attention_implementation",
+          "type": "enumeration",
+          "required": false,
+          "default": "sdpa",
+          "values": [
+            "eager",
+            "flash_attention_2",
+            "sdpa"
+          ]
+        },
+        {
+          "name": "experts_implementation",
+          "type": "enumeration",
+          "required": false,
+          "default": "auto",
+          "values": [
+            "auto",
+            "grouped_mm"
+          ]
+        },
+        {
+          "name": "quantization",
+          "type": "enumeration",
+          "required": false,
+          "default": "none",
+          "values": [
+            "4bit",
+            "8bit",
+            "none"
+          ]
+        },
+        {
+          "name": "exact_checkpoint",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "ignorable_unexpected_prefixes",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "set"
+        },
+        {
+          "name": "required_tensor_families",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "set"
+        },
+        {
+          "name": "checkpoint_key_remap",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "ordered"
+        }
       ],
       "state": [
-        {"name": "base_checkpoint_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "load_receipt_digest", "type": "string", "required": true, "string_format": "sha256_digest"}
+        {
+          "name": "base_checkpoint_fingerprint",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "load_receipt_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        }
       ],
       "state_grade": "exact",
       "reference_implementation": true
     },
     {
-      "key": {"category": "trainability", "name": "full", "version": "1.0.0"},
+      "key": {
+        "category": "trainability",
+        "name": "full",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.trainability.full.v1",
-      "model_families": ["transformer", "vision"],
-      "required_capabilities": ["trainability.full.v1"],
+      "model_families": [
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "trainability.full.v1"
+      ],
       "configuration": [],
-      "state": [{"name": "trainable_parameter_manifest", "type": "string", "required": true, "string_format": "sha256_digest"}],
+      "state": [
+        {
+          "name": "trainable_parameter_manifest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        }
+      ],
       "state_grade": "exact",
       "reference_implementation": true
     },
     {
-      "key": {"category": "trainability", "name": "frozen", "version": "1.0.0"},
+      "key": {
+        "category": "trainability",
+        "name": "frozen",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.trainability.frozen.v1",
-      "model_families": ["transformer", "vision"],
-      "required_capabilities": ["trainability.frozen.v1"],
+      "model_families": [
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "trainability.frozen.v1"
+      ],
       "configuration": [],
-      "state": [{"name": "trainable_parameter_manifest", "type": "string", "required": true, "string_format": "sha256_digest"}],
+      "state": [
+        {
+          "name": "trainable_parameter_manifest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        }
+      ],
       "state_grade": "exact",
       "reference_implementation": true
     },
     {
-      "key": {"category": "trainability", "name": "named_rules", "version": "1.0.0"},
+      "key": {
+        "category": "trainability",
+        "name": "named_rules",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.trainability.named_rules.v1",
-      "model_families": ["transformer", "vision"],
-      "required_capabilities": ["trainability.named_rules.v1"],
-      "configuration": [
-        {"name": "default_trainable", "type": "boolean", "required": false, "default": false},
-        {"name": "freeze_patterns", "type": "string_list", "required": false, "default": [], "collection_semantics": "set", "string_format": "parameter_selector"},
-        {"name": "unfreeze_patterns", "type": "string_list", "required": false, "default": [], "collection_semantics": "set", "string_format": "parameter_selector"}
+      "model_families": [
+        "transformer",
+        "vision"
       ],
-      "state": [{"name": "trainable_parameter_manifest", "type": "string", "required": true, "string_format": "sha256_digest"}],
+      "required_capabilities": [
+        "trainability.named_rules.v1"
+      ],
+      "configuration": [
+        {
+          "name": "default_trainable",
+          "type": "boolean",
+          "required": false,
+          "default": false
+        },
+        {
+          "name": "freeze_patterns",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "set",
+          "string_format": "parameter_selector"
+        },
+        {
+          "name": "unfreeze_patterns",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "set",
+          "string_format": "parameter_selector"
+        }
+      ],
+      "state": [
+        {
+          "name": "trainable_parameter_manifest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        }
+      ],
       "state_grade": "exact",
       "reference_implementation": true
     },
     {
-      "key": {"category": "trainability", "name": "lora", "version": "1.0.0"},
+      "key": {
+        "category": "trainability",
+        "name": "lora",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.trainability.lora.v1",
-      "model_families": ["transformer", "vision"],
-      "required_capabilities": ["trainability.lora.v1"],
+      "model_families": [
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "trainability.lora.v1"
+      ],
       "configuration": [
-        {"name": "rank", "type": "integer", "required": true, "minimum": 1, "maximum": 4096},
-        {"name": "alpha", "type": "integer", "required": true, "minimum": 1, "maximum": 65536},
-        {"name": "dropout", "type": "number", "required": false, "default": 0.0, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
-        {"name": "target_selectors", "type": "string_list", "required": true, "collection_semantics": "set", "string_format": "parameter_selector"},
-        {"name": "modules_to_save", "type": "string_list", "required": false, "default": [], "collection_semantics": "set", "string_format": "parameter_selector"},
-        {"name": "bias", "type": "enumeration", "required": false, "default": "none", "values": ["all", "lora_only", "none"]},
-        {"name": "merge_on_completion", "type": "boolean", "required": false, "default": false}
+        {
+          "name": "rank",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 4096
+        },
+        {
+          "name": "alpha",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 65536
+        },
+        {
+          "name": "dropout",
+          "type": "number",
+          "required": false,
+          "default": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.999999999999,
+          "unit": "ratio"
+        },
+        {
+          "name": "target_selectors",
+          "type": "string_list",
+          "required": true,
+          "collection_semantics": "set",
+          "string_format": "parameter_selector"
+        },
+        {
+          "name": "modules_to_save",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "set",
+          "string_format": "parameter_selector"
+        },
+        {
+          "name": "bias",
+          "type": "enumeration",
+          "required": false,
+          "default": "none",
+          "values": [
+            "all",
+            "lora_only",
+            "none"
+          ]
+        },
+        {
+          "name": "merge_on_completion",
+          "type": "boolean",
+          "required": false,
+          "default": false
+        }
       ],
       "state": [
-        {"name": "adapter_state_manifest", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "merged", "type": "boolean", "required": true},
-        {"name": "trainable_parameter_manifest", "type": "string", "required": true, "string_format": "sha256_digest"}
+        {
+          "name": "adapter_state_manifest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "merged",
+          "type": "boolean",
+          "required": true
+        },
+        {
+          "name": "trainable_parameter_manifest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        }
       ],
       "state_grade": "exact",
       "reference_implementation": true
     },
     {
-      "key": {"category": "trainability", "name": "lora_target_manifest", "version": "2.0.0"},
+      "key": {
+        "category": "trainability",
+        "name": "lora_target_manifest",
+        "version": "2.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.trainability.lora_target_manifest.v2",
-      "model_families": ["transformer", "vision"],
-      "required_capabilities": ["trainability.lora_target_manifest.v2"],
+      "model_families": [
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "trainability.lora_target_manifest.v2"
+      ],
       "configuration": [
-        {"name": "rank", "type": "integer", "required": true, "minimum": 1, "maximum": 4096},
-        {"name": "alpha", "type": "integer", "required": true, "minimum": 1, "maximum": 65536},
-        {"name": "dropout", "type": "number", "required": false, "default": 0.0, "minimum": 0.0, "maximum": 0.999999},
-        {"name": "target_manifest_path", "type": "path", "required": true},
-        {"name": "manifest_schema", "type": "string", "required": true},
-        {"name": "required_policy_digest", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "bias", "type": "enumeration", "required": false, "default": "none", "values": ["all", "lora_only", "none"]},
-        {"name": "merge_on_completion", "type": "boolean", "required": false, "default": false}
+        {
+          "name": "rank",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 4096
+        },
+        {
+          "name": "alpha",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 65536
+        },
+        {
+          "name": "dropout",
+          "type": "number",
+          "required": false,
+          "default": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.999999
+        },
+        {
+          "name": "target_manifest_path",
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "manifest_schema",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "required_policy_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "bias",
+          "type": "enumeration",
+          "required": false,
+          "default": "none",
+          "values": [
+            "all",
+            "lora_only",
+            "none"
+          ]
+        },
+        {
+          "name": "merge_on_completion",
+          "type": "boolean",
+          "required": false,
+          "default": false
+        }
       ],
       "state": [
-        {"name": "adapter_state_manifest", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "merged", "type": "boolean", "required": true},
-        {"name": "trainable_parameter_manifest", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "target_manifest_file_digest", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "producer_target_digest", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "producer_digest_status", "type": "string", "required": true},
-        {"name": "target_policy_digest", "type": "string", "required": true, "string_format": "sha256_digest"}
+        {
+          "name": "adapter_state_manifest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "merged",
+          "type": "boolean",
+          "required": true
+        },
+        {
+          "name": "trainable_parameter_manifest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "target_manifest_file_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "producer_target_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "producer_digest_status",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "target_policy_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        }
       ],
       "state_grade": "exact",
       "reference_implementation": true
     },
     {
-      "key": {"category": "activation_memory", "name": "hf_gradient_checkpointing", "version": "1.0.0"},
+      "key": {
+        "category": "activation_memory",
+        "name": "hf_gradient_checkpointing",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.activation_memory.hf_gradient_checkpointing.v1",
-      "model_families": ["transformer", "vision"],
-      "required_capabilities": ["activation_memory.hf_gradient_checkpointing.v1"],
+      "model_families": [
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "activation_memory.hf_gradient_checkpointing.v1"
+      ],
       "configuration": [
-        {"name": "use_reentrant", "type": "boolean", "required": false, "default": false}
+        {
+          "name": "use_reentrant",
+          "type": "boolean",
+          "required": false,
+          "default": false
+        }
       ],
       "state": [
-        {"name": "enabled", "type": "boolean", "required": true},
-        {"name": "use_reentrant", "type": "boolean", "required": true}
+        {
+          "name": "enabled",
+          "type": "boolean",
+          "required": true
+        },
+        {
+          "name": "use_reentrant",
+          "type": "boolean",
+          "required": true
+        }
       ],
       "state_grade": "exact",
       "reference_implementation": true
     },
     {
-      "key": {"category": "data_source", "name": "jsonl_image_caption", "version": "1.0.0"},
+      "key": {
+        "category": "data_source",
+        "name": "jsonl_image_caption",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.data_source.jsonl_image_caption.v1",
-      "model_families": ["mageflow", "transformer", "vision"],
-      "required_capabilities": ["data_source.jsonl_image_caption.v1"],
+      "model_families": [
+        "mageflow",
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "data_source.jsonl_image_caption.v1"
+      ],
       "configuration": [
-        {"name": "manifest_path", "type": "path", "required": true},
-        {"name": "image_root", "type": "path", "required": true},
-        {"name": "content_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "declared_columns", "type": "string_list", "required": true, "collection_semantics": "set"},
-        {"name": "image_column", "type": "string", "required": true},
-        {"name": "caption_columns", "type": "string_list", "required": true, "collection_semantics": "ordered"},
-        {"name": "id_column", "type": "string", "required": false, "default": ""}
+        {
+          "name": "manifest_path",
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "image_root",
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "content_fingerprint",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "declared_columns",
+          "type": "string_list",
+          "required": true,
+          "collection_semantics": "set"
+        },
+        {
+          "name": "image_column",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "caption_columns",
+          "type": "string_list",
+          "required": true,
+          "collection_semantics": "ordered"
+        },
+        {
+          "name": "id_column",
+          "type": "string",
+          "required": false,
+          "default": ""
+        }
       ],
       "state": [
-        {"name": "content_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "cursor", "type": "integer", "required": true}
+        {
+          "name": "content_fingerprint",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "cursor",
+          "type": "integer",
+          "required": true
+        }
       ],
       "state_grade": "exact",
       "reference_implementation": true
     },
     {
-      "key": {"category": "data_source", "name": "manifested_jsonl_image_splits", "version": "1.0.0"},
+      "key": {
+        "category": "data_source",
+        "name": "manifested_jsonl_image_splits",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.data_source.jsonl_frozen_image_splits.v1",
-      "model_families": ["transformer", "vision"],
-      "required_capabilities": ["data_source.jsonl_frozen_image_splits.v1"],
+      "model_families": [
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "data_source.jsonl_frozen_image_splits.v1"
+      ],
       "configuration": [
-        {"name": "dataset_root", "type": "path", "required": true},
-        {"name": "content_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "declared_columns", "type": "string_list", "required": true, "collection_semantics": "set"},
-        {"name": "image_column", "type": "string", "required": true},
-        {"name": "caption_columns", "type": "string_list", "required": true, "collection_semantics": "ordered"},
-        {"name": "id_column", "type": "string", "required": true}
+        {
+          "name": "dataset_root",
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "content_fingerprint",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "declared_columns",
+          "type": "string_list",
+          "required": true,
+          "collection_semantics": "set"
+        },
+        {
+          "name": "image_column",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "caption_columns",
+          "type": "string_list",
+          "required": true,
+          "collection_semantics": "ordered"
+        },
+        {
+          "name": "id_column",
+          "type": "string",
+          "required": true
+        }
       ],
       "state": [
-        {"name": "content_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "cursor", "type": "integer", "required": true}
+        {
+          "name": "content_fingerprint",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "cursor",
+          "type": "integer",
+          "required": true
+        }
       ],
       "state_grade": "exact",
       "reference_implementation": true
     },
     {
-      "key": {"category": "data_source", "name": "jsonl_token_corpus", "version": "1.0.0"},
+      "key": {
+        "category": "data_source",
+        "name": "jsonl_token_corpus",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.data_source.jsonl_token_corpus.v1",
-      "model_families": ["rwkv", "transformer"],
-      "required_capabilities": ["data_source.jsonl_token_corpus.v1"],
+      "model_families": [
+        "rwkv",
+        "transformer"
+      ],
+      "required_capabilities": [
+        "data_source.jsonl_token_corpus.v1"
+      ],
       "configuration": [
-        {"name": "manifest_path", "type": "path", "required": true},
-        {"name": "content_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "declared_columns", "type": "string_list", "required": true, "collection_semantics": "set"},
-        {"name": "token_column", "type": "string", "required": true},
-        {"name": "id_column", "type": "string", "required": false, "default": ""}
+        {
+          "name": "manifest_path",
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "content_fingerprint",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "declared_columns",
+          "type": "string_list",
+          "required": true,
+          "collection_semantics": "set"
+        },
+        {
+          "name": "token_column",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "id_column",
+          "type": "string",
+          "required": false,
+          "default": ""
+        }
       ],
       "state": [
-        {"name": "content_fingerprint", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "cursor", "type": "integer", "required": true}
+        {
+          "name": "content_fingerprint",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "cursor",
+          "type": "integer",
+          "required": true
+        }
       ],
       "state_grade": "exact",
       "reference_implementation": true
     },
     {
-      "key": {"category": "sample_processor", "name": "image_caption", "version": "1.0.0"},
+      "key": {
+        "category": "sample_processor",
+        "name": "image_caption",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.sample_processor.image_caption.v1",
-      "model_families": ["mageflow", "transformer", "vision"],
-      "required_capabilities": ["sample_processor.image_caption.v1"],
+      "model_families": [
+        "mageflow",
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "sample_processor.image_caption.v1"
+      ],
       "configuration": [
-        {"name": "image_column", "type": "string", "required": true},
-        {"name": "caption_columns", "type": "string_list", "required": true, "collection_semantics": "ordered"},
-        {"name": "minimum_pixels", "type": "integer", "required": false, "default": 1024, "minimum": 1, "maximum": 268435456, "unit": "pixels"},
-        {"name": "maximum_pixels", "type": "integer", "required": true, "minimum": 1, "maximum": 268435456, "unit": "pixels"},
-        {"name": "maximum_edge", "type": "integer", "required": true, "minimum": 1, "maximum": 65536, "unit": "pixels"},
-        {"name": "oversize_policy", "type": "enumeration", "required": false, "default": "reject", "values": ["downscale", "reject"]}
+        {
+          "name": "image_column",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "caption_columns",
+          "type": "string_list",
+          "required": true,
+          "collection_semantics": "ordered"
+        },
+        {
+          "name": "minimum_pixels",
+          "type": "integer",
+          "required": false,
+          "default": 1024,
+          "minimum": 1,
+          "maximum": 268435456,
+          "unit": "pixels"
+        },
+        {
+          "name": "maximum_pixels",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 268435456,
+          "unit": "pixels"
+        },
+        {
+          "name": "maximum_edge",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 65536,
+          "unit": "pixels"
+        },
+        {
+          "name": "oversize_policy",
+          "type": "enumeration",
+          "required": false,
+          "default": "reject",
+          "values": [
+            "downscale",
+            "reject"
+          ]
+        }
       ],
       "state": [],
       "state_grade": "stateless",
       "reference_implementation": true
     },
     {
-      "key": {"category": "sample_processor", "name": "token_ids", "version": "1.0.0"},
+      "key": {
+        "category": "sample_processor",
+        "name": "token_ids",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.sample_processor.token_ids.v1",
-      "model_families": ["rwkv", "transformer"],
-      "required_capabilities": ["sample_processor.token_ids.v1"],
+      "model_families": [
+        "rwkv",
+        "transformer"
+      ],
+      "required_capabilities": [
+        "sample_processor.token_ids.v1"
+      ],
       "configuration": [
-        {"name": "token_column", "type": "string", "required": true},
-        {"name": "minimum_tokens", "type": "integer", "required": false, "default": 1, "minimum": 1, "maximum": 1048576, "unit": "tokens"},
-        {"name": "maximum_tokens", "type": "integer", "required": true, "minimum": 1, "maximum": 1048576, "unit": "tokens"},
-        {"name": "vocabulary_size", "type": "integer", "required": true, "minimum": 2, "maximum": 16777216, "unit": "tokens"}
+        {
+          "name": "token_column",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "minimum_tokens",
+          "type": "integer",
+          "required": false,
+          "default": 1,
+          "minimum": 1,
+          "maximum": 1048576,
+          "unit": "tokens"
+        },
+        {
+          "name": "maximum_tokens",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1048576,
+          "unit": "tokens"
+        },
+        {
+          "name": "vocabulary_size",
+          "type": "integer",
+          "required": true,
+          "minimum": 2,
+          "maximum": 16777216,
+          "unit": "tokens"
+        }
       ],
       "state": [],
       "state_grade": "stateless",
       "reference_implementation": true
     },
     {
-      "key": {"category": "sample_mapper", "name": "assistant_only", "version": "1.0.0"},
+      "key": {
+        "category": "sample_mapper",
+        "name": "assistant_only",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.sample_mapper.assistant_only.v1",
-      "model_families": ["transformer", "vision"],
-      "required_capabilities": ["sample_mapper.assistant_only.v1"],
+      "model_families": [
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "sample_mapper.assistant_only.v1"
+      ],
       "configuration": [
-        {"name": "prompt_column", "type": "string", "required": false, "default": ""},
-        {"name": "fixed_prompt", "type": "string", "required": false, "default": ""},
-        {"name": "target_column", "type": "string", "required": true},
-        {"name": "maximum_tokens", "type": "integer", "required": true, "minimum": 1, "maximum": 1048576, "unit": "tokens"},
-        {"name": "append_eos", "type": "boolean", "required": false, "default": true}
+        {
+          "name": "prompt_column",
+          "type": "string",
+          "required": false,
+          "default": ""
+        },
+        {
+          "name": "fixed_prompt",
+          "type": "string",
+          "required": false,
+          "default": ""
+        },
+        {
+          "name": "target_column",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "maximum_tokens",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1048576,
+          "unit": "tokens"
+        },
+        {
+          "name": "append_eos",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        }
       ],
       "state": [],
       "state_grade": "stateless",
       "reference_implementation": true
     },
     {
-      "key": {"category": "sample_mapper", "name": "assistant_conversation", "version": "2.0.0"},
+      "key": {
+        "category": "sample_mapper",
+        "name": "assistant_conversation",
+        "version": "2.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.sample_mapper.assistant_conversation.v2",
-      "model_families": ["transformer", "vision"],
-      "required_capabilities": ["sample_mapper.assistant_conversation.v2"],
+      "model_families": [
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "sample_mapper.assistant_conversation.v2"
+      ],
       "configuration": [
-        {"name": "system_prompt", "type": "string", "required": true},
-        {"name": "user_prompt", "type": "string", "required": true},
-        {"name": "target_column", "type": "string", "required": true},
-        {"name": "maximum_tokens", "type": "integer", "required": true, "minimum": 1, "maximum": 1048576, "unit": "tokens"},
-        {"name": "append_eos", "type": "boolean", "required": false, "default": true}
+        {
+          "name": "system_prompt",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "user_prompt",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "target_column",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "maximum_tokens",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1048576,
+          "unit": "tokens"
+        },
+        {
+          "name": "append_eos",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        }
       ],
       "state": [],
       "state_grade": "stateless",
       "reference_implementation": true
     },
     {
-      "key": {"category": "sample_mapper", "name": "assistant_conversation", "version": "3.0.0"},
+      "key": {
+        "category": "sample_mapper",
+        "name": "assistant_conversation",
+        "version": "3.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.sample_mapper.assistant_conversation.v3",
-      "model_families": ["transformer", "vision"],
-      "required_capabilities": ["sample_mapper.assistant_conversation.v3"],
+      "model_families": [
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "sample_mapper.assistant_conversation.v3"
+      ],
       "configuration": [
-        {"name": "system_prompt", "type": "string", "required": true},
-        {"name": "user_prompt", "type": "string", "required": true},
-        {"name": "target_column", "type": "string", "required": true},
-        {"name": "maximum_tokens", "type": "integer", "required": true, "minimum": 1, "maximum": 1048576, "unit": "tokens"},
-        {"name": "append_eos", "type": "boolean", "required": false, "default": true},
-        {"name": "enable_thinking", "type": "boolean", "required": true},
-        {"name": "maximum_trailing_tokens_after_eos", "type": "integer", "required": true, "minimum": 0, "maximum": 16, "unit": "tokens"}
+        {
+          "name": "system_prompt",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "user_prompt",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "target_column",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "maximum_tokens",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1048576,
+          "unit": "tokens"
+        },
+        {
+          "name": "append_eos",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "enable_thinking",
+          "type": "boolean",
+          "required": true
+        },
+        {
+          "name": "maximum_trailing_tokens_after_eos",
+          "type": "integer",
+          "required": true,
+          "minimum": 0,
+          "maximum": 16,
+          "unit": "tokens"
+        }
       ],
       "state": [],
       "state_grade": "stateless",
       "reference_implementation": true
     },
     {
-      "key": {"category": "sample_mapper", "name": "causal_tokens", "version": "1.0.0"},
+      "key": {
+        "category": "sample_mapper",
+        "name": "causal_tokens",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.sample_mapper.causal_tokens.v1",
-      "model_families": ["rwkv", "transformer"],
-      "required_capabilities": ["sample_mapper.causal_tokens.v1"],
+      "model_families": [
+        "rwkv",
+        "transformer"
+      ],
+      "required_capabilities": [
+        "sample_mapper.causal_tokens.v1"
+      ],
       "configuration": [
-        {"name": "token_column", "type": "string", "required": true},
-        {"name": "maximum_tokens", "type": "integer", "required": true, "minimum": 1, "maximum": 1048576, "unit": "tokens"}
+        {
+          "name": "token_column",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "maximum_tokens",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1048576,
+          "unit": "tokens"
+        }
       ],
       "state": [],
       "state_grade": "stateless",
       "reference_implementation": true
     },
     {
-      "key": {"category": "collator", "name": "padded", "version": "1.0.0"},
+      "key": {
+        "category": "collator",
+        "name": "padded",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.collator.padded.v1",
-      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
-      "required_capabilities": ["collator.padded.v1"],
+      "model_families": [
+        "mageflow",
+        "rwkv",
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "collator.padded.v1"
+      ],
       "configuration": [
-        {"name": "pad_token_id", "type": "integer", "required": true, "minimum": 0, "maximum": 16777215},
-        {"name": "label_pad_token_id", "type": "integer", "required": false, "default": -100, "minimum": -1000000, "maximum": 16777215},
-        {"name": "pad_to_multiple", "type": "integer", "required": false, "default": 1, "minimum": 1, "maximum": 4096},
-        {"name": "maximum_sequence_length", "type": "integer", "required": true, "minimum": 1, "maximum": 1048576, "unit": "tokens"}
+        {
+          "name": "pad_token_id",
+          "type": "integer",
+          "required": true,
+          "minimum": 0,
+          "maximum": 16777215
+        },
+        {
+          "name": "label_pad_token_id",
+          "type": "integer",
+          "required": false,
+          "default": -100,
+          "minimum": -1000000,
+          "maximum": 16777215
+        },
+        {
+          "name": "pad_to_multiple",
+          "type": "integer",
+          "required": false,
+          "default": 1,
+          "minimum": 1,
+          "maximum": 4096
+        },
+        {
+          "name": "maximum_sequence_length",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1048576,
+          "unit": "tokens"
+        }
       ],
       "state": [],
       "state_grade": "stateless",
       "reference_implementation": true
     },
     {
-      "key": {"category": "sampler", "name": "deterministic", "version": "1.0.0"},
+      "key": {
+        "category": "sampler",
+        "name": "deterministic",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.sampler.deterministic.v1",
-      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
-      "required_capabilities": ["sampler.deterministic.v1"],
+      "model_families": [
+        "mageflow",
+        "rwkv",
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "sampler.deterministic.v1"
+      ],
       "configuration": [
-        {"name": "seed", "type": "integer", "required": true, "minimum": 0, "maximum": 9223372036854775807},
-        {"name": "shuffle", "type": "boolean", "required": false, "default": true}
+        {
+          "name": "seed",
+          "type": "integer",
+          "required": true,
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        {
+          "name": "shuffle",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        }
       ],
       "state": [
-        {"name": "cursor", "type": "integer", "required": true},
-        {"name": "epoch", "type": "integer", "required": true},
-        {"name": "order_digest", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "rng_state_digest", "type": "string", "required": true, "string_format": "sha256_digest"}
+        {
+          "name": "cursor",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "epoch",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "order_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "rng_state_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        }
       ],
       "state_grade": "exact",
       "reference_implementation": true
     },
     {
-      "key": {"category": "batching", "name": "fixed", "version": "1.0.0"},
+      "key": {
+        "category": "batching",
+        "name": "fixed",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.batching.fixed.v1",
-      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
-      "required_capabilities": ["batching.fixed.v1"],
+      "model_families": [
+        "mageflow",
+        "rwkv",
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "batching.fixed.v1"
+      ],
       "configuration": [
-        {"name": "batch_size", "type": "integer", "required": true, "minimum": 1, "maximum": 257, "unit": "samples"},
-        {"name": "drop_last", "type": "boolean", "required": false, "default": false},
-        {"name": "prefetch_workers", "type": "integer", "required": false, "default": 0, "minimum": 0, "maximum": 1024, "unit": "workers"}
+        {
+          "name": "batch_size",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 257,
+          "unit": "samples"
+        },
+        {
+          "name": "drop_last",
+          "type": "boolean",
+          "required": false,
+          "default": false
+        },
+        {
+          "name": "prefetch_workers",
+          "type": "integer",
+          "required": false,
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1024,
+          "unit": "workers"
+        }
       ],
       "state": [
-        {"name": "batches_emitted", "type": "integer", "required": true},
-        {"name": "pending_sample_ids", "type": "string_list", "required": true, "collection_semantics": "ordered"},
-        {"name": "bucket_assignment_digest", "type": "string", "required": true, "string_format": "sha256_digest"}
+        {
+          "name": "batches_emitted",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "pending_sample_ids",
+          "type": "string_list",
+          "required": true,
+          "collection_semantics": "ordered"
+        },
+        {
+          "name": "bucket_assignment_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        }
       ],
       "state_grade": "exact",
       "reference_implementation": true
     },
     {
-      "key": {"category": "batching", "name": "bucketed", "version": "1.0.0"},
+      "key": {
+        "category": "batching",
+        "name": "bucketed",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.batching.bucketed.v1",
-      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
-      "required_capabilities": ["batching.bucketed.v1"],
+      "model_families": [
+        "mageflow",
+        "rwkv",
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "batching.bucketed.v1"
+      ],
       "configuration": [
-        {"name": "bucket_by", "type": "enumeration", "required": true, "values": ["image_area", "token_length"]},
-        {"name": "bucket_boundaries", "type": "string_list", "required": true, "collection_semantics": "ordered"},
-        {"name": "batch_sizes", "type": "string_list", "required": true, "collection_semantics": "ordered"},
-        {"name": "drop_last", "type": "boolean", "required": false, "default": false},
-        {"name": "prefetch_workers", "type": "integer", "required": false, "default": 0, "minimum": 0, "maximum": 1024, "unit": "workers"}
+        {
+          "name": "bucket_by",
+          "type": "enumeration",
+          "required": true,
+          "values": [
+            "image_area",
+            "token_length"
+          ]
+        },
+        {
+          "name": "bucket_boundaries",
+          "type": "string_list",
+          "required": true,
+          "collection_semantics": "ordered"
+        },
+        {
+          "name": "batch_sizes",
+          "type": "string_list",
+          "required": true,
+          "collection_semantics": "ordered"
+        },
+        {
+          "name": "drop_last",
+          "type": "boolean",
+          "required": false,
+          "default": false
+        },
+        {
+          "name": "prefetch_workers",
+          "type": "integer",
+          "required": false,
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1024,
+          "unit": "workers"
+        }
       ],
       "state": [
-        {"name": "batches_emitted", "type": "integer", "required": true},
-        {"name": "pending_sample_ids", "type": "string_list", "required": true, "collection_semantics": "ordered"},
-        {"name": "bucket_assignment_digest", "type": "string", "required": true, "string_format": "sha256_digest"}
+        {
+          "name": "batches_emitted",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "pending_sample_ids",
+          "type": "string_list",
+          "required": true,
+          "collection_semantics": "ordered"
+        },
+        {
+          "name": "bucket_assignment_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        }
       ],
       "state_grade": "exact",
       "reference_implementation": true
     },
     {
-      "key": {"category": "split_selector", "name": "deterministic_holdout", "version": "1.0.0"},
+      "key": {
+        "category": "split_selector",
+        "name": "deterministic_holdout",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.split_selector.deterministic_holdout.v1",
-      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
-      "required_capabilities": ["split_selector.deterministic_holdout.v1"],
+      "model_families": [
+        "mageflow",
+        "rwkv",
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "split_selector.deterministic_holdout.v1"
+      ],
       "configuration": [
-        {"name": "seed", "type": "integer", "required": true, "minimum": 0, "maximum": 9223372036854775807},
-        {"name": "held_out_count", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000000, "unit": "samples"},
-        {"name": "selection", "type": "enumeration", "required": false, "default": "train", "values": ["held_out", "train"]}
+        {
+          "name": "seed",
+          "type": "integer",
+          "required": true,
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        {
+          "name": "held_out_count",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1000000000,
+          "unit": "samples"
+        },
+        {
+          "name": "selection",
+          "type": "enumeration",
+          "required": false,
+          "default": "train",
+          "values": [
+            "held_out",
+            "train"
+          ]
+        }
       ],
       "state": [],
       "state_grade": "stateless",
       "reference_implementation": true
     },
     {
-      "key": {"category": "split_selector", "name": "frozen_named", "version": "1.0.0"},
+      "key": {
+        "category": "split_selector",
+        "name": "frozen_named",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.split_selector.frozen_named.v1",
-      "model_families": ["transformer", "vision"],
-      "required_capabilities": ["split_selector.frozen_named.v1"],
+      "model_families": [
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "split_selector.frozen_named.v1"
+      ],
       "configuration": [
-        {"name": "selection", "type": "enumeration", "required": true, "values": ["test", "train", "validation"]}
+        {
+          "name": "selection",
+          "type": "enumeration",
+          "required": true,
+          "values": [
+            "test",
+            "train",
+            "validation"
+          ]
+        }
       ],
       "state": [],
       "state_grade": "stateless",
@@ -450,8 +1558,12 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.activation.squared_relu.v1",
-      "model_families": ["rwkv"],
-      "required_capabilities": ["activation.squared_relu.v1"],
+      "model_families": [
+        "rwkv"
+      ],
+      "required_capabilities": [
+        "activation.squared_relu.v1"
+      ],
       "configuration": [],
       "state": [],
       "state_grade": "stateless",
@@ -465,8 +1577,12 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.activation.silu.v1",
-      "model_families": ["rwkv"],
-      "required_capabilities": ["activation.silu.v1"],
+      "model_families": [
+        "rwkv"
+      ],
+      "required_capabilities": [
+        "activation.silu.v1"
+      ],
       "configuration": [],
       "state": [],
       "state_grade": "stateless",
@@ -480,10 +1596,24 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.gradient_accumulation.fixed.v1",
-      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
-      "required_capabilities": ["gradient_accumulation.fixed.v1"],
+      "model_families": [
+        "mageflow",
+        "rwkv",
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "gradient_accumulation.fixed.v1"
+      ],
       "configuration": [
-        {"name": "microbatches_per_optimizer_step", "type": "integer", "required": true, "minimum": 1, "maximum": 65536, "unit": "count"}
+        {
+          "name": "microbatches_per_optimizer_step",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 65536,
+          "unit": "count"
+        }
       ],
       "state": [],
       "step_domain": "microbatch",
@@ -498,12 +1628,35 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.curriculum.context_length.v1",
-      "model_families": ["rwkv"],
-      "required_capabilities": ["curriculum.context_length.v1"],
+      "model_families": [
+        "rwkv"
+      ],
+      "required_capabilities": [
+        "curriculum.context_length.v1"
+      ],
       "configuration": [
-        {"name": "maximum_sequence_length", "type": "integer", "required": true, "minimum": 1, "maximum": 1048576, "unit": "tokens"},
-        {"name": "base_batch_size", "type": "integer", "required": true, "minimum": 1, "maximum": 1048576, "unit": "samples"},
-        {"name": "stages", "type": "string", "required": false, "default": ""}
+        {
+          "name": "maximum_sequence_length",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1048576,
+          "unit": "tokens"
+        },
+        {
+          "name": "base_batch_size",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1048576,
+          "unit": "samples"
+        },
+        {
+          "name": "stages",
+          "type": "string",
+          "required": false,
+          "default": ""
+        }
       ],
       "state": [],
       "step_domain": "optimizer_step",
@@ -518,12 +1671,39 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.gradient_clipping.global_norm.v1",
-      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
-      "required_capabilities": ["gradient_clipping.global_norm.v1"],
+      "model_families": [
+        "mageflow",
+        "rwkv",
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "gradient_clipping.global_norm.v1"
+      ],
       "configuration": [
-        {"name": "max_norm", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1000000000000.0, "unit": "ratio"},
-        {"name": "norm_type", "type": "number", "required": false, "default": 2.0, "minimum": 1e-12, "maximum": 1000000000000.0, "unit": "ratio"},
-        {"name": "error_if_nonfinite", "type": "boolean", "required": false, "default": false}
+        {
+          "name": "max_norm",
+          "type": "number",
+          "required": true,
+          "minimum": 1e-12,
+          "maximum": 1000000000000.0,
+          "unit": "ratio"
+        },
+        {
+          "name": "norm_type",
+          "type": "number",
+          "required": false,
+          "default": 2.0,
+          "minimum": 1e-12,
+          "maximum": 1000000000000.0,
+          "unit": "ratio"
+        },
+        {
+          "name": "error_if_nonfinite",
+          "type": "boolean",
+          "required": false,
+          "default": false
+        }
       ],
       "state": [],
       "state_grade": "stateless",
@@ -537,10 +1717,22 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.normalization.layer_norm.v1",
-      "model_families": ["rwkv"],
-      "required_capabilities": ["normalization.layer_norm.v1"],
+      "model_families": [
+        "rwkv"
+      ],
+      "required_capabilities": [
+        "normalization.layer_norm.v1"
+      ],
       "configuration": [
-        {"name": "epsilon", "type": "number", "required": false, "default": 1e-5, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"}
+        {
+          "name": "epsilon",
+          "type": "number",
+          "required": false,
+          "default": 1e-05,
+          "minimum": 1e-12,
+          "maximum": 1.0,
+          "unit": "ratio"
+        }
       ],
       "state": [],
       "state_grade": "stateless",
@@ -554,10 +1746,22 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.parameter_router.mageflow_appearance_expert.v1",
-      "model_families": ["mageflow"],
-      "required_capabilities": ["parameter_router.mageflow_appearance_expert.v1"],
+      "model_families": [
+        "mageflow"
+      ],
+      "required_capabilities": [
+        "parameter_router.mageflow_appearance_expert.v1"
+      ],
       "configuration": [
-        {"name": "shared_backbone_multiplier", "type": "number", "required": false, "default": 0.5, "minimum": 1e-12, "maximum": 1000.0, "unit": "ratio"}
+        {
+          "name": "shared_backbone_multiplier",
+          "type": "number",
+          "required": false,
+          "default": 0.5,
+          "minimum": 1e-12,
+          "maximum": 1000.0,
+          "unit": "ratio"
+        }
       ],
       "state": [],
       "state_grade": "stateless",
@@ -571,8 +1775,12 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.parameter_router.mageflow_full_backbone.v1",
-      "model_families": ["mageflow"],
-      "required_capabilities": ["parameter_router.mageflow_full_backbone.v1"],
+      "model_families": [
+        "mageflow"
+      ],
+      "required_capabilities": [
+        "parameter_router.mageflow_full_backbone.v1"
+      ],
       "configuration": [],
       "state": [],
       "state_grade": "stateless",
@@ -586,11 +1794,31 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.parameter_router.mageflow_terminal_expert.v1",
-      "model_families": ["mageflow"],
-      "required_capabilities": ["parameter_router.mageflow_terminal_expert.v1"],
+      "model_families": [
+        "mageflow"
+      ],
+      "required_capabilities": [
+        "parameter_router.mageflow_terminal_expert.v1"
+      ],
       "configuration": [
-        {"name": "shared_backbone_multiplier", "type": "number", "required": false, "default": 0.5, "minimum": 1e-12, "maximum": 1000.0, "unit": "ratio"},
-        {"name": "repa_projection_multiplier", "type": "number", "required": false, "default": 1.0, "minimum": 1e-12, "maximum": 1000.0, "unit": "ratio"}
+        {
+          "name": "shared_backbone_multiplier",
+          "type": "number",
+          "required": false,
+          "default": 0.5,
+          "minimum": 1e-12,
+          "maximum": 1000.0,
+          "unit": "ratio"
+        },
+        {
+          "name": "repa_projection_multiplier",
+          "type": "number",
+          "required": false,
+          "default": 1.0,
+          "minimum": 1e-12,
+          "maximum": 1000.0,
+          "unit": "ratio"
+        }
       ],
       "state": [],
       "state_grade": "stateless",
@@ -604,11 +1832,29 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.objective.linear_head_cross_entropy.v1",
-      "model_families": ["rwkv", "transformer"],
-      "required_capabilities": ["objective.linear_head_cross_entropy.v1"],
+      "model_families": [
+        "rwkv",
+        "transformer"
+      ],
+      "required_capabilities": [
+        "objective.linear_head_cross_entropy.v1"
+      ],
       "configuration": [
-        {"name": "chunk_size", "type": "integer", "required": false, "default": 2048, "minimum": 1, "maximum": 1048576, "unit": "count"},
-        {"name": "prefer_fused", "type": "boolean", "required": false, "default": true}
+        {
+          "name": "chunk_size",
+          "type": "integer",
+          "required": false,
+          "default": 2048,
+          "minimum": 1,
+          "maximum": 1048576,
+          "unit": "count"
+        },
+        {
+          "name": "prefer_fused",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        }
       ],
       "state": [],
       "state_grade": "stateless",
@@ -622,21 +1868,100 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.objective.cached_reference_dpo.v1",
-      "model_families": ["transformer"],
-      "required_capabilities": ["objective.cached_reference_dpo.v1"],
+      "model_families": [
+        "transformer"
+      ],
+      "required_capabilities": [
+        "objective.cached_reference_dpo.v1"
+      ],
       "configuration": [
-        {"name": "beta", "type": "number", "required": false, "default": 0.1, "minimum": 1e-12, "maximum": 10.0, "unit": "ratio"},
-        {"name": "label_smoothing", "type": "number", "required": false, "default": 0.0, "minimum": 0.0, "maximum": 0.499999999, "unit": "ratio"},
-        {"name": "chosen_column", "type": "string", "required": false, "default": "chosen"},
-        {"name": "rejected_column", "type": "string", "required": false, "default": "rejected"},
-        {"name": "reference_chosen_logp_column", "type": "string", "required": false, "default": "reference_chosen_logp_sum"},
-        {"name": "reference_rejected_logp_column", "type": "string", "required": false, "default": "reference_rejected_logp_sum"},
-        {"name": "reference_chosen_token_ids_column", "type": "string", "required": false, "default": "reference_chosen_token_ids"},
-        {"name": "reference_rejected_token_ids_column", "type": "string", "required": false, "default": "reference_rejected_token_ids"},
-        {"name": "launch_audit_examples", "type": "integer", "required": false, "default": 16, "minimum": 1, "maximum": 1024, "unit": "count"},
-        {"name": "reference_drift_tolerance", "type": "number", "required": false, "default": 2.0, "minimum": 1e-12, "maximum": 100.0, "unit": "nat"},
-        {"name": "evaluation_chunk_size", "type": "integer", "required": false, "default": 2048, "minimum": 1, "maximum": 1048576, "unit": "count"},
-        {"name": "evaluation_prefer_fused", "type": "boolean", "required": false, "default": true}
+        {
+          "name": "beta",
+          "type": "number",
+          "required": false,
+          "default": 0.1,
+          "minimum": 1e-12,
+          "maximum": 10.0,
+          "unit": "ratio"
+        },
+        {
+          "name": "label_smoothing",
+          "type": "number",
+          "required": false,
+          "default": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.499999999,
+          "unit": "ratio"
+        },
+        {
+          "name": "chosen_column",
+          "type": "string",
+          "required": false,
+          "default": "chosen"
+        },
+        {
+          "name": "rejected_column",
+          "type": "string",
+          "required": false,
+          "default": "rejected"
+        },
+        {
+          "name": "reference_chosen_logp_column",
+          "type": "string",
+          "required": false,
+          "default": "reference_chosen_logp_sum"
+        },
+        {
+          "name": "reference_rejected_logp_column",
+          "type": "string",
+          "required": false,
+          "default": "reference_rejected_logp_sum"
+        },
+        {
+          "name": "reference_chosen_token_ids_column",
+          "type": "string",
+          "required": false,
+          "default": "reference_chosen_token_ids"
+        },
+        {
+          "name": "reference_rejected_token_ids_column",
+          "type": "string",
+          "required": false,
+          "default": "reference_rejected_token_ids"
+        },
+        {
+          "name": "launch_audit_examples",
+          "type": "integer",
+          "required": false,
+          "default": 16,
+          "minimum": 1,
+          "maximum": 1024,
+          "unit": "count"
+        },
+        {
+          "name": "reference_drift_tolerance",
+          "type": "number",
+          "required": false,
+          "default": 2.0,
+          "minimum": 1e-12,
+          "maximum": 100.0,
+          "unit": "nat"
+        },
+        {
+          "name": "evaluation_chunk_size",
+          "type": "integer",
+          "required": false,
+          "default": 2048,
+          "minimum": 1,
+          "maximum": 1048576,
+          "unit": "count"
+        },
+        {
+          "name": "evaluation_prefer_fused",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        }
       ],
       "state": [],
       "state_grade": "stateless",
@@ -650,19 +1975,79 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.optimizer.torch_adamw.v1",
-      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
-      "required_capabilities": ["optimizer.torch_adamw.v1"],
+      "model_families": [
+        "mageflow",
+        "rwkv",
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "optimizer.torch_adamw.v1"
+      ],
       "configuration": [
-        {"name": "learning_rate", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
-        {"name": "beta1", "type": "number", "required": false, "default": 0.9, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
-        {"name": "beta2", "type": "number", "required": false, "default": 0.999, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
-        {"name": "epsilon", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"},
-        {"name": "weight_decay", "type": "number", "required": false, "default": 0.01, "minimum": 0.0, "maximum": 10.0, "unit": "ratio"},
-        {"name": "foreach", "type": "boolean", "required": false, "default": true},
-        {"name": "fused", "type": "boolean", "required": false, "default": false}
+        {
+          "name": "learning_rate",
+          "type": "number",
+          "required": true,
+          "minimum": 1e-12,
+          "maximum": 1.0,
+          "unit": "ratio"
+        },
+        {
+          "name": "beta1",
+          "type": "number",
+          "required": false,
+          "default": 0.9,
+          "minimum": 0.0,
+          "maximum": 0.999999999999,
+          "unit": "ratio"
+        },
+        {
+          "name": "beta2",
+          "type": "number",
+          "required": false,
+          "default": 0.999,
+          "minimum": 0.0,
+          "maximum": 0.999999999999,
+          "unit": "ratio"
+        },
+        {
+          "name": "epsilon",
+          "type": "number",
+          "required": false,
+          "default": 1e-08,
+          "minimum": 1e-16,
+          "maximum": 1.0,
+          "unit": "ratio"
+        },
+        {
+          "name": "weight_decay",
+          "type": "number",
+          "required": false,
+          "default": 0.01,
+          "minimum": 0.0,
+          "maximum": 10.0,
+          "unit": "ratio"
+        },
+        {
+          "name": "foreach",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "fused",
+          "type": "boolean",
+          "required": false,
+          "default": false
+        }
       ],
       "state": [
-        {"name": "parameter_state_manifest", "type": "string", "required": true}
+        {
+          "name": "parameter_state_manifest",
+          "type": "string",
+          "required": true
+        }
       ],
       "state_grade": "exact",
       "reference_implementation": true
@@ -675,20 +2060,81 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.optimizer.fp32_master_adamw.v1",
-      "model_families": ["mageflow"],
-      "required_capabilities": ["optimizer.fp32_master_adamw.v1"],
+      "model_families": [
+        "mageflow"
+      ],
+      "required_capabilities": [
+        "optimizer.fp32_master_adamw.v1"
+      ],
       "configuration": [
-        {"name": "learning_rate", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
-        {"name": "beta1", "type": "number", "required": false, "default": 0.9, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
-        {"name": "beta2", "type": "number", "required": false, "default": 0.999, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
-        {"name": "epsilon", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"},
-        {"name": "weight_decay", "type": "number", "required": false, "default": 0.01, "minimum": 0.0, "maximum": 10.0, "unit": "ratio"},
-        {"name": "foreach", "type": "boolean", "required": false, "default": true},
-        {"name": "fused", "type": "boolean", "required": false, "default": false}
+        {
+          "name": "learning_rate",
+          "type": "number",
+          "required": true,
+          "minimum": 1e-12,
+          "maximum": 1.0,
+          "unit": "ratio"
+        },
+        {
+          "name": "beta1",
+          "type": "number",
+          "required": false,
+          "default": 0.9,
+          "minimum": 0.0,
+          "maximum": 0.999999999999,
+          "unit": "ratio"
+        },
+        {
+          "name": "beta2",
+          "type": "number",
+          "required": false,
+          "default": 0.999,
+          "minimum": 0.0,
+          "maximum": 0.999999999999,
+          "unit": "ratio"
+        },
+        {
+          "name": "epsilon",
+          "type": "number",
+          "required": false,
+          "default": 1e-08,
+          "minimum": 1e-16,
+          "maximum": 1.0,
+          "unit": "ratio"
+        },
+        {
+          "name": "weight_decay",
+          "type": "number",
+          "required": false,
+          "default": 0.01,
+          "minimum": 0.0,
+          "maximum": 10.0,
+          "unit": "ratio"
+        },
+        {
+          "name": "foreach",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "fused",
+          "type": "boolean",
+          "required": false,
+          "default": false
+        }
       ],
       "state": [
-        {"name": "parameter_state_manifest", "type": "string", "required": true},
-        {"name": "fp32_master_weights_manifest", "type": "string", "required": true}
+        {
+          "name": "parameter_state_manifest",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "fp32_master_weights_manifest",
+          "type": "string",
+          "required": true
+        }
       ],
       "state_grade": "exact",
       "reference_implementation": true
@@ -701,16 +2147,55 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.optimizer.torch_sparse_adam.v1",
-      "model_families": ["transformer"],
-      "required_capabilities": ["optimizer.torch_sparse_adam.v1"],
+      "model_families": [
+        "transformer"
+      ],
+      "required_capabilities": [
+        "optimizer.torch_sparse_adam.v1"
+      ],
       "configuration": [
-        {"name": "learning_rate", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
-        {"name": "beta1", "type": "number", "required": false, "default": 0.9, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
-        {"name": "beta2", "type": "number", "required": false, "default": 0.999, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
-        {"name": "epsilon", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"}
+        {
+          "name": "learning_rate",
+          "type": "number",
+          "required": true,
+          "minimum": 1e-12,
+          "maximum": 1.0,
+          "unit": "ratio"
+        },
+        {
+          "name": "beta1",
+          "type": "number",
+          "required": false,
+          "default": 0.9,
+          "minimum": 0.0,
+          "maximum": 0.999999999999,
+          "unit": "ratio"
+        },
+        {
+          "name": "beta2",
+          "type": "number",
+          "required": false,
+          "default": 0.999,
+          "minimum": 0.0,
+          "maximum": 0.999999999999,
+          "unit": "ratio"
+        },
+        {
+          "name": "epsilon",
+          "type": "number",
+          "required": false,
+          "default": 1e-08,
+          "minimum": 1e-16,
+          "maximum": 1.0,
+          "unit": "ratio"
+        }
       ],
       "state": [
-        {"name": "sparse_parameter_state_manifest", "type": "string", "required": true}
+        {
+          "name": "sparse_parameter_state_manifest",
+          "type": "string",
+          "required": true
+        }
       ],
       "state_grade": "exact",
       "reference_implementation": true
@@ -723,19 +2208,72 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.optimizer.fp32_master_adamw_no_decay.v2",
-      "model_families": ["mageflow"],
-      "required_capabilities": ["optimizer.fp32_master_adamw_no_decay.v2"],
+      "model_families": [
+        "mageflow"
+      ],
+      "required_capabilities": [
+        "optimizer.fp32_master_adamw_no_decay.v2"
+      ],
       "configuration": [
-        {"name": "learning_rate", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
-        {"name": "beta1", "type": "number", "required": false, "default": 0.9, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
-        {"name": "beta2", "type": "number", "required": false, "default": 0.999, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
-        {"name": "epsilon", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"},
-        {"name": "foreach", "type": "boolean", "required": false, "default": true},
-        {"name": "fused", "type": "boolean", "required": false, "default": false}
+        {
+          "name": "learning_rate",
+          "type": "number",
+          "required": true,
+          "minimum": 1e-12,
+          "maximum": 1.0,
+          "unit": "ratio"
+        },
+        {
+          "name": "beta1",
+          "type": "number",
+          "required": false,
+          "default": 0.9,
+          "minimum": 0.0,
+          "maximum": 0.999999999999,
+          "unit": "ratio"
+        },
+        {
+          "name": "beta2",
+          "type": "number",
+          "required": false,
+          "default": 0.999,
+          "minimum": 0.0,
+          "maximum": 0.999999999999,
+          "unit": "ratio"
+        },
+        {
+          "name": "epsilon",
+          "type": "number",
+          "required": false,
+          "default": 1e-08,
+          "minimum": 1e-16,
+          "maximum": 1.0,
+          "unit": "ratio"
+        },
+        {
+          "name": "foreach",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "fused",
+          "type": "boolean",
+          "required": false,
+          "default": false
+        }
       ],
       "state": [
-        {"name": "parameter_state_manifest", "type": "string", "required": true},
-        {"name": "fp32_master_weights_manifest", "type": "string", "required": true}
+        {
+          "name": "parameter_state_manifest",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "fp32_master_weights_manifest",
+          "type": "string",
+          "required": true
+        }
       ],
       "state_grade": "exact",
       "reference_implementation": true
@@ -748,18 +2286,70 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.optimizer.torch_adamw_no_decay.v2",
-      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
-      "required_capabilities": ["optimizer.torch_adamw_no_decay.v2"],
+      "model_families": [
+        "mageflow",
+        "rwkv",
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "optimizer.torch_adamw_no_decay.v2"
+      ],
       "configuration": [
-        {"name": "learning_rate", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
-        {"name": "beta1", "type": "number", "required": false, "default": 0.9, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
-        {"name": "beta2", "type": "number", "required": false, "default": 0.999, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
-        {"name": "epsilon", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"},
-        {"name": "foreach", "type": "boolean", "required": false, "default": true},
-        {"name": "fused", "type": "boolean", "required": false, "default": false}
+        {
+          "name": "learning_rate",
+          "type": "number",
+          "required": true,
+          "minimum": 1e-12,
+          "maximum": 1.0,
+          "unit": "ratio"
+        },
+        {
+          "name": "beta1",
+          "type": "number",
+          "required": false,
+          "default": 0.9,
+          "minimum": 0.0,
+          "maximum": 0.999999999999,
+          "unit": "ratio"
+        },
+        {
+          "name": "beta2",
+          "type": "number",
+          "required": false,
+          "default": 0.999,
+          "minimum": 0.0,
+          "maximum": 0.999999999999,
+          "unit": "ratio"
+        },
+        {
+          "name": "epsilon",
+          "type": "number",
+          "required": false,
+          "default": 1e-08,
+          "minimum": 1e-16,
+          "maximum": 1.0,
+          "unit": "ratio"
+        },
+        {
+          "name": "foreach",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "fused",
+          "type": "boolean",
+          "required": false,
+          "default": false
+        }
       ],
       "state": [
-        {"name": "parameter_state_manifest", "type": "string", "required": true}
+        {
+          "name": "parameter_state_manifest",
+          "type": "string",
+          "required": true
+        }
       ],
       "state_grade": "exact",
       "reference_implementation": true
@@ -772,13 +2362,29 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.schedule.linear_warmup_constant.v1",
-      "model_families": ["rwkv", "transformer"],
-      "required_capabilities": ["schedule.linear_warmup_constant.v1"],
+      "model_families": [
+        "rwkv",
+        "transformer"
+      ],
+      "required_capabilities": [
+        "schedule.linear_warmup_constant.v1"
+      ],
       "configuration": [
-        {"name": "warmup_steps", "type": "integer", "required": true, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"}
+        {
+          "name": "warmup_steps",
+          "type": "integer",
+          "required": true,
+          "minimum": 0,
+          "maximum": 1000000000,
+          "unit": "optimizer_step"
+        }
       ],
       "state": [
-        {"name": "cursor", "type": "integer", "required": true}
+        {
+          "name": "cursor",
+          "type": "integer",
+          "required": true
+        }
       ],
       "step_domain": "optimizer_step",
       "state_grade": "exact",
@@ -792,8 +2398,15 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.schedule.constant.v1",
-      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
-      "required_capabilities": ["schedule.constant.v1"],
+      "model_families": [
+        "mageflow",
+        "rwkv",
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "schedule.constant.v1"
+      ],
       "configuration": [],
       "state": [],
       "step_domain": "optimizer_step",
@@ -808,15 +2421,48 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.schedule.linear_warmup_cosine.v1",
-      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
-      "required_capabilities": ["schedule.linear_warmup_cosine.v1"],
+      "model_families": [
+        "mageflow",
+        "rwkv",
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "schedule.linear_warmup_cosine.v1"
+      ],
       "configuration": [
-        {"name": "warmup_steps", "type": "integer", "required": true, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"},
-        {"name": "max_steps", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000000, "unit": "optimizer_step"},
-        {"name": "minimum_ratio", "type": "number", "required": false, "default": 0.1, "minimum": 0.0, "maximum": 1.0, "unit": "ratio"}
+        {
+          "name": "warmup_steps",
+          "type": "integer",
+          "required": true,
+          "minimum": 0,
+          "maximum": 1000000000,
+          "unit": "optimizer_step"
+        },
+        {
+          "name": "max_steps",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1000000000,
+          "unit": "optimizer_step"
+        },
+        {
+          "name": "minimum_ratio",
+          "type": "number",
+          "required": false,
+          "default": 0.1,
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "unit": "ratio"
+        }
       ],
       "state": [
-        {"name": "cursor", "type": "integer", "required": true}
+        {
+          "name": "cursor",
+          "type": "integer",
+          "required": true
+        }
       ],
       "step_domain": "optimizer_step",
       "state_grade": "exact",
@@ -830,17 +2476,64 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.schedule.powercool.v1",
-      "model_families": ["rwkv", "transformer"],
-      "required_capabilities": ["schedule.powercool.v1"],
+      "model_families": [
+        "rwkv",
+        "transformer"
+      ],
+      "required_capabilities": [
+        "schedule.powercool.v1"
+      ],
       "configuration": [
-        {"name": "warmup_steps", "type": "integer", "required": true, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"},
-        {"name": "max_steps", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000000, "unit": "optimizer_step"},
-        {"name": "minimum_ratio", "type": "number", "required": false, "default": 0.0, "minimum": 0.0, "maximum": 1.0, "unit": "ratio"},
-        {"name": "cooldown_fraction", "type": "number", "required": false, "default": 0.2, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
-        {"name": "power", "type": "number", "required": false, "default": 2.0, "minimum": 1e-12, "maximum": 1000.0, "unit": "ratio"}
+        {
+          "name": "warmup_steps",
+          "type": "integer",
+          "required": true,
+          "minimum": 0,
+          "maximum": 1000000000,
+          "unit": "optimizer_step"
+        },
+        {
+          "name": "max_steps",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1000000000,
+          "unit": "optimizer_step"
+        },
+        {
+          "name": "minimum_ratio",
+          "type": "number",
+          "required": false,
+          "default": 0.0,
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "unit": "ratio"
+        },
+        {
+          "name": "cooldown_fraction",
+          "type": "number",
+          "required": false,
+          "default": 0.2,
+          "minimum": 1e-12,
+          "maximum": 1.0,
+          "unit": "ratio"
+        },
+        {
+          "name": "power",
+          "type": "number",
+          "required": false,
+          "default": 2.0,
+          "minimum": 1e-12,
+          "maximum": 1000.0,
+          "unit": "ratio"
+        }
       ],
       "state": [
-        {"name": "cursor", "type": "integer", "required": true}
+        {
+          "name": "cursor",
+          "type": "integer",
+          "required": true
+        }
       ],
       "step_domain": "optimizer_step",
       "state_grade": "exact",
@@ -854,13 +2547,48 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.precision.bf16_parameters_fp32_reductions.v1",
-      "model_families": ["rwkv", "transformer", "vision"],
-      "required_capabilities": ["precision.bf16_parameters_fp32_reductions.v1"],
+      "model_families": [
+        "rwkv",
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "precision.bf16_parameters_fp32_reductions.v1"
+      ],
       "configuration": [
-        {"name": "parameter_dtype", "type": "enumeration", "required": false, "default": "bfloat16", "values": ["bfloat16"]},
-        {"name": "compute_dtype", "type": "enumeration", "required": false, "default": "bfloat16", "values": ["bfloat16"]},
-        {"name": "reduction_dtype", "type": "enumeration", "required": false, "default": "float32", "values": ["float32"]},
-        {"name": "gradient_scaling", "type": "boolean", "required": false, "default": false}
+        {
+          "name": "parameter_dtype",
+          "type": "enumeration",
+          "required": false,
+          "default": "bfloat16",
+          "values": [
+            "bfloat16"
+          ]
+        },
+        {
+          "name": "compute_dtype",
+          "type": "enumeration",
+          "required": false,
+          "default": "bfloat16",
+          "values": [
+            "bfloat16"
+          ]
+        },
+        {
+          "name": "reduction_dtype",
+          "type": "enumeration",
+          "required": false,
+          "default": "float32",
+          "values": [
+            "float32"
+          ]
+        },
+        {
+          "name": "gradient_scaling",
+          "type": "boolean",
+          "required": false,
+          "default": false
+        }
       ],
       "state": [],
       "state_grade": "stateless",
@@ -874,13 +2602,46 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.precision.fp32_parameters_bf16_compute.v1",
-      "model_families": ["vision"],
-      "required_capabilities": ["precision.fp32_parameters_bf16_compute.v1"],
+      "model_families": [
+        "vision"
+      ],
+      "required_capabilities": [
+        "precision.fp32_parameters_bf16_compute.v1"
+      ],
       "configuration": [
-        {"name": "parameter_dtype", "type": "enumeration", "required": false, "default": "float32", "values": ["float32"]},
-        {"name": "compute_dtype", "type": "enumeration", "required": false, "default": "bfloat16", "values": ["bfloat16"]},
-        {"name": "reduction_dtype", "type": "enumeration", "required": false, "default": "float32", "values": ["float32"]},
-        {"name": "gradient_scaling", "type": "boolean", "required": false, "default": false}
+        {
+          "name": "parameter_dtype",
+          "type": "enumeration",
+          "required": false,
+          "default": "float32",
+          "values": [
+            "float32"
+          ]
+        },
+        {
+          "name": "compute_dtype",
+          "type": "enumeration",
+          "required": false,
+          "default": "bfloat16",
+          "values": [
+            "bfloat16"
+          ]
+        },
+        {
+          "name": "reduction_dtype",
+          "type": "enumeration",
+          "required": false,
+          "default": "float32",
+          "values": [
+            "float32"
+          ]
+        },
+        {
+          "name": "gradient_scaling",
+          "type": "boolean",
+          "required": false,
+          "default": false
+        }
       ],
       "state": [],
       "state_grade": "stateless",
@@ -894,10 +2655,24 @@
       },
       "backend": "python",
       "implementation": "rwkv_lab.weight_decay_schedule.constant.v1",
-      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
-      "required_capabilities": ["weight_decay_schedule.constant.v1"],
+      "model_families": [
+        "mageflow",
+        "rwkv",
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "weight_decay_schedule.constant.v1"
+      ],
       "configuration": [
-        {"name": "weight_decay", "type": "number", "required": true, "minimum": 0.0, "maximum": 10.0, "unit": "ratio"}
+        {
+          "name": "weight_decay",
+          "type": "number",
+          "required": true,
+          "minimum": 0.0,
+          "maximum": 10.0,
+          "unit": "ratio"
+        }
       ],
       "state": [],
       "step_domain": "optimizer_step",
@@ -905,34 +2680,116 @@
       "reference_implementation": true
     },
     {
-      "key": {"category": "evaluator", "name": "scalar_loss", "version": "1.0.0"},
+      "key": {
+        "category": "evaluator",
+        "name": "scalar_loss",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.evaluator.scalar_loss.v1",
-      "model_families": ["*"],
-      "required_capabilities": ["evaluator.scalar_loss.v1"],
+      "model_families": [
+        "*"
+      ],
+      "required_capabilities": [
+        "evaluator.scalar_loss.v1"
+      ],
       "configuration": [
-        {"name": "split_slot", "type": "string", "required": false, "default": "evaluation_split"},
-        {"name": "metrics", "type": "string_list", "required": true, "collection_semantics": "set"},
-        {"name": "reduction", "type": "enumeration", "required": false, "default": "weighted_mean", "values": ["mean", "sum", "weighted_mean"]},
-        {"name": "maximum_examples", "type": "integer", "required": false, "default": 0, "minimum": 0, "maximum": 1000000000, "unit": "samples"}
+        {
+          "name": "split_slot",
+          "type": "string",
+          "required": false,
+          "default": "evaluation_split"
+        },
+        {
+          "name": "metrics",
+          "type": "string_list",
+          "required": true,
+          "collection_semantics": "set"
+        },
+        {
+          "name": "reduction",
+          "type": "enumeration",
+          "required": false,
+          "default": "weighted_mean",
+          "values": [
+            "mean",
+            "sum",
+            "weighted_mean"
+          ]
+        },
+        {
+          "name": "maximum_examples",
+          "type": "integer",
+          "required": false,
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1000000000,
+          "unit": "samples"
+        }
       ],
       "state": [],
       "state_grade": "stateless",
       "reference_implementation": true
     },
     {
-      "key": {"category": "evaluation_schedule", "name": "launch_gate_periodic", "version": "1.0.0"},
+      "key": {
+        "category": "evaluation_schedule",
+        "name": "launch_gate_periodic",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.evaluation_schedule.launch_gate_periodic.v1",
-      "model_families": ["*"],
-      "required_capabilities": ["evaluation_schedule.launch_gate_periodic.v1"],
+      "model_families": [
+        "*"
+      ],
+      "required_capabilities": [
+        "evaluation_schedule.launch_gate_periodic.v1"
+      ],
       "configuration": [
-        {"name": "launch_gate_examples", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000, "unit": "samples"},
-        {"name": "full_step_zero", "type": "boolean", "required": false, "default": true},
-        {"name": "qualitative_every_steps", "type": "integer", "required": false, "default": 0, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"},
-        {"name": "full_every_steps", "type": "integer", "required": false, "default": 0, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"},
-        {"name": "defer_full_scalar", "type": "boolean", "required": false, "default": true},
-        {"name": "final", "type": "boolean", "required": false, "default": true}
+        {
+          "name": "launch_gate_examples",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1000000,
+          "unit": "samples"
+        },
+        {
+          "name": "full_step_zero",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "qualitative_every_steps",
+          "type": "integer",
+          "required": false,
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1000000000,
+          "unit": "optimizer_step"
+        },
+        {
+          "name": "full_every_steps",
+          "type": "integer",
+          "required": false,
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1000000000,
+          "unit": "optimizer_step"
+        },
+        {
+          "name": "defer_full_scalar",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "final",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        }
       ],
       "state": [],
       "step_domain": "optimizer_step",
@@ -940,16 +2797,50 @@
       "reference_implementation": true
     },
     {
-      "key": {"category": "evaluation_schedule", "name": "launch_gate_periodic", "version": "2.0.0"},
+      "key": {
+        "category": "evaluation_schedule",
+        "name": "launch_gate_periodic",
+        "version": "2.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.evaluation_schedule.launch_gate_periodic.v2",
-      "model_families": ["*"],
-      "required_capabilities": ["evaluation_schedule.launch_gate_periodic.v2"],
+      "model_families": [
+        "*"
+      ],
+      "required_capabilities": [
+        "evaluation_schedule.launch_gate_periodic.v2"
+      ],
       "configuration": [
-        {"name": "full_step_zero", "type": "boolean", "required": false, "default": true},
-        {"name": "qualitative_every_steps", "type": "integer", "required": false, "default": 0, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"},
-        {"name": "full_every_steps", "type": "integer", "required": false, "default": 0, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"},
-        {"name": "final", "type": "boolean", "required": false, "default": true}
+        {
+          "name": "full_step_zero",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "qualitative_every_steps",
+          "type": "integer",
+          "required": false,
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1000000000,
+          "unit": "optimizer_step"
+        },
+        {
+          "name": "full_every_steps",
+          "type": "integer",
+          "required": false,
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1000000000,
+          "unit": "optimizer_step"
+        },
+        {
+          "name": "final",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        }
       ],
       "state": [],
       "step_domain": "optimizer_step",
@@ -957,118 +2848,361 @@
       "reference_implementation": true
     },
     {
-      "key": {"category": "qualitative_sample", "name": "fixed_held_out", "version": "1.0.0"},
+      "key": {
+        "category": "qualitative_sample",
+        "name": "fixed_held_out",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.qualitative_sample.fixed_held_out.v1",
-      "model_families": ["*"],
-      "required_capabilities": ["qualitative_sample.fixed_held_out.v1"],
+      "model_families": [
+        "*"
+      ],
+      "required_capabilities": [
+        "qualitative_sample.fixed_held_out.v1"
+      ],
       "configuration": [
-        {"name": "identity_field", "type": "string", "required": true},
-        {"name": "identities_digest", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "selector_digest", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "sample_count", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000, "unit": "samples"}
+        {
+          "name": "identity_field",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "identities_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "selector_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "sample_count",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1000000,
+          "unit": "samples"
+        }
       ],
       "state": [],
       "state_grade": "stateless",
       "reference_implementation": true
     },
     {
-      "key": {"category": "qualitative_sample", "name": "fixed_held_out", "version": "2.0.0"},
+      "key": {
+        "category": "qualitative_sample",
+        "name": "fixed_held_out",
+        "version": "2.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.qualitative_sample.fixed_held_out.v2",
-      "model_families": ["*"],
-      "required_capabilities": ["qualitative_sample.fixed_held_out.v2"],
+      "model_families": [
+        "*"
+      ],
+      "required_capabilities": [
+        "qualitative_sample.fixed_held_out.v2"
+      ],
       "configuration": [
-        {"name": "identity_field", "type": "string", "required": true},
-        {"name": "sample_count", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000, "unit": "samples"}
+        {
+          "name": "identity_field",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "sample_count",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1000000,
+          "unit": "samples"
+        }
       ],
       "state": [
-        {"name": "identities_digest", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "selector_digest", "type": "string", "required": true, "string_format": "sha256_digest"}
+        {
+          "name": "identities_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "selector_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        }
       ],
       "state_grade": "exact",
       "reference_implementation": true
     },
     {
-      "key": {"category": "qualitative_sample", "name": "fixed_manifest", "version": "1.0.0"},
+      "key": {
+        "category": "qualitative_sample",
+        "name": "fixed_manifest",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.qualitative_sample.fixed_manifest.v1",
-      "model_families": ["*"],
-      "required_capabilities": ["qualitative_sample.fixed_manifest.v1"],
+      "model_families": [
+        "*"
+      ],
+      "required_capabilities": [
+        "qualitative_sample.fixed_manifest.v1"
+      ],
       "configuration": [
-        {"name": "manifest_name", "type": "string", "required": true},
-        {"name": "manifest_sha256", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "identity_field", "type": "string", "required": true},
-        {"name": "sample_count", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000, "unit": "samples"}
+        {
+          "name": "manifest_name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "manifest_sha256",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "identity_field",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "sample_count",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1000000,
+          "unit": "samples"
+        }
       ],
       "state": [
-        {"name": "identities_digest", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "selector_digest", "type": "string", "required": true, "string_format": "sha256_digest"}
+        {
+          "name": "identities_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "selector_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        }
       ],
       "state_grade": "exact",
       "reference_implementation": true
     },
     {
-      "key": {"category": "artifact_renderer", "name": "evidence_envelope", "version": "1.0.0"},
+      "key": {
+        "category": "artifact_renderer",
+        "name": "evidence_envelope",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.artifact_renderer.evidence_envelope.v1",
-      "model_families": ["*"],
-      "required_capabilities": ["artifact_renderer.evidence_envelope.v1"],
+      "model_families": [
+        "*"
+      ],
+      "required_capabilities": [
+        "artifact_renderer.evidence_envelope.v1"
+      ],
       "configuration": [
-        {"name": "modality", "type": "enumeration", "required": true, "values": ["audio", "image", "multimodal", "text", "video"]},
-        {"name": "schema", "type": "enumeration", "required": false, "default": "trainvm.eval-evidence.v1", "values": ["trainvm.eval-evidence.v1"]}
+        {
+          "name": "modality",
+          "type": "enumeration",
+          "required": true,
+          "values": [
+            "audio",
+            "image",
+            "multimodal",
+            "text",
+            "video"
+          ]
+        },
+        {
+          "name": "schema",
+          "type": "enumeration",
+          "required": false,
+          "default": "trainvm.eval-evidence.v1",
+          "values": [
+            "trainvm.eval-evidence.v1"
+          ]
+        }
       ],
       "state": [],
       "state_grade": "stateless",
       "reference_implementation": true
     },
     {
-      "key": {"category": "artifact_renderer", "name": "caption_triplet", "version": "1.0.0"},
+      "key": {
+        "category": "artifact_renderer",
+        "name": "caption_triplet",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.artifact_renderer.caption_triplet.v1",
-      "model_families": ["transformer", "vision"],
-      "required_capabilities": ["artifact_renderer.caption_triplet.v1"],
+      "model_families": [
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "artifact_renderer.caption_triplet.v1"
+      ],
       "configuration": [
-        {"name": "modality", "type": "enumeration", "required": false, "default": "multimodal", "values": ["multimodal"]},
-        {"name": "schema", "type": "enumeration", "required": false, "default": "trainvm.caption-triplet.v1", "values": ["trainvm.caption-triplet.v1"]}
+        {
+          "name": "modality",
+          "type": "enumeration",
+          "required": false,
+          "default": "multimodal",
+          "values": [
+            "multimodal"
+          ]
+        },
+        {
+          "name": "schema",
+          "type": "enumeration",
+          "required": false,
+          "default": "trainvm.caption-triplet.v1",
+          "values": [
+            "trainvm.caption-triplet.v1"
+          ]
+        }
       ],
       "state": [],
       "state_grade": "stateless",
       "reference_implementation": true
     },
     {
-      "key": {"category": "generation_policy", "name": "greedy", "version": "1.0.0"},
+      "key": {
+        "category": "generation_policy",
+        "name": "greedy",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.generation_policy.greedy.v1",
-      "model_families": ["transformer", "vision"],
-      "required_capabilities": ["generation_policy.greedy.v1"],
+      "model_families": [
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "generation_policy.greedy.v1"
+      ],
       "configuration": [
-        {"name": "maximum_new_tokens", "type": "integer", "required": true, "minimum": 1, "maximum": 4096, "unit": "tokens"},
-        {"name": "generation_batch_size", "type": "integer", "required": false, "default": 1, "minimum": 1, "maximum": 256, "unit": "count"},
-        {"name": "padding_side", "type": "enumeration", "required": false, "default": "left", "values": ["left"]},
-        {"name": "use_cache", "type": "boolean", "required": false, "default": true}
+        {
+          "name": "maximum_new_tokens",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 4096,
+          "unit": "tokens"
+        },
+        {
+          "name": "generation_batch_size",
+          "type": "integer",
+          "required": false,
+          "default": 1,
+          "minimum": 1,
+          "maximum": 256,
+          "unit": "count"
+        },
+        {
+          "name": "padding_side",
+          "type": "enumeration",
+          "required": false,
+          "default": "left",
+          "values": [
+            "left"
+          ]
+        },
+        {
+          "name": "use_cache",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        }
       ],
       "state": [],
       "state_grade": "stateless",
       "reference_implementation": true
     },
     {
-      "key": {"category": "checkpoint_policy", "name": "atomic_retained", "version": "1.0.0"},
+      "key": {
+        "category": "checkpoint_policy",
+        "name": "atomic_retained",
+        "version": "1.0.0"
+      },
       "backend": "python",
       "implementation": "rwkv_lab.checkpoint_policy.atomic_retained.v1",
-      "model_families": ["*"],
-      "required_capabilities": ["checkpoint_policy.atomic_retained.v1"],
+      "model_families": [
+        "*"
+      ],
+      "required_capabilities": [
+        "checkpoint_policy.atomic_retained.v1"
+      ],
       "configuration": [
-        {"name": "every_steps", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000000, "unit": "optimizer_step"},
-        {"name": "keep_last", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000, "unit": "count"},
-        {"name": "keep_best", "type": "integer", "required": false, "default": 0, "minimum": 0, "maximum": 1000000, "unit": "count"},
-        {"name": "publish_final", "type": "boolean", "required": false, "default": true},
-        {"name": "resume_grade", "type": "enumeration", "required": true, "values": ["compatible", "exact", "restart_only"]}
+        {
+          "name": "every_steps",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1000000000,
+          "unit": "optimizer_step"
+        },
+        {
+          "name": "keep_last",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1000000,
+          "unit": "count"
+        },
+        {
+          "name": "keep_best",
+          "type": "integer",
+          "required": false,
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1000000,
+          "unit": "count"
+        },
+        {
+          "name": "publish_final",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "resume_grade",
+          "type": "enumeration",
+          "required": true,
+          "values": [
+            "compatible",
+            "exact",
+            "restart_only"
+          ]
+        }
       ],
       "state": [
-        {"name": "last_published_step", "type": "integer", "required": true},
-        {"name": "publication_manifest", "type": "string", "required": true, "string_format": "sha256_digest"},
-        {"name": "retention_manifest", "type": "string", "required": true, "string_format": "sha256_digest"}
+        {
+          "name": "last_published_step",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "publication_manifest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "retention_manifest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        }
       ],
       "step_domain": "optimizer_step",
       "state_grade": "exact",

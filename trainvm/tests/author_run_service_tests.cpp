@@ -143,9 +143,13 @@ std::vector<AdapterProfile> profiles() {
                {"eval_gallery", port(OperationPortType::artifact, false,
                                 ArtifactType::image_gallery,
                                 "rwkv-lab.eval-gallery.v2")},
-               {"metrics", port(OperationPortType::artifact, false,
-                                ArtifactType::metrics,
-                                "hf.multimodal-sft.metrics.v1")},
+               // Deliberately three outputs, matching the deployed adapter
+               // registry and the worker itself: hf_multimodal_sft.py publishes
+               // via output_name exactly twice, eval_gallery and test_eval,
+               // plus checkpoint state. It emits no metrics artifact. This
+               // fixture previously declared a fourth, so a recipe publishing
+               // "metrics" authored cleanly here while the live controller
+               // rejected it with author_run.adapter.
                {"test_eval", port(OperationPortType::artifact, false,
                                   ArtifactType::report,
                                   "rwkv-lab.hf-test-caption-evidence-bundle.v1")}}}};
