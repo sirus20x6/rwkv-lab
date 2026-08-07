@@ -1587,6 +1587,12 @@ TrainVMService::TrainVMService(
           // CLOCK_MONOTONIC on the same machine and cannot actually disagree
           // about time; the comparison instant was simply taken too early.
           const std::int64_t observed_at = hostd_monotonic_now_ns();
+          // hostd serves a cached inventory whenever it is younger than its own
+          // refresh interval (inventory_refresh_interval_ns in
+          // hostd_daemon_runtime.cpp), so that interval must stay below this
+          // bound or a well-behaved authority is refused for most of every
+          // cycle. Raising this without lowering that one reintroduces the
+          // mismatch in the other direction.
           constexpr std::uint64_t maximum_age_ns = 5'000'000'000ULL;
           if (const std::optional<std::string> rejection =
                   passive_inventory_rejection(coordinator, authority,
