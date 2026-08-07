@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
@@ -195,6 +196,105 @@ def test_exact_checkpoint_loader_rejects_loading_drift(tmp_path: Path) -> None:
         loader.load(transformers_module=facade)
 
 
+def test_unexpected_keys_are_only_tolerated_when_declared(tmp_path: Path) -> None:
+    """An undeclared dropped key fails; the same key declared is recorded, not hidden."""
+
+    class DroppedHead(_AutoFactory):
+        loading_info: ClassVar[dict[str, object]] = {
+            **_AutoFactory.loading_info,
+            "unexpected_keys": ["mtp.fc.weight", "mtp.norm.weight"],
+        }
+
+    facade = SimpleNamespace(
+        AutoModelForCausalLM=DroppedHead, AutoTokenizer=_AuxiliaryFactory
+    )
+    undeclared = build_registered_model_loader(
+        ModelLoaderImplementation.HF_CAUSAL_V1, _model_configuration(tmp_path)
+    )
+    with pytest.raises(RuntimeError, match="did not load exactly"):
+        undeclared.load(transformers_module=facade)
+
+    declared = build_registered_model_loader(
+        ModelLoaderImplementation.HF_CAUSAL_V1,
+        replace(_model_configuration(tmp_path), ignorable_unexpected_prefixes=("mtp.",)),
+    )
+    receipt = declared.load(transformers_module=facade).receipt
+    assert receipt.exact
+    assert receipt.unexpected_keys == ()
+    # The exclusion is evidence in the receipt, not an invisible allowance.
+    assert receipt.ignored_unexpected_keys == ("mtp.fc.weight", "mtp.norm.weight")
+
+
+def test_required_family_that_is_not_source_bound_fails_by_name(
+    tmp_path: Path,
+) -> None:
+    """The Qwen3.6 vision drop: a whole family missing must fail naming the family.
+
+    Regression guard for a checkpoint that nests the vision tower where the model
+    class never looks, so every one of its tensors is silently randomly
+    initialized while the load still reports success.
+    """
+
+    class VisionDropped(_AutoFactory):
+        loading_info: ClassVar[dict[str, object]] = {
+            **_AutoFactory.loading_info,
+            "missing_keys": ["vision_tower.weight", "vision_tower.bias"],
+        }
+
+    facade = SimpleNamespace(
+        AutoModelForImageTextToText=VisionDropped, AutoProcessor=_AuxiliaryFactory
+    )
+    configuration = replace(
+        _model_configuration(tmp_path),
+        exact_checkpoint=False,  # the blunt gate is off; the family gate must still bite
+        required_tensor_families=("vision_tower.",),
+    )
+    loader = build_registered_model_loader(
+        ModelLoaderImplementation.HF_MULTIMODAL_V1, configuration
+    )
+    with pytest.raises(RuntimeError, match=r"vision_tower\. \(0/2 bound\)"):
+        loader.load(transformers_module=facade)
+
+
+def test_required_family_absent_from_the_model_is_never_vacuously_satisfied(
+    tmp_path: Path,
+) -> None:
+    """A family the model does not declare at all binds zero, and must fail."""
+    facade = SimpleNamespace(
+        AutoModelForImageTextToText=_AutoFactory, AutoProcessor=_AuxiliaryFactory
+    )
+    configuration = replace(
+        _model_configuration(tmp_path),
+        required_tensor_families=("model.visual.",),
+    )
+    loader = build_registered_model_loader(
+        ModelLoaderImplementation.HF_MULTIMODAL_V1, configuration
+    )
+    with pytest.raises(RuntimeError, match=r"model\.visual\. \(0/0 bound\)"):
+        loader.load(transformers_module=facade)
+
+
+def test_fully_bound_families_are_recorded_in_the_receipt(tmp_path: Path) -> None:
+    facade = SimpleNamespace(
+        AutoModelForImageTextToText=_AutoFactory, AutoProcessor=_AuxiliaryFactory
+    )
+    configuration = replace(
+        _model_configuration(tmp_path),
+        required_tensor_families=("vision_tower.", "language_model."),
+    )
+    receipt = (
+        build_registered_model_loader(
+            ModelLoaderImplementation.HF_MULTIMODAL_V1, configuration
+        )
+        .load(transformers_module=facade)
+        .receipt
+    )
+    bound = {family: (got, want) for family, got, want in receipt.family_binding}
+    assert bound["vision_tower."] == (2, 2)
+    assert bound["language_model."][0] == bound["language_model."][1]
+    assert bound["language_model."][0] > 0
+
+
 def test_named_rules_freeze_and_unfreeze_qwen_tensors_deterministically() -> None:
     model = TinyQwen()
     policy = build_registered_trainability(
@@ -275,9 +375,11 @@ def test_resolved_component_string_lists_and_resume_state_are_exact(
                 "attention_implementation": "sdpa",
                 "checkpoint_fingerprint": "sha256:" + "b" * 64,
                 "exact_checkpoint": True,
+                "ignorable_unexpected_prefixes": [],
                 "local_files_only": True,
                 "model_path": str(tmp_path),
                 "quantization": "none",
+                "required_tensor_families": [],
                 "revision": "main",
                 "trust_remote_code": False,
             },
@@ -362,9 +464,11 @@ def test_resolved_component_factories_dispatch_without_workload_imports(
                 "attention_implementation": "sdpa",
                 "checkpoint_fingerprint": "sha256:" + "a" * 64,
                 "exact_checkpoint": True,
+                "ignorable_unexpected_prefixes": [],
                 "local_files_only": True,
                 "model_path": str(tmp_path),
                 "quantization": "none",
+                "required_tensor_families": [],
                 "revision": "main",
                 "trust_remote_code": False,
             },
