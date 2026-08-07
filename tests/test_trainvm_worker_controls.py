@@ -552,9 +552,37 @@ def test_checkpoint_command_blocks_later_controls_until_immutable_publication(
 
 
 @pytest.mark.parametrize("effective_step", [0, -1, True])
-def test_safe_point_step_must_be_positive(effective_step: object) -> None:
+def test_safe_point_step_must_name_a_step_that_happened(
+    effective_step: object,
+) -> None:
+    """Safe points that follow work reject a zeroth or negative step."""
+
     runtime = WorkerControlRuntime(FakeSession(), {}, 0)
-    with pytest.raises(WorkerControlError, match="effective step must be positive"):
+    with pytest.raises(WorkerControlError, match="effective step must be at least"):
+        runtime.apply(
+            SafePoint.NEXT_OPTIMIZER_STEP,
+            effective_step=effective_step,  # type: ignore[arg-type]
+            applier=lambda *_: None,
+        )
+
+
+def test_launch_gate_evaluation_accepts_step_zero() -> None:
+    """An evaluation may precede training, so step 0 is valid for NEXT_EVAL.
+
+    The HF adapter requires a complete step-zero gate on a fresh run and fails
+    closed without one, then applies controls at that gate. Rejecting 0 here
+    made that path unreachable: the model loaded, the gate was demanded, and the
+    run died before its first optimizer step.
+    """
+
+    runtime = WorkerControlRuntime(FakeSession(), {}, 0)
+    assert runtime.evaluation(0, lambda *_: None) == ()
+
+
+@pytest.mark.parametrize("effective_step", [-1, True])
+def test_evaluation_still_rejects_impossible_steps(effective_step: object) -> None:
+    runtime = WorkerControlRuntime(FakeSession(), {}, 0)
+    with pytest.raises(WorkerControlError, match="effective step must be at least"):
         runtime.apply(
             SafePoint.NEXT_EVAL,
             effective_step=effective_step,  # type: ignore[arg-type]

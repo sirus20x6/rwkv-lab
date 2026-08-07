@@ -561,19 +561,8 @@ bool contexts_allow(const ObservedHostResource& resource,
 
 bool disposition_allows(const ObservedHostResource& resource,
                         ResourceAccessMode mode) {
-  if (resource.disposition ==
-      ResourceObservationDisposition::audited_eligible) {
-    return true;
-  }
-  if (mode != ResourceAccessMode::cooperative_compute ||
-      resource.disposition != ResourceObservationDisposition::occupied) {
-    return false;
-  }
-  const bool display_device = resource.labels.contains("display");
-  if (!display_device) return true;
-  const auto authorization = resource.labels.find("display-sharing");
-  return authorization != resource.labels.end() &&
-         authorization->second == "operator-authorized-cooperative";
+  return resource_disposition_permits(resource.disposition, resource.labels,
+                                      mode);
 }
 
 bool blocked_by_conflicting_observation(
@@ -625,6 +614,22 @@ bool topology_facts_equal(const ObservedHostResource& left,
 }
 
 }  // namespace
+
+bool resource_disposition_permits(
+    ResourceObservationDisposition disposition,
+    const std::map<std::string, std::string>& labels, ResourceAccessMode mode) {
+  if (disposition == ResourceObservationDisposition::audited_eligible)
+    return true;
+  if (mode != ResourceAccessMode::cooperative_compute ||
+      disposition != ResourceObservationDisposition::occupied) {
+    return false;
+  }
+  const bool display_device = labels.contains("display");
+  if (!display_device) return true;
+  const auto authorization = labels.find("display-sharing");
+  return authorization != labels.end() &&
+         authorization->second == "operator-authorized-cooperative";
+}
 
 std::string canonical_resource_key(const HostResourceId& id) {
   return id.stable_id + "\x1f" + enum_to_string(id.kind) + "\x1f" +

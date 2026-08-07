@@ -1383,6 +1383,88 @@ void populate_invocation(v1::WorkerWelcome& welcome,
                v1::WorkerExecutionPhaseRequest::PHASE_WARMUP);
 }
 
+// Why the controller may not accept hostd's passive inventory as canonical GPU
+// authoring evidence, or nullopt when it may. Every condition is admission
+// evidence — the caller must reject on any of them — but they are enumerated
+// individually so a rejection names the one that fired. Collapsed into a single
+// disjunction, this check reported fifteen distinct causes with one sentence,
+// and a rejection could not be acted on without a debugger.
+[[nodiscard]] std::optional<std::string>
+passive_inventory_rejection(const HostdCoordinatorStatus &coordinator,
+                            const HostdAuthorityStatus &authority,
+                            const HostIdentity &expected_host,
+                            std::int64_t now_ns, std::uint64_t maximum_age_ns) {
+  const auto observed = static_cast<std::uint64_t>(now_ns);
+  if (coordinator.host_id != expected_host.host_id)
+    return "hostd names host " + coordinator.host_id + "; this controller is "
+           "bound to " + expected_host.host_id;
+  if (coordinator.boot_id != expected_host.boot_id)
+    return "hostd names boot " + coordinator.boot_id + "; this controller is "
+           "bound to " + expected_host.boot_id + " (the host rebooted under a "
+           "running controller)";
+  if (!authority.resource_inventory_observed)
+    return "hostd has not yet observed its resource inventory";
+  if (authority.resource_inventory_observation_age_ns > maximum_age_ns)
+    return "hostd resource inventory is " +
+           std::to_string(authority.resource_inventory_observation_age_ns /
+                          1'000'000ULL) +
+           "ms old; the admission bound is " +
+           std::to_string(maximum_age_ns / 1'000'000ULL) + "ms";
+  if (authority.current_inventory_digest.empty())
+    return "hostd reported no current inventory digest";
+  if (authority.current_inventory_receipt_digest.empty())
+    return "hostd reported no current inventory receipt digest";
+  if (authority.passive_memory_host_id != coordinator.host_id)
+    return "hostd passive memory names host " +
+           authority.passive_memory_host_id + "; its own status names " +
+           coordinator.host_id;
+  if (authority.passive_memory_boot_id != coordinator.boot_id)
+    return "hostd passive memory names boot " +
+           authority.passive_memory_boot_id + "; its own status names " +
+           coordinator.boot_id;
+  if (authority.passive_memory_inventory_digest !=
+      authority.current_inventory_digest)
+    return "hostd passive memory was observed against inventory " +
+           authority.passive_memory_inventory_digest + "; the current "
+           "inventory is " + authority.current_inventory_digest;
+  if (authority.passive_memory_inventory_receipt_digest !=
+      authority.current_inventory_receipt_digest)
+    return "hostd passive memory carries inventory receipt " +
+           authority.passive_memory_inventory_receipt_digest +
+           "; the current receipt is " +
+           authority.current_inventory_receipt_digest;
+  if (authority.passive_memory_observed_monotonic_ns == 0U)
+    return "hostd has not yet observed passive accelerator memory";
+  if (authority.passive_memory_observed_monotonic_ns > observed)
+    return "hostd observed passive memory " +
+           std::to_string((authority.passive_memory_observed_monotonic_ns -
+                           observed) / 1'000'000ULL) +
+           "ms after this controller received its reply; both read "
+           "CLOCK_MONOTONIC on this host, so they no longer share a clock "
+           "origin";
+  if (observed - authority.passive_memory_observed_monotonic_ns >
+      maximum_age_ns)
+    return "hostd passive memory is " +
+           std::to_string((observed -
+                           authority.passive_memory_observed_monotonic_ns) /
+                          1'000'000ULL) +
+           "ms old; the admission bound is " +
+           std::to_string(maximum_age_ns / 1'000'000ULL) + "ms";
+  if (authority.passive_memory_observation_digest.empty())
+    return "hostd reported no passive memory observation digest";
+  if (authority.passive_accelerator_memory.empty())
+    return "hostd observed passive memory but reported no accelerators";
+  if (authority.passive_accelerator_memory_truncated)
+    return "hostd truncated its passive accelerator memory report";
+  if (authority.passive_accelerator_memory_count !=
+      authority.passive_accelerator_memory.size())
+    return "hostd observed " +
+           std::to_string(authority.passive_accelerator_memory_count) +
+           " accelerators but carried " +
+           std::to_string(authority.passive_accelerator_memory.size());
+  return std::nullopt;
+}
+
 }  // namespace
 
 TrainVMService::TrainVMService(
@@ -1496,40 +1578,40 @@ TrainVMService::TrainVMService(
                 "hostd omitted its passive authority inventory status");
           const auto &coordinator = *reply.status;
           const auto &authority = *reply.authority_status;
+          // Age is measured from the reply, not from the deadline computed
+          // before the request. hostd refreshes a stale inventory while serving
+          // the status call and stamps the observation once the capture returns,
+          // so an observation made during this very request carries a timestamp
+          // later than `now` — on this host NVML takes about a second, and the
+          // observation landed ~972ms "in the future". Both processes read
+          // CLOCK_MONOTONIC on the same machine and cannot actually disagree
+          // about time; the comparison instant was simply taken too early.
+          const std::int64_t observed_at = hostd_monotonic_now_ns();
+          // hostd serves a cached inventory whenever it is younger than its own
+          // refresh interval (inventory_refresh_interval_ns in
+          // hostd_daemon_runtime.cpp), so that interval must stay below this
+          // bound or a well-behaved authority is refused for most of every
+          // cycle. Raising this without lowering that one reintroduces the
+          // mismatch in the other direction.
           constexpr std::uint64_t maximum_age_ns = 5'000'000'000ULL;
-          if (coordinator.host_id != authority_host_.host_id ||
-              coordinator.boot_id != authority_host_.boot_id ||
-              !authority.resource_inventory_observed ||
-              authority.resource_inventory_observation_age_ns >
-                  maximum_age_ns ||
-              authority.current_inventory_digest.empty() ||
-              authority.current_inventory_receipt_digest.empty() ||
-              authority.passive_memory_host_id != coordinator.host_id ||
-              authority.passive_memory_boot_id != coordinator.boot_id ||
-              authority.passive_memory_inventory_digest !=
-                  authority.current_inventory_digest ||
-              authority.passive_memory_inventory_receipt_digest !=
-                  authority.current_inventory_receipt_digest ||
-              authority.passive_memory_observed_monotonic_ns == 0U ||
-              authority.passive_memory_observed_monotonic_ns >
-                  static_cast<std::uint64_t>(now) ||
-              static_cast<std::uint64_t>(now) -
-                      authority.passive_memory_observed_monotonic_ns >
-                  maximum_age_ns ||
-              authority.passive_memory_observation_digest.empty() ||
-              authority.passive_accelerator_memory.empty() ||
-              authority.passive_accelerator_memory_truncated ||
-              authority.passive_accelerator_memory_count !=
-                  authority.passive_accelerator_memory.size())
+          if (const std::optional<std::string> rejection =
+                  passive_inventory_rejection(coordinator, authority,
+                                              authority_host_, observed_at,
+                                              maximum_age_ns))
             throw std::runtime_error(
-                "hostd passive inventory is absent, stale, or names another "
-                "host/boot authority");
+                "hostd passive inventory is not admissible: " + *rejection);
           std::vector<PassiveAcceleratorMemoryEvidence> result;
           result.reserve(authority.passive_accelerator_memory.size());
           for (const auto &memory :
                authority.passive_accelerator_memory) {
-            if (!memory.audited_eligible)
-              continue;
+            // Every observed device is carried through with its disposition.
+            // Filtering on `audited_eligible` here decided a policy question —
+            // may this plan use this device — with an observation that cannot
+            // express the answer, and did it before the plan was in scope: a
+            // GPU driving a display is observed occupied forever, so on this
+            // host preflight was handed an empty accelerator list and reported
+            // insufficient VRAM. Selection is preflight's to make, against the
+            // access mode the plan actually declares.
             AcceleratorVendor vendor{};
             switch (memory.vendor) {
             case HostAcceleratorVendor::nvidia:
@@ -1554,6 +1636,7 @@ TrainVMService::TrainVMService(
                 .selector_labels = memory.selector_labels,
                 .observation_digest =
                     authority.passive_memory_observation_digest,
+                .disposition = memory.disposition,
             });
           }
           return result;
@@ -2652,11 +2735,36 @@ HostProcessSagaSnapshot TrainVMService::launch_worker_process(
   const auto projection = journal_.projection(identity.run_id);
   const auto plan =
       projection ? journal_.compiled_plan(projection->plan_hash) : std::nullopt;
-  if (!projection || !plan || projection->current_node_id != identity.node_id ||
-      projection->current_attempt_id != identity.attempt_id) {
+  if (!projection)
     throw OperationPreconditionError(
-        "host process launch cannot recover its exact resource policy");
-  }
+        "host process launch cannot recover its exact resource policy: no "
+        "projection for run " + identity.run_id);
+  if (!plan)
+    throw OperationPreconditionError(
+        "host process launch cannot recover its exact resource policy: no "
+        "compiled plan " + projection->plan_hash);
+  // The node and attempt are re-derived from the recovered execution state,
+  // not from the projection. A run is still `acquiring` when its first worker
+  // is launched — entering the node is what the launch accomplishes — and the
+  // projection deliberately clears current_node_id and current_attempt_id on
+  // entering `acquiring`, setting them only once `node.entered` is journaled,
+  // which happens after the worker reports ready. Comparing the sealed launch
+  // against the projection therefore compared "train" against "" on every
+  // first launch and could never hold. reconcile_host_grant already recovers
+  // the controller for exactly this question, one step earlier in the same
+  // reconciliation.
+  Controller recovered(*plan, journal_, identity.run_id);
+  recovered.recover();
+  if (recovered.state().current_node_id != identity.node_id)
+    throw OperationPreconditionError(
+        "host process launch cannot recover its exact resource policy: the "
+        "sealed launch names node " + identity.node_id +
+        "; the recovered run is at " + recovered.state().current_node_id);
+  if (recovered.state().current_attempt_id != identity.attempt_id)
+    throw OperationPreconditionError(
+        "host process launch cannot recover its exact resource policy: the "
+        "sealed launch names attempt " + identity.attempt_id +
+        "; the recovered run is at " + recovered.state().current_attempt_id);
   const LinuxProcessPolicy process_policy = compile_linux_process_policy(
       plan->experiment.spec.resources.cpu_io_policy);
   return host_process_saga_->reconcile(

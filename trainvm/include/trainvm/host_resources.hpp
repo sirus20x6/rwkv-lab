@@ -76,6 +76,24 @@ enum class ResourceAccessMode {
   mutex_exclusive,
 };
 
+// Whether an observed disposition permits selecting a resource under `mode`.
+//
+// A device that also drives a display is observed `occupied` for as long as it
+// is driving that display — no authorization changes the observation, because
+// the observation is true. What an authorization changes is whether an occupied
+// device may still be selected cooperatively, which is the question this answers
+// and the reason `exclusive: false` exists in a plan.
+//
+// Exported because two call sites need the identical answer: resource
+// acquisition, which holds a full ObservedHostResource, and passive preflight,
+// which holds only what the host authority put on the wire. Those two had drifted
+// into one place applying this rule and the other applying `disposition ==
+// audited_eligible`, so a cooperative plan was rejected before preflight ever
+// saw the device.
+[[nodiscard]] bool resource_disposition_permits(
+    ResourceObservationDisposition disposition,
+    const std::map<std::string, std::string>& labels, ResourceAccessMode mode);
+
 enum class TopologyPolicy {
   any,
   same_numa_node,
