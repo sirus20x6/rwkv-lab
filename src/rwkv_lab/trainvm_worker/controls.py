@@ -200,12 +200,24 @@ class WorkerControlRuntime:
     ) -> tuple[AppliedControlPatch, ...]:
         if not isinstance(safe_point, SafePoint):
             raise TypeError("safe point must be allowlisted")
+        # A launch-gate evaluation runs before any optimizer step, so step 0 is
+        # its correct and only sensible value — the HF adapter requires that
+        # gate on a fresh run and fails closed without it. Every other safe
+        # point names a step that must already have happened, where a zeroth
+        # step is meaningless and stays rejected. Zero is representable
+        # downstream regardless: an immediate control patch is acknowledged with
+        # effective_step 0 a few lines below, and acknowledge_controls defaults
+        # to it.
+        minimum_step = 0 if safe_point is SafePoint.NEXT_EVAL else 1
         if (
             not isinstance(effective_step, int)
             or isinstance(effective_step, bool)
-            or effective_step <= 0
+            or effective_step < minimum_step
         ):
-            raise WorkerControlError("safe-point effective step must be positive")
+            raise WorkerControlError(
+                "safe-point effective step must be at least "
+                f"{minimum_step} for {safe_point.name}, got {effective_step!r}"
+            )
         self._collect()
         applied: list[AppliedControlPatch] = []
         while self._pending:
