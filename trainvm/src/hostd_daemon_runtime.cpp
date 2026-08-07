@@ -279,31 +279,20 @@ public:
               HostdAuthorityStatus::maximum_passive_memory_rows);
           status.passive_accelerator_memory_truncated = true;
         }
-        const auto identity = [&] {
-          return nlohmann::json{
-              {"api_version", "trainvm.hostd-passive-memory/v1"},
-              {"host_id", status.passive_memory_host_id},
-              {"boot_id", status.passive_memory_boot_id},
-              {"inventory_digest", status.passive_memory_inventory_digest},
-              {"inventory_receipt_digest",
-               status.passive_memory_inventory_receipt_digest},
-              {"observed_monotonic_ns",
-               status.passive_memory_observed_monotonic_ns},
-              {"accelerator_count", status.passive_accelerator_memory_count},
-              {"accelerators_truncated",
-               status.passive_accelerator_memory_truncated},
-              {"accelerators", encode_json(status.passive_accelerator_memory)},
-          };
-        };
+        // Both the trim bound and the digest come from the transport's own
+        // encoder. A second encoding written here drifted from it — it omitted
+        // api_version and encoded the accelerator rows reflectively — so every
+        // status carrying passive memory failed the transport's digest check
+        // and was closed with no reply.
         while (!status.passive_accelerator_memory.empty() &&
-               identity().dump().size() >
+               hostd_passive_memory_identity_bytes(status) >
                    HostdAuthorityStatus::
                        maximum_passive_memory_identity_bytes) {
           status.passive_accelerator_memory.pop_back();
           status.passive_accelerator_memory_truncated = true;
         }
         status.passive_memory_observation_digest =
-            "sha256:" + sha256_hex(identity().dump());
+            hostd_passive_memory_observation_digest(status);
       }
       for (const ResourceFence &fence : occupancy.active_fences) {
         const auto observed = std::find_if(

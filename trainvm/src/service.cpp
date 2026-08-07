@@ -5686,7 +5686,8 @@ int serve(const std::filesystem::path& journal_path,
           HostLaunchRegistry host_launch_registry,
           TrainingComponentRegistry training_components,
           std::optional<HostdClientConfiguration> hostd_configuration,
-          std::optional<std::uint32_t> worker_socket_gid) {
+          std::optional<std::uint32_t> worker_socket_gid,
+          std::filesystem::path recipe_registry_path) {
   if (journal_path.empty() || socket_path.empty()) {
     throw std::invalid_argument("serve requires journal and socket paths");
   }
@@ -5713,7 +5714,8 @@ int serve(const std::filesystem::path& journal_path,
                          std::move(training_components),
                          std::move(hostd_configuration),
                          "unix:" + absolute_socket.string(), nullptr,
-                         SqliteAuthorityEnforcementGrade::strict_filesystem);
+                         SqliteAuthorityEnforcementGrade::strict_filesystem, {},
+                         std::move(recipe_registry_path));
   if (worker_socket_gid) {
     struct stat parent_status {};
     if (*worker_socket_gid != static_cast<std::uint32_t>(::getegid()) ||

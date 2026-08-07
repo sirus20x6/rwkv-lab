@@ -14,8 +14,12 @@
 #include "trainvm/training_schedules.hpp"
 #include "trainvm/training_preflight.hpp"
 
+#include <algorithm>
+#include <array>
 #include <charconv>
 #include <filesystem>
+#include <map>
+#include <ranges>
 #include <fstream>
 #include <iostream>
 #include <optional>
@@ -61,9 +65,10 @@ void usage() {
          "[--metric <metric>] [--baseline <config>] [--limit <count>]\n"
       << "  trainvm serve --journal <journal.db> --socket <trainvm.sock> "
          "--registry <adapters.json> --host-launch-registry "
-         "<host-launches.json> --training-component-registry "
-         "<training-components.json> [--hostd-client <hostd-client.json>] "
-         "[--worker-socket-gid <gid>]\n"
+         "<host-launches.json> [--training-component-registry "
+         "<training-components.json>] [--hostd-client <hostd-client.json>] "
+         "[--worker-socket-gid <gid>] "
+         "[--recipe-registry <recipe-profiles.json>]\n"
       << "  trainvm simulate <experiment.json> <events.jsonl> [run-id]\n"
       << "  trainvm journal init <journal.db>\n"
       << "  trainvm journal verify <journal.db>\n"
@@ -580,28 +585,48 @@ int journal_command(int argc, char** argv) {
 }
 
 int serve_command(int argc, char** argv) {
-  const bool with_hostd = argc == 14 || argc == 16;
-  const bool with_worker_group = argc == 16;
-  if ((argc != 12 && argc != 14 && argc != 16) ||
-      std::string_view(argv[2]) != "--journal" ||
-      std::string_view(argv[4]) != "--socket" ||
-      std::string_view(argv[6]) != "--registry" ||
-      std::string_view(argv[8]) != "--host-launch-registry" ||
-      std::string_view(argv[10]) != "--training-component-registry" ||
-      (with_hostd && std::string_view(argv[12]) != "--hostd-client") ||
-      (with_worker_group &&
-       std::string_view(argv[14]) != "--worker-socket-gid")) {
+  // Flag-keyed rather than positional: the previous form pinned each option to
+  // a fixed argv index, so adding one meant a new exact argc and every optional
+  // combination became its own arm — this branch already carried three arms for
+  // two optional flags. Order no longer matters and an unknown or repeated flag
+  // is rejected instead of being read as another option's value.
+  std::map<std::string_view, std::string_view> options;
+  static constexpr std::array<std::string_view, 4> required = {
+      "--journal", "--socket", "--registry", "--host-launch-registry"};
+  static constexpr std::array<std::string_view, 4> optional = {
+      "--training-component-registry", "--hostd-client", "--recipe-registry",
+      "--worker-socket-gid"};
+  if (argc % 2 != 0) {
     usage();
     return 64;
   }
+  for (int index = 2; index + 1 < argc; index += 2) {
+    const std::string_view flag(argv[index]);
+    const bool known =
+        std::ranges::find(required, flag) != required.end() ||
+        std::ranges::find(optional, flag) != optional.end();
+    if (!known || !options.emplace(flag, argv[index + 1]).second) {
+      usage();
+      return 64;
+    }
+  }
+  if (std::ranges::any_of(required, [&](std::string_view flag) {
+        return !options.contains(flag);
+      })) {
+    usage();
+    return 64;
+  }
+
   std::optional<trainvm::HostdClientConfiguration> hostd;
-  if (with_hostd) {
+  if (const auto client = options.find("--hostd-client");
+      client != options.end()) {
     hostd = trainvm::HostdClientConfiguration::load_file(
-        std::filesystem::absolute(argv[13]).lexically_normal());
+        std::filesystem::absolute(client->second).lexically_normal());
   }
   std::optional<std::uint32_t> worker_socket_gid;
-  if (with_worker_group) {
-    const std::string_view text(argv[15]);
+  if (const auto group = options.find("--worker-socket-gid");
+      group != options.end()) {
+    const std::string_view text(group->second);
     std::uint32_t value = 0U;
     const auto [end, error] =
         std::from_chars(text.data(), text.data() + text.size(), value);
@@ -612,12 +637,20 @@ int serve_command(int argc, char** argv) {
     }
     worker_socket_gid = value;
   }
-  return trainvm::serve(argv[3], argv[5],
-                        trainvm::AdapterRegistry::load_file(argv[7]),
-                        trainvm::HostLaunchRegistry::load_file(argv[9]),
-                        trainvm::TrainingComponentRegistry::load_file(
-                            argv[11]),
-                        std::move(hostd), worker_socket_gid);
+  const auto components = options.find("--training-component-registry");
+  const auto recipes = options.find("--recipe-registry");
+  return trainvm::serve(
+      options["--journal"], options["--socket"],
+      trainvm::AdapterRegistry::load_file(options["--registry"]),
+      trainvm::HostLaunchRegistry::load_file(options["--host-launch-registry"]),
+      components == options.end()
+          ? trainvm::TrainingComponentRegistry({})
+          : trainvm::TrainingComponentRegistry::load_file(components->second),
+      std::move(hostd), worker_socket_gid,
+      recipes == options.end()
+          ? std::filesystem::path(
+                std::string(trainvm::kInstalledRecipeProfilePath))
+          : std::filesystem::path(recipes->second));
 }
 
 int inspect_rwkv_lab_worker_command(std::string code_fingerprint) {

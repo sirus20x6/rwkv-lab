@@ -680,6 +680,20 @@ std::string plain_sha256(std::string_view bytes) {
   return "sha256:" + sha256_hex(bytes);
 }
 
+}  // namespace
+
+std::string hostd_passive_memory_observation_digest(
+    const HostdAuthorityStatus &status) {
+  return plain_sha256(passive_memory_identity_json(status).dump());
+}
+
+std::size_t hostd_passive_memory_identity_bytes(
+    const HostdAuthorityStatus &status) {
+  return passive_memory_identity_json(status).dump().size();
+}
+
+namespace {
+
 nlohmann::json authority_status_json(const HostdAuthorityStatus &status) {
   nlohmann::json fences = nlohmann::json::array();
   for (const ResourceFence &fence : status.active_fences)
