@@ -38,6 +38,12 @@ class HuggingFaceModelConfiguration:
     # A family listed here that loses even one tensor fails the load by name,
     # rather than contributing anonymous entries to a missing-key count.
     required_tensor_families: tuple[str, ...] = ()
+    # Checkpoint-to-model weight renames, each "source=>target", for a
+    # checkpoint that matches a Transformers architecture but was not converted
+    # to its key layout. Declared here rather than inferred from the model path,
+    # so the remap is configuration a reader can see and a receipt can record
+    # instead of a special case hidden behind a name match.
+    checkpoint_key_remap: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         path = Path(self.model_path)
@@ -68,6 +74,21 @@ class HuggingFaceModelConfiguration:
                 raise ValueError(f"{label} prefixes must be unique")
             if any(not prefix for prefix in prefixes):
                 raise ValueError(f"{label} prefixes must be non-empty")
+        sources: set[str] = set()
+        for entry in self.checkpoint_key_remap:
+            source, separator, target = entry.partition("=>")
+            if not separator or not source or not target:
+                raise ValueError(
+                    "checkpoint key remap entries must be 'source=>target'"
+                )
+            if source in sources:
+                raise ValueError("checkpoint key remap sources must be unique")
+            sources.add(source)
+
+    def remap_pairs(self) -> dict[str, str]:
+        return dict(
+            entry.split("=>", 1) for entry in self.checkpoint_key_remap
+        )
 
     @classmethod
     def from_resolved(cls, value: dict[str, Any]) -> HuggingFaceModelConfiguration:
@@ -82,11 +103,16 @@ class HuggingFaceModelConfiguration:
             "exact_checkpoint",
             "ignorable_unexpected_prefixes",
             "required_tensor_families",
+            "checkpoint_key_remap",
         }
         if set(value) != expected:
             raise ValueError("resolved Hugging Face model configuration is inexact")
         resolved = dict(value)
-        for field in ("ignorable_unexpected_prefixes", "required_tensor_families"):
+        for field in (
+            "ignorable_unexpected_prefixes",
+            "required_tensor_families",
+            "checkpoint_key_remap",
+        ):
             resolved[field] = tuple(resolved[field])
         return cls(**resolved)
 
@@ -109,6 +135,9 @@ class ModelLoadReceipt:
     # Per required family: how many of the model's parameters in that family
     # came from the checkpoint, out of how many the model has.
     family_binding: tuple[tuple[str, int, int], ...]
+    # The checkpoint-to-model renames this load applied, so a receipt states
+    # which key layout the weights actually came from.
+    applied_key_remap: tuple[str, ...]
     exact: bool
 
     def canonical_dict(self) -> dict[str, Any]:
@@ -156,6 +185,11 @@ def _loading_arguments(configuration: HuggingFaceModelConfiguration) -> dict[str
         arguments["load_in_4bit"] = True
     elif configuration.quantization == "8bit":
         arguments["load_in_8bit"] = True
+    # Per-call, so a remap never leaks into another load through global
+    # conversion-mapping registry state.
+    remap = configuration.remap_pairs()
+    if remap:
+        arguments["key_mapping"] = remap
     return arguments
 
 
@@ -221,6 +255,7 @@ def _receipt(
         error_messages=errors,
         ignored_unexpected_keys=ignored,
         family_binding=tuple(binding),
+        applied_key_remap=configuration.checkpoint_key_remap,
         exact=exact,
     )
 

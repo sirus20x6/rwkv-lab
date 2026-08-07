@@ -295,6 +295,94 @@ def test_fully_bound_families_are_recorded_in_the_receipt(tmp_path: Path) -> Non
     assert bound["language_model."][0] > 0
 
 
+def test_checkpoint_key_remap_is_passed_per_call_and_recorded(tmp_path: Path) -> None:
+    """The remap reaches from_pretrained as key_mapping, and lands in the receipt.
+
+    Per-call rather than through the global conversion-mapping registry, so one
+    model's remap can never leak into another load in the same process.
+    """
+    seen: dict[str, object] = {}
+
+    class Recording(_AutoFactory):
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            seen.update(kwargs)
+            return super().from_pretrained(*args, **kwargs)
+
+    facade = SimpleNamespace(
+        AutoModelForImageTextToText=Recording, AutoProcessor=_AuxiliaryFactory
+    )
+    configuration = replace(
+        _model_configuration(tmp_path),
+        checkpoint_key_remap=("model.language_model.visual.=>model.visual.",),
+    )
+    receipt = (
+        build_registered_model_loader(
+            ModelLoaderImplementation.HF_MULTIMODAL_V1, configuration
+        )
+        .load(transformers_module=facade)
+        .receipt
+    )
+    assert seen["key_mapping"] == {"model.language_model.visual.": "model.visual."}
+    assert receipt.applied_key_remap == (
+        "model.language_model.visual.=>model.visual.",
+    )
+
+    # No remap declared means the argument is not sent at all, so an unrelated
+    # load keeps Transformers' own default conversion behaviour.
+    seen.clear()
+    build_registered_model_loader(
+        ModelLoaderImplementation.HF_MULTIMODAL_V1, _model_configuration(tmp_path)
+    ).load(transformers_module=facade)
+    assert "key_mapping" not in seen
+
+
+def test_malformed_checkpoint_key_remap_is_rejected(tmp_path: Path) -> None:
+    for entry in ("no-separator", "=>target", "source=>", ""):
+        with pytest.raises(ValueError, match="source=>target"):
+            replace(_model_configuration(tmp_path), checkpoint_key_remap=(entry,))
+    with pytest.raises(ValueError, match="unique"):
+        replace(
+            _model_configuration(tmp_path),
+            checkpoint_key_remap=("a=>b", "a=>c"),
+        )
+
+
+def test_qwen36_vision_remap_reconciles_the_published_key_layout() -> None:
+    """Pin the Qwen3.6 nesting so a Transformers upgrade cannot silently revert it.
+
+    Qwen3.6 publishes its ViT at model.language_model.visual.*, while
+    Qwen3_5MoeForConditionalGeneration expects model.visual.*. Nothing remaps it,
+    so without the declared remap all 333 vision tensors load as missing and are
+    randomly initialized while the load still reports success. This asserts the
+    rename is a pure prefix substitution over the real published key names.
+    """
+    published = [
+        "model.language_model.visual.patch_embed.proj.weight",
+        "model.language_model.visual.pos_embed",
+        "model.language_model.visual.blocks.0.attn.qkv.weight",
+        "model.language_model.visual.merger.linear_fc1.bias",
+    ]
+    expected = [
+        "model.visual.patch_embed.proj.weight",
+        "model.visual.pos_embed",
+        "model.visual.blocks.0.attn.qkv.weight",
+        "model.visual.merger.linear_fc1.bias",
+    ]
+    configuration = HuggingFaceModelConfiguration(
+        model_path=str(Path(__file__).resolve().parent),
+        checkpoint_fingerprint="sha256:" + "a" * 64,
+        checkpoint_key_remap=("model.language_model.visual.=>model.visual.",),
+    )
+    (source, target), = configuration.remap_pairs().items()
+    assert [key.replace(source, target, 1) for key in published] == expected
+
+    # The language side must be untouched: the checkpoint already nests it where
+    # the class looks, so a remap that caught it too would break the load.
+    language = "model.language_model.layers.0.self_attn.q_proj.weight"
+    assert language.replace(source, target, 1) == language
+
+
 def test_named_rules_freeze_and_unfreeze_qwen_tensors_deterministically() -> None:
     model = TinyQwen()
     policy = build_registered_trainability(
@@ -463,6 +551,7 @@ def test_resolved_component_factories_dispatch_without_workload_imports(
             "configuration": {
                 "attention_implementation": "sdpa",
                 "checkpoint_fingerprint": "sha256:" + "a" * 64,
+                "checkpoint_key_remap": [],
                 "exact_checkpoint": True,
                 "ignorable_unexpected_prefixes": [],
                 "local_files_only": True,
