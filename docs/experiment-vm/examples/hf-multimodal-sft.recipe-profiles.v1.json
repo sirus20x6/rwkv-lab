@@ -66,12 +66,6 @@
               "fingerprint": "manifest_sha256",
               "required": true
             },
-            "metrics": {
-              "type": "metrics",
-              "schema": "hf.multimodal-sft.metrics.v1",
-              "immutability": "append_only",
-              "fingerprint": "manifest_sha256"
-            },
             "test_eval": {
               "type": "report",
               "schema": "rwkv-lab.hf-test-caption-evidence-bundle.v1",
@@ -469,7 +463,6 @@
                 "publishes": {
                   "checkpoint": "checkpoint",
                   "eval_gallery": "eval_gallery",
-                  "metrics": "metrics",
                   "test_eval": "test_eval"
                 },
                 "idempotency": "receipt_required",
@@ -817,12 +810,6 @@
               "immutability": "append_only",
               "fingerprint": "manifest_sha256",
               "required": true
-            },
-            "metrics": {
-              "type": "metrics",
-              "schema": "hf.multimodal-sft.metrics.v1",
-              "immutability": "append_only",
-              "fingerprint": "manifest_sha256"
             },
             "test_eval": {
               "type": "report",
@@ -1224,7 +1211,6 @@
                 "publishes": {
                   "checkpoint": "checkpoint",
                   "eval_gallery": "eval_gallery",
-                  "metrics": "metrics",
                   "test_eval": "test_eval"
                 },
                 "idempotency": "receipt_required",
@@ -1586,12 +1572,6 @@
               "immutability": "append_only",
               "fingerprint": "manifest_sha256",
               "required": true
-            },
-            "metrics": {
-              "type": "metrics",
-              "schema": "hf.multimodal-sft.metrics.v1",
-              "immutability": "append_only",
-              "fingerprint": "manifest_sha256"
             },
             "test_eval": {
               "type": "report",
@@ -2011,7 +1991,6 @@
                 "publishes": {
                   "checkpoint": "checkpoint",
                   "eval_gallery": "eval_gallery",
-                  "metrics": "metrics",
                   "test_eval": "test_eval"
                 },
                 "idempotency": "receipt_required",
