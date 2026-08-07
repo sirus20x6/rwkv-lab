@@ -25,10 +25,6 @@ Cmnd_Alias TRAINVM_HOSTD = \
     /usr/bin/install -o root -g root -m 0644 /thearray/git/moe-mla-parity-integration/deploy/trainvm-hostd.service /etc/systemd/system/trainvm-hostd.service, \
     /usr/bin/install -o root -g root -m 0644 /thearray/git/moe-mla-parity-integration/deploy/trainvm-gpu-fault-observer.service /etc/systemd/system/trainvm-gpu-fault-observer.service, \
     /usr/bin/install -o root -g root -m 0644 /thearray/git/moe-mla-parity-integration/deploy/trainvm-controller.service /etc/systemd/system/trainvm-controller.service, \
-    /usr/bin/install -o root -g root -m 0644 /thearray/git/moe-mla/runs/trainvm-worker-deployment-26fe458/adapters.json /etc/trainvm/adapters.json, \
-    /usr/bin/install -o root -g root -m 0644 /thearray/git/moe-mla/runs/trainvm-worker-deployment-26fe458/host-launches.json /etc/trainvm/host-launches.json, \
-    /usr/bin/install -o root -g root -m 0644 /thearray/git/moe-mla-parity-integration/docs/experiment-vm/examples/training-components.v1.json /etc/trainvm/training-components.json, \
-    /usr/bin/install -d -o root -g webteam -m 0750 /etc/trainvm, \
     /usr/bin/systemctl daemon-reload, \
     /usr/bin/systemctl enable --now trainvm-gpu-fault-observer.service, \
     /usr/bin/systemctl enable --now trainvm-controller.service, \
