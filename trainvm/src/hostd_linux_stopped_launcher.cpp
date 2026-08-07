@@ -238,10 +238,20 @@ bool install_worker_credentials(
     const LinuxWorkerCredentialSpec& credentials) noexcept {
   if (credentials.uid == 0U || credentials.gid == 0U ||
       !credentials.no_new_privileges ||
+      credentials.supplementary_gids.size() > kMaximumSupplementaryGroups ||
       ::prctl(PR_SET_NO_NEW_PRIVS, 1UL, 0UL, 0UL, 0UL) != 0 ||
-      ::prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0UL, 0UL, 0UL) != 0 ||
-      ::setgroups(0U, nullptr) != 0 ||
-      ::setresgid(credentials.gid, credentials.gid, credentials.gid) != 0 ||
+      ::prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0UL, 0UL, 0UL) != 0) {
+    return false;
+  }
+  // setgroups(2) needs CAP_SETGID. When the sealed set is empty the authority
+  // is privileged and drops the groups outright; otherwise the sealed set names
+  // the groups it already carries and the check below proves none were gained.
+  if (credentials.supplementary_gids.empty() && ::setgroups(0U, nullptr) != 0) {
+    return false;
+  }
+  // Same-value setresuid/setresgid are permitted unprivileged and still prove
+  // the running identity is the one that was sealed.
+  if (::setresgid(credentials.gid, credentials.gid, credentials.gid) != 0 ||
       ::setresuid(credentials.uid, credentials.uid, credentials.uid) != 0) {
     return false;
   }
@@ -253,9 +263,24 @@ bool install_worker_credentials(
       ::prctl(PR_SET_DUMPABLE, 0UL, 0UL, 0UL, 0UL) != 0 ||
       ::geteuid() != credentials.uid || ::getuid() != credentials.uid ||
       ::getegid() != credentials.gid || ::getgid() != credentials.gid ||
-      ::getgroups(0, nullptr) != 0 ||
       ::prctl(PR_GET_NO_NEW_PRIVS, 0UL, 0UL, 0UL, 0UL) != 1) {
     return false;
+  }
+  // Exactly the sealed set, in either direction. With an empty sealed set this
+  // is the previous `getgroups(0, nullptr) != 0` check unchanged.
+  std::array<gid_t, kMaximumSupplementaryGroups> observed{};
+  const int observed_count =
+      ::getgroups(static_cast<int>(observed.size()), observed.data());
+  if (observed_count < 0 ||
+      static_cast<std::size_t>(observed_count) !=
+          credentials.supplementary_gids.size()) {
+    return false;
+  }
+  std::sort(observed.begin(), observed.begin() + observed_count);
+  for (int index = 0; index < observed_count; ++index) {
+    const auto slot = static_cast<std::size_t>(index);
+    if (observed[slot] == 0U || observed[slot] != credentials.supplementary_gids[slot])
+      return false;
   }
   (void)::umask(0077);
   return true;
@@ -322,6 +347,37 @@ bool zero_hex(std::string_view value) {
          });
 }
 
+// The worker's supplementary groups must equal the sealed set exactly — neither
+// a subset nor a superset. gid 0 may never appear, whether or not the worker
+// shares the authority identity.
+bool supplementary_groups_equal(std::string_view field,
+                                const std::vector<gid_t>& expected) {
+  std::vector<gid_t> observed;
+  observed.reserve(expected.size());
+  while (!field.empty()) {
+    while (!field.empty() && (field.front() == ' ' || field.front() == '\t'))
+      field.remove_prefix(1U);
+    if (field.empty()) break;
+    const std::size_t end = field.find_first_of(" \t");
+    const std::string_view token = field.substr(0U, end);
+    std::uint64_t value = 0U;
+    const auto parsed =
+        std::from_chars(token.data(), token.data() + token.size(), value);
+    if (parsed.ec != std::errc{} || parsed.ptr != token.data() + token.size() ||
+        value == 0U ||
+        value > static_cast<std::uint64_t>(std::numeric_limits<gid_t>::max()) ||
+        observed.size() >= kMaximumSupplementaryGroups) {
+      return false;
+    }
+    observed.push_back(static_cast<gid_t>(value));
+    field = end == std::string_view::npos ? std::string_view{}
+                                          : field.substr(end);
+  }
+  std::ranges::sort(observed);
+  return std::ranges::adjacent_find(observed) == observed.end() &&
+         observed == expected;
+}
+
 bool worker_status_has_credentials(
     std::string_view status, const LinuxWorkerCredentialSpec& expected) {
   const auto uid = status_field(status, "Uid");
@@ -336,7 +392,8 @@ bool worker_status_has_credentials(
          expected.no_new_privileges && uid && gid && groups &&
          no_new_privileges && effective && permitted && inheritable && ambient &&
          four_ids_equal(*uid, expected.uid) &&
-         four_ids_equal(*gid, expected.gid) && groups->empty() &&
+         four_ids_equal(*gid, expected.gid) &&
+         supplementary_groups_equal(*groups, expected.supplementary_gids) &&
          *no_new_privileges == "1" && zero_hex(*effective) &&
          zero_hex(*permitted) && zero_hex(*inheritable) && zero_hex(*ambient);
 }
@@ -414,8 +471,15 @@ void validate_spec(const LinuxStoppedLaunchSpec& spec) {
       spec.expected_cgroup_device == 0U || spec.expected_cgroup_inode == 0U ||
       spec.executable_name.empty() || spec.executable_name.size() > 4096U ||
       !valid_digest(spec.executable_digest) ||
-      ::geteuid() != 0U || spec.credentials.uid == 0U ||
+      // The launcher may target a uid it already is, or any uid if it is root.
+      // In the unprivileged case this is strictly stronger than the old
+      // "must be root" rule; in the privileged case it is identical, so no
+      // capability is silently gained.
+      (::geteuid() != 0U && ::geteuid() != spec.credentials.uid) ||
+      spec.credentials.uid == 0U ||
       spec.credentials.gid == 0U || !spec.credentials.no_new_privileges ||
+      spec.credentials.supplementary_gids.size() >
+          kMaximumSupplementaryGroups ||
       (spec.nice && (*spec.nice < -20 || *spec.nice > 19)) ||
       spec.arguments.size() > 256U) {
     reject("stopped launch specification is malformed or unbounded");

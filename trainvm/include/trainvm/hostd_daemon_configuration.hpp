@@ -58,6 +58,12 @@ struct HostdDaemonWorkerIdentityDocument final {
   std::uint32_t uid{};
   std::uint32_t gid{};
   bool no_new_privileges{};
+  // An unprivileged authority cannot call setgroups(2), so a worker that shares
+  // its identity necessarily inherits its supplementary groups. Declaring that
+  // here keeps the sharing deliberate: the exact inherited set is sealed at
+  // startup and the worker is then attested against it, rather than the
+  // attestation being loosened to whatever the child happens to carry.
+  std::optional<bool> inherit_authority_supplementary_groups;
 
   bool operator==(const HostdDaemonWorkerIdentityDocument &) const = default;
 };

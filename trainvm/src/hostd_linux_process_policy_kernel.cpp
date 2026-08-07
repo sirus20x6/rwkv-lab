@@ -333,12 +333,21 @@ HostProcessPolicyInstallationBinding host_process_policy_installation_binding(
 LinuxProcessPolicy linux_process_policy_from_process(
     const HostProcessLaunchIntent& intent,
     const HostProcessSpawnReceipt& spawn) {
-  if (intent.api_version != kHostProcessLaunchIntentApiVersionV3 ||
-      intent.request.api_version != kHostProcessLaunchRequestApiVersionV3 ||
-      spawn.api_version != kHostProcessSpawnReceiptApiVersionV3 ||
-      spawn.request.api_version != kHostProcessSpawnRequestApiVersionV3 ||
-      !intent.request.process_policy || !spawn.request.process_policy) {
-    reject("durable process has no v3 process-policy evidence");
+  // v3 and v4 carry identical process-policy evidence; they differ only in
+  // whether a device policy accompanies it.
+  const bool v3_pair =
+      intent.api_version == kHostProcessLaunchIntentApiVersionV3 &&
+      intent.request.api_version == kHostProcessLaunchRequestApiVersionV3 &&
+      spawn.api_version == kHostProcessSpawnReceiptApiVersionV3 &&
+      spawn.request.api_version == kHostProcessSpawnRequestApiVersionV3;
+  const bool v4_pair =
+      intent.api_version == kHostProcessLaunchIntentApiVersionV4 &&
+      intent.request.api_version == kHostProcessLaunchRequestApiVersionV4 &&
+      spawn.api_version == kHostProcessSpawnReceiptApiVersionV4 &&
+      spawn.request.api_version == kHostProcessSpawnRequestApiVersionV4;
+  if ((!v3_pair && !v4_pair) || !intent.request.process_policy ||
+      !spawn.request.process_policy) {
+    reject("durable process has no v3 or v4 process-policy evidence");
   }
   const auto& binding = *intent.request.process_policy;
   LinuxProcessPolicy result{

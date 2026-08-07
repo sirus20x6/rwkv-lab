@@ -66,6 +66,29 @@ void require_inventory_identity(
   }
 }
 
+// Captured once, before NVML and before any fork, while the daemon is still
+// single-threaded. An unprivileged authority cannot drop its supplementary
+// groups, so the worker inherits them; sealing the observed set here — rather
+// than declaring it in configuration, where it would rot the first time
+// /etc/group changed — lets the launcher attest the worker against an exact
+// set instead of loosening the check to whatever the child happens to carry.
+std::vector<gid_t> seal_authority_supplementary_groups() {
+  const int count = ::getgroups(0, nullptr);
+  if (count < 0 || static_cast<std::size_t>(count) > kMaximumSupplementaryGroups)
+    throw HostdDaemonRuntimeError("hostd supplementary group set is unbounded");
+  std::vector<gid_t> groups(static_cast<std::size_t>(count));
+  if (count > 0 && ::getgroups(count, groups.data()) != count)
+    throw HostdDaemonRuntimeError(
+        "hostd supplementary group set changed while sealing");
+  std::ranges::sort(groups);
+  if (std::ranges::adjacent_find(groups) != groups.end() ||
+      std::ranges::find(groups, 0U) != groups.end()) {
+    throw HostdDaemonRuntimeError(
+        "hostd supplementary group set is not a canonical non-root set");
+  }
+  return groups;
+}
+
 int open_socket_parent(const std::filesystem::path &path) {
   const int descriptor = ::open(path.parent_path().c_str(),
                                 O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
@@ -421,13 +444,25 @@ struct HostdDaemonRuntime::Implementation final {
         gpu_authorization(std::move(input_gpu_authorization)),
         owner_pid(::getpid()),
         owner_tid(current_tid()),
-        launch_capable(configuration.document().authority_uid == 0U &&
-                       ::geteuid() == 0U &&
+        launch_capable(configuration.document().authority_uid != 0U &&
+                       ::geteuid() ==
+                           static_cast<uid_t>(
+                               configuration.document().authority_uid) &&
                        configuration.worker_credentials().uid != 0U &&
                        configuration.worker_credentials().gid != 0U &&
                        configuration.worker_credentials().no_new_privileges) {
     if (owner_tid <= 0)
       throw HostdDaemonRuntimeError("could not bind hostd owner thread");
+    // hostd_main enforces this before publishing, but the runtime is also
+    // constructed directly, and every ownership expectation below is derived
+    // from the configured authority rather than from the running identity.
+    if (::geteuid() !=
+            static_cast<uid_t>(configuration.document().authority_uid) ||
+        ::getegid() !=
+            static_cast<gid_t>(configuration.document().authority_gid)) {
+      throw HostdDaemonRuntimeError(
+          "hostd runtime identity is not its configured authority");
+    }
     gpu_authorization.require_matches(configuration);
 
     clock = std::make_unique<AuthorityClock>();
@@ -485,19 +520,26 @@ struct HostdDaemonRuntime::Implementation final {
         configuration.coordinator(), ledger, logical_fence, gpu_fault_guard);
 
     launcher = std::make_unique<LinuxStoppedLauncherKernel>();
-    device_kernel = std::make_unique<LinuxCgroupDeviceKernel>();
-    device_installer =
-        std::make_unique<LinuxDevicePolicyInstaller>(*device_kernel);
+    // No device policy: installing one needs CAP_BPF, which an unprivileged
+    // authority does not hold. The BPF layer stays built and unit-tested; it is
+    // simply not wired into any production launch.
     process_policy_kernel =
         std::make_unique<LinuxCgroupProcessPolicyKernel>();
     process_policy_installer =
         std::make_unique<LinuxProcessPolicyInstaller>(*process_policy_kernel);
     context_auditor = std::make_unique<LinuxInventoryProcessContextAuditor>(
         *inventory_kernel);
+    LinuxWorkerCredentialSpec worker_credentials =
+        configuration.worker_credentials();
+    if (configuration.document()
+            .worker_identity.inherit_authority_supplementary_groups
+            .value_or(false)) {
+      worker_credentials.supplementary_gids =
+          seal_authority_supplementary_groups();
+    }
     process_authority = std::make_unique<LinuxProcessAuthority>(
-        *ledger, *clock, *cgroups, *device_installer,
-        *process_policy_installer, *launcher,
-        configuration.worker_credentials(), *context_auditor);
+        *ledger, *clock, *cgroups, nullptr, *process_policy_installer,
+        *launcher, worker_credentials, *context_auditor);
     process_supervisor =
         std::make_shared<HostdLinuxProcessSupervisor>(*process_authority);
     release_authority =

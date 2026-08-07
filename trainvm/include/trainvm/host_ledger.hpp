@@ -30,24 +30,36 @@ inline constexpr std::string_view kHostProcessLaunchRequestApiVersionV2 =
     "trainvm.host-process-launch-request/v2";
 inline constexpr std::string_view kHostProcessLaunchRequestApiVersionV3 =
     "trainvm.host-process-launch-request/v3";
+// v4 is v3 without device-policy evidence. An unprivileged authority cannot
+// install a cgroup device program, so a record that claimed one would be
+// unverifiable; omitting it keeps worker credentials and process policy bound
+// while making the absence explicit rather than implied.
+inline constexpr std::string_view kHostProcessLaunchRequestApiVersionV4 =
+    "trainvm.host-process-launch-request/v4";
 inline constexpr std::string_view kHostProcessLaunchIntentApiVersion =
     "trainvm.host-process-launch-intent/v1";
 inline constexpr std::string_view kHostProcessLaunchIntentApiVersionV2 =
     "trainvm.host-process-launch-intent/v2";
 inline constexpr std::string_view kHostProcessLaunchIntentApiVersionV3 =
     "trainvm.host-process-launch-intent/v3";
+inline constexpr std::string_view kHostProcessLaunchIntentApiVersionV4 =
+    "trainvm.host-process-launch-intent/v4";
 inline constexpr std::string_view kHostProcessSpawnRequestApiVersion =
     "trainvm.host-process-spawn-request/v1";
 inline constexpr std::string_view kHostProcessSpawnRequestApiVersionV2 =
     "trainvm.host-process-spawn-request/v2";
 inline constexpr std::string_view kHostProcessSpawnRequestApiVersionV3 =
     "trainvm.host-process-spawn-request/v3";
+inline constexpr std::string_view kHostProcessSpawnRequestApiVersionV4 =
+    "trainvm.host-process-spawn-request/v4";
 inline constexpr std::string_view kHostProcessSpawnReceiptApiVersion =
     "trainvm.host-process-spawn-receipt/v1";
 inline constexpr std::string_view kHostProcessSpawnReceiptApiVersionV2 =
     "trainvm.host-process-spawn-receipt/v2";
 inline constexpr std::string_view kHostProcessSpawnReceiptApiVersionV3 =
     "trainvm.host-process-spawn-receipt/v3";
+inline constexpr std::string_view kHostProcessSpawnReceiptApiVersionV4 =
+    "trainvm.host-process-spawn-receipt/v4";
 inline constexpr std::string_view kHostProcessExitRequestApiVersion =
     "trainvm.host-process-exit-request/v1";
 inline constexpr std::string_view kHostProcessExitReceiptApiVersion =

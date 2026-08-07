@@ -41,11 +41,13 @@ HostdDaemonConfigurationDocument document() {
       .boot_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
       .broker_epoch = "broker-daemon",
       .broker_instance_id = "hostd-instance-daemon",
-      .authority_uid = 0U,
+      .authority_uid = uid,
       .authority_gid = gid,
       .worker_identity = {.uid = uid == 1000U ? 1001U : 1000U,
                           .gid = gid == 1000U ? 1001U : 1000U,
-                          .no_new_privileges = true},
+                          .no_new_privileges = true,
+                          .inherit_authority_supplementary_groups =
+                              std::nullopt},
       .ledger_path = "/var/lib/trainvm-hostd/host-ledger.sqlite3",
       .journal_path = "/var/lib/trainvm/journal.sqlite3",
       .journal_identity = {.directory_path = "/var/lib/trainvm",
@@ -143,7 +145,7 @@ void valid_document_compiles_every_authority_policy() {
   const HostdDaemonConfiguration config(std::move(source));
   require(
       config.ledger_authority().enforcement_grade ==
-              HostLedgerEnforcementGrade::strict_privileged_filesystem &&
+              HostLedgerEnforcementGrade::strict_filesystem &&
           config.inventory().trusted_host_namespace &&
           config.inventory().trusted_nvml_loader &&
           config.document().gpu_fault_guard.has_value() &&
@@ -179,17 +181,39 @@ void valid_document_compiles_every_authority_policy() {
       "one daemon document compiles all strict authority sub-configs");
 }
 
-void root_hostd_accepts_a_separate_journal_service_owner() {
+// The daemon is deliberately unprivileged. Rejecting uid 0 in the configuration
+// language is what keeps a privileged hostd unrepresentable rather than merely
+// unconfigured.
+void privileged_authority_identity_is_unrepresentable() {
+  auto root_authority = document();
+  root_authority.authority_uid = 0U;
+  require_throws<HostdDaemonConfigurationError>(
+      [&] { HostdDaemonConfiguration invalid(std::move(root_authority)); },
+      "a root host authority is not a representable configuration");
+
+  auto root_group = document();
+  root_group.authority_gid = 0U;
+  require_throws<HostdDaemonConfigurationError>(
+      [&] { HostdDaemonConfiguration invalid(std::move(root_group)); },
+      "a root host authority group is not a representable configuration");
+
+  auto nobody_authority = document();
+  nobody_authority.authority_uid = 65534U;
+  require_throws<HostdDaemonConfigurationError>(
+      [&] { HostdDaemonConfiguration invalid(std::move(nobody_authority)); },
+      "a shared nobody identity cannot own the host authority");
+}
+
+void unprivileged_hostd_accepts_a_separate_journal_service_owner() {
   auto separated = document();
-  separated.authority_uid = 0U;
   separated.authority_gid =
       separated.worker_identity.gid == 1002U ? 1003U : 1002U;
   separated.journal_identity.owner_uid = separated.transport.allowed_uid;
   const HostdDaemonConfiguration config(std::move(separated));
-  require(config.document().authority_uid == 0U &&
+  require(config.document().authority_uid != 0U &&
               config.document().journal_identity.owner_uid ==
                   config.document().transport.allowed_uid,
-          "root hostd pins the non-root TrainVM journal service identity");
+          "unprivileged hostd pins the TrainVM journal service identity");
 
   auto mismatched = document();
   mismatched.journal_identity.owner_uid =
@@ -236,11 +260,40 @@ void unsafe_paths_trust_roles_and_bounds_are_rejected() {
       [&] { HostdDaemonConfiguration invalid(std::move(root_worker)); },
       "training workers can never inherit root identity");
 
-  auto same_worker = document();
-  same_worker.worker_identity.uid = same_worker.authority_uid;
+  // Identity sharing is legal only when it is total and declared. A worker that
+  // shares half the authority identity is neither confined nor attestable.
+  auto partial_overlap = document();
+  partial_overlap.worker_identity.uid = partial_overlap.authority_uid;
   require_throws<HostdDaemonConfigurationError>(
-      [&] { HostdDaemonConfiguration invalid(std::move(same_worker)); },
-      "training workers must differ from the host authority identity");
+      [&] { HostdDaemonConfiguration invalid(std::move(partial_overlap)); },
+      "workers may not share only half the host authority identity");
+
+  auto undeclared_sharing = document();
+  undeclared_sharing.worker_identity.uid = undeclared_sharing.authority_uid;
+  undeclared_sharing.worker_identity.gid = undeclared_sharing.authority_gid;
+  require_throws<HostdDaemonConfigurationError>(
+      [&] { HostdDaemonConfiguration invalid(std::move(undeclared_sharing)); },
+      "shared worker identity must declare group inheritance");
+
+  auto undeclared_separation = document();
+  undeclared_separation.worker_identity
+      .inherit_authority_supplementary_groups = true;
+  require_throws<HostdDaemonConfigurationError>(
+      [&] {
+        HostdDaemonConfiguration invalid(std::move(undeclared_separation));
+      },
+      "a separated worker may not claim inherited authority groups");
+
+  auto declared_sharing = document();
+  declared_sharing.worker_identity.uid = declared_sharing.authority_uid;
+  declared_sharing.worker_identity.gid = declared_sharing.authority_gid;
+  declared_sharing.worker_identity.inherit_authority_supplementary_groups =
+      true;
+  const HostdDaemonConfiguration shared(std::move(declared_sharing));
+  require(shared.document().worker_identity.uid ==
+                  shared.document().authority_uid &&
+              shared.worker_credentials().supplementary_gids.empty(),
+          "declared identity sharing is accepted and seals groups later");
 
   auto socket_name = document();
   socket_name.socket.path =
@@ -296,7 +349,8 @@ void file_loading_is_strict_and_reflection_closed() {
 int main() {
   try {
     valid_document_compiles_every_authority_policy();
-    root_hostd_accepts_a_separate_journal_service_owner();
+    unprivileged_hostd_accepts_a_separate_journal_service_owner();
+    privileged_authority_identity_is_unrepresentable();
     unsafe_paths_trust_roles_and_bounds_are_rejected();
     file_loading_is_strict_and_reflection_closed();
     std::cout << "hostd daemon configuration tests passed\n";

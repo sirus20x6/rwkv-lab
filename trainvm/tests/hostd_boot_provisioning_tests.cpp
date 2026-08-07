@@ -53,11 +53,13 @@ HostdDaemonConfigurationDocument daemon_document() {
       .boot_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
       .broker_epoch = "broker-boot-provisioning",
       .broker_instance_id = "hostd-boot-provisioning",
-      .authority_uid = 0U,
-      .authority_gid = 0U,
+      .authority_uid = uid,
+      .authority_gid = gid,
       .worker_identity = {.uid = uid == 1000U ? 1001U : 1000U,
                           .gid = gid == 1000U ? 1001U : 1000U,
-                          .no_new_privileges = true},
+                          .no_new_privileges = true,
+                          .inherit_authority_supplementary_groups =
+                              std::nullopt},
       .ledger_path = "/var/lib/trainvm-hostd/boot-ledger.sqlite3",
       .journal_path = "/var/lib/trainvm/boot-journal.sqlite3",
       .journal_identity = {.directory_path = "/var/lib/trainvm",
@@ -117,13 +119,15 @@ HostdSocketIdentity endpoint(std::uint64_t path_inode) {
       .parent_device = 41U,
       .parent_inode = 42U,
       .parent_mode = 0750U,
-      .parent_owner_uid = 0U,
-      .parent_owner_gid = 0U,
+      // The socket is owned by the unprivileged authority that bound it, which
+      // is what the published client document pins as the expected server.
+      .parent_owner_uid = static_cast<std::uint32_t>(::geteuid()),
+      .parent_owner_gid = static_cast<std::uint32_t>(::getegid()),
       .path_device = 41U,
       .path_inode = path_inode,
       .path_mode = 0660U,
-      .owner_uid = 0U,
-      .owner_gid = 0U,
+      .owner_uid = static_cast<std::uint32_t>(::geteuid()),
+      .owner_gid = static_cast<std::uint32_t>(::getegid()),
       .link_count = 1U,
   };
 }
@@ -186,8 +190,10 @@ void socket_replacement_requires_a_new_client_document() {
           "a reboot socket inode replacement must invalidate the old controller policy");
   require(old_client.document().socket_path ==
                   new_client.document().socket_path &&
-              old_client.document().expected_server_uid == 0U &&
-              old_client.document().expected_server_gid == 0U,
+              old_client.document().expected_server_uid ==
+                  daemon.document().authority_uid &&
+              old_client.document().expected_server_gid ==
+                  daemon.document().authority_gid,
           "endpoint replacement preserves server identity and canonical path");
 }
 
