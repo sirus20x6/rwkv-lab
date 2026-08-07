@@ -6,6 +6,7 @@
 
 #include <cerrno>
 #include <algorithm>
+#include <iostream>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -591,9 +592,17 @@ struct HostdDaemonRuntime::Implementation final {
     if (!socket)
       throw HostdDaemonRuntimeError(
           "hostd transport assembly requires the bound authority socket");
+    // Every status rejection is otherwise silent: the connection is closed with
+    // no reply and nothing is recorded, so a controller that cannot complete a
+    // status exchange reports only that the peer closed on it. Surface the
+    // reason the transport already computes.
+    HostdStatusTransportLimits status_limits = configuration.status_transport();
+    status_limits.rejection_observer = [](std::string_view reason) {
+      std::cerr << "trainvm-hostd: status rejected: " << reason << '\n';
+    };
     auto candidate_status = std::make_unique<HostdStatusServer>(
-        socket, coordinator, configuration.status_peer(),
-        configuration.status_transport(), authority_status_source);
+        socket, coordinator, configuration.status_peer(), status_limits,
+        authority_status_source);
     auto candidate_mutation = std::make_unique<HostdMutationServer>(
         socket, coordinator, challenge_verifier, session_kernel,
         service_identity, ledger_time, configuration.mutation_transport(),
