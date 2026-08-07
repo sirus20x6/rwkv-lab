@@ -2729,11 +2729,36 @@ HostProcessSagaSnapshot TrainVMService::launch_worker_process(
   const auto projection = journal_.projection(identity.run_id);
   const auto plan =
       projection ? journal_.compiled_plan(projection->plan_hash) : std::nullopt;
-  if (!projection || !plan || projection->current_node_id != identity.node_id ||
-      projection->current_attempt_id != identity.attempt_id) {
+  if (!projection)
     throw OperationPreconditionError(
-        "host process launch cannot recover its exact resource policy");
-  }
+        "host process launch cannot recover its exact resource policy: no "
+        "projection for run " + identity.run_id);
+  if (!plan)
+    throw OperationPreconditionError(
+        "host process launch cannot recover its exact resource policy: no "
+        "compiled plan " + projection->plan_hash);
+  // The node and attempt are re-derived from the recovered execution state,
+  // not from the projection. A run is still `acquiring` when its first worker
+  // is launched — entering the node is what the launch accomplishes — and the
+  // projection deliberately clears current_node_id and current_attempt_id on
+  // entering `acquiring`, setting them only once `node.entered` is journaled,
+  // which happens after the worker reports ready. Comparing the sealed launch
+  // against the projection therefore compared "train" against "" on every
+  // first launch and could never hold. reconcile_host_grant already recovers
+  // the controller for exactly this question, one step earlier in the same
+  // reconciliation.
+  Controller recovered(*plan, journal_, identity.run_id);
+  recovered.recover();
+  if (recovered.state().current_node_id != identity.node_id)
+    throw OperationPreconditionError(
+        "host process launch cannot recover its exact resource policy: the "
+        "sealed launch names node " + identity.node_id +
+        "; the recovered run is at " + recovered.state().current_node_id);
+  if (recovered.state().current_attempt_id != identity.attempt_id)
+    throw OperationPreconditionError(
+        "host process launch cannot recover its exact resource policy: the "
+        "sealed launch names attempt " + identity.attempt_id +
+        "; the recovered run is at " + recovered.state().current_attempt_id);
   const LinuxProcessPolicy process_policy = compile_linux_process_policy(
       plan->experiment.spec.resources.cpu_io_policy);
   return host_process_saga_->reconcile(

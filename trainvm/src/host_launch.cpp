@@ -356,7 +356,9 @@ SealedArtifact resolve_artifact(
   }
   if (digest != expected_fingerprint) {
     throw HostLaunchResolutionError(
-        "launch artifact bytes disagree with the trusted fingerprint");
+        "launch artifact bytes disagree with the trusted fingerprint: sealed " +
+        digest + " from a " + std::to_string(source.metadata.st_size) +
+        "-byte artifact, but the registry pins " + expected_fingerprint);
   }
   const int seals = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK |
                     (executable ? F_SEAL_EXEC : 0) | F_SEAL_SEAL;

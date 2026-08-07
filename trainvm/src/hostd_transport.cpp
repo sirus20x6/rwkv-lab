@@ -565,6 +565,21 @@ std::string process_phase_name(HostdProcessAuthorityPhase phase) {
   throw HostdTransportError("hostd process authority phase is invalid");
 }
 
+// A rejection reason bounded so it can never push an error packet past the
+// payload limit, which would replace a useful rejection with no reply at all.
+std::string bounded_transport_reason(std::string_view prefix,
+                                     std::string_view reason) {
+  constexpr std::size_t maximum_reason_bytes = 256U;
+  std::string bounded(prefix);
+  bounded.append(reason.substr(0U, std::min(reason.size(),
+                                            maximum_reason_bytes)));
+  if (reason.size() > maximum_reason_bytes) bounded.append("...");
+  std::erase_if(bounded, [](unsigned char character) {
+    return character < 0x20U || character == 0x7FU;
+  });
+  return bounded;
+}
+
 std::string resource_kind_name(HostResourceKind kind) {
   switch (kind) {
   case HostResourceKind::accelerator:
@@ -2776,8 +2791,15 @@ HostdServeResult HostdMutationServer::serve_accepted(
       send_error("challenge_rejected",
                  "mutation challenge verification failed");
       return HostdServeResult::rejected;
-    } catch (const HostdUnauthorized &) {
-      send_error("unauthorized", "mutation authorization failed");
+    } catch (const HostdUnauthorized &rejection) {
+      // Over twenty distinct authorization checks throw this, each with a
+      // precise reason, and all of them arrived at the controller as the same
+      // four words. The peer is an authorized local service on a uid- and
+      // cgroup-checked socket, so the reason is not disclosure; withholding it
+      // only meant a rejected grant could not be diagnosed without a debugger.
+      send_error("unauthorized",
+                 bounded_transport_reason("mutation authorization failed: ",
+                                          rejection.what()));
       return HostdServeResult::rejected;
     } catch (const HostdStateError &) {
       send_error("state_rejected", "hostd state rejected the mutation");

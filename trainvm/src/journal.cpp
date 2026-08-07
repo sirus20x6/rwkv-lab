@@ -31,6 +31,14 @@
 #include <utility>
 
 namespace trainvm {
+
+bool journal_event_hash_valid(std::string_view value) {
+  return value.size() == 64U &&
+         std::ranges::all_of(value, [](char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f');
+         });
+}
 namespace {
 
 bool valid_sha256_digest(std::string_view value) {
@@ -873,11 +881,7 @@ constexpr std::string_view kControllerIdentityMetadataPrefix =
     "hostd_controller_id:";
 
 bool valid_hash_hex(std::string_view value) {
-  return value.size() == 64U &&
-         std::ranges::all_of(value, [](char character) {
-           return (character >= '0' && character <= '9') ||
-                  (character >= 'a' && character <= 'f');
-         });
+  return journal_event_hash_valid(value);
 }
 
 std::string lease_authority_identity(std::string_view concurrency_key,
