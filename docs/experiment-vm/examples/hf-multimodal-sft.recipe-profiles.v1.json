@@ -1837,7 +1837,7 @@
                           "system_prompt": "You are an expert image-captioning assistant. Describe only what the image supports, in natural language suitable for training a text-to-image model.",
                           "user_prompt": "Write one detailed master caption in 4-8 sentences. Cover the main subject, secondary objects, actions, spatial relationships, setting, composition, camera viewpoint, lighting, colors, materials, texture, photographic or artistic style, and all genuinely legible text. Integrate details naturally in context rather than listing tags. Do not mention these instructions, metadata, uncertainty policy, or the image file path.",
                           "target_column": "caption",
-                          "maximum_tokens": 1024,
+                          "maximum_tokens": 2048,
                           "append_eos": true,
                           "enable_thinking": false,
                           "maximum_trailing_tokens_after_eos": 1
