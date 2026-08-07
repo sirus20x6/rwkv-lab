@@ -31,7 +31,13 @@ NoNewPrivileges=yes
 PrivateDevices=no
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/thearray/git/moe-mla/runs/trainvm-ztok-optimization-authority-20260804 /run/trainvm-controller
+# The controller creates one directory per authored run under runs/, so the
+# writable root is runs/ itself, not a single run inside it. Naming only the
+# journal directory left AuthorRun failing at provisioning with "Read-only
+# file system" for every run but the one that happened to be listed. What a
+# run may then write is bounded by the plan's own allowed_write_roots, which
+# recipe expansion derives from the run identity.
+ReadWritePaths=/thearray/git/moe-mla/runs /run/trainvm-controller
 LimitNOFILE=1048576
 
 [Install]

@@ -264,6 +264,7 @@ public:
               .audited_eligible =
                   resource->disposition ==
                   ResourceObservationDisposition::audited_eligible,
+              .disposition = resource->disposition,
               .total_memory_bytes = memory.total_memory_bytes,
               .free_memory_bytes = memory.free_memory_bytes,
               .selector_labels = resource->labels,

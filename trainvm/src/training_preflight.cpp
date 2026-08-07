@@ -699,11 +699,22 @@ run_training_preflight(const CompiledPlan &plan,
                  observed->second == required.second;
         });
   };
+  // The access mode the plan declares. `exclusive: false` is a request to share
+  // a device with whatever else is already on it — which on a workstation means
+  // the compositor driving the display.
+  const ResourceAccessMode access_mode =
+      request.exclusive ? ResourceAccessMode::exclusive_compute
+                        : ResourceAccessMode::cooperative_compute;
+  const auto disposition_permits = [&](const auto &accelerator) {
+    return resource_disposition_permits(accelerator.disposition,
+                                        accelerator.selector_labels,
+                                        access_mode);
+  };
   std::size_t suitable = 0U;
   for (const auto &accelerator : environment.accelerators) {
     if (accelerator.vendor != request.vendor ||
         accelerator.total_memory_bytes < minimum_total ||
-        !matches_selector(accelerator)) {
+        !matches_selector(accelerator) || !disposition_permits(accelerator)) {
       continue;
     }
     if (accelerator.free_memory_bytes < minimum_free)
@@ -711,14 +722,42 @@ run_training_preflight(const CompiledPlan &plan,
     ++suitable;
   }
   if (request.count > 0 && suitable < static_cast<std::size_t>(request.count)) {
-    const bool enough_total =
+    const auto matching_devices =
         std::ranges::count_if(
             environment.accelerators, [&](const auto &accelerator) {
               return accelerator.vendor == request.vendor &&
                      accelerator.total_memory_bytes >= minimum_total &&
                      matches_selector(accelerator);
-            }) >= request.count;
-    if (enough_total && minimum_free > 0U) {
+            });
+    const bool enough_total = matching_devices >= request.count;
+    const auto permitted_devices =
+        std::ranges::count_if(
+            environment.accelerators, [&](const auto &accelerator) {
+              return accelerator.vendor == request.vendor &&
+                     accelerator.total_memory_bytes >= minimum_total &&
+                     matches_selector(accelerator) &&
+                     disposition_permits(accelerator);
+            });
+    if (enough_total && permitted_devices < request.count) {
+      // Big enough and the right kind, but its current occupancy is not one
+      // this plan's access mode may share. Reporting that as a VRAM shortfall
+      // would send the reader to the wrong knob entirely.
+      fail(diagnostics, "resource.occupancy_not_permitted",
+           "/spec/resources/accelerators/exclusive",
+           std::to_string(matching_devices) +
+               " matching accelerator(s) observed, but only " +
+               std::to_string(permitted_devices) +
+               " may be selected under the declared " +
+               (request.exclusive ? "exclusive" : "cooperative") +
+               " access mode; a device driving a display is observed occupied "
+               "for as long as it does so",
+           request.exclusive
+               ? "Declare cooperative access, or free the device of its "
+                 "existing consumers."
+               : "Authorize cooperative display sharing for this device on the "
+                 "host authority, or free the device of its existing "
+                 "consumers.");
+    } else if (enough_total && minimum_free > 0U) {
       fail(diagnostics, "resource.free_vram_insufficient",
            "/spec/resources/accelerators",
            "declared total-VRAM selector is satisfiable, but only " +
@@ -730,10 +769,31 @@ run_training_preflight(const CompiledPlan &plan,
            "conflicting GPU consumers, or select a device with enough "
            "passively observed free memory.");
     } else {
+      // Say what was actually observed. "cannot satisfy the declared
+      // count/vendor/total-VRAM selector" names three possible causes and
+      // distinguishes none of them, and it reads identically whether a device
+      // was too small or no device reached preflight at all — which is what
+      // happens when every passive row is filtered out upstream.
+      std::string observed;
+      for (const auto &accelerator : environment.accelerators) {
+        observed += observed.empty() ? " observed: " : ", ";
+        observed += accelerator.stable_id + " " +
+                    std::to_string(accelerator.total_memory_bytes >> 30U) +
+                    " GiB total / " +
+                    std::to_string(accelerator.free_memory_bytes >> 30U) +
+                    " GiB free";
+      }
+      if (environment.accelerators.empty())
+        observed =
+            " no accelerator reached preflight: the host authority reported no "
+            "passively observed device that was eligible for this plan";
       fail(diagnostics, "resource.total_vram_insufficient",
            "/spec/resources/accelerators/minimum_memory_gib",
            "passive inventory cannot satisfy the declared accelerator "
-           "count/vendor/total-VRAM selector",
+           "count/vendor/total-VRAM selector; requested " +
+               std::to_string(request.count) +
+               " device(s) of at least " +
+               std::to_string(minimum_total >> 30U) + " GiB;" + observed,
            "Correct the total-memory selector or schedule the run on a "
            "matching host.");
     }
