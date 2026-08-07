@@ -57,7 +57,6 @@ class LinuxPreparedLaunch final {
   friend class LinuxProcessAuthority;
   LinuxPreparedLaunch(HostProcessLaunchIntent intent,
                       HostProcessSpawnReceipt spawn_receipt,
-                      LinuxDevicePolicyInstallation device_policy,
                       LinuxProcessPolicy process_policy,
                       LinuxProcessPolicyInstallation process_policy_installation,
                       LinuxAllocationCgroup cgroup,
@@ -65,7 +64,6 @@ class LinuxPreparedLaunch final {
 
   HostProcessLaunchIntent intent_;
   HostProcessSpawnReceipt spawn_receipt_;
-  LinuxDevicePolicyInstallation device_policy_;
   LinuxProcessPolicy process_policy_;
   LinuxProcessPolicyInstallation process_policy_installation_;
   // Destruction is reverse declaration order: child is killed/reaped before
@@ -116,7 +114,7 @@ class LinuxProcessAuthority final {
  public:
   LinuxProcessAuthority(SQLiteHostLedger& ledger, AuthorityClock& clock,
                         LinuxCgroupAuthority& cgroups,
-                        LinuxDevicePolicyInstaller& device_policies,
+                        LinuxDevicePolicyInstaller* device_policies,
                         LinuxProcessPolicyInstaller& process_policies,
                         LinuxStoppedLauncherKernel& launcher,
                         LinuxWorkerCredentialSpec worker_credentials,
@@ -151,7 +149,10 @@ class LinuxProcessAuthority final {
   SQLiteHostLedger& ledger_;
   AuthorityClock& clock_;
   LinuxCgroupAuthority& cgroups_;
-  LinuxDevicePolicyInstaller& device_policies_;
+  // Null when the authority is unprivileged: installing a cgroup device policy
+  // needs CAP_BPF. Recovered records that carry device evidence are refused
+  // rather than silently accepted without it.
+  LinuxDevicePolicyInstaller* device_policies_;
   LinuxProcessPolicyInstaller& process_policies_;
   LinuxStoppedLauncherKernel& launcher_;
   LinuxWorkerCredentialSpec worker_credentials_;

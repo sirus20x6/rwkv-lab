@@ -85,16 +85,19 @@ add_library(trainvm_core
   src/external_profiler_artifact.cpp
   src/fake_worker.cpp
   src/fsm.cpp
+  src/gpu_fault_observer.cpp
   src/host_ledger.cpp
   src/sqlite_filesystem_authority.cpp
   src/host_process_saga.cpp
   src/host_startup_audit.cpp
   src/hostd.cpp
+  src/hostd_boot_provisioning.cpp
   src/hostd_client_bootstrap.cpp
   src/hostd_client_configuration.cpp
   src/hostd_daemon_configuration.cpp
   src/hostd_crash_qualification.cpp
   src/hostd_daemon_runtime.cpp
+  src/hostd_gpu_authorization.cpp
   src/hostd_journal_fence_attestor.cpp
   src/hostd_journal_logical_fence.cpp
   src/hostd_ledger_singleton_token.cpp
@@ -211,6 +214,11 @@ target_link_libraries(trainvm PRIVATE
 )
 
 add_executable(trainvm-hostd src/hostd_main.cpp)
+add_executable(trainvm-gpu-fault-observer src/gpu_fault_observer_main.cpp)
+target_compile_options(trainvm-gpu-fault-observer PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(trainvm-gpu-fault-observer PRIVATE trainvm_core)
 add_executable(trainvm-hostd-crash-qualification
   src/hostd_crash_qualification_main.cpp
 )
@@ -456,6 +464,12 @@ target_compile_options(host_resources_tests PRIVATE
 )
 target_link_libraries(host_resources_tests PRIVATE trainvm_core)
 add_test(NAME host_resources_tests COMMAND host_resources_tests)
+add_executable(gpu_fault_observer_tests tests/gpu_fault_observer_tests.cpp)
+target_compile_options(gpu_fault_observer_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(gpu_fault_observer_tests PRIVATE trainvm_core)
+add_test(NAME gpu_fault_observer_tests COMMAND gpu_fault_observer_tests)
 add_executable(resource_request_builder_tests
   tests/resource_request_builder_tests.cpp
 )
@@ -698,6 +712,19 @@ target_compile_options(hostd_daemon_configuration_tests PRIVATE
 target_link_libraries(hostd_daemon_configuration_tests PRIVATE trainvm_core)
 add_test(NAME hostd_daemon_configuration_tests
   COMMAND hostd_daemon_configuration_tests
+)
+add_executable(hostd_boot_provisioning_tests
+  tests/hostd_boot_provisioning_tests.cpp
+)
+target_compile_options(hostd_boot_provisioning_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_compile_definitions(hostd_boot_provisioning_tests PRIVATE
+  TRAINVM_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+target_link_libraries(hostd_boot_provisioning_tests PRIVATE trainvm_core)
+add_test(NAME hostd_boot_provisioning_tests
+  COMMAND hostd_boot_provisioning_tests
 )
 add_executable(hostd_ledger_singleton_token_tests
   tests/hostd_ledger_singleton_token_tests.cpp

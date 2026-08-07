@@ -103,6 +103,11 @@ def _model_configuration(model_path: Path) -> HuggingFaceModelConfiguration:
             "AutoModelForImageTextToText",
             "AutoProcessor",
         ),
+        (
+            ModelLoaderImplementation.HF_MULTIMODAL_V2,
+            "AutoModelForImageTextToText",
+            "AutoProcessor",
+        ),
     ],
 )
 def test_hugging_face_loaders_produce_exact_checkpoint_receipts(
@@ -153,6 +158,67 @@ def test_hugging_face_load_receipt_binds_processor_template_identity(
     second = loader.load(transformers_module=facade)
     assert first.receipt.auxiliary_fingerprint != second.receipt.auxiliary_fingerprint
     assert first.receipt.digest != second.receipt.digest
+
+
+def test_hugging_face_loader_passes_only_declared_expert_backend(
+    tmp_path: Path,
+) -> None:
+    seen: list[dict[str, object]] = []
+
+    class RecordingFactory(_AutoFactory):
+        @classmethod
+        def from_pretrained(cls, *_args, **kwargs):
+            seen.append(dict(kwargs))
+            return super().from_pretrained(*_args, **kwargs)
+
+    facade = SimpleNamespace(
+        AutoModelForImageTextToText=RecordingFactory,
+        AutoProcessor=_AuxiliaryFactory,
+    )
+    automatic = build_registered_model_loader(
+        ModelLoaderImplementation.HF_MULTIMODAL_V1,
+        _model_configuration(tmp_path),
+    )
+    automatic_receipt = automatic.load(transformers_module=facade).receipt
+    assert "experts_implementation" not in seen[-1]
+    assert "load_configuration_digest" not in automatic_receipt.canonical_dict()
+
+    grouped = build_registered_model_loader(
+        ModelLoaderImplementation.HF_MULTIMODAL_V2,
+        HuggingFaceModelConfiguration(
+            model_path=str(tmp_path),
+            checkpoint_fingerprint="sha256:" + "a" * 64,
+            experts_implementation="grouped_mm",
+        ),
+    )
+    grouped_receipt = grouped.load(transformers_module=facade).receipt
+    assert seen[-1]["experts_implementation"] == "grouped_mm"
+    assert grouped_receipt.canonical_dict()["load_configuration_digest"] == (
+        grouped_receipt.load_configuration_digest
+    )
+    assert grouped_receipt.load_configuration_digest != (
+        automatic_receipt.load_configuration_digest
+    )
+    assert grouped_receipt.digest != automatic_receipt.digest
+
+    with pytest.raises(ValueError, match="experts implementation"):
+        HuggingFaceModelConfiguration(
+            model_path=str(tmp_path),
+            checkpoint_fingerprint="sha256:" + "a" * 64,
+            experts_implementation="unbounded_import",
+        )
+
+    grouped_configuration = HuggingFaceModelConfiguration(
+        model_path=str(tmp_path),
+        checkpoint_fingerprint="sha256:" + "a" * 64,
+        experts_implementation="grouped_mm",
+    )
+    for legacy in (
+        ModelLoaderImplementation.HF_CAUSAL_V1,
+        ModelLoaderImplementation.HF_MULTIMODAL_V1,
+    ):
+        with pytest.raises(ValueError, match="versioned multimodal loader"):
+            build_registered_model_loader(legacy, grouped_configuration)
 
 
 def test_hugging_face_auxiliary_identity_rejects_process_local_object_repr(
@@ -582,3 +648,36 @@ def test_resolved_component_factories_dispatch_without_workload_imports(
     )
     assert loader.implementation is ModelLoaderImplementation.HF_MULTIMODAL_V1
     assert policy.implementation is TrainabilityImplementation.LORA_V1
+
+
+def test_resolved_model_loader_rejects_cross_version_configuration(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    descriptors = json.loads(
+        (root / "docs/experiment-vm/examples/training-components.v1.json").read_text()
+    )["components"]
+    descriptor = next(
+        item
+        for item in descriptors
+        if item["key"]
+        == {"category": "model_loader", "name": "hf_multimodal", "version": "1.0.0"}
+    )
+    with pytest.raises(ValueError, match="does not match its implementation"):
+        model_loader_from_resolved_component(
+            {
+                "configuration": {
+                    "attention_implementation": "sdpa",
+                    "checkpoint_fingerprint": "sha256:" + "a" * 64,
+                    "exact_checkpoint": True,
+                    "experts_implementation": "grouped_mm",
+                    "local_files_only": True,
+                    "model_path": str(tmp_path),
+                    "quantization": "none",
+                    "revision": "main",
+                    "trust_remote_code": False,
+                },
+                "descriptor": descriptor,
+                "descriptor_digest": _digest(descriptor),
+            }
+        )

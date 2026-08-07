@@ -4,6 +4,7 @@ import hashlib
 import json
 import random
 from contextlib import nullcontext
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,8 @@ import torch.nn.functional as F
 
 from rwkv_lab.training_components import (
     AssistantOnlyMapperConfiguration,
+    CachedReferenceDPOConfiguration,
+    CachedReferenceDPOObjective,
     CausalTokensMapperConfiguration,
     ImageCaptionProcessorConfiguration,
     JsonlFrozenImageSplitsConfiguration,
@@ -36,6 +39,8 @@ from rwkv_lab.trainvm_adapters.hf_multimodal_sft import (
     HFEngineState,
     HFForwardBatchCodec,
     HFMultimodalSFTError,
+    backward_cached_dpo_pair,
+    component_cached_dpo_loss,
     component_causal_loss,
     initialize_training_stack,
     normalize_token_mean_gradients,
@@ -244,6 +249,64 @@ def test_registered_objective_matches_hf_causal_shift_and_is_image_sensitive() -
         model, objective, changed.tensors, ignore_index=-100
     )
     assert float(changed_loss.detach()) != pytest.approx(float(actual.detach()))
+
+
+def test_cached_reference_dpo_binds_exact_frozen_suffixes_and_updates_policy() -> None:
+    chosen = "specific red subject"
+    rejected = "generic subject"
+    values = {
+        "image": "sample-1.png",
+        "caption": chosen,
+        "chosen": chosen,
+        "rejected": rejected,
+        "reference_chosen_logp_sum": -9.0,
+        "reference_rejected_logp_sum": -7.0,
+        "reference_chosen_token_ids": [
+            *(ord(character) for character in chosen),
+            2,
+        ],
+        "reference_rejected_token_ids": [
+            *(ord(character) for character in rejected),
+            2,
+        ],
+    }
+    sample = ProcessedSample("sample-1", 0, values, image=1.0, image_size=(1, 1))
+    configuration = CachedReferenceDPOConfiguration(
+        evaluation_chunk_size=32,
+        evaluation_prefer_fused=False,
+    )
+    objective = CachedReferenceDPOObjective(configuration)
+    batch = _codec().encode_preference((sample,), configuration)
+    assert batch.chosen.targets == (chosen,)
+    assert batch.rejected.targets == (rejected,)
+    assert batch.reference_chosen.tolist() == [-9.0]
+    model = TinyCausalModel()
+    low_memory_model = deepcopy(model)
+    loss, margin, policy_chosen, policy_rejected = component_cached_dpo_loss(
+        model, objective, batch, ignore_index=-100
+    )
+    assert loss.ndim == margin.ndim == 0 or margin.shape == (1,)
+    assert policy_chosen.shape == policy_rejected.shape == (1,)
+    loss.backward()
+    assert model.embedding.weight.grad is not None
+    assert torch.isfinite(model.embedding.weight.grad).all()
+    low_memory_loss, low_memory_margin, *_ = backward_cached_dpo_pair(
+        low_memory_model, objective, batch, ignore_index=-100
+    )
+    assert low_memory_loss == pytest.approx(loss.detach())
+    assert torch.equal(low_memory_margin, margin)
+    for expected, actual in zip(
+        model.parameters(), low_memory_model.parameters(), strict=True
+    ):
+        assert actual.grad is not None
+        assert expected.grad is not None
+        assert torch.allclose(actual.grad, expected.grad, rtol=2e-5, atol=2e-6)
+
+    bad_values = dict(values)
+    bad_values["reference_chosen_token_ids"] = [123]
+    bad = ProcessedSample("sample-1", 0, bad_values, image=1.0, image_size=(1, 1))
+    with pytest.raises(HFMultimodalSFTError, match="frozen reference ledger"):
+        _codec().encode_preference((bad,), configuration)
 
 
 def test_unequal_microbatches_match_one_concatenated_token_mean_gradient() -> None:
@@ -1098,8 +1161,8 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         def qualitative_samples(self):
             return SimpleNamespace(
                 configuration=SimpleNamespace(sample_count=1),
-                bind=lambda identities, selector_digest: SimpleNamespace(
-                    identities=tuple(identities),
+                select=lambda population, selector_digest, dataset_root: SimpleNamespace(
+                    identities=tuple(population[:1]),
                     identities_digest="sha256:" + "4" * 64,
                     selector_digest=selector_digest,
                 ),
@@ -1280,6 +1343,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         (final_checkpoint / "engine-state.json").read_text(encoding="utf-8")
     )
     assert final_checkpoint_state["runtime_state"]["finalization_pending"] is True
+    before_eval_only_recovery = model.head.weight.detach().clone()
     final_controls = Controls()
     final_observability = Observability()
     step = run_hf_multimodal_sft(
@@ -1295,6 +1359,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         device="cpu",
     )
     assert step == 1
+    assert torch.equal(model.head.weight, before_eval_only_recovery)
     assert [event[0] for event in controls.events] == [
         "checkpoint",
         "gallery",
@@ -1763,6 +1828,59 @@ def test_test_caption_evidence_retries_failed_ids_and_collapses_latest_records(
         "generated-2-b",
     )
     assert json.loads((directory / "receipt.json").read_text())["failures"] == 0
+
+
+def test_all_error_final_audit_cannot_seal_completion_evidence(
+    tmp_path, monkeypatch
+) -> None:
+    import rwkv_lab.trainvm_adapters.hf_multimodal_sft as engine
+
+    samples = tuple(
+        ProcessedSample(
+            sample_id,
+            ordinal,
+            {"caption": f"target-{sample_id}"},
+            image=object(),
+            image_size=(512, 512),
+        )
+        for ordinal, sample_id in enumerate(("a", "b", "c"))
+    )
+    monkeypatch.setattr(
+        engine,
+        "generate_hf_captions",
+        lambda **_values: (_ for _ in ()).throw(
+            RuntimeError("cudaErrorLaunchTimeout")
+        ),
+    )
+    directory = tmp_path / "final-audit"
+    with pytest.raises(engine.HFMultimodalSFTError, match="failed generations"):
+        engine._write_test_caption_evidence(
+            directory=directory,
+            stack=object(),
+            codec=object(),
+            samples=samples,
+            device=torch.device("cpu"),
+            step=745,
+            model_load_receipt="sha256:" + "a" * 64,
+            checkpoint_artifact_id="checkpoint-final",
+            checkpoint_manifest_digest="sha256:" + "b" * 64,
+            model_state_digest="sha256:" + "c" * 64,
+            split_membership_digest="sha256:" + "d" * 64,
+            decode_policy_digest="sha256:" + "e" * 64,
+            model_state_mode="trained",
+            maximum_new_tokens=768,
+            generation_batch_size=3,
+            use_cache=True,
+        )
+    failed = tuple(
+        json.loads(line)
+        for line in (directory / "captions.partial.jsonl").read_text().splitlines()
+    )
+    assert len(failed) == len(samples)
+    assert all(record["status"] == "failed" for record in failed)
+    assert all(record["error_code"] == "generation_failed" for record in failed)
+    assert not (directory / "captions.jsonl").exists()
+    assert not (directory / "receipt.json").exists()
 
 
 def test_test_caption_evidence_rejects_stale_resume_identity(

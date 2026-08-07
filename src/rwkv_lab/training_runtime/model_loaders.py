@@ -15,6 +15,7 @@ _MAXIMUM_AUXILIARY_IDENTITY_BYTES = 1024 * 1024
 class ModelLoaderImplementation(str, Enum):
     HF_CAUSAL_V1 = "rwkv_lab.model_loader.hf_causal.v1"
     HF_MULTIMODAL_V1 = "rwkv_lab.model_loader.hf_multimodal.v1"
+    HF_MULTIMODAL_V2 = "rwkv_lab.model_loader.hf_multimodal.v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +26,7 @@ class HuggingFaceModelConfiguration:
     local_files_only: bool = True
     trust_remote_code: bool = False
     attention_implementation: str = "sdpa"
+    experts_implementation: str = "auto"
     quantization: str = "none"
     exact_checkpoint: bool = True
     # Prefixes of checkpoint keys this configuration knowingly declines to load.
@@ -64,6 +66,8 @@ class HuggingFaceModelConfiguration:
             "flash_attention_2",
         }:
             raise ValueError("unsupported attention implementation")
+        if self.experts_implementation not in {"auto", "grouped_mm"}:
+            raise ValueError("unsupported experts implementation")
         if self.quantization not in {"none", "4bit", "8bit"}:
             raise ValueError("unsupported model quantization")
         for prefixes, label in (
@@ -92,7 +96,7 @@ class HuggingFaceModelConfiguration:
 
     @classmethod
     def from_resolved(cls, value: dict[str, Any]) -> HuggingFaceModelConfiguration:
-        expected = {
+        v1 = {
             "model_path",
             "checkpoint_fingerprint",
             "revision",
@@ -105,7 +109,8 @@ class HuggingFaceModelConfiguration:
             "required_tensor_families",
             "checkpoint_key_remap",
         }
-        if set(value) != expected:
+        v2 = {*v1, "experts_implementation"}
+        if frozenset(value) not in {frozenset(v1), frozenset(v2)}:
             raise ValueError("resolved Hugging Face model configuration is inexact")
         resolved = dict(value)
         for field in (
@@ -120,6 +125,7 @@ class HuggingFaceModelConfiguration:
 @dataclass(frozen=True, slots=True)
 class ModelLoadReceipt:
     implementation: str
+    load_configuration_digest: str
     checkpoint_fingerprint: str
     model_class: str
     checkpoint_tensor_count: int
@@ -141,7 +147,12 @@ class ModelLoadReceipt:
     exact: bool
 
     def canonical_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        document = asdict(self)
+        if self.implementation != ModelLoaderImplementation.HF_MULTIMODAL_V2:
+            # V1 receipts are immutable exact-resume identities.  The V2 receipt
+            # binds its new expert backend option without invalidating V1 resumes.
+            document.pop("load_configuration_digest")
+        return document
 
     @property
     def digest(self) -> str:
@@ -181,6 +192,8 @@ def _loading_arguments(configuration: HuggingFaceModelConfiguration) -> dict[str
         "attn_implementation": configuration.attention_implementation,
         "output_loading_info": True,
     }
+    if configuration.experts_implementation != "auto":
+        arguments["experts_implementation"] = configuration.experts_implementation
     if configuration.quantization == "4bit":
         arguments["load_in_4bit"] = True
     elif configuration.quantization == "8bit":
@@ -244,6 +257,16 @@ def _receipt(
         )
     return ModelLoadReceipt(
         implementation=implementation.value,
+        load_configuration_digest="sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                asdict(configuration),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest(),
         checkpoint_fingerprint=configuration.checkpoint_fingerprint,
         model_class=f"{type(model).__module__}.{type(model).__qualname__}",
         checkpoint_tensor_count=len(model.state_dict()),
@@ -395,6 +418,13 @@ def build_registered_model_loader(
     implementation: ModelLoaderImplementation,
     configuration: HuggingFaceModelConfiguration,
 ) -> RegisteredModelLoader:
+    if (
+        implementation is not ModelLoaderImplementation.HF_MULTIMODAL_V2
+        and configuration.experts_implementation != "auto"
+    ):
+        raise ValueError(
+            "experts_implementation requires the versioned multimodal loader"
+        )
     return RegisteredModelLoader(implementation, configuration)
 
 
@@ -407,6 +437,13 @@ def model_loader_from_resolved_component(
     implementation = ModelLoaderImplementation(descriptor["implementation"])
     if descriptor["key"]["category"] != "model_loader":
         raise ValueError("resolved component is not a model loader")
+    has_experts_backend = "experts_implementation" in component["configuration"]
+    if has_experts_backend != (
+        implementation is ModelLoaderImplementation.HF_MULTIMODAL_V2
+    ):
+        raise ValueError(
+            "resolved Hugging Face model configuration does not match its implementation"
+        )
     configuration = HuggingFaceModelConfiguration.from_resolved(
         dict(component["configuration"])
     )

@@ -4,8 +4,8 @@
   "boot_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
   "broker_epoch": "site-broker-epoch",
   "broker_instance_id": "hostd-instance-1",
-  "authority_uid": 0,
-  "authority_gid": 0,
+  "authority_uid": 1001,
+  "authority_gid": 1001,
   "worker_identity": {
     "uid": 1000,
     "gid": 1000,
@@ -23,7 +23,7 @@
     "inode": 14,
     "authority_device": 15,
     "authority_inode": 16,
-    "owner_uid": 0
+    "owner_uid": 1000
   },
   "inventory": {
     "maximum_devices": 16,

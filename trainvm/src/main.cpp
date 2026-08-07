@@ -67,6 +67,7 @@ void usage() {
          "--registry <adapters.json> --host-launch-registry "
          "<host-launches.json> [--training-component-registry "
          "<training-components.json>] [--hostd-client <hostd-client.json>] "
+         "[--worker-socket-gid <gid>] "
          "[--recipe-registry <recipe-profiles.json>]\n"
       << "  trainvm simulate <experiment.json> <events.jsonl> [run-id]\n"
       << "  trainvm journal init <journal.db>\n"
@@ -586,13 +587,15 @@ int journal_command(int argc, char** argv) {
 int serve_command(int argc, char** argv) {
   // Flag-keyed rather than positional: the previous form pinned each option to
   // a fixed argv index, so adding one meant a new exact argc and every optional
-  // combination became its own arm. Order no longer matters and an unknown or
-  // repeated flag is rejected instead of being read as another option's value.
+  // combination became its own arm — this branch already carried three arms for
+  // two optional flags. Order no longer matters and an unknown or repeated flag
+  // is rejected instead of being read as another option's value.
   std::map<std::string_view, std::string_view> options;
   static constexpr std::array<std::string_view, 4> required = {
       "--journal", "--socket", "--registry", "--host-launch-registry"};
-  static constexpr std::array<std::string_view, 3> optional = {
-      "--training-component-registry", "--hostd-client", "--recipe-registry"};
+  static constexpr std::array<std::string_view, 4> optional = {
+      "--training-component-registry", "--hostd-client", "--recipe-registry",
+      "--worker-socket-gid"};
   if (argc % 2 != 0) {
     usage();
     return 64;
@@ -620,6 +623,20 @@ int serve_command(int argc, char** argv) {
     hostd = trainvm::HostdClientConfiguration::load_file(
         std::filesystem::absolute(client->second).lexically_normal());
   }
+  std::optional<std::uint32_t> worker_socket_gid;
+  if (const auto group = options.find("--worker-socket-gid");
+      group != options.end()) {
+    const std::string_view text(group->second);
+    std::uint32_t value = 0U;
+    const auto [end, error] =
+        std::from_chars(text.data(), text.data() + text.size(), value);
+    if (error != std::errc{} || end != text.data() + text.size() ||
+        value == 0U) {
+      throw std::invalid_argument(
+          "--worker-socket-gid must be one nonzero numeric gid");
+    }
+    worker_socket_gid = value;
+  }
   const auto components = options.find("--training-component-registry");
   const auto recipes = options.find("--recipe-registry");
   return trainvm::serve(
@@ -629,7 +646,7 @@ int serve_command(int argc, char** argv) {
       components == options.end()
           ? trainvm::TrainingComponentRegistry({})
           : trainvm::TrainingComponentRegistry::load_file(components->second),
-      std::move(hostd),
+      std::move(hostd), worker_socket_gid,
       recipes == options.end()
           ? std::filesystem::path(
                 std::string(trainvm::kInstalledRecipeProfilePath))

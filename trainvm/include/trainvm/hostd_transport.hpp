@@ -235,6 +235,18 @@ struct HostdAuthorityStatus final {
   bool operator==(const HostdAuthorityStatus &) const = default;
 };
 
+// The passive-memory observation digest, and the size of the evidence it is
+// taken over. Both are exported so a status producer and the transport that
+// validates it agree by construction: they were previously computed from two
+// separately written JSON encodings, which silently disagreed — the validating
+// side included an api_version field and hand-built each accelerator row, the
+// producing side did neither — so every status carrying passive memory failed
+// its own digest check and the connection was closed with no reply.
+[[nodiscard]] std::string hostd_passive_memory_observation_digest(
+    const HostdAuthorityStatus &status);
+[[nodiscard]] std::size_t hostd_passive_memory_identity_bytes(
+    const HostdAuthorityStatus &status);
+
 class IHostdAuthorityStatusSource {
 public:
   virtual ~IHostdAuthorityStatusSource() = default;

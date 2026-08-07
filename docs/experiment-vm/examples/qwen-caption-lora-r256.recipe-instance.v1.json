@@ -1,7 +1,7 @@
 {
   "api_version": "trainvm.recipe-instance/v1",
-  "recipe": {"name": "hf_multimodal_sft", "version": "1"},
-  "run_identity": "qwen36-caption-lora-r256",
+  "recipe": {"name": "hf_multimodal_sft", "version": "2"},
+  "run_identity": "qwen36-caption-distill-lora-r256-declarative-v1",
   "overrides": {
     "model.path": "/thearray/git/ob/text-generation-webui/models/Qwen3.6-35B-A3B-heretic",
     "data.root": "/thearray/git/datasets/captiontest/qwen36-caption-finetune-v1",
@@ -13,8 +13,10 @@
     "hyperparameters.gradient_accumulation": 16,
     "hyperparameters.maximum_steps": 745,
     "evaluation.qualitative_sample_count": 10,
-    "evaluation.qualitative_every_steps": 100,
-    "evaluation.full_every_steps": 100,
+    "data.qualitative_manifest_name": "validation-fixed-100.jsonl",
+    "data.qualitative_manifest_sha256": "sha256:e5cfb9fc5edac6cb890409efb02db477060603b8f87a42b401e6235da49a8fdc",
+    "evaluation.qualitative_every_steps": 250,
+    "evaluation.full_every_steps": 250,
     "checkpointing.every_steps": 250
   }
 }

@@ -226,6 +226,128 @@
     },
     {
       "key": {
+        "category": "model_loader",
+        "name": "hf_multimodal",
+        "version": "2.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.model_loader.hf_multimodal.v2",
+      "model_families": [
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "model_loader.hf_multimodal.v2"
+      ],
+      "configuration": [
+        {
+          "name": "model_path",
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "checkpoint_fingerprint",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "revision",
+          "type": "string",
+          "required": false,
+          "default": "main"
+        },
+        {
+          "name": "local_files_only",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "trust_remote_code",
+          "type": "boolean",
+          "required": false,
+          "default": false
+        },
+        {
+          "name": "attention_implementation",
+          "type": "enumeration",
+          "required": false,
+          "default": "sdpa",
+          "values": [
+            "eager",
+            "flash_attention_2",
+            "sdpa"
+          ]
+        },
+        {
+          "name": "experts_implementation",
+          "type": "enumeration",
+          "required": false,
+          "default": "auto",
+          "values": [
+            "auto",
+            "grouped_mm"
+          ]
+        },
+        {
+          "name": "quantization",
+          "type": "enumeration",
+          "required": false,
+          "default": "none",
+          "values": [
+            "4bit",
+            "8bit",
+            "none"
+          ]
+        },
+        {
+          "name": "exact_checkpoint",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "ignorable_unexpected_prefixes",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "set"
+        },
+        {
+          "name": "required_tensor_families",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "set"
+        },
+        {
+          "name": "checkpoint_key_remap",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "ordered"
+        }
+      ],
+      "state": [
+        {
+          "name": "base_checkpoint_fingerprint",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "load_receipt_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        }
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
         "category": "trainability",
         "name": "full",
         "version": "1.0.0"
@@ -1001,6 +1123,69 @@
     {
       "key": {
         "category": "sample_mapper",
+        "name": "assistant_conversation",
+        "version": "3.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.sample_mapper.assistant_conversation.v3",
+      "model_families": [
+        "transformer",
+        "vision"
+      ],
+      "required_capabilities": [
+        "sample_mapper.assistant_conversation.v3"
+      ],
+      "configuration": [
+        {
+          "name": "system_prompt",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "user_prompt",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "target_column",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "maximum_tokens",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1048576,
+          "unit": "tokens"
+        },
+        {
+          "name": "append_eos",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "enable_thinking",
+          "type": "boolean",
+          "required": true
+        },
+        {
+          "name": "maximum_trailing_tokens_after_eos",
+          "type": "integer",
+          "required": true,
+          "minimum": 0,
+          "maximum": 16,
+          "unit": "tokens"
+        }
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "sample_mapper",
         "name": "causal_tokens",
         "version": "1.0.0"
       },
@@ -1666,6 +1851,113 @@
         },
         {
           "name": "prefer_fused",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        }
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "objective",
+        "name": "cached_reference_dpo",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.objective.cached_reference_dpo.v1",
+      "model_families": [
+        "transformer"
+      ],
+      "required_capabilities": [
+        "objective.cached_reference_dpo.v1"
+      ],
+      "configuration": [
+        {
+          "name": "beta",
+          "type": "number",
+          "required": false,
+          "default": 0.1,
+          "minimum": 1e-12,
+          "maximum": 10.0,
+          "unit": "ratio"
+        },
+        {
+          "name": "label_smoothing",
+          "type": "number",
+          "required": false,
+          "default": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.499999999,
+          "unit": "ratio"
+        },
+        {
+          "name": "chosen_column",
+          "type": "string",
+          "required": false,
+          "default": "chosen"
+        },
+        {
+          "name": "rejected_column",
+          "type": "string",
+          "required": false,
+          "default": "rejected"
+        },
+        {
+          "name": "reference_chosen_logp_column",
+          "type": "string",
+          "required": false,
+          "default": "reference_chosen_logp_sum"
+        },
+        {
+          "name": "reference_rejected_logp_column",
+          "type": "string",
+          "required": false,
+          "default": "reference_rejected_logp_sum"
+        },
+        {
+          "name": "reference_chosen_token_ids_column",
+          "type": "string",
+          "required": false,
+          "default": "reference_chosen_token_ids"
+        },
+        {
+          "name": "reference_rejected_token_ids_column",
+          "type": "string",
+          "required": false,
+          "default": "reference_rejected_token_ids"
+        },
+        {
+          "name": "launch_audit_examples",
+          "type": "integer",
+          "required": false,
+          "default": 16,
+          "minimum": 1,
+          "maximum": 1024,
+          "unit": "count"
+        },
+        {
+          "name": "reference_drift_tolerance",
+          "type": "number",
+          "required": false,
+          "default": 2.0,
+          "minimum": 1e-12,
+          "maximum": 100.0,
+          "unit": "nat"
+        },
+        {
+          "name": "evaluation_chunk_size",
+          "type": "integer",
+          "required": false,
+          "default": 2048,
+          "minimum": 1,
+          "maximum": 1048576,
+          "unit": "count"
+        },
+        {
+          "name": "evaluation_prefer_fused",
           "type": "boolean",
           "required": false,
           "default": true
@@ -2615,6 +2907,63 @@
         "qualitative_sample.fixed_held_out.v2"
       ],
       "configuration": [
+        {
+          "name": "identity_field",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "sample_count",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1000000,
+          "unit": "samples"
+        }
+      ],
+      "state": [
+        {
+          "name": "identities_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "selector_digest",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        }
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "qualitative_sample",
+        "name": "fixed_manifest",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.qualitative_sample.fixed_manifest.v1",
+      "model_families": [
+        "*"
+      ],
+      "required_capabilities": [
+        "qualitative_sample.fixed_manifest.v1"
+      ],
+      "configuration": [
+        {
+          "name": "manifest_name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "manifest_sha256",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
         {
           "name": "identity_field",
           "type": "string",

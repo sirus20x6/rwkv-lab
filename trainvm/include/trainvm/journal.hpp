@@ -228,6 +228,15 @@ enum class HostGrantEnforcement {
   legacy_process_free_test,
 };
 
+// A privileged observer such as hostd must be able to attest the established
+// journal without becoming a second journal writer.  Read-only access refuses
+// creation and migration, requires the current exact schema and authority
+// metadata, and verifies the durable event/projection chains before use.
+enum class JournalAccessMode {
+  read_write,
+  read_only,
+};
+
 class Journal {
 public:
   explicit Journal(
@@ -238,7 +247,8 @@ public:
       std::optional<HostIdentity> expected_host_grant_authority =
           std::nullopt,
       std::shared_ptr<SqliteFilesystemAuthority> filesystem_authority = {},
-      bool require_exclusive_wal = false);
+      bool require_exclusive_wal = false,
+      JournalAccessMode access_mode = JournalAccessMode::read_write);
   ~Journal();
 
   Journal(const Journal&) = delete;
@@ -415,6 +425,7 @@ public:
   std::optional<JournalFileIdentity> expected_file_;
   std::shared_ptr<SqliteFilesystemAuthority> filesystem_authority_;
   bool exclusive_wal_{};
+  JournalAccessMode access_mode_{JournalAccessMode::read_write};
   HostGrantEnforcement host_grant_enforcement_;
   std::optional<HostIdentity> expected_host_grant_authority_;
   mutable std::atomic<bool> authority_poisoned_{false};
@@ -432,6 +443,7 @@ public:
                          const std::string& result_event_id,
                          const std::vector<Event>& events);
   void initialize();
+  void initialize_read_only();
   void require_file_identity(const JournalFileIdentity& expected) const;
   void require_namespace_identity(const JournalFileIdentity& expected) const;
   void require_attested_authority() const;

@@ -63,8 +63,8 @@ void test_mode_and_bounds() {
   auto shared = context();
   shared.resources.accelerators.exclusive = false;
   require(build_resource_bundle_request(shared).access_mode ==
-              ResourceAccessMode::exclusive_compute,
-          "non-device-exclusive training still receives exclusive compute authority");
+              ResourceAccessMode::cooperative_compute,
+          "non-device-exclusive training receives cooperative compute authority");
 
   auto zero = context();
   zero.resources.accelerators.vendor = AcceleratorVendor::none;

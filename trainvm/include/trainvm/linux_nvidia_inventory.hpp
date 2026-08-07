@@ -12,6 +12,18 @@ namespace trainvm {
 
 inline constexpr std::string_view kLinuxNvidiaInventoryApiVersion =
     "trainvm.linux-nvidia-inventory/v2";
+inline constexpr std::string_view kLinuxNvidiaComputeContextOwnerDigestLabel =
+    "compute-context-owner-digest";
+inline constexpr std::string_view kLinuxNvidiaComputeContextOwnerCountLabel =
+    "compute-context-owner-count";
+inline constexpr std::string_view kLinuxNvidiaGraphicsContextOwnerDigestLabel =
+    "graphics-context-owner-digest";
+inline constexpr std::string_view kLinuxNvidiaGraphicsContextOwnerCountLabel =
+    "graphics-context-owner-count";
+inline constexpr std::string_view kLinuxNvidiaDisplaySharingLabel =
+    "display-sharing";
+inline constexpr std::string_view kLinuxNvidiaDisplaySharingAuthorized =
+    "operator-authorized-cooperative";
 
 struct LinuxNvidiaObservedContexts final {
   ResourceContextDisposition compute{ResourceContextDisposition::unknown};
@@ -124,6 +136,10 @@ struct LinuxNvidiaInventoryConfig final {
   // must leave them false and receives observation-only/probe_unknown output.
   bool trusted_host_namespace{};
   bool trusted_nvml_loader{};
+  // Exact GPU UUIDs authorized by a separate boot-scoped root document for
+  // cooperative use when NVML proves the physical device is display-active.
+  // This never authorizes exclusive display-GPU selection.
+  std::vector<std::string> authorized_display_gpu_ids;
 
   bool operator==(const LinuxNvidiaInventoryConfig &) const = default;
 };

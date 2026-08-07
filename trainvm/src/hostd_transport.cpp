@@ -160,12 +160,12 @@ HostdSocketIdentity socket_identity(const struct stat &parent,
                                     const struct stat &path) {
   return {.parent_device = static_cast<std::uint64_t>(parent.st_dev),
           .parent_inode = static_cast<std::uint64_t>(parent.st_ino),
-          .parent_mode = static_cast<std::uint32_t>(parent.st_mode),
+          .parent_mode = static_cast<std::uint32_t>(parent.st_mode) & 07777U,
           .parent_owner_uid = static_cast<std::uint32_t>(parent.st_uid),
           .parent_owner_gid = static_cast<std::uint32_t>(parent.st_gid),
           .path_device = static_cast<std::uint64_t>(path.st_dev),
           .path_inode = static_cast<std::uint64_t>(path.st_ino),
-          .path_mode = static_cast<std::uint32_t>(path.st_mode),
+          .path_mode = static_cast<std::uint32_t>(path.st_mode) & 07777U,
           .owner_uid = static_cast<std::uint32_t>(path.st_uid),
           .owner_gid = static_cast<std::uint32_t>(path.st_gid),
           .link_count = static_cast<std::uint64_t>(path.st_nlink)};
@@ -679,6 +679,20 @@ nlohmann::json passive_memory_identity_json(
 std::string plain_sha256(std::string_view bytes) {
   return "sha256:" + sha256_hex(bytes);
 }
+
+}  // namespace
+
+std::string hostd_passive_memory_observation_digest(
+    const HostdAuthorityStatus &status) {
+  return plain_sha256(passive_memory_identity_json(status).dump());
+}
+
+std::size_t hostd_passive_memory_identity_bytes(
+    const HostdAuthorityStatus &status) {
+  return passive_memory_identity_json(status).dump().size();
+}
+
+namespace {
 
 nlohmann::json authority_status_json(const HostdAuthorityStatus &status) {
   nlohmann::json fences = nlohmann::json::array();
@@ -2830,10 +2844,10 @@ HostdServeResult HostdUnifiedServer::serve_one(
     const std::uint16_t opcode = get_u16(wire_prefix, 8U);
     if (opcode == kStatusRequestOpcode)
       return status_.serve_accepted(connection.release(),
-                                    absolute_monotonic_deadline_ns);
+                                    std::numeric_limits<std::int64_t>::max());
     if (opcode == kMutationOpenOpcode)
       return mutation_.serve_accepted(connection.release(),
-                                      absolute_monotonic_deadline_ns);
+                                      std::numeric_limits<std::int64_t>::max());
     return HostdServeResult::rejected;
   } catch (...) {
     return HostdServeResult::rejected;

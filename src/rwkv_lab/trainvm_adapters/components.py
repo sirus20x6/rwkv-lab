@@ -8,6 +8,7 @@ import torch
 
 from rwkv_lab.training_components import (
     BFloat16PrecisionPolicy,
+    CachedReferenceDPOObjective,
     ConstantLearningRateConfiguration,
     ConstantWeightDecaySchedule,
     ContextLengthCurriculum,
@@ -226,7 +227,7 @@ class WorkerTrainingComponents:
         self,
         *,
         slot: str = "objective",
-    ) -> LinearHeadCrossEntropyObjective:
+    ) -> LinearHeadCrossEntropyObjective | CachedReferenceDPOObjective:
         component = self.composition.require(slot, category="objective")
         return objective_from_resolved_component(component.runtime_envelope())
 

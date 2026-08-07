@@ -509,6 +509,8 @@ SqliteFilesystemAuthority::acquire(SqliteAuthorityConfig config) {
       config.enforcement_grade ==
           SqliteAuthorityEnforcementGrade::strict_filesystem ||
       config.enforcement_grade ==
+          SqliteAuthorityEnforcementGrade::strict_privileged_filesystem ||
+      config.enforcement_grade ==
           SqliteAuthorityEnforcementGrade::cooperative_test;
   const bool has_posix_double_slash_prefix =
       native_path.size() > 1U && native_path[0] == '/' && native_path[1] == '/';
@@ -528,6 +530,15 @@ SqliteFilesystemAuthority::acquire(SqliteAuthorityConfig config) {
       throw SqliteAuthorityError(
           "strict SQLite authority requires a dedicated non-root, non-nobody "
           "effective UID/GID matching the authority owner");
+    }
+  }
+  if (config.enforcement_grade ==
+      SqliteAuthorityEnforcementGrade::strict_privileged_filesystem) {
+    if (::geteuid() != 0U || config.expected_owner_uid != 0U ||
+        ::getegid() != config.expected_owner_gid) {
+      throw SqliteAuthorityError(
+          "privileged strict SQLite authority requires effective uid 0 and "
+          "the configured authority group");
     }
   }
   const std::string database_name = config.ledger_path.filename().string();
@@ -569,8 +580,8 @@ SqliteFilesystemAuthority::acquire(SqliteAuthorityConfig config) {
   implementation->lock_identity = lock.identity;
   implementation->filesystem = filesystem;
   implementation->protected_filesystem_boundary =
-      implementation->config.enforcement_grade ==
-      SqliteAuthorityEnforcementGrade::strict_filesystem;
+      implementation->config.enforcement_grade !=
+      SqliteAuthorityEnforcementGrade::cooperative_test;
   // The pinned parent descriptor closes pathname races on the database and
   // lock files, but SQLite opens `-wal`, `-shm`, and `-journal` itself, by
   // concatenated pathname and without any identity check. The authority VFS

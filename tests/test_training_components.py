@@ -398,6 +398,27 @@ def test_linear_head_cross_entropy_objective_matches_reference_value_and_gradien
     torch.testing.assert_close(observed_gradient, hidden.grad)
 
 
+def test_cached_reference_dpo_objective_rewards_chosen_relative_improvement():
+    from rwkv_lab.training_runtime.objectives import (
+        CachedReferenceDPOConfiguration,
+        CachedReferenceDPOObjective,
+    )
+
+    objective = CachedReferenceDPOObjective(CachedReferenceDPOConfiguration(beta=0.1))
+    chosen = torch.tensor([-8.0], requires_grad=True)
+    rejected = torch.tensor([-9.0], requires_grad=True)
+    loss, margin = objective(
+        chosen,
+        rejected,
+        torch.tensor([-8.0]),
+        torch.tensor([-8.0]),
+    )
+    assert float(margin) == pytest.approx(0.1)
+    loss.backward()
+    assert chosen.grad.item() < 0.0
+    assert rejected.grad.item() > 0.0
+
+
 def test_bfloat16_precision_policy_owns_module_and_reduction_dtypes():
     policy = build_registered_precision_policy(
         PrecisionImplementation.BF16_PARAMETERS_FP32_REDUCTIONS_V1,
