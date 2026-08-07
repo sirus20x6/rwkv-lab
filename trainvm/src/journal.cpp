@@ -2575,16 +2575,6 @@ void Journal::require_namespace_identity(
   // SQLite, so their inode cannot be latched across an observed absence. Every
   // authoritative SQL boundary instead requires any present generation to be
   // an unaliased, non-symlink, owner-controlled regular file.
-  //
-  // A privileged read-only observer is the one case where the auxiliary owner
-  // legitimately differs from the journal owner. hostd runs as uid 0 and must
-  // attest a WAL-mode journal owned by the controller, and SQLite creates the
-  // -wal and -shm as root when hostd opens it first. Accepting a root-owned
-  // generation does not widen the boundary, since only root could have created
-  // it, and without it hostd rejects on every restart the very auxiliaries it
-  // created itself.
-  const bool privileged_observer =
-      access_mode_ == JournalAccessMode::read_only && ::geteuid() == 0U;
   for (const std::string_view suffix :
        {std::string_view{"-journal"}, std::string_view{"-wal"},
         std::string_view{"-shm"}}) {
@@ -2594,8 +2584,7 @@ void Journal::require_namespace_identity(
       if (errno == ENOENT) continue;
       throw std::runtime_error("could not inspect SQLite authority auxiliary");
     }
-    if (!safe_authority_file(status, expected.owner_uid) &&
-        !(privileged_observer && safe_authority_file(status, 0U))) {
+    if (!safe_authority_file(status, expected.owner_uid)) {
       throw std::runtime_error("SQLite authority auxiliary is unsafe: " + name);
     }
   }
