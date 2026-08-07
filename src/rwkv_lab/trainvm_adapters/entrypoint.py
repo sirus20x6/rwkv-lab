@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import traceback
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 
@@ -153,6 +154,15 @@ def run_worker(
             # a normal operation result would race the cancellation state.
             return 0
         except Exception as error:  # noqa: BLE001 - trainer failures are terminal events
+            # The traceback goes to this process's stderr, which the host
+            # authority's operator can read and which is not retained anywhere.
+            # It is deliberately not part of the durable event below: the
+            # bound on that event is what keeps paths and invocation values out
+            # of a shared, replicated artifact. Without this, a trainer failure
+            # reached the operator as the exception's type name and nothing
+            # else — "ValueError", with no message, file, or line anywhere on
+            # the machine.
+            traceback.print_exc()
             # The durable event is intentionally bounded and contains neither the
             # exception message nor invocation values, which may disclose paths.
             session.finish(
