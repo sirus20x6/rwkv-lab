@@ -1,0 +1,92 @@
+{
+  "api_version": "trainvm.hostd-daemon/v1",
+  "host_id": "sha256:2037d5068283d0b7f1dee370d56464672df2c841e16b880c87ad26b08e04e03f",
+  "boot_id": "4f2de8fa-9ec1-4430-a90e-2c46588699ab",
+  "broker_epoch": "local-20260803",
+  "broker_instance_id": "trainvm-hostd-9742afd",
+  "authority_uid": 1001,
+  "authority_gid": 1001,
+  "worker_identity": {
+    "uid": 1001,
+    "gid": 1001,
+    "no_new_privileges": true,
+    "inherit_authority_supplementary_groups": true
+  },
+  "ledger_path": "/var/lib/trainvm-hostd/host-ledger-unprivileged-v4.sqlite3",
+  "journal_path": "/thearray/git/moe-mla/runs/trainvm-ztok-optimization-authority-20260804/journal.sqlite3",
+  "journal_identity": {
+    "directory_path": "/thearray/git/moe-mla/runs/trainvm-ztok-optimization-authority-20260804",
+    "journal_name": "journal.sqlite3",
+    "authority_name": "journal.sqlite3.authority.lock",
+    "directory_device": 54,
+    "directory_inode": 171978851,
+    "device": 54,
+    "inode": 171981533,
+    "authority_device": 54,
+    "authority_inode": 171981534,
+    "owner_uid": 1001
+  },
+  "inventory": {
+    "maximum_devices": 16,
+    "maximum_partitions_per_device": 16,
+    "maximum_processes_per_device": 4096,
+    "maximum_capture_duration_ns": 5000000000,
+    "maximum_snapshot_age_ns": 1000000000,
+    "trusted_host_namespace": true,
+    "trusted_nvml_loader": true
+  },
+  "gpu_fault_guard": {
+    "state_path": "/run/trainvm-gpu-fault/state.json",
+    "maximum_state_age_ns": 10000000000
+  },
+  "cgroup": {
+    "root_path": "/sys/fs/cgroup/system.slice/trainvm-hostd.service/workers",
+    "root_unified_path": "/system.slice/trainvm-hostd.service/workers"
+  },
+  "socket": {
+    "path": "/run/trainvm-hostd/hostd.sock",
+    "parent_mode": 488,
+    "socket_mode": 432,
+    "listen_backlog": 128
+  },
+  "host_namespaces": {
+    "mount_namespace": {"device": 5, "inode": 4026531832},
+    "pid_namespace": {"device": 5, "inode": 4026531836},
+    "cgroup_namespace": {"device": 5, "inode": 4026531835},
+    "time_namespace": {"device": 5, "inode": 4026531834},
+    "time_for_children_namespace": {"device": 5, "inode": 4026531834}
+  },
+  "service_roles": [
+    {
+      "cgroup_path": "/system.slice/trainvm-controller.service",
+      "service_identity": "trainvm-authority",
+      "expected_uid": 1001,
+      "expected_gid": 1001,
+      "access": "grant_release"
+    }
+  ],
+  "maximum_cgroup_file_bytes": 4096,
+  "maximum_live_sessions": 1024,
+  "maximum_logical_scopes": 4096,
+  "transport": {
+    "allowed_uid": 1001,
+    "allowed_gid": 1001,
+    "maximum_payload_bytes": 65536,
+    "status_session_timeout_ns": 30000000000,
+    "mutation_session_timeout_ns": 30000000000,
+    "serve_wake_interval_ns": 100000000
+  },
+  "challenge": {
+    "ttl_ns": 5000000000,
+    "maximum_outstanding": 256,
+    "maximum_outstanding_per_peer": 8
+  },
+  "startup": {
+    "require_stable_occupancy": true,
+    "fail_on_blocking_findings": true,
+    "maximum_findings": 128,
+    "exact_live_policy": "terminate_and_reconcile",
+    "reconcile_observed_nonlive": true,
+    "maximum_recovery_steps": 64
+  }
+}

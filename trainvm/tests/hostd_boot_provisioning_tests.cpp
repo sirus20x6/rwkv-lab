@@ -415,17 +415,34 @@ void deployment_uses_boot_materialization_and_stable_peer_authority() {
   require(input.is_open(), "deployment unit must be readable");
   const std::string unit((std::istreambuf_iterator<char>(input)),
                          std::istreambuf_iterator<char>());
-  require(unit.find("--materialize-config /etc/trainvm/hostd.template.json /run/trainvm-hostd/hostd.json") !=
+  // The authority owns and writes its own configuration and GPU authorization,
+  // so both live in its state directory rather than under /etc, which it has no
+  // authority to write.
+  const std::string state_dir = "/home/sirus/.local/state/trainvm-hostd";
+  require(unit.find("--materialize-config " + state_dir +
+                    "/hostd.template.json /run/trainvm-hostd/hostd.json") !=
                   std::string::npos &&
-              unit.find("--check-gpu-authorization /etc/trainvm/hostd.template.json /etc/trainvm/hostd-gpu-authorization.json") !=
-                  std::string::npos &&
-              unit.find("--gpu-authorization /etc/trainvm/hostd-gpu-authorization.json") !=
+              unit.find("--check-gpu-authorization " + state_dir +
+                        "/hostd.template.json " + state_dir +
+                        "/hostd-gpu-authorization.json") != std::string::npos &&
+              unit.find("--gpu-authorization " + state_dir +
+                        "/hostd-gpu-authorization.json") !=
                   std::string::npos &&
               unit.find("--publish-client-config /run/trainvm-hostd/client.json") !=
                   std::string::npos &&
               unit.find("LoadCredential=") == std::string::npos &&
               unit.find("StartLimitBurst=3") != std::string::npos,
           "enabled hostd unit must require explicit boot GPU authority, materialize each boot, publish the endpoint, and bound failed starts");
+
+  // The daemon must be unprivileged, and must be so by construction rather than
+  // by the configuration it happens to be given.
+  require(unit.find("User=root") == std::string::npos &&
+              unit.find("User=sirus") != std::string::npos &&
+              unit.find("CapabilityBoundingSet=\n") != std::string::npos &&
+              unit.find("AmbientCapabilities=\n") != std::string::npos &&
+              unit.find("NoNewPrivileges=yes") != std::string::npos &&
+              unit.find("Delegate=yes") != std::string::npos,
+          "hostd must run unprivileged with no capabilities and a delegated cgroup");
   const auto authorization_check = unit.find("--check-gpu-authorization");
   const auto first_start_pre = unit.find("ExecStartPre=");
   require(authorization_check != std::string::npos &&
@@ -437,13 +454,15 @@ void deployment_uses_boot_materialization_and_stable_peer_authority() {
   require(sudoers_input.is_open(), "sudoers installer must be readable");
   const std::string sudoers((std::istreambuf_iterator<char>(sudoers_input)),
                             std::istreambuf_iterator<char>());
-  require(sudoers.find("--authorize-gpu-start /etc/trainvm/hostd.template.json /etc/trainvm/hostd-gpu-authorization.json deny") !=
-                  std::string::npos &&
-              sudoers.find("--authorize-gpu-start /etc/trainvm/hostd.template.json /etc/trainvm/hostd-gpu-authorization.json cooperative_allowlist *") !=
-                  std::string::npos &&
+  // GPU authority is now published by the unprivileged authority itself, under
+  // an identity check that a sudo invocation would fail. No privileged rule may
+  // grant, install, or stand in for it.
+  require(sudoers.find("--authorize-gpu-start") == std::string::npos &&
+              sudoers.find("hostd.template.json") == std::string::npos &&
+              sudoers.find("hostd-gpu-authorization") == std::string::npos &&
               sudoers.find("deploy/trainvm-hostd-gpu-authorization") ==
                   std::string::npos,
-          "deployment must permit an explicit operator command but never install implicit GPU authority");
+          "no privileged rule may install or stand in for GPU authority");
 }
 
 }  // namespace

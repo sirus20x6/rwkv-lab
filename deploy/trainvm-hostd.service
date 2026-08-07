@@ -1,0 +1,56 @@
+[Unit]
+Description=TrainVM host resource and process authority
+Requires=trainvm-gpu-fault-observer.service
+Requires=trainvm-controller.service
+BindsTo=trainvm-controller.service
+After=local-fs.target display-manager.service gpu-watchdog.service trainvm-gpu-fault-observer.service trainvm-controller.service
+Before=shutdown.target
+StartLimitIntervalSec=30s
+StartLimitBurst=3
+
+[Service]
+Type=simple
+# The authority is unprivileged. Root bought only a foreign-uid worker spawn
+# and a BPF device allowlist, neither of which is worth anything on a
+# single-user, single-GPU host, while its permission override let hostd write
+# into a journal it is designed only to observe.
+User=sirus
+Group=sirus
+RuntimeDirectory=trainvm-hostd
+RuntimeDirectoryMode=0750
+StateDirectory=trainvm-hostd
+StateDirectoryMode=0700
+# The GPU watchdog and this authority both claim the device; refuse to start
+# rather than race it.
+ExecCondition=/usr/bin/sh -c '! /usr/bin/systemctl --quiet is-active gpu-watchdog.service'
+# Boot-scoped GPU authority is checked before any startup work, so the daemon
+# exits through ExecCondition before NVML can load the CUDA driver.
+ExecCondition=/usr/local/sbin/trainvm-hostd --check-gpu-authorization /home/sirus/.local/state/trainvm-hostd/hostd.template.json /home/sirus/.local/state/trainvm-hostd/hostd-gpu-authorization.json
+ExecStartPre=/usr/bin/mkdir -p /sys/fs/cgroup/system.slice/trainvm-hostd.service/workers
+ExecStartPre=/usr/local/sbin/trainvm-hostd --materialize-config /home/sirus/.local/state/trainvm-hostd/hostd.template.json /run/trainvm-hostd/hostd.json
+ExecStart=/usr/bin/sh -c 'printf "+cpu +io" > /sys/fs/cgroup/system.slice/trainvm-hostd.service/cgroup.subtree_control && printf "+cpu +io" > /sys/fs/cgroup/system.slice/trainvm-hostd.service/workers/cgroup.subtree_control && exec /usr/local/sbin/trainvm-hostd --config /run/trainvm-hostd/hostd.json --gpu-authorization /home/sirus/.local/state/trainvm-hostd/hostd-gpu-authorization.json --publish-client-config /run/trainvm-hostd/client.json'
+ExecStopPost=/usr/bin/sh -c 'if [ -w /sys/fs/cgroup/system.slice/trainvm-hostd.service/workers/cgroup.kill ]; then printf "1" > /sys/fs/cgroup/system.slice/trainvm-hostd.service/workers/cgroup.kill; fi'
+Restart=on-failure
+RestartSec=5s
+KillMode=control-group
+TimeoutStopSec=30s
+# Delegation is what lets an unprivileged authority own its worker cgroups:
+# systemd chowns the delegated subtree to User=.
+Delegate=yes
+DelegateSubgroup=trainvm-daemon
+TasksMax=infinity
+LimitNOFILE=1048576
+UMask=0077
+# Nothing left needs a privilege transition, and this makes the daemon's own
+# guarantee match the one it demands of its workers.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=no
+PrivateMounts=no
+PrivateUsers=no
+ProtectControlGroups=no
+ProtectKernelTunables=no
+
+[Install]
+WantedBy=multi-user.target
