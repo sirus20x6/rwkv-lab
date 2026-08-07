@@ -37,6 +37,8 @@ Cmnd_Alias TRAINVM_HOSTD = \
     /usr/bin/systemctl stop trainvm-hostd.service, \
     /usr/bin/systemctl restart trainvm-hostd.service, \
     /usr/bin/systemctl restart trainvm-controller.service, \
+    /usr/bin/systemctl stop trainvm-gpu-fault-observer.service, \
+    /usr/bin/systemctl restart trainvm-gpu-fault-observer.service, \
     /usr/bin/systemctl status trainvm-gpu-fault-observer.service, \
     /usr/bin/systemctl status trainvm-hostd.service, \
     /usr/bin/systemctl status trainvm-controller.service, \
