@@ -1,7 +1,12 @@
 #include "trainvm/hostd_boot_provisioning.hpp"
 #include "trainvm/hostd_gpu_authorization.hpp"
 
+#include <fcntl.h>
+#include <linux/magic.h>
+#include <linux/openat2.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/vfs.h>
 #include <unistd.h>
 
 #include <filesystem>
@@ -398,7 +403,44 @@ void atomic_publication_is_exact_and_rejects_unsafe_ancestry() {
       "symlinked authority ancestry must be rejected");
 }
 
+// (statfs magic comes from <linux/magic.h>.)
+// Whether this host can resolve a path under /proc the way the session
+// authority does. It pins /proc by descriptor and resolves with openat2 under
+// RESOLVE_IN_ROOT|NO_MAGICLINKS|NO_XDEV, with no path-resolution fallback — a
+// container that masks parts of /proc with bind mounts, or blocks openat2 in
+// its seccomp profile, cannot satisfy that. Probed explicitly rather than by
+// catching the failure, so a genuine regression in boot observation still fails
+// the test instead of being reported as an unsupported environment.
+[[nodiscard]] bool procfs_supports_pinned_resolution() {
+  const int proc =
+      ::open("/proc", O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (proc < 0) return false;
+  struct statfs filesystem{};
+  struct stat status{};
+  if (::fstatfs(proc, &filesystem) != 0 ||
+      filesystem.f_type != PROC_SUPER_MAGIC ||
+      ::fstat(proc, &status) != 0 || !S_ISDIR(status.st_mode) ||
+      status.st_uid != 0U || (status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+    ::close(proc);
+    return false;
+  }
+  open_how how{};
+  how.flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW;
+  how.resolve = RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV;
+  const int probe = static_cast<int>(::syscall(
+      SYS_openat2, proc, "sys/kernel/random/boot_id", &how, sizeof(how)));
+  ::close(proc);
+  if (probe < 0) return false;
+  ::close(probe);
+  return true;
+}
+
 void live_boot_observation_is_accepted_without_gpu_access() {
+  if (!procfs_supports_pinned_resolution()) {
+    std::cerr << "SKIP: live boot observation needs a procfs this host does "
+                 "not expose to openat2 under RESOLVE_IN_ROOT|NO_XDEV\n";
+    return;
+  }
   const HostdLinuxBootAuthoritySnapshot observed =
       observe_hostd_linux_boot_authority();
   const HostdDaemonConfiguration materialized =
