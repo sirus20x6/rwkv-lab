@@ -26,6 +26,11 @@ import pytest
 import trainvm_binary
 import ztok_binary
 
+# The checkout root is on sys.path for the same reason; this is the module the
+# runner masks portable children with, and the module whose physical check the
+# portable receipt now carries.
+from scripts import non_gpu_environment
+
 REPOSITORY = pathlib.Path(__file__).resolve().parents[1]
 RUNNER = REPOSITORY / "scripts/run_benchmark_fixture.py"
 MATRIX = REPOSITORY / "docs/experiment-vm/benchmark-matrix.v1.json"
@@ -620,6 +625,13 @@ def test_portable_fixture_emits_evidence_the_gate_accepts(tmp_path):
     assert cell["steady_state_step_seconds"] > 0
     assert cell["peak_memory_bytes"] > 0
     assert cell["input_wait_seconds"] >= 0
+    # The device attribution has to reach the receipt to be evidence at all.
+    # The workload computed these three before and the runner dropped every
+    # one, so a portable receipt made no claim about what it ran on and a
+    # wrong claim in the workload could not be seen from here.
+    assert cell["accelerator"] is False
+    assert cell["execution_device"] == "cpu"
+    assert cell["open_accelerator_device_files"] == []
 
     document = json.loads(evidence.read_text())
     assert document["api_version"] == "trainvm.cache-qualification-evidence/v1"
@@ -941,3 +953,126 @@ def test_every_workload_declares_its_input_pipeline_source():
             f"{workload.name} reports input wait without declaring its source")
         assert f'"{expected[workload.name]}"' in source, (
             f"{workload.name} must declare its actual input source")
+
+
+def run_portable_workload(**environment_overrides) -> dict:
+    """One timed portable step, with the environment stated per test.
+
+    A value of None deletes the variable rather than setting it empty. The
+    two are different states of CUDA_VISIBLE_DEVICES and the difference is the
+    subject of the tests below, so a helper that could not express "unset"
+    would not be able to ask the question.
+    """
+    environment = {**os.environ, "PYTHONPATH": str(REPOSITORY / "src")}
+    for name, value in environment_overrides.items():
+        if value is None:
+            environment.pop(name, None)
+        else:
+            environment[name] = value
+    completed = subprocess.run(
+        [
+            sys.executable, str(PORTABLE_WORKLOAD),
+            "--phase", "timed", "--bucket", "seq64xbatch2", "--steps", "1",
+        ],
+        capture_output=True, text=True, cwd=REPOSITORY, env=environment,
+        check=False, timeout=600,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout)
+
+
+@pytest.mark.slow
+def test_a_visible_device_is_not_reported_as_a_device_that_was_used():
+    """CUDA_VISIBLE_DEVICES="0" does not mean this measurement used a GPU.
+
+    It means one is visible. This workload builds its model and its batches on
+    the default device and never moves them, so the measurement is a CPU
+    measurement whatever the mask admits. The field used to be
+    `bool(os.environ.get("CUDA_VISIBLE_DEVICES"))`, which reported True here
+    and put "this ran on an accelerator" into a receipt that outlives the run.
+    """
+    report = run_portable_workload(CUDA_VISIBLE_DEVICES="0")
+    assert report["accelerator"] is False
+    assert report["execution_device"] == "cpu"
+
+
+@pytest.mark.slow
+def test_a_mask_meaning_no_devices_is_not_reported_as_a_device():
+    """The same expression was also wrong in the other direction.
+
+    "-1" is the widely copied way to say *no* devices, and truthiness read it
+    as yes. This is the half of the defect that reproduces on a host with no
+    accelerator at all, which is where CI runs.
+    """
+    report = run_portable_workload(CUDA_VISIBLE_DEVICES="-1")
+    assert report["accelerator"] is False
+    assert report["execution_device"] == "cpu"
+
+
+@pytest.mark.slow
+def test_a_masked_portable_run_proves_no_device_was_reachable():
+    """The production path, with the physical proof the receipt now carries.
+
+    This is what `scripts/run_benchmark_fixture.py` does to every portable
+    child. An empty descriptor list is the claim a portable receipt exists to
+    make -- that the CPU path was measured -- and it is stated by the process
+    rather than inferred from the variable that was supposed to cause it.
+    """
+    report = run_portable_workload(**non_gpu_environment.NON_GPU_ENVIRONMENT)
+    assert report["accelerator"] is False
+    assert report["execution_device"] == "cpu"
+    assert report["open_accelerator_device_files"] == []
+
+
+def test_no_workload_decides_device_use_from_the_visibility_mask():
+    """The defect's shape, banned by name across every benchmark workload.
+
+    A receipt field that says what a run used must come from the run. The
+    environment variable is an input to device discovery, not a report of its
+    outcome, and reading it back as one is wrong whichever value it holds.
+    """
+    workloads = sorted(
+        (REPOSITORY / "scripts" / "benchmark_workloads").glob("*_lm_step.py"))
+    assert workloads, "no benchmark workloads found"
+    for workload in workloads:
+        source = workload.read_text(encoding="utf-8")
+        offending = [
+            line for line in source.splitlines()
+            if "VISIBLE_DEVICES" in line and not line.lstrip().startswith("#")
+        ]
+        assert not offending, (
+            f"{workload.name} reads a visibility mask outside a comment: "
+            f"{offending}")
+
+
+def test_the_portable_receipt_would_report_a_device_it_had_actually_used():
+    """The half of the fix no end-to-end assertion can reach.
+
+    Every other test of these two fields expects `False` and `"cpu"`, because
+    the portable workload is CPU-only and pins its batch generator to the CPU
+    -- forcing it onto a device with `torch.set_default_device("cuda")` raises
+    `Expected a 'cuda' device type for generator but found 'cpu'` before the
+    first step. So no run, on any host, can distinguish reading the device
+    from returning two constants that happen to be right.
+
+    `torch.device("cuda:0")` can be constructed on a machine with no driver
+    and initializes nothing, so calling the derivation directly is the check
+    that discriminates. This is the card's "records true on a device" clause
+    in the only form that is not a lie: the portable receipt would say so if
+    it ever ran there, and it never does.
+    """
+    import torch
+
+    module = importlib.util.spec_from_file_location(
+        "portable_lm_step_for_attribution", PORTABLE_WORKLOAD)
+    workload = importlib.util.module_from_spec(module)
+    module.loader.exec_module(workload)
+
+    assert workload.device_attribution(torch.device("cpu")) == {
+        "accelerator": False, "execution_device": "cpu"}
+    assert workload.device_attribution(torch.device("cuda:0")) == {
+        "accelerator": True, "execution_device": "cuda"}
+    # No side effect on the way past: constructing a device object must not
+    # be the thing that opens one, or this test would violate the masking
+    # invariant tests/test_non_gpu_environment.py enforces on this session.
+    assert non_gpu_environment.open_accelerator_device_files() == []

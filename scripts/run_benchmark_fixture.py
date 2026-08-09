@@ -598,6 +598,13 @@ def run_cell(
         "tokenizer_version",
         "sequence_length",
         "batch_size",
+        # A portable receipt is only evidence that the CPU path was measured
+        # if it carries what the workload observed. These three were being
+        # computed and then dropped, so the receipt asserted nothing either
+        # way and a wrong value in the workload was invisible here.
+        "accelerator",
+        "execution_device",
+        "open_accelerator_device_files",
     ):
         if diagnostic in timed:
             cell[diagnostic] = timed[diagnostic]

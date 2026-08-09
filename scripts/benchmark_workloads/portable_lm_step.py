@@ -22,10 +22,43 @@ import sys
 import time
 
 # Run as a script the sibling module is already importable; loaded by file
-# path from a test it is not, so make both work.
+# path from a test it is not, so make both work. scripts/ is added for the
+# same reason: non_gpu_environment lives one directory up.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(
+    0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from batch_identity import batch_digest, chain_digests  # noqa: E402
+from non_gpu_environment import open_accelerator_device_files  # noqa: E402
+
+
+def device_attribution(device) -> dict:
+    """What the receipt says about where a measured step ran.
+
+    `device` is taken off a tensor the step produced, so this reports the
+    run rather than an environment variable that was only ever an input to
+    device discovery.
+
+    It is a module-level function rather than two expressions inside `main`
+    for a testability reason that is worth stating, because it is the only
+    reason. This workload is CPU-only and its batch generator is pinned to
+    the CPU, so no test can drive it onto a device and every end-to-end
+    assertion about these two fields expects "cpu" and False -- which a pair
+    of hardcoded literals would satisfy exactly as well. `torch.device` can
+    be constructed for a device that is not present, and no driver is
+    initialized by doing so, so calling this directly is the one way a test
+    on any host can tell the derivation apart from a constant.
+    """
+
+    return {
+        # The claim: did this measurement use an accelerator. Not "was one
+        # visible", which is what `bool(os.environ.get("CUDA_VISIBLE_DEVICES"))`
+        # asked, and not even that: unset means every device is visible and
+        # that expression read it as none.
+        "accelerator": device.type != "cpu",
+        # Stated beside it so the bool is checkable rather than asserted.
+        "execution_device": device.type,
+    }
 
 
 def parse_bucket(bucket: str) -> tuple[int, int]:
@@ -169,7 +202,26 @@ def main() -> int:
             },
         }
 
+    # Where the measured step actually ran, read off the tensor it produced.
+    # `first_step` below indexes step_seconds, so at least one step has run by
+    # here and `loss` is bound. This workload builds its model and its batches
+    # on the default device and never moves them, so on any host it reads
+    # "cpu" -- but it reads it from the tensor rather than asserting it, so it
+    # would stop reading "cpu" the moment somebody gave this workload a device.
     first_step = step_seconds[0]
+    attribution = device_attribution(loss.device)
+    # The physical statement, and the one this repository already trusts: an
+    # open descriptor on /dev/nvidia* cannot be explained away, whereas
+    # torch.cuda.is_available() is False for a CPU-only torch build and for a
+    # driver/runtime mismatch too. It is also free. Calling into torch.cuda
+    # here would initialize the driver in a process whose whole purpose is to
+    # measure the CPU path -- creating a context on the very device the runner
+    # refuses to contend with, and moving the peak-RSS number reported below.
+    # Deduplicated because the descriptor count is not the claim and is noisy:
+    # an unmasked run on this repository's GPU workstation holds twenty-one
+    # descriptors across three distinct device files. Which devices were
+    # reachable is the claim, and an empty list still means none.
+    open_device_files = sorted(set(open_accelerator_device_files()))
     sorted_step_seconds = sorted(step_seconds)
     median = sorted_step_seconds[len(sorted_step_seconds) // 2]
     training_step_seconds = sum(step_seconds)
@@ -210,7 +262,24 @@ def main() -> int:
         "quality_metric": "cross_entropy",
         "sequence_length": sequence_length,
         "batch_size": batch_size,
-        "accelerator": bool(os.environ.get("CUDA_VISIBLE_DEVICES")),
+        # `accelerator` and `execution_device`, derived from the tensor the
+        # measured step produced. The field used to read
+        # `bool(os.environ.get("CUDA_VISIBLE_DEVICES"))`, which is wrong in
+        # both directions: unset means every device is visible, so a receipt
+        # from an ordinary GPU host recorded False, while "-1" means no
+        # devices and recorded True. The masked path this workload actually
+        # runs under ("") was the one case it got right, and only by accident
+        # of an empty string being falsy.
+        **attribution,
+        # The physical companion to the two above, and a different claim:
+        # which accelerator device files this process had open when it
+        # finished. A portable receipt exists to show the CPU path was
+        # measured even on a GPU host, and an empty list is what shows it --
+        # whereas a non-empty list on an unmasked host says the driver was
+        # initialized by an import even though no tensor ever left the CPU.
+        # Reachable and used are separate facts and the receipt keeps them
+        # apart.
+        "open_accelerator_device_files": open_device_files,
         "compiled": arguments.compile_step,
         "compile_mode": (
             arguments.compile_mode if arguments.compile_step else None),
