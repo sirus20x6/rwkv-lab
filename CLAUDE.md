@@ -408,13 +408,15 @@ of order you will pin a digest of a digest that is about to change:
 cmake -S trainvm -B trainvm/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build trainvm/build -j "$(nproc)" --target trainvm
 
-# 2. The compatibility catalog's two digests, plus any empty classification
-#    surface. Paste both into docs/experiment-vm/compatibility-workflows.v1.json.
+# 2. The compatibility catalog's per-source pins and its classification
+#    surface digest, plus any empty classification surface. --write splices
+#    them back in; nothing else in the document moves. There are 155 pins, so
+#    do not hand-edit them.
 trainvm/build/trainvm print-catalog-digests \
-  docs/experiment-vm/compatibility-workflows.v1.json .
+  docs/experiment-vm/compatibility-workflows.v1.json . --write
 
 # 3. kReviewedCatalogDigest, in trainvm/src/compatibility_catalog.cpp. It is
-#    computed FROM the value you just pasted, so it only settles after step 2.
+#    computed FROM the values step 2 just wrote, so it only settles after it.
 #    This command fails on purpose and names the value to pin.
 trainvm/build/trainvm validate-catalog \
   docs/experiment-vm/compatibility-workflows.v1.json .
@@ -448,9 +450,16 @@ classification with the per-file hashes erased. What is left in the catalogs is
 the `entries` list, where two changes touch two different objects and git merges
 them without help.
 
-Conflicts are still possible in `compatibility-workflows.v1.json` and in
-`compatibility_catalog.cpp`, which keep whole-tree digests on purpose. When one
-happens, do **not** resolve those hunks by editing them or by picking a side. A pin is a digest of content: whichever side you
+`compatibility-workflows.v1.json` no longer stores a whole-tree digest either.
+Its byte binding is `source_digests`, one object per referenced path, so two
+pull requests editing two different sources rewrite two different objects and
+git merges them. A catalog that still declares a `source_tree_digest` is
+refused by name — that is what a hand-resolved rebase produces.
+
+What is left that a merge can still collide on is `kReviewedCatalogDigest` in
+`compatibility_catalog.cpp`, and it only moves when a *classification* moves.
+When it does conflict, do **not** resolve that hunk by editing it or by picking
+a side. A pin is a digest of content: whichever side you
 choose was computed against a tree that no longer exists, so both sides are
 wrong after the merge, and the result is a plausible-looking digest that
 matches nothing.
@@ -469,6 +478,10 @@ new base; check which you have before trusting either.) The pinned digests in
 — take one side, then let the ctest print the two correct values beside their
 names.
 
+A conflict in `compatibility-workflows.v1.json` itself should now be rare. If
+you get one, read it rather than regenerating past it: two changes to the same
+entry, or to the same source's pin, is a real overlap.
+
 There is deliberately no single `refresh-all` script yet. Writing one is filed.
 
 **Do not skip the build**, and do not assume a checkout that already has
@@ -481,11 +494,11 @@ and sends you off debugging a catalog that is fine. Either way the digest you
 are chasing never appears. The build takes several minutes and needs GCC 16
 with `-freflection`; that is expected.
 
-Two things to know before you paste a new value in:
+Two things to know before you accept a regenerated value:
 
-The compatibility catalog's `source_tree_digest` moving is mechanical —
-regenerate it and move on. (The source-disposition catalogs no longer have one;
-these two artifacts are different and only the compatibility one stores it.)
+The compatibility catalog's per-source pins moving is mechanical — regenerate
+them with `--write` and move on. (Neither artifact stores a tree digest now;
+both derive it from per-file hashes at load time.)
 But if
 `classification_surface_digest` also moves, that is a **real** signal: something
 changed a file's entrypoint, argument surface, or checkpoint/resume call sites.

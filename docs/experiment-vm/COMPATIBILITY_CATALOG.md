@@ -42,9 +42,9 @@ design-only records are stateless and use `none`.
 
 The v1 inventory is an exact compiled mapping, not merely a set of reviewed IDs. Removing or adding
 an entry fails, and changing any field of an existing entry fails until the canonical catalog digest
-is deliberately updated in compiled code. The catalog also carries `source_tree_digest`, a
-deterministic SHA-256 tree digest over every unique referenced path and its exact bytes. Validation
-hashes each source through the same descriptor used to inspect it.
+is deliberately updated in compiled code. The catalog also carries `source_digests`, one SHA-256 per
+unique referenced path over that file's exact bytes, from which a deterministic tree digest is
+derived. Validation hashes each source through the same descriptor used to inspect it.
 
 The mutable export records are intentionally candid. `export.legacy-mutable-bundle` recursively
 overwrites its destination and performs only shallow listed-file/tensor-count verification.
@@ -68,8 +68,8 @@ remain as `retired_legacy` records, and both kinds bind their handler file plus
 `dashboard/internal/server/server.go`, the registration table itself. Two independent gates keep
 that closed:
 
-1. adding, removing, or renaming any route changes the router bytes and therefore fails the
-   `source_tree_digest` check before anything else is examined;
+1. adding, removing, or renaming any route changes the router bytes and therefore fails that file's
+   pinned `source_digests` entry before anything else is examined;
 2. `compatibility_catalog_tests` re-reads the registration table and fails when a served legacy
    route has no active record, an active record names an unserved route, or a retired record becomes
    served again. TrainVM's own `/api/trainvm/` namespace is excluded because it is declarative
@@ -104,9 +104,25 @@ service does not contain it.
 
 The catalog pins two, and they answer different questions.
 
-`source_tree_digest` binds the **whole bytes** of every referenced source. It is the provenance
-record: it says the entries were reviewed against exactly these files. It still fails closed, so the
-record cannot go stale.
+`source_digests` binds the **whole bytes** of every referenced source, one pinned sha256 per path.
+It is the provenance record: it says the entries were reviewed against exactly these files. It still
+fails closed, so the record cannot go stale, and a mismatch names the file that drifted.
+
+The whole-tree `source_tree_digest` that `validate-catalog` and `print-catalog-digests` still report
+is **derived** from those pairs at load time, and no catalog stores it. It used to be stored, and
+storing it was the last per-scope serialization point in the repository: it is a pure function of
+the per-path pins, so the stored copy carried no information, while every edit to any of the 155
+referenced sources rewrote that one line. Two pull requests touching two unrelated files conflicted
+on it by construction — 65 of the 129 `scripts` disposition entries and 68 of the 165 `rwkv-lab`
+ones are also referenced here, so this covered about half of each scope even after the disposition
+catalogs stopped storing theirs. A catalog that still declares a `source_tree_digest` is refused by
+name, because a hand-resolved rebase is exactly what produces one and a stale pin that still looks
+authoritative is worse than an absent one.
+
+Deriving it loses nothing measurable: the fold over the per-path pins reproduces, byte for byte, the
+value the catalog stored before the change. What it does lose is an accident — while the value was
+stored, it incidentally pinned the fold itself, so changing a separator broke loading. That is now
+pinned directly, over fixed pairs, in `compatibility_catalog_tests.cpp`.
 
 `classification_surface_digest` binds only the part of each source that could change how the entry
 beside it is classified — its entrypoint declaration, its argument surface, and its checkpoint and
@@ -141,10 +157,13 @@ a review. Now:
 cmake -S trainvm -B trainvm/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build trainvm/build -j "$(nproc)" --target trainvm
 trainvm/build/trainvm print-catalog-digests \
-  "$PWD/docs/experiment-vm/compatibility-workflows.v1.json" "$PWD"
+  "$PWD/docs/experiment-vm/compatibility-workflows.v1.json" "$PWD" --write
 ```
 
 It computes both digests without checking them, so it still reports when they disagree, and lists
-any Python source whose classification surface came out empty. Paste `source_tree_digest` back into
-the JSON after an unrelated source edit. If `classification_surface_digest` also moved, that is the
+any Python source whose classification surface came out empty. Drop `--write` to look without
+touching the file; with it, the per-source pins and `classification_surface_digest` are spliced back
+into the catalog and nothing else in the document moves. There are 155 pins, so hand-editing them is
+not a procedure anyone follows correctly — that is why the writer exists rather than an instruction
+to paste. If `classification_surface_digest` also moved, that is the
 signal to actually re-read the entry before pinning it and bumping `kReviewedCatalogDigest`.
