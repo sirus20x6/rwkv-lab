@@ -1,0 +1,44 @@
+# clangd (the C++ language server / indexer) configuration for TrainVM.
+#
+# READ THE "C++ diagnostics are only as good as trainvm/build/" SECTION OF THE
+# REPOSITORY CLAUDE.md BEFORE ACTING ON ANYTHING CLANGD REPORTS HERE.
+#
+# The build is GCC 16 with -freflection (P2996 static reflection). clangd is
+# clang, which is a different compiler with a different feature set, so its
+# view of this tree is approximate by construction. This file narrows the gap
+# as far as it can go; what it cannot close is written down below rather than
+# hidden.
+
+CompileFlags:
+  # compile_commands.json records the real GCC command line, which contains
+  # -freflection. clang's driver rejects unknown -f flags outright
+  # ("error: unknown argument: '-freflection'"), so every TU picked up an
+  # otherwise meaningless driver diagnostic. Stripped for the indexer only --
+  # the flag stays in trainvm/CMakeLists.txt, where it is load-bearing.
+  Remove: [-freflection]
+
+  # Fallback for a source file with no compile_commands.json entry: a worktree
+  # that has never been configured, or a file added since the last configure.
+  # Without these clangd guesses a bare `clang++ file.cpp`, which defaults to
+  # C++17 with no include path, and then reports a wall of nonsense --
+  # 'trainvm/...hpp' file not found, no member 'ranges' in namespace 'std',
+  # undeclared identifier 'nlohmann', and eventually implicit-int fallout such
+  # as "'ostream' (aka 'int')". None of that is real. These flags make the
+  # unconfigured case merely incomplete instead of actively misleading; they
+  # are appended after the real command when one exists, where they are inert.
+  #
+  # -I paths are relative to the compile command's directory, which is
+  # trainvm/build for a real command and the source file's own directory for a
+  # fallback one. ../include resolves to trainvm/include in both cases.
+  Add: [-std=c++26, -I../include]
+
+Diagnostics:
+  # A deliberate suppression, not a fix. clangd's include-cleaner decides an
+  # include is unused by looking at which declarations the AST references, and
+  # reflection defeats that: a type reached only through std::meta or ^^T
+  # leaves no ordinary reference behind, and clangd cannot evaluate either
+  # construct in the first place. Its verdicts on this tree are therefore
+  # unsound in the dangerous direction -- it proposes removing headers the GCC
+  # build needs. Everything that reports an actual compile error is still on.
+  UnusedIncludes: None
+  MissingIncludes: None
