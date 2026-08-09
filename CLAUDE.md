@@ -378,6 +378,30 @@ Each ends with a line stating `PASSED` or `FAILED`. Read that line — the older
 form printed a neutral tally that looked identical either way, and a PR was
 pushed red because its output was truncated to exactly that line.
 
+### Mutation testing: the baseline row is not a formality
+
+There is no mutation-testing harness in this repository — the practice is to
+write one per card: edit a source, run the tests, restore it, repeat. Whatever
+you write, run the unmutated tree first and **read the baseline row before
+anything else**. A red baseline means the tree is not what you think it is, and
+every red count printed after it is measured against a reference you do not
+understand; the interesting rows are not interesting, they are noise.
+
+That row is the only instrument that catches a corrupted working tree, and it
+has done it twice in one night. One agent's failure parser was reporting
+`red=0` for every mutation, which a broken harness and a perfect test suite
+produce identically — the baseline distinguished them. Another had had an
+earlier harness run killed mid-mutation, leaving a mutated file on disk that the
+pin refresh above then certified with every gate green; the next run's red
+baseline is what surfaced it. If the baseline is red, stop, clean the tree, and
+re-establish it before interpreting a single mutation result.
+
+Making harnesses signal-safe — trapping SIGTERM/SIGINT to restore the file — was
+weighed and deliberately not adopted. It narrows the window without closing it
+(SIGKILL and the OOM killer take no handler), and a harness advertising a
+restore invites exactly the trust the baseline check exists to withhold. Treat
+restore as best-effort; the baseline row is the check.
+
 ### Adding a native module now costs a caller or a stated reason
 
 `ci_unwired_module_gate.py` fails when a header under `trainvm/include/trainvm/`
@@ -404,6 +428,31 @@ more than one place. None of them should be recomputed by hand.
 There are **four** pin sites, and they are not next to each other. Refresh them
 in this order — later ones are computed from the values you just wrote, so out
 of order you will pin a digest of a digest that is about to change:
+
+**Before step 1, confirm the tree holds only what you meant to pin.** `git status
+--porcelain` and `git diff origin/main`, read rather than skimmed, cost seconds
+and are the only opportunity you get. A refresh pins the bytes that are on disk
+when it runs, so anything else sitting in the tree gets pinned too, and the
+result is indistinguishable from a correct one: a digest over stray content and
+a digest over the content you meant are both 64 hex characters, and nothing in
+this repository can look at either and tell you which it has. The refresh will
+succeed, `validate-catalog` will report valid, `ci_compatibility_pin_gate.py`
+will pass and the disposition `--check` loop will pass — all of them, because
+every one of them asks "do these bytes match this digest?", and they do.
+
+The route that produced this was an in-place mutation harness — anything that
+edits a source, runs the tests, and restores it. One was killed by a tool
+timeout mid-mutation, leaving `src/rwkv_lab/trainvm_adapters/handlers.py`
+carrying the mutation that was live at the kill. `git status` showed the file
+modified, which it already legitimately was from the card's own work, so nothing
+looked wrong; the four steps then regenerated
+`compatibility-workflows.v1.json`, `source-dispositions.rwkv-lab.v1.json` and
+`kReviewedCatalogDigest` as digests of mutated source, and every gate agreed.
+**Never regenerate pins in a tree that an in-place harness has run in without
+first re-establishing that it is clean** — `git checkout` the paths the harness
+touched, or do the refresh in a fresh worktree. This is the same failure as a
+hand-resolved pin conflict below ("a plausible-looking digest that matches
+nothing"), reached from the other direction.
 
 ```bash
 # 1. Build first. `trainvm/build/trainvm` is gitignored, so whatever is sitting
