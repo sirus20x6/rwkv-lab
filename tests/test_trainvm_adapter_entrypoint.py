@@ -1268,10 +1268,31 @@ def test_rlvr_handler_seals_verifier_and_publishes_terminal_checkpoint(
             }
         },
         workspace=_sealed_workspace(read_root, run_directory),
-        publishes={"checkpoint": {}},
+        publishes={"checkpoint": {}, "eval_examples": {}},
         resume=None,
     )
-    components = SimpleNamespace()
+    # Not an empty namespace any more: the handler now reads the resolved
+    # composition to build the held-out eval policy it hands the trainer, so a
+    # double that resolves nothing would only prove the handler ignores it.
+    components = SimpleNamespace(
+        composition=SimpleNamespace(
+            components={
+                "artifact_renderer": SimpleNamespace(
+                    descriptor_digest="sha256:" + "a" * 64
+                ),
+                "evaluator": SimpleNamespace(descriptor_digest="sha256:" + "e" * 64),
+                "qualitative_samples": SimpleNamespace(
+                    descriptor_digest="sha256:" + "9" * 64
+                ),
+            }
+        ),
+        evaluator=lambda: SimpleNamespace(
+            configuration=SimpleNamespace(metrics=("eval.pass_at_k", "eval.reward"))
+        ),
+        qualitative_samples=lambda: SimpleNamespace(
+            configuration=SimpleNamespace(identity_field="id", sample_count=8)
+        ),
+    )
     profiler = SimpleNamespace()
     observability = SimpleNamespace(
         keepalive=lambda *_args: __import__("contextlib").nullcontext()
@@ -1296,6 +1317,13 @@ def test_rlvr_handler_seals_verifier_and_publishes_terminal_checkpoint(
     )
     assert hooks["worker_components"] is components
     assert hooks["worker_step_profiler"] is profiler
+    # The provenance the controller cross-checks comes from the resolved
+    # composition, not from anything the handler invents.
+    policy = hooks["worker_eval_examples"]
+    assert policy.evaluator_component_digest == "sha256:" + "e" * 64
+    assert policy.metric_names == ("eval.pass_at_k", "eval.reward")
+    assert policy.identity_field == "id"
+    assert policy.sample_count == 8
     assert result.event_type == "worker.completed"
     assert result.optimizer_step == 4
     assert result.payload["promotion_eligible"] is True

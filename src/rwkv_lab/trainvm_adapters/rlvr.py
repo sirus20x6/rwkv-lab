@@ -213,4 +213,86 @@ class RLVRTrainConfig:
             raise ValueError("first rollout device must match device")
 
 
-__all__ = ["RLVRTrainConfig"]
+def _digest_string(value: object, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 71
+        or not value.startswith("sha256:")
+        or any(character not in "0123456789abcdef" for character in value[7:])
+    ):
+        raise ValueError(f"{label} must be a sha256: digest")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class RLVRHeldoutEvalPolicy:
+    """The composition-derived half of RLVR's attempt-baseline eval evidence.
+
+    Split deliberately. Everything here is decided by the *resolved* training
+    composition and is therefore knowable in the handler, before a model is
+    loaded: the evaluator whose digest and metric names
+    ``validate_eval_examples_gate_provenance`` cross-checks against the
+    manifest, and the renderer and held-out selector that -- with the trainer's
+    own data-derived digests -- compose the frozen evaluation-manifest digest
+    published as ``policy_digest``.
+
+    The data-derived half (which task ids were selected, and what the policy
+    answered) is not here, because it is not decidable until ``rlvr_train.run``
+    has loaded the task pools and drawn its seeded ``fixed_eval`` selection.
+
+    ``policy_digest`` is composed rather than taken from a generation policy
+    because this route's composition contract declares no ``generation_policy``
+    slot. That makes ``RWKVTextEvalPolicy``'s shape inapplicable twice over --
+    it would have no digest to carry, and its held-out payload is RWKV
+    vocabulary token ids, while RLVR's held-out evidence is verifier prompts
+    and sampled text. ``hf_multimodal_sft`` is the template followed here.
+    """
+
+    identity_field: str
+    evaluator_component_digest: str
+    metric_names: tuple[str, ...]
+    artifact_renderer_digest: str
+    qualitative_sample_digest: str
+    sample_count: int
+    decode: tuple[tuple[str, float | int], ...]
+
+    def __post_init__(self) -> None:
+        for label in (
+            "evaluator_component_digest",
+            "artifact_renderer_digest",
+            "qualitative_sample_digest",
+        ):
+            _digest_string(getattr(self, label), label)
+        if (
+            not isinstance(self.identity_field, str)
+            or not self.identity_field
+            or len(self.identity_field.encode("utf-8")) > 256
+        ):
+            raise ValueError("RLVR eval identity field is required")
+        if (
+            not isinstance(self.metric_names, tuple)
+            or not self.metric_names
+            or self.metric_names != tuple(sorted(set(self.metric_names)))
+            or any(
+                not isinstance(metric, str) or not metric
+                for metric in self.metric_names
+            )
+        ):
+            raise ValueError("RLVR eval metric names must be sorted and unique")
+        _integer(self.sample_count, "sample_count", 1, 512)
+        if not isinstance(self.decode, tuple) or any(
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or not isinstance(item[0], str)
+            or not item[0]
+            or isinstance(item[1], bool)
+            or not isinstance(item[1], (int, float))
+            or not math.isfinite(float(item[1]))
+            for item in self.decode
+        ):
+            raise ValueError("RLVR eval decode policy must be named finite numbers")
+        if len(self.decode) != len({name for name, _ in self.decode}):
+            raise ValueError("RLVR eval decode policy names must be unique")
+
+
+__all__ = ["RLVRHeldoutEvalPolicy", "RLVRTrainConfig"]

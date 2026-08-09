@@ -107,7 +107,7 @@ every pull request by the same script without `--write`. Do not hand-edit it.
 | `rwkv_lab.mageflow_terminal_expert.v1.Train` | yes | yes | yes | no | no | the adapter declares no eval_examples output port, so no composition may publish one (adapter_registry.cpp rejects an undeclared operation output) |
 | `rwkv_lab.qwen_ao3.v1.Train` | yes | yes | yes | no | no | the adapter declares no eval_examples output port, so no composition may publish one (adapter_registry.cpp rejects an undeclared operation output) |
 | `rwkv_lab.rwkv_posttraining.v1.Train` | yes | yes | no | no | no | the adapter declares no eval_examples output port, so no composition may publish one (adapter_registry.cpp rejects an undeclared operation output); and no checkpoint output, while eval-examples is checkpoint-bound |
-| `rwkv_lab.rwkv_rlvr.v1.Train` | yes | yes | yes | no | no | the adapter declares no eval_examples output port, so no composition may publish one (adapter_registry.cpp rejects an undeclared operation output) |
+| `rwkv_lab.rwkv_rlvr.v1.Train` | yes | yes | yes | yes | yes — examples/rlvr-candidate.json[rlvr-candidate] | nothing — armed |
 | `rwkv_lab.rwkv_scratch.v1.Train` | yes | yes | yes | yes | yes — examples/rwkv-lm.recipe-profiles.v1.json[rwkv-lm-continuation-v1], examples/rwkv-lm.recipe-profiles.v1.json[rwkv-lm-scratch-v1] | nothing — armed |
 | `rwkv_lab.scalar_metric_decision.v1.Decide` | no | no | no | no | no | nothing — not stateful, so no optimizer mutation to gate |
 | `rwkv_lab.transformer_mla.v1.Train` | yes | yes | yes | no | no | the adapter declares no eval_examples output port, so no composition may publish one (adapter_registry.cpp rejects an undeclared operation output) |
