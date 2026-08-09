@@ -470,7 +470,29 @@ void deployment_uses_boot_materialization_and_stable_peer_authority() {
   // The authority owns and writes its own configuration and GPU authorization,
   // so both live in its state directory rather than under /etc, which it has no
   // authority to write.
-  const std::string state_dir = "/home/sirus/.local/state/trainvm-hostd";
+  //
+  // Which directory that is belongs to the deployment, not to this test: the
+  // unit is the checked-in record of it. Naming it here spelled one machine's
+  // home directory into the suite, which is the shape of literal that passes on
+  // the deployment host and fails everywhere else the moment anything touches
+  // the filesystem. Take the directory from the unit and assert every property
+  // the comment above claims -- that it is one directory, absolute, outside
+  // /etc, and used consistently by all three arguments.
+  const std::string authorization_flag = "--check-gpu-authorization ";
+  const auto flag_at = unit.find(authorization_flag);
+  require(flag_at != std::string::npos,
+          "hostd unit must check GPU authorization before startup");
+  const auto template_suffix = std::string("/hostd.template.json");
+  const auto argument_at = flag_at + authorization_flag.size();
+  const auto template_at = unit.find(template_suffix, argument_at);
+  require(template_at != std::string::npos,
+          "GPU authorization check must name the materialization template");
+  const std::string state_dir =
+      unit.substr(argument_at, template_at - argument_at);
+  require(state_dir.starts_with("/") &&
+              state_dir.find(' ') == std::string::npos &&
+              !state_dir.starts_with("/etc/"),
+          "hostd state directory must be one absolute path the daemon may write");
   require(unit.find("--materialize-config " + state_dir +
                     "/hostd.template.json /run/trainvm-hostd/hostd.json") !=
                   std::string::npos &&

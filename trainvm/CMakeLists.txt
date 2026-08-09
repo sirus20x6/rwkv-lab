@@ -320,6 +320,19 @@ target_link_libraries(training_component_registry_tests PRIVATE trainvm_core)
 add_test(NAME training_component_registry_tests
   COMMAND training_component_registry_tests
 )
+add_executable(native_source_host_paths_tests
+  tests/native_source_host_paths_tests.cpp
+)
+target_compile_options(native_source_host_paths_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_compile_definitions(native_source_host_paths_tests PRIVATE
+  TRAINVM_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+add_test(NAME native_source_host_paths_tests
+  COMMAND native_source_host_paths_tests
+)
+
 add_executable(recipe_profile_tests
   tests/recipe_profile_tests.cpp
 )
