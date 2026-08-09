@@ -12,6 +12,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <grpcpp/grpcpp.h>
 
@@ -51,6 +52,44 @@ class AuthorityLock {
   std::shared_ptr<SqliteFilesystemAuthority> filesystem_authority_;
   std::filesystem::path journal_path_;
   JournalFileIdentity journal_identity_;
+};
+
+// Why the reconciliation supervisor is not doing work for a run right now.
+// This is the diagnostic that was missing when a controller burned a core for
+// eight hours: `top` could see the CPU, but nothing could say which run the
+// loop was re-reconciling or what it was waiting for.
+struct ReconciliationSupervisorMetrics final {
+  // Supervisor loop iterations, split by what ended the condition wait.
+  std::uint64_t wakes{};
+  std::uint64_t explicit_wakes{};
+  std::uint64_t cadence_wakes{};
+  std::uint64_t scans{};
+  // Calls to reconcile_until_quiescent, and the reconcile_once steps inside
+  // them. `steps` growing while the journal does not is the exact signature of
+  // the spin this instrumentation exists to catch.
+  std::uint64_t reconcile_passes{};
+  std::uint64_t reconcile_steps{};
+  // Runs the scan found but deliberately did not reconcile because neither
+  // their journal state nor their backoff deadline had moved.
+  std::uint64_t skipped_idle_runs{};
+  // Passes that exhausted the per-wake step budget and were requeued.
+  std::uint64_t budget_requeues{};
+  std::uint64_t failures{};
+  std::uint64_t tracked_runs{};
+
+  bool operator==(const ReconciliationSupervisorMetrics&) const = default;
+};
+
+struct ReconciliationRunWait final {
+  std::string run_id;
+  std::string wait_reason;
+  std::uint64_t idle_passes{};
+  std::uint64_t retries{};
+  std::int64_t backoff_ns{};
+  std::int64_t next_due_ns{};
+  std::uint64_t last_event_sequence{};
+
+  bool operator==(const ReconciliationRunWait&) const = default;
 };
 
 class TrainVMService final : public v1::TrainVM::Service,
@@ -126,6 +165,11 @@ class TrainVMService final : public v1::TrainVM::Service,
       const v1::GetHostAuthorityStatusRequest* request,
       v1::GetHostAuthorityStatusResponse* response) override;
 
+  grpc::Status GetReconciliationStatus(
+      grpc::ServerContext* context,
+      const v1::GetReconciliationStatusRequest* request,
+      v1::GetReconciliationStatusResponse* response) override;
+
   grpc::Status Connect(
       grpc::ServerContext* context,
       grpc::ServerReaderWriter<v1::ControllerToWorker,
@@ -135,6 +179,13 @@ class TrainVMService final : public v1::TrainVM::Service,
   // that serve() owns. Destruction is an idempotent stop boundary.
   void start_reconciliation_supervisor();
   void stop_reconciliation_supervisor() noexcept;
+
+  // Supervisor telemetry. Safe to call from any thread, including while the
+  // supervisor is running.
+  static constexpr std::size_t kMaximumReportedWaits = 256U;
+  [[nodiscard]] ReconciliationSupervisorMetrics reconciliation_metrics() const;
+  [[nodiscard]] std::vector<ReconciliationRunWait> reconciliation_waits(
+      std::size_t limit = kMaximumReportedWaits) const;
 
  private:
   struct AuthorRunAuthority final {
@@ -192,7 +243,10 @@ class TrainVMService final : public v1::TrainVM::Service,
   ReconcileResult reconcile_once(const std::string& run_id);
   void notify_reconciliation(const std::string& run_id);
   void reconciliation_loop(std::stop_token stop);
-  void reconcile_until_quiescent(const std::string& run_id);
+  // Returns the disposition the pass settled on, or nullopt when the pass
+  // exhausted its step budget without reaching a quiescent disposition.
+  std::optional<ReconcileDisposition> reconcile_until_quiescent(
+      const std::string& run_id);
   void synchronize_lease_renewal(const std::string& run_id);
   [[nodiscard]] std::optional<std::string> reconciliation_failure(
       const std::string& run_id) const;
@@ -277,10 +331,50 @@ class TrainVMService final : public v1::TrainVM::Service,
   static constexpr std::size_t kMaximumSupervisorWakeRuns = 4'096U;
   static constexpr std::size_t kMaximumSupervisorFailures = 4'096U;
   static constexpr std::size_t kMaximumSupervisorFailureBytes = 4'096U;
+
+  // Idle scheduling. The supervisor still ticks at kSupervisorCadenceNs, but a
+  // tick now costs one indexed projection scan rather than a full controller
+  // recovery per reconcilable run: a run is only reconciled when its journal
+  // state moved, an explicit wake named it, or its backoff deadline expired.
+  //
+  // Two caps, because the two kinds of wait have different failure modes. A
+  // run parked on worker evidence cannot change without a journal write, so its
+  // re-check is a safety net and may be slow. A run parked on lease or host
+  // grant contention *can* change on the clock alone, with no journal write to
+  // wake it, so its re-check must stay well inside any lease timeout.
+  static constexpr std::int64_t kSupervisorCadenceNs = 250'000'000LL;
+  static constexpr std::int64_t kIdleBackoffCeilingNs = 30'000'000'000LL;
+  static constexpr std::int64_t kContendedBackoffCeilingNs = 2'000'000'000LL;
+  static constexpr std::size_t kMaximumSupervisorSchedules = 4'096U;
+
+  struct SupervisorRunSchedule final {
+    std::uint64_t last_event_sequence{};
+    std::int64_t next_due_ns{};
+    std::int64_t backoff_ns{};
+    std::uint64_t idle_passes{};
+    std::uint64_t retries{};
+    std::string wait_reason;
+  };
+
+  [[nodiscard]] bool reconciliation_due(const RunProjection& projection,
+                                        std::int64_t now_ns) const;
+  void record_reconciliation_outcome(
+      const std::string& run_id,
+      std::optional<ReconcileDisposition> disposition,
+      std::uint64_t observed_event_sequence, std::int64_t now_ns);
+  void record_reconciliation_retry(const std::string& run_id,
+                                   std::uint64_t observed_event_sequence,
+                                   std::int64_t now_ns);
+  // Caller holds reconciliation_mutex_.
+  SupervisorRunSchedule& reconciliation_schedule(const std::string& run_id);
+
   mutable std::mutex reconciliation_mutex_;
   std::condition_variable reconciliation_condition_;
   std::set<std::string, std::less<>> reconciliation_wake_runs_;
   std::map<std::string, std::string, std::less<>> reconciliation_failures_;
+  std::map<std::string, SupervisorRunSchedule, std::less<>>
+      reconciliation_schedules_;
+  ReconciliationSupervisorMetrics reconciliation_metrics_;
   std::string reconciliation_scan_cursor_;
   bool reconciliation_started_{};
   std::jthread reconciliation_thread_;

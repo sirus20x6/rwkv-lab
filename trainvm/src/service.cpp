@@ -1782,6 +1782,8 @@ void TrainVMService::start_reconciliation_supervisor() {
   reconciliation_failures_.clear();
   reconciliation_scan_cursor_.clear();
   reconciliation_wake_runs_.clear();
+  reconciliation_schedules_.clear();
+  reconciliation_metrics_ = {};
   reconciliation_started_ = true;
   try {
     reconciliation_thread_ = std::jthread(
@@ -1817,13 +1819,30 @@ void TrainVMService::notify_reconciliation(const std::string& run_id) {
     if (reconciliation_wake_runs_.size() < kMaximumSupervisorWakeRuns) {
       reconciliation_wake_runs_.insert(run_id);
     }
+    // An explicit wake means something happened, so the run's accumulated
+    // idle backoff no longer describes it.
+    if (const auto found = reconciliation_schedules_.find(run_id);
+        found != reconciliation_schedules_.end()) {
+      found->second.backoff_ns = 0;
+      found->second.idle_passes = 0U;
+      found->second.next_due_ns = 0;
+    }
   }
   reconciliation_condition_.notify_one();
 }
 
-void TrainVMService::reconcile_until_quiescent(const std::string& run_id) {
+std::optional<ReconcileDisposition> TrainVMService::reconcile_until_quiescent(
+    const std::string& run_id) {
+  {
+    std::scoped_lock lock(reconciliation_mutex_);
+    ++reconciliation_metrics_.reconcile_passes;
+  }
   for (std::size_t step = 0U; step < kMaximumImmediateReconcileSteps;
        ++step) {
+    {
+      std::scoped_lock lock(reconciliation_mutex_);
+      ++reconciliation_metrics_.reconcile_steps;
+    }
     const ReconcileResult result = reconcile_once(run_id);
     switch (result.disposition) {
       case ReconcileDisposition::lease_acquired:
@@ -1848,13 +1867,17 @@ void TrainVMService::reconcile_until_quiescent(const std::string& run_id) {
       // the next supervisor wake retries the gate.
       case ReconcileDisposition::qualification_evidence_required:
       case ReconcileDisposition::input_required:
-        return;
+        return result.disposition;
     }
   }
-  // A legal cyclic workflow can consume the per-wake work budget. Requeue it
-  // instead of monopolizing the authority thread or treating bounded work as
-  // a workflow failure.
-  notify_reconciliation(run_id);
+  // A legal cyclic workflow can consume the per-wake work budget. The caller
+  // requeues it at the supervisor cadence instead of monopolizing the authority
+  // thread: the old unconditional notify_reconciliation() here made the next
+  // condition wait return immediately, so a run that kept consuming its budget
+  // reconciled in a zero-delay loop and pinned a core.
+  std::scoped_lock lock(reconciliation_mutex_);
+  ++reconciliation_metrics_.budget_requeues;
+  return std::nullopt;
 }
 
 void TrainVMService::synchronize_lease_renewal(
@@ -2147,19 +2170,202 @@ void TrainVMService::record_reconciliation_failure(std::string run_id,
       "reconciliation failure retention limit is exhausted");
 }
 
+namespace {
+
+// The wait a disposition puts a run into, and whether the clock alone can end
+// it. A run parked on worker evidence, operator input, published qualification
+// evidence, or nothing at all cannot change disposition until something is
+// written to the journal, so re-reconciling it on a timer is pure waste; a run
+// parked on lease or host-grant contention can be released by another run's
+// lease expiring, with no journal write of its own to wake it.
+struct DispositionWait final {
+  std::string_view reason;
+  bool clock_sensitive{};
+};
+
+DispositionWait disposition_wait(ReconcileDisposition disposition) {
+  switch (disposition) {
+    case ReconcileDisposition::lease_busy:
+      return {"waiting for a conflicting logical lease to expire", true};
+    case ReconcileDisposition::host_grant_busy:
+      return {"waiting for host resource admission", true};
+    case ReconcileDisposition::awaiting_worker:
+      return {"waiting for worker evidence", false};
+    case ReconcileDisposition::launch_prepared:
+    case ReconcileDisposition::launch_replayed:
+      return {"waiting for the launched worker to report", false};
+    case ReconcileDisposition::qualification_evidence_required:
+      return {"waiting for published cache qualification evidence", false};
+    case ReconcileDisposition::input_required:
+      return {"waiting for operator artifact validation", false};
+    case ReconcileDisposition::no_action:
+      return {"no reconciliation action is available", false};
+    // Progress dispositions never park a run: reconcile_until_quiescent keeps
+    // draining, so they are only reachable here defensively.
+    case ReconcileDisposition::lease_acquired:
+    case ReconcileDisposition::host_grant_acquired:
+    case ReconcileDisposition::host_process_exited:
+    case ReconcileDisposition::external_profiler_artifact_published:
+    case ReconcileDisposition::host_grant_released:
+    case ReconcileDisposition::builtin_completed:
+    case ReconcileDisposition::qualification_completed:
+    case ReconcileDisposition::qualification_rejected:
+      return {"reconciliation is making progress", true};
+  }
+  return {"reconciliation disposition is unclassified", true};
+}
+
+std::int64_t next_backoff_ns(std::int64_t current, std::int64_t ceiling,
+                             std::int64_t base) {
+  if (current < base) return base;
+  if (current >= ceiling) return ceiling;
+  return current > ceiling / 2 ? ceiling : current * 2;
+}
+
+}  // namespace
+
+TrainVMService::SupervisorRunSchedule&
+TrainVMService::reconciliation_schedule(const std::string& run_id) {
+  if (const auto found = reconciliation_schedules_.find(run_id);
+      found != reconciliation_schedules_.end()) {
+    return found->second;
+  }
+  // Bounded retention. Evicting the entry due soonest costs at most one extra
+  // reconcile for a run that is about to be reconciled anyway, and never
+  // suppresses one: an absent schedule always means "due now".
+  while (reconciliation_schedules_.size() >= kMaximumSupervisorSchedules) {
+    auto victim = reconciliation_schedules_.begin();
+    for (auto candidate = reconciliation_schedules_.begin();
+         candidate != reconciliation_schedules_.end(); ++candidate) {
+      if (candidate->second.next_due_ns < victim->second.next_due_ns) {
+        victim = candidate;
+      }
+    }
+    reconciliation_schedules_.erase(victim);
+  }
+  return reconciliation_schedules_[run_id];
+}
+
+bool TrainVMService::reconciliation_due(const RunProjection& projection,
+                                        std::int64_t now_ns) const {
+  std::scoped_lock lock(reconciliation_mutex_);
+  const auto found = reconciliation_schedules_.find(projection.run_id);
+  if (found == reconciliation_schedules_.end()) return true;
+  // A journal write is the event-driven path: any new event for this run makes
+  // it due immediately, whatever its backoff was.
+  if (found->second.last_event_sequence != projection.last_event_sequence) {
+    return true;
+  }
+  return now_ns >= found->second.next_due_ns;
+}
+
+void TrainVMService::record_reconciliation_outcome(
+    const std::string& run_id,
+    std::optional<ReconcileDisposition> disposition,
+    std::uint64_t observed_event_sequence, std::int64_t now_ns) {
+  std::scoped_lock lock(reconciliation_mutex_);
+  SupervisorRunSchedule& schedule = reconciliation_schedule(run_id);
+  // Anything that moved the journal is fresh work, so the run starts its wait
+  // over rather than inheriting the backoff it had accumulated while idle.
+  if (schedule.last_event_sequence != observed_event_sequence) {
+    schedule.backoff_ns = 0;
+    schedule.idle_passes = 0U;
+  }
+  schedule.last_event_sequence = observed_event_sequence;
+  schedule.retries = 0U;
+  if (!disposition) {
+    // The pass exhausted its step budget, which means it was making progress.
+    // Requeue at the cadence rather than at zero delay.
+    schedule.wait_reason = "reconciliation exceeded its per-wake step budget";
+    schedule.backoff_ns = 0;
+    schedule.next_due_ns = now_ns;
+    schedule.idle_passes = 0U;
+    return;
+  }
+  const DispositionWait wait = disposition_wait(*disposition);
+  schedule.wait_reason = std::string(wait.reason);
+  ++schedule.idle_passes;
+  schedule.backoff_ns = next_backoff_ns(
+      schedule.backoff_ns,
+      wait.clock_sensitive ? kContendedBackoffCeilingNs : kIdleBackoffCeilingNs,
+      kSupervisorCadenceNs);
+  schedule.next_due_ns =
+      now_ns > std::numeric_limits<std::int64_t>::max() - schedule.backoff_ns
+          ? std::numeric_limits<std::int64_t>::max()
+          : now_ns + schedule.backoff_ns;
+  reconciliation_metrics_.tracked_runs = reconciliation_schedules_.size();
+}
+
+void TrainVMService::record_reconciliation_retry(
+    const std::string& run_id, std::uint64_t observed_event_sequence,
+    std::int64_t now_ns) {
+  std::scoped_lock lock(reconciliation_mutex_);
+  ++reconciliation_metrics_.failures;
+  SupervisorRunSchedule& schedule = reconciliation_schedule(run_id);
+  if (schedule.last_event_sequence != observed_event_sequence) {
+    schedule.backoff_ns = 0;
+  }
+  schedule.last_event_sequence = observed_event_sequence;
+  ++schedule.retries;
+  schedule.wait_reason = "retrying after a reconciliation failure";
+  schedule.backoff_ns = next_backoff_ns(schedule.backoff_ns,
+                                        kIdleBackoffCeilingNs,
+                                        kSupervisorCadenceNs);
+  schedule.next_due_ns =
+      now_ns > std::numeric_limits<std::int64_t>::max() - schedule.backoff_ns
+          ? std::numeric_limits<std::int64_t>::max()
+          : now_ns + schedule.backoff_ns;
+  reconciliation_metrics_.tracked_runs = reconciliation_schedules_.size();
+}
+
+ReconciliationSupervisorMetrics TrainVMService::reconciliation_metrics() const {
+  std::scoped_lock lock(reconciliation_mutex_);
+  ReconciliationSupervisorMetrics metrics = reconciliation_metrics_;
+  metrics.tracked_runs = reconciliation_schedules_.size();
+  return metrics;
+}
+
+std::vector<ReconciliationRunWait> TrainVMService::reconciliation_waits(
+    std::size_t limit) const {
+  std::vector<ReconciliationRunWait> waits;
+  std::scoped_lock lock(reconciliation_mutex_);
+  waits.reserve(std::min(limit, reconciliation_schedules_.size()));
+  for (const auto& [run_id, schedule] : reconciliation_schedules_) {
+    if (waits.size() >= limit) break;
+    waits.push_back({.run_id = run_id,
+                     .wait_reason = schedule.wait_reason,
+                     .idle_passes = schedule.idle_passes,
+                     .retries = schedule.retries,
+                     .backoff_ns = schedule.backoff_ns,
+                     .next_due_ns = schedule.next_due_ns,
+                     .last_event_sequence = schedule.last_event_sequence});
+  }
+  return waits;
+}
+
 void TrainVMService::reconciliation_loop(std::stop_token stop) {
-  constexpr auto kSupervisorCadence = std::chrono::milliseconds(250);
+  constexpr auto kSupervisorCadence =
+      std::chrono::nanoseconds(kSupervisorCadenceNs);
   while (!stop.stop_requested()) {
     std::set<std::string, std::less<>> run_ids;
     {
       std::unique_lock lock(reconciliation_mutex_);
-      (void)reconciliation_condition_.wait_for(
+      const bool woken = reconciliation_condition_.wait_for(
           lock, kSupervisorCadence,
           [&] { return stop.stop_requested() ||
                        !reconciliation_wake_runs_.empty(); });
       if (stop.stop_requested()) break;
+      ++reconciliation_metrics_.wakes;
+      if (woken && !reconciliation_wake_runs_.empty()) {
+        ++reconciliation_metrics_.explicit_wakes;
+      } else {
+        ++reconciliation_metrics_.cadence_wakes;
+      }
       run_ids.swap(reconciliation_wake_runs_);
     }
+    // An explicitly named run is reconciled unconditionally: a wake is the
+    // event-driven path, and its whole point is to bypass any backoff.
+    const std::set<std::string, std::less<>> woken_runs = run_ids;
 
     try {
       std::vector<RunProjection> page;
@@ -2168,15 +2374,23 @@ void TrainVMService::reconciliation_loop(std::stop_token stop) {
         page = journal_.reconcilable_projections(
             reconciliation_scan_cursor_, kReconciliationPageSize);
       }
+      const std::int64_t now_ns = authority_now().boot.nanoseconds;
       {
         std::scoped_lock lock(reconciliation_mutex_);
+        ++reconciliation_metrics_.scans;
         reconciliation_scan_cursor_ =
             page.size() == kReconciliationPageSize
                 ? page.back().run_id
                 : std::string{};
       }
       for (const RunProjection& projection : page) {
-        run_ids.insert(projection.run_id);
+        if (woken_runs.contains(projection.run_id)) continue;
+        if (reconciliation_due(projection, now_ns)) {
+          run_ids.insert(projection.run_id);
+        } else {
+          std::scoped_lock lock(reconciliation_mutex_);
+          ++reconciliation_metrics_.skipped_idle_runs;
+        }
       }
     } catch (const std::exception& exception) {
       record_reconciliation_failure("__scan__", exception.what());
@@ -2185,17 +2399,37 @@ void TrainVMService::reconciliation_loop(std::stop_token stop) {
 
     for (const std::string& run_id : run_ids) {
       if (stop.stop_requested()) break;
+      // Sampled before the pass: an event written while the pass runs must
+      // leave the run due again rather than be swallowed by the schedule. A
+      // failing pass records it too, or a run whose every pass throws would
+      // read as "the journal moved" forever and never back off.
+      std::uint64_t observed_sequence = 0U;
       try {
-        reconcile_until_quiescent(run_id);
+        std::scoped_lock lock(command_mutex_);
+        if (const auto projection = journal_.projection(run_id)) {
+          observed_sequence = projection->last_event_sequence;
+        }
+      } catch (...) {
+        // Leave the sequence at zero; the pass below reports the real failure.
+      }
+      try {
+        const std::optional<ReconcileDisposition> disposition =
+            reconcile_until_quiescent(run_id);
         synchronize_lease_renewal(run_id);
+        record_reconciliation_outcome(run_id, disposition, observed_sequence,
+                                      authority_now().boot.nanoseconds);
         std::scoped_lock lock(reconciliation_mutex_);
         reconciliation_failures_.erase(run_id);
       } catch (const std::exception& exception) {
         record_reconciliation_failure(run_id, exception.what());
+        record_reconciliation_retry(run_id, observed_sequence,
+                                    authority_now().boot.nanoseconds);
       } catch (...) {
         record_reconciliation_failure(
             run_id,
             "reconciliation failed with a non-standard exception");
+        record_reconciliation_retry(run_id, observed_sequence,
+                                    authority_now().boot.nanoseconds);
       }
     }
     if (stop.stop_requested()) break;
@@ -5765,6 +5999,47 @@ grpc::Status TrainVMService::GetDescriptor(
   } catch (const std::exception& exception) {
     return {grpc::StatusCode::DATA_LOSS, exception.what()};
   }
+}
+
+grpc::Status TrainVMService::GetReconciliationStatus(
+    grpc::ServerContext* context,
+    const v1::GetReconciliationStatusRequest* request,
+    v1::GetReconciliationStatusResponse* response) {
+  if (request == nullptr || response == nullptr ||
+      request->ByteSizeLong() > 64U) {
+    return {grpc::StatusCode::INVALID_ARGUMENT,
+            "reconciliation status requires an empty bounded request"};
+  }
+  if (cancelled(context)) return cancellation_status();
+  const ReconciliationSupervisorMetrics metrics = reconciliation_metrics();
+  const std::vector<ReconciliationRunWait> waits =
+      reconciliation_waits(kMaximumReportedWaits);
+  {
+    std::scoped_lock lock(reconciliation_mutex_);
+    response->set_supervisor_running(reconciliation_started_);
+  }
+  response->set_wakes(metrics.wakes);
+  response->set_explicit_wakes(metrics.explicit_wakes);
+  response->set_cadence_wakes(metrics.cadence_wakes);
+  response->set_scans(metrics.scans);
+  response->set_reconcile_passes(metrics.reconcile_passes);
+  response->set_reconcile_steps(metrics.reconcile_steps);
+  response->set_skipped_idle_runs(metrics.skipped_idle_runs);
+  response->set_budget_requeues(metrics.budget_requeues);
+  response->set_failures(metrics.failures);
+  response->set_tracked_runs(metrics.tracked_runs);
+  response->set_waits_truncated(metrics.tracked_runs > waits.size());
+  for (const ReconciliationRunWait& wait : waits) {
+    auto* output = response->add_waits();
+    output->set_run_id(wait.run_id);
+    output->set_wait_reason(wait.wait_reason);
+    output->set_idle_passes(wait.idle_passes);
+    output->set_retries(wait.retries);
+    output->set_backoff_ns(wait.backoff_ns);
+    output->set_next_due_boottime_ns(wait.next_due_ns);
+    output->set_last_event_sequence(wait.last_event_sequence);
+  }
+  return grpc::Status::OK;
 }
 
 grpc::Status TrainVMService::GetHostAuthorityStatus(

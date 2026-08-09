@@ -13214,6 +13214,451 @@ void test_service_reconciliation_supervisor() {
   std::filesystem::remove_all(directory);
 }
 
+// Regression for the controller that sustained ~85% of a core for eight hours
+// while its worker was defunct.
+//
+// The shape of the bug: a run whose worker will never report stays in the
+// reconcilable projection set forever, and the supervisor re-reconciled every
+// such run on every 250 ms tick. Each reconcile builds a Controller and calls
+// recover(), which re-verifies the whole journal hash chain and replays the
+// run's entire event history. On an eight-hour training journal that is a very
+// large amount of work, repeated four times a second, producing nothing: the
+// journal does not move, so every pass is provably a no-op.
+//
+// That is what makes it a busy poll rather than reconciliation that has not
+// finished yet. This test pins the distinction directly: it asserts the journal
+// does not move (no progress is even being attempted) *and* that the supervisor
+// stops doing work anyway.
+//
+// Determinism comes from the injected authority clock. While it is frozen, a
+// parked run can never reach its backoff deadline, so the post-fix step delta
+// is exactly zero rather than "small". Before the fix the delta is one pass per
+// 250 ms tick, because nothing consulted a deadline at all.
+void test_service_supervisor_settles_after_terminal_worker() {
+  auto source = load_fixture();
+  source["spec"]["resources"]["lease_timeout_seconds"] = 5;
+  const auto compiled = trainvm::compile_document(source);
+  check(compiled.valid(), "terminal-worker spin fixture compiles");
+  if (!compiled.plan) return;
+
+  const auto directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-supervisor-spin-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  check(::chmod(directory.c_str(), 0700) == 0,
+        "spin fixture protects its authority directory");
+  const auto database = directory / "journal.db";
+  const std::string run_id = "service-supervisor-spin-run";
+  const auto adapters = fixture_adapter_profiles();
+  const trainvm::HostIdentity authority_host{
+      .host_id = "sha256:" + std::string(64U, '7'),
+      .boot_id = kTestBootId,
+  };
+  {
+    trainvm::AdapterRegistry registry(adapters);
+    trainvm::Journal journal(database);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued(
+        adapter_locked_submission(*compiled.plan, registry));
+  }
+
+  const auto wait_until = [](const std::function<bool()>& predicate) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (predicate()) return true;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return predicate();
+  };
+
+  std::atomic<std::int64_t> authority_now_ns{1'000'000'000LL};
+  trainvm::TrainVMService service(
+      database, trainvm::AdapterRegistry(adapters),
+      fixture_disabled_host_launch_registry(), authority_host,
+      [&authority_now_ns] {
+        return test_time(authority_now_ns.load(std::memory_order_relaxed));
+      },
+      trainvm::HostGrantEnforcement::legacy_process_free_test);
+  trainvm::Journal observer(database);
+  service.start_reconciliation_supervisor();
+
+  // The worker launch is prepared and then nothing ever reports: exactly the
+  // state a defunct child or a dropped worker socket leaves behind.
+  const bool parked = wait_until([&] {
+    return observer
+               .event(run_id +
+                      ":worker-launch:train_to_boundary:train_to_boundary@1")
+               .has_value() &&
+           service.reconciliation_metrics().skipped_idle_runs > 0U;
+  });
+  const auto settled = service.reconciliation_metrics();
+  const std::uint64_t settled_events = observer.event_count();
+
+  // Six cadences of wall time. Every one of them used to be a full controller
+  // recovery over the whole journal.
+  std::this_thread::sleep_for(std::chrono::milliseconds(1'500));
+
+  const auto idled = service.reconciliation_metrics();
+  const std::uint64_t idled_events = observer.event_count();
+  const auto waits = service.reconciliation_waits();
+  const auto parked_wait = std::ranges::find_if(
+      waits, [&](const trainvm::ReconciliationRunWait& wait) {
+        return wait.run_id == run_id;
+      });
+
+  const bool journal_frozen = idled_events == settled_events;
+  const bool stopped_working =
+      idled.reconcile_steps == settled.reconcile_steps &&
+      idled.reconcile_passes == settled.reconcile_passes;
+  const bool kept_ticking = idled.wakes > settled.wakes + 2U;
+  const bool skipped =
+      idled.skipped_idle_runs > settled.skipped_idle_runs + 2U;
+  const bool reported =
+      parked_wait != waits.end() &&
+      (parked_wait->wait_reason == "waiting for worker evidence" ||
+       parked_wait->wait_reason ==
+           "waiting for the launched worker to report") &&
+      parked_wait->backoff_ns >=
+          trainvm::TrainVMService::kSupervisorCadenceNs &&
+      parked_wait->idle_passes > 0U;
+  if (!parked || !journal_frozen || !stopped_working || !kept_ticking ||
+      !skipped || !reported) {
+    std::cerr << "supervisor spin diagnostics:"
+              << " parked=" << parked
+              << " events " << settled_events << "->" << idled_events
+              << " steps " << settled.reconcile_steps << "->"
+              << idled.reconcile_steps
+              << " passes " << settled.reconcile_passes << "->"
+              << idled.reconcile_passes
+              << " wakes " << settled.wakes << "->" << idled.wakes
+              << " skipped " << settled.skipped_idle_runs << "->"
+              << idled.skipped_idle_runs
+              << " reason="
+              << (parked_wait != waits.end() ? parked_wait->wait_reason
+                                             : std::string("<none>"))
+              << " backoff="
+              << (parked_wait != waits.end() ? parked_wait->backoff_ns : -1)
+              << '\n';
+  }
+  check(parked && journal_frozen && kept_ticking && skipped,
+        "terminal worker leaves a frozen journal the supervisor keeps scanning");
+  check(stopped_working,
+        "supervisor stops re-reconciling a run whose journal cannot move");
+  check(reported,
+        "supervisor telemetry names the parked run, its wait reason, and its backoff");
+
+  // The same telemetry has to be reachable over the wire, and specifically
+  // without a configured hostd: an authority whose host daemon is missing or
+  // poisoned is exactly when this needs to be readable.
+  trainvm::v1::GetReconciliationStatusRequest status_request;
+  trainvm::v1::GetReconciliationStatusResponse status_response;
+  const grpc::Status status =
+      service.GetReconciliationStatus(nullptr, &status_request,
+                                      &status_response);
+  const auto wire_wait = std::ranges::find_if(
+      status_response.waits(),
+      [&](const trainvm::v1::ReconciliationRunWait& wait) {
+        return wait.run_id() == run_id;
+      });
+  check(status.ok() && status_response.supervisor_running() &&
+            status_response.reconcile_steps() == idled.reconcile_steps &&
+            status_response.skipped_idle_runs() > 0U &&
+            status_response.tracked_runs() > 0U &&
+            wire_wait != status_response.waits().end() &&
+            !wire_wait->wait_reason().empty() &&
+            wire_wait->backoff_ns() >=
+                trainvm::TrainVMService::kSupervisorCadenceNs,
+        "GetReconciliationStatus reports the spin counters without a hostd");
+
+  // The park is a backoff, not a wedge: an explicit wake and a journal write
+  // both put the run back to work, and so does the clock once the backoff
+  // ceiling elapses. Losing any of those would trade a spin for a stall.
+  const auto before_wake = service.reconciliation_metrics();
+  service.notify_reconciliation(run_id);
+  const bool woke = wait_until([&] {
+    return service.reconciliation_metrics().reconcile_steps >
+           before_wake.reconcile_steps;
+  });
+  check(woke, "an explicit wake bypasses supervisor backoff");
+
+  // Let the woken pass finish and re-park before measuring, so the deadline
+  // being tested is the one this snapshot describes.
+  const auto after_wake = service.reconciliation_metrics();
+  (void)wait_until([&] {
+    return service.reconciliation_metrics().skipped_idle_runs >
+           after_wake.skipped_idle_runs + 1U;
+  });
+  // Advanced in steps smaller than the lease renewal margin: the point is that
+  // the deadline is consulted at all, and expiring the lease under the
+  // supervisor would change what is being measured.
+  const auto before_clock = service.reconciliation_metrics();
+  const auto clock_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  bool rechecked = false;
+  while (!rechecked && std::chrono::steady_clock::now() < clock_deadline) {
+    authority_now_ns.fetch_add(
+        trainvm::TrainVMService::kSupervisorCadenceNs * 2LL,
+        std::memory_order_relaxed);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    rechecked = service.reconciliation_metrics().reconcile_steps >
+                before_clock.reconcile_steps;
+  }
+  check(rechecked,
+        "a parked run is still re-checked once its backoff deadline elapses");
+
+  service.stop_reconciliation_supervisor();
+  std::filesystem::remove_all(directory);
+}
+
+// Soak over the four ways a run stops producing evidence. All of them must
+// leave the supervisor idle rather than spinning, and all of them must name
+// themselves in telemetry.
+//
+//   - defunct child / dropped worker socket: a committed launch with no worker
+//     evidence. Indistinguishable to the authority, and covered together.
+//   - poisoned authority dependency: every reconcile pass throws. Stands in for
+//     a poisoned hostd, which fails the same way from the supervisor's side.
+//   - pending lifecycle command: a durable command nobody can acknowledge.
+void test_service_supervisor_idle_soak() {
+  auto source = load_fixture();
+  source["spec"]["resources"]["lease_timeout_seconds"] = 5;
+  const auto compiled = trainvm::compile_document(source);
+  check(compiled.valid(), "supervisor soak fixture compiles");
+  if (!compiled.plan) return;
+
+  const auto directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-supervisor-soak-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  check(::chmod(directory.c_str(), 0700) == 0,
+        "soak fixture protects its authority directory");
+  const auto database = directory / "journal.db";
+  const std::string run_id = "service-supervisor-soak-run";
+  const auto adapters = fixture_adapter_profiles();
+  const trainvm::HostIdentity authority_host{
+      .host_id = "sha256:" + std::string(64U, '7'),
+      .boot_id = kTestBootId,
+  };
+  {
+    trainvm::AdapterRegistry registry(adapters);
+    trainvm::Journal journal(database);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued(
+        adapter_locked_submission(*compiled.plan, registry));
+  }
+
+  const auto wait_until = [](const std::function<bool()>& predicate) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (predicate()) return true;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return predicate();
+  };
+  std::atomic<std::int64_t> authority_now_ns{1'000'000'000LL};
+  const auto clock = [&authority_now_ns] {
+    return test_time(authority_now_ns.load(std::memory_order_relaxed));
+  };
+  // Waits for the scenario's own transitions to finish, then measures four
+  // cadences of genuinely idle supervisor. Without the settle phase this would
+  // measure the run still working, not the idle path under test.
+  const auto soak_delta = [](trainvm::TrainVMService& service) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline) {
+      const auto before = service.reconciliation_metrics();
+      std::this_thread::sleep_for(std::chrono::milliseconds(600));
+      const auto after = service.reconciliation_metrics();
+      if (after.reconcile_steps == before.reconcile_steps &&
+          after.wakes > before.wakes) {
+        break;
+      }
+    }
+    const auto before = service.reconciliation_metrics();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1'000));
+    const auto after = service.reconciliation_metrics();
+    return std::pair<std::uint64_t, std::uint64_t>{
+        after.reconcile_steps - before.reconcile_steps,
+        after.wakes - before.wakes};
+  };
+
+  std::uint64_t launched_events = 0U;
+  {
+    trainvm::TrainVMService service(
+        database, trainvm::AdapterRegistry(adapters),
+        fixture_disabled_host_launch_registry(), authority_host, clock,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
+    trainvm::Journal observer(database);
+    service.start_reconciliation_supervisor();
+    const bool parked = wait_until([&] {
+      return service.reconciliation_metrics().skipped_idle_runs > 0U;
+    });
+    const auto [steps, wakes] = soak_delta(service);
+    launched_events = observer.event_count();
+    check(parked && steps == 0U && wakes > 2U,
+          "a defunct child that never says hello settles to an idle supervisor");
+    service.stop_reconciliation_supervisor();
+  }
+
+  // Dropped worker socket, then a lifecycle command nobody can acknowledge.
+  // A separate journal: this scenario needs a run that reached running/running,
+  // which is the state a worker reaches by connecting and then vanishing.
+  {
+    const auto disconnected_database = directory / "disconnected.db";
+    const std::string disconnected_run = "service-supervisor-disconnect-run";
+    trainvm::WorkerLaunchTicket launch;
+    {
+      trainvm::Journal journal(
+          disconnected_database, std::nullopt,
+          trainvm::HostGrantEnforcement::legacy_process_free_test);
+      trainvm::AdapterRegistry registry(adapters);
+      trainvm::Controller controller(*compiled.plan, journal,
+                                     disconnected_run);
+      controller.create_queued(
+          adapter_locked_submission(*compiled.plan, registry));
+      (void)controller.begin_acquisition(test_time(2'000));
+      const auto& node = compiled.plan->experiment.spec.workflow.nodes.at(
+          controller.state().current_node_id);
+      const auto& component =
+          compiled.plan->experiment.spec.components.at(node.invoke.component);
+      launch = controller.prepare_worker_launch(
+          registry.worker_launch_request(component, node.invoke.operation),
+          test_time(2'100));
+      (void)bind_test_worker_launch(controller, launch, 2'150);
+    }
+    std::atomic<std::int64_t> disconnected_now_ns{2'200};
+    trainvm::TrainVMService service(
+        disconnected_database, trainvm::AdapterRegistry(adapters),
+        fixture_test_host_launch_registry(*compiled.plan, launch),
+        fixture_test_host_identity(),
+        [&disconnected_now_ns] {
+          return test_time(
+              disconnected_now_ns.load(std::memory_order_relaxed));
+        },
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
+    prime_test_service_launch(service, launch);
+    trainvm::v1::WorkerHello hello;
+    hello.set_run_id(launch.run_id);
+    hello.set_node_id(launch.node_id);
+    hello.set_attempt_id(launch.attempt_id);
+    hello.set_launch_nonce(launch.launch_nonce);
+    hello.set_adapter(launch.adapter);
+    hello.set_adapter_version(launch.adapter_version);
+    hello.set_code_fingerprint(launch.code_fingerprint);
+    for (const auto& capability : launch.required_capabilities) {
+      hello.add_capabilities(capability);
+    }
+    hello.set_last_acked_controller_sequence(0);
+    hello.set_concurrency_key(launch.concurrency_key);
+    hello.set_lease_id(launch.lease_id);
+    hello.set_fencing_token(launch.fencing_token);
+    trainvm::TrainVMService::WorkerConnection connection;
+    const grpc::Status opened =
+        service.open_worker_connection(hello, connection);
+    // The worker is now gone: the stream is simply never read or written
+    // again, which is what a dropped socket looks like to the authority.
+    service.start_reconciliation_supervisor();
+    const bool parked = wait_until([&] {
+      return service.reconciliation_metrics().skipped_idle_runs > 0U;
+    });
+    const auto [steps, wakes] = soak_delta(service);
+    check(opened.ok() && parked && steps == 0U && wakes > 2U,
+          "a dropped worker socket settles to an idle supervisor");
+
+    // A durable lifecycle command nobody can acknowledge must still be picked
+    // up promptly. It appends lifecycle.requested, and a journal write is the
+    // event-driven path out of backoff -- no explicit wake involved.
+    const auto before = service.reconciliation_metrics();
+    const auto projection = [&] {
+      std::scoped_lock lock(service.command_mutex_);
+      return service.journal_.projection(disconnected_run);
+    }();
+    bool submitted = false;
+    if (projection && projection->desired_state == "running" &&
+        projection->observed_state == "running") {
+      trainvm::LifecycleCommand command;
+      command.command_id = disconnected_run + ":soak-pause";
+      command.run_id = disconnected_run;
+      command.idempotency_key = "soak-pause";
+      command.expected_run_revision = projection->run_revision;
+      command.kind = trainvm::LifecycleCommandKind::pause;
+      command.author = "soak";
+      command.reason = "supervisor idle soak";
+      std::scoped_lock lock(service.command_mutex_);
+      (void)service.journal_.submit_lifecycle_command(std::move(command));
+      submitted = true;
+    }
+    const bool noticed =
+        submitted && wait_until([&] {
+          return service.reconciliation_metrics().reconcile_steps >
+                 before.reconcile_steps;
+        });
+    const auto [after_steps, after_wakes] = soak_delta(service);
+    if (!opened.ok() || !submitted || !noticed || after_steps != 0U) {
+      std::cerr << "supervisor disconnect diagnostics: open="
+                << opened.error_message() << " state="
+                << (projection ? projection->desired_state + "/" +
+                                     projection->observed_state
+                               : std::string("<none>"))
+                << " submitted=" << submitted << " noticed=" << noticed
+                << " after_steps=" << after_steps << '\n';
+    }
+    check(submitted && noticed && after_steps == 0U && after_wakes > 2U,
+          "a pending lifecycle command wakes the supervisor once and then settles");
+    service.stop_reconciliation_supervisor();
+  }
+
+  // Poisoned authority dependency: the restarted service is locked to a
+  // different adapter fingerprint, so every reconcile pass throws. The failure
+  // must be retried under backoff, not four times a second, and it must not be
+  // silently swallowed either.
+  {
+    trainvm::TrainVMService poisoned(
+        database, trainvm::AdapterRegistry(fixture_adapter_profiles('b')),
+        fixture_disabled_host_launch_registry(), authority_host, clock,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
+    trainvm::Journal observer(database);
+    poisoned.start_reconciliation_supervisor();
+    const bool failed = wait_until([&] {
+      return poisoned.reconciliation_failure(run_id).has_value();
+    });
+    const auto before = poisoned.reconciliation_metrics();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1'000));
+    const auto after = poisoned.reconciliation_metrics();
+    const auto waits = poisoned.reconciliation_waits();
+    const auto poisoned_wait = std::ranges::find_if(
+        waits, [&](const trainvm::ReconciliationRunWait& wait) {
+          return wait.run_id == run_id;
+        });
+    const bool retried_slowly =
+        after.reconcile_steps - before.reconcile_steps <= 2U;
+    const bool retry_reported =
+        poisoned_wait != waits.end() && poisoned_wait->retries > 0U &&
+        poisoned_wait->wait_reason == "retrying after a reconciliation failure";
+    if (!failed || !retried_slowly || !retry_reported) {
+      std::cerr << "supervisor poison diagnostics: failed=" << failed
+                << " steps " << before.reconcile_steps << "->"
+                << after.reconcile_steps
+                << " failures=" << after.failures << " reason="
+                << (poisoned_wait != waits.end() ? poisoned_wait->wait_reason
+                                                 : std::string("<none>"))
+                << '\n';
+    }
+    check(failed && retried_slowly && retry_reported,
+          "a poisoned authority dependency retries under backoff and says so");
+    check(observer.event_count() == launched_events && observer.verify_chain(),
+          "a poisoned authority retries without mutating the journal");
+    poisoned.stop_reconciliation_supervisor();
+  }
+  std::filesystem::remove_all(directory);
+}
+
 void test_service_orders_physical_before_logical_release() {
   auto source = load_fixture();
   source["spec"]["artifacts"]["checkpoint"]["required"] = true;
@@ -13930,6 +14375,8 @@ int main() {
     test_adapter_registry_and_reconciler();
     test_host_grant_saga();
     test_service_reconciliation_supervisor();
+    test_service_supervisor_settles_after_terminal_worker();
+    test_service_supervisor_idle_soak();
     test_service_orders_physical_before_logical_release();
     test_legacy_journal_migration_policy();
   } catch (const std::exception& exception) {
