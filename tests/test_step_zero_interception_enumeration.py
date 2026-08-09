@@ -71,7 +71,7 @@ import pytest
 
 from rwkv_lab.trainvm_adapters import handlers
 
-from trainvm_binary import TrainvmBinaryError, resolve_trainvm
+from trainvm_binary import resolve_trainvm
 
 REPOSITORY = pathlib.Path(__file__).resolve().parent.parent
 SOURCE_ROOT = REPOSITORY / "src"
@@ -424,11 +424,15 @@ def test_every_operation_is_classified_exactly_once() -> None:
 
 
 def _native_profiles() -> list[dict] | None:
-    """The authority's own registry, when a binary of this checkout exists."""
-    try:
-        binary, _ = resolve_trainvm()
-    except TrainvmBinaryError:
-        raise
+    """The authority's own registry, when a binary of this checkout exists.
+
+    ``resolve_trainvm`` raises ``TrainvmBinaryError`` when ``TRAINVM_BINARY``
+    names something unusable, and that exception is deliberately allowed to
+    propagate: an explicitly requested binary that cannot be honoured must fail
+    rather than degrade into the skip below.
+    """
+
+    binary, _ = resolve_trainvm()
     if binary is None:
         return None
     fingerprint = "sha256:" + "a" * 64
