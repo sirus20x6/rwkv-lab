@@ -4,7 +4,8 @@
   "comment": "The native ctest job runs in a container on a GitHub hosted runner. These suites are excluded there because they fail on that runner specifically, not merely 'in a container' -- each passes in the same image on a real host, including under a 4-core cpuset with full ctest contention. This file exists so the exclusion set cannot grow silently: scripts/validate_native_ci_exclusions.py asserts the workflow's ctest -E expression names exactly these suites, so adding or removing one fails until it is declared with a reason. The declaration carries no authority over what runs; the workflow does.",
   "workflow": ".github/workflows/tests.yml",
   "job": "native",
-  "covered_by": "scripts/acceptance.sh on a real host",
+  "covered_by": "scripts/acceptance.sh on a real host, run by hand -- nothing schedules it",
+  "attested_by": "docs/experiment-vm/acceptance-attestations.v1.jsonl",
   "exclusions": [
     {
       "suite": "hostd_linux_session_authority_tests",

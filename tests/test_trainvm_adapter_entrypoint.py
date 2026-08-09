@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import asdict
+from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from typing import Self
 
@@ -35,6 +38,7 @@ from rwkv_lab.trainvm_adapters.handlers import (
 from rwkv_lab.trainvm_adapters.io import (
     AdapterInputError,
     WorkspacePathAuthority,
+    bind_worker_process_environment,
     read_inline_config,
     require_run_directory,
 )
@@ -47,12 +51,33 @@ from rwkv_lab.trainvm_worker import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _empty_launch_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run these tests under hostd's launch condition, which has no HOME.
+
+    The worker is exec'd with a literal empty envp, so a test that inherits the
+    developer's HOME is not exercising the code path that runs in production.
+    """
+
+    monkeypatch.delenv("HOME", raising=False)
+
+
 class FakeSession:
     def __init__(self, bootstrap: object, *, completed: bool = False) -> None:
         self.bootstrap = bootstrap
         self.completed_before_connect = completed
+        # A real directory: run_worker binds the process HOME to it, and the
+        # workspace authority resolves it on disk rather than trusting a string.
+        self._workspace = tempfile.TemporaryDirectory()
+        run_directory = Path(self._workspace.name) / "run"
+        run_directory.mkdir()
         self.invocation = SimpleNamespace(
             run_id="run-1",
+            workspace={
+                "run_directory": str(run_directory),
+                "allowed_read_roots": [self._workspace.name],
+                "allowed_write_roots": [self._workspace.name],
+            },
             controls={},
             effective_control_revision=0,
             observability={
@@ -123,6 +148,85 @@ def test_run_directory_must_equal_the_authority_workspace(tmp_path) -> None:
         require_run_directory(str(tmp_path / "other"), workspace)
     with pytest.raises(AdapterInputError, match="absolute normalized"):
         require_run_directory("relative/run", workspace)
+
+
+def _home_workspace(tmp_path) -> tuple[Path, dict[str, object]]:
+    run_directory = tmp_path / "run"
+    run_directory.mkdir()
+    return run_directory, {
+        "run_directory": str(run_directory),
+        "allowed_read_roots": [str(tmp_path)],
+        "allowed_write_roots": [str(tmp_path)],
+    }
+
+
+def test_empty_launch_environment_gets_a_home_inside_the_run_directory(
+    tmp_path,
+) -> None:
+    """hostd execs the worker with envp {nullptr}; HOME must come from authority."""
+
+    run_directory, workspace = _home_workspace(tmp_path)
+    environment: dict[str, str] = {}
+
+    bound = bind_worker_process_environment(workspace, environment=environment)
+
+    assert bound == run_directory
+    assert environment["HOME"] == str(run_directory)
+    # The derived home is inside the directory the controller authorized, not
+    # some other writable location that happens to exist on the host.
+    assert Path(environment["HOME"]).is_relative_to(run_directory)
+    # 185b086's half: the optional CUDA probe is off before any trainer import.
+    assert environment["DS_IGNORE_CUDA_DETECTION"] == "1"
+
+
+def test_home_outside_the_authorized_run_directory_is_refused(tmp_path) -> None:
+    """Restoring the launcher's environment must fail loudly, not silently work."""
+
+    _, workspace = _home_workspace(tmp_path)
+    outside = tmp_path / "operator-home"
+    outside.mkdir()
+
+    with pytest.raises(AdapterInputError, match="outside the authorized run"):
+        bind_worker_process_environment(
+            workspace, environment={"HOME": str(outside)}
+        )
+
+
+def test_a_home_already_inside_the_run_directory_is_kept(tmp_path) -> None:
+    run_directory, workspace = _home_workspace(tmp_path)
+    nested = run_directory / "cache"
+    nested.mkdir()
+
+    assert (
+        bind_worker_process_environment(
+            workspace, environment={"HOME": str(nested)}
+        )
+        == nested
+    )
+
+
+def test_sealed_invocation_may_override_the_library_probe_default(
+    tmp_path,
+) -> None:
+    _, workspace = _home_workspace(tmp_path)
+    environment = {"DS_IGNORE_CUDA_DETECTION": "0"}
+
+    bind_worker_process_environment(workspace, environment=environment)
+
+    assert environment["DS_IGNORE_CUDA_DETECTION"] == "0"
+
+
+def test_home_binding_refuses_an_unprovisioned_run_directory(tmp_path) -> None:
+    """hostd provisions and chowns the run directory before the launch."""
+
+    workspace = {
+        "run_directory": str(tmp_path / "never-provisioned"),
+        "allowed_read_roots": [str(tmp_path)],
+        "allowed_write_roots": [str(tmp_path)],
+    }
+
+    with pytest.raises(AdapterInputError, match="not a provisioned directory"):
+        bind_worker_process_environment(workspace, environment={})
 
 
 def test_workspace_path_authority_confines_reads_writes_and_symlinks(tmp_path) -> None:
@@ -1969,6 +2073,35 @@ def test_runner_reports_success_with_optimizer_step() -> None:
     ]
     assert sessions[0].heartbeats == [(0, "initializing")]
     assert sessions[0].closed
+
+
+def test_runner_binds_home_before_the_handler_runs() -> None:
+    """The 2026-08-03 live run died here: model resident, no HOME, no step 1.
+
+    The assertion is inside the executor because that is the ordering that
+    matters -- binding after the adapter has already imported its trainer is
+    indistinguishable from not binding at all.
+    """
+
+    bootstrap = SimpleNamespace(run_id="run-1")
+    session = FakeSession(bootstrap)
+    run_directory = Path(session.invocation.workspace["run_directory"])
+    assert "HOME" not in os.environ
+
+    def require_home(*_args: object) -> HandlerResult:
+        assert os.environ["HOME"] == str(run_directory)
+        assert os.environ["DS_IGNORE_CUDA_DETECTION"] == "1"
+        return HandlerResult("worker.completed", {"reason": "done"}, 1)
+
+    assert (
+        run_worker(
+            bootstrap_reader=lambda _descriptor: bootstrap,
+            session_factory=lambda _bootstrap: session,
+            executor=require_home,
+        )
+        == 0
+    )
+    assert session.finished == [("worker.completed", {"reason": "done"}, 1)]
 
 
 def test_runner_publishes_handler_checkpoints_before_terminal_event(

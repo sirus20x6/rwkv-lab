@@ -201,9 +201,17 @@ would go red for a reason unrelated to the change under test.
 | `trainvm_dashboard_live_e2e` | needs an authority directory whose complete ancestry is unwritable by others |
 | `rwkv_lab_worker_artifact` | builds a sealed worker artifact from the real runtime closure |
 
-All four still run in `scripts/acceptance.sh` on a real host. Their exact set
+All four are covered by `scripts/acceptance.sh` on a real host. Their exact set
 and reasons are pinned by `native-ci-exclusions.v1.json`; the hosted job cannot
 silently add another exclusion.
+
+**Covered means runnable, not running.** Nothing schedules `scripts/acceptance.sh`
+— no workflow references it, there is no Makefile, and nothing in CMake calls it.
+It runs when a person types the command. This section previously said the four
+"still run in" acceptance, which reads as a cadence, and there is none; the four
+are checked exactly as often as somebody chooses to check them. Whether that has
+happened is answered by the attestation log below, and by the last lines of the
+`State which suites this job does not run` step, which echo it into every CI run.
 
 The job was verified to fail for the right reason: breaking one native
 assertion turns it red (ctest exit 8), so it is a gate rather than decoration.
@@ -282,6 +290,44 @@ existing `*.pt`/`*.safetensors`/`*.bin` rules happened to cover its checkpoint
 payloads, but 150 files — receipts, configs, manifests, logs — were still
 stageable by any `git add -A`. Ignoring the directory by shape is what makes
 that independent of whether extension rules keep coincidentally covering it.
+
+### The attestation log, which is tracked, and why that is not a contradiction
+
+`docs/experiment-vm/acceptance-attestations.v1.jsonl` is committed. The receipt
+beside it must never be. The difference is not a matter of degree:
+
+| | receipt | attestation |
+|---|---|---|
+| answers | what did this run output | did a run happen, when, against what |
+| shape | one file, overwritten each run | one line appended per run |
+| ages into | a confident wrong claim about the tree you have checked out | a historical fact that stays true |
+
+A receipt is a statement about *now*, and git serves it to every future reader as
+though it were still now. A line saying "on 2026-08-09, at commit `abc1234`, on
+host `tower`, `rwkv_lab_worker_artifact` failed" does not become false when main
+moves; it becomes *older*, which is precisely the information a reader wants.
+
+`scripts/acceptance.sh` writes the line itself, so it cannot be forgotten, and it
+writes one **whether the run passed or failed**. A log that grew only on success
+would be a green-only instrument: an absent line would mean "never ran" or "ran
+and failed" with no way to tell, which is the ambiguity the log exists to remove.
+Runs against a dirty worktree are recorded with `dirty_worktree: true` and attest
+the modifications, not the commit named.
+
+```bash
+tail -1 docs/experiment-vm/acceptance-attestations.v1.jsonl | python3 -m json.tool
+git log --oneline <that commit>..origin/main | wc -l   # how stale it is
+```
+
+An empty log means no real-host acceptance has ever been attested. Commit the
+appended line with your work; it is one line and merges cleanly with anyone
+else's, because appending is the only operation.
+
+Nothing fails on a stale attestation, deliberately. No hosted runner can produce
+a real-host run, so such a check could only ever be red, and this document
+already argues that a permanently red signal is worse than an honest gap. The
+gap that remains is the other half: something still has to *cause* the runs. The
+attestation makes the absence of that visible rather than fixing it.
 
 Durable evidence therefore lives in three places, none of them the source tree:
 CI build artifacts for the raw run output; the pull request body for what a
