@@ -441,3 +441,101 @@ def test_the_cadence_a_run_declares_is_the_cadence_it_publishes(tmp_path):
     assert probe_steps == list(schedule.plan(6).steps_for(EvaluationKind.SCALAR_PROBE))
     assert full_steps == list(schedule.plan(6).steps_for(EvaluationKind.SCALAR_FULL))
     assert set(probe_steps).isdisjoint(full_steps)
+
+
+def _mutable_cadence():
+    return EvaluationScheduleConfiguration(
+        defer_full_scalar=False,
+        probe_examples=1,
+        qualitative_every_steps=3,
+        mutable_cadence=True,
+    )
+
+
+def _run_with_patch(directory, *, patch, patch_at, maximum_steps=6):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from rwkv_lab.trainvm_adapters.hf_multimodal_sft import run_hf_multimodal_sft
+
+    directory.mkdir(parents=True, exist_ok=True)
+    harness = _engine_harness(
+        directory,
+        schedule_configuration=_mutable_cadence(),
+        maximum_steps=maximum_steps,
+    )
+    controls = harness.Controls(patch=patch, patch_at=patch_at)
+    observability = harness.Observability()
+    step = run_hf_multimodal_sft(
+        invocation=SimpleNamespace(attempt_id="attempt-1"),
+        components=harness.Components(),
+        run_directory=directory / "run",
+        controls=controls,
+        observability=observability,
+        step_profiler=SimpleNamespace(input_wait=nullcontext, step=lambda _step: None),
+        resume_directory=None,
+        device="cpu",
+    )
+    return step, harness, controls, observability
+
+
+def test_a_live_cadence_patch_applies_at_an_evaluation_safe_point(tmp_path):
+    step, _harness, _controls, observability = _run_with_patch(
+        tmp_path / "patched",
+        patch={"evaluation.probe_every_steps": 2},
+        patch_at=("evaluation", 0),
+    )
+    assert step == 6
+    probe_steps = sorted(
+        at_step
+        for name, _value, at_step in observability.metrics
+        if name == "eval.probe_loss"
+    )
+    # The patch arrived at the step-zero evaluation, so the probe cadence it
+    # declared is live for the rest of the run.
+    assert probe_steps == [2, 4]
+    revisions = [
+        value
+        for name, value, _step in observability.metrics
+        if name == "eval.cadence_revision"
+    ]
+    # The patch lands at the step-zero gate, before the first plan is
+    # published, and exactly one revision is recorded for the whole run.
+    assert revisions and set(revisions) == {1}
+
+    _step, _harness, _controls, unpatched = _run_with_patch(
+        tmp_path / "unpatched", patch=None, patch_at=None
+    )
+    assert not [
+        at_step
+        for name, _value, at_step in unpatched.metrics
+        if name == "eval.probe_loss"
+    ]
+    assert {
+        value
+        for name, value, _step in unpatched.metrics
+        if name == "eval.cadence_revision"
+    } == {0}
+
+
+def test_only_the_evaluation_safe_point_carries_a_live_cadence_patch(tmp_path):
+    from rwkv_lab.trainvm_adapters.hf_multimodal_sft import HFMultimodalSFTError
+
+    for phase, at_step in (("optimizer_step", 1), ("microbatch", 1), ("checkpoint", 3)):
+        with pytest.raises(HFMultimodalSFTError, match="evaluation cadence"):
+            _run_with_patch(
+                tmp_path / f"rejected-{phase}",
+                patch={"evaluation.probe_every_steps": 2},
+                patch_at=(phase, at_step),
+            )
+
+
+def test_a_live_patch_of_anything_but_cadence_is_refused(tmp_path):
+    from rwkv_lab.trainvm_adapters.hf_multimodal_sft import HFMultimodalSFTError
+
+    with pytest.raises(HFMultimodalSFTError, match="evaluation cadence controls"):
+        _run_with_patch(
+            tmp_path / "rejected-example-identity",
+            patch={"evaluation.probe_examples": 4},
+            patch_at=("evaluation", 0),
+        )

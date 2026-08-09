@@ -3217,7 +3217,10 @@ def run_hf_multimodal_sft(
         _candidate: Mapping[str, Any], assignments: Mapping[str, Any]
     ) -> None:
         if assignments:
-            raise HFMultimodalSFTError("HF SFT v1 exposes no live scalar controls")
+            raise HFMultimodalSFTError(
+                "HF SFT accepts a live patch only for evaluation cadence, and "
+                "only at an evaluation safe point"
+            )
 
     # The declared milestone timeline is published before any of it is paid
     # for, so the cost of a cadence is visible in the dashboard from the first

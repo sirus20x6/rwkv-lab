@@ -1273,7 +1273,13 @@ def _engine_harness(tmp_path, *, schedule_configuration=None, maximum_steps=1):
         checkpoint_completion_requested = False
 
         def __init__(
-            self, *, fail_gallery=False, fail_artifact=False, fail_before_step=0
+            self,
+            *,
+            fail_gallery=False,
+            fail_artifact=False,
+            fail_before_step=0,
+            patch=None,
+            patch_at=None,
         ):
             self.events = []
             self.safe_points = []
@@ -1284,6 +1290,19 @@ def _engine_harness(tmp_path, *, schedule_configuration=None, maximum_steps=1):
             # a test can resume from a checkpoint that is genuinely mid-run
             # rather than from the launch or the final one.
             self.fail_before_step = fail_before_step
+            # Delivers one control patch at exactly one (phase, step) safe
+            # point, so a test can show which safe points accept a live
+            # cadence change and which refuse it.
+            self.patch = dict(patch or {})
+            self.patch_at = patch_at
+
+        def _assignments(self, phase, step):
+            # One-shot, like a real control command: the authority pops each
+            # patch once, and a safe point can be re-entered at the same step.
+            if self.patch_at == (phase, step):
+                self.patch_at = None
+                return dict(self.patch)
+            return {}
 
         def checkpoint_state(self):
             return {"effective_control_revision": 0, "effective_controls": {}}
@@ -1296,7 +1315,7 @@ def _engine_harness(tmp_path, *, schedule_configuration=None, maximum_steps=1):
             if self.fail_before_step and step == self.fail_before_step:
                 raise RuntimeError("simulated crash before optimizer step")
             self.safe_points.append(("microbatch", step))
-            applier({}, {})
+            applier({}, self._assignments("microbatch", step))
 
         def optimizer_step(self, step, applier):
             self.safe_points.append(("optimizer_step", step))
@@ -1311,15 +1330,15 @@ def _engine_harness(tmp_path, *, schedule_configuration=None, maximum_steps=1):
                     random.getstate(),
                 )
             )
-            applier({}, {})
+            applier({}, self._assignments("optimizer_step", step))
 
         def evaluation(self, step, applier):
             self.safe_points.append(("evaluation", step))
-            applier({}, {})
+            applier({}, self._assignments("evaluation", step))
 
         def checkpoint(self, step, applier):
             self.safe_points.append(("checkpoint", step))
-            applier({}, {})
+            applier({}, self._assignments("checkpoint", step))
 
         def verify_checkpoint_state(self, state):
             assert state == self.checkpoint_state()
