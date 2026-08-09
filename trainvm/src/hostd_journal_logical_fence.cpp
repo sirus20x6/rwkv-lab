@@ -2,6 +2,7 @@
 
 #include <ranges>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 #include "trainvm/json.hpp"
@@ -59,20 +60,54 @@ HostdLogicalFenceEvidence JournalHostdLogicalFenceEvidenceSource::attest(
   const JournalLogicalFenceSnapshot durable =
       journal_->snapshot(attribution, observed);
   const ResourceLease& lease = durable.lease;
-  if (durable.authority.journal_id != attribution.journal_id ||
-      durable.authority.host.boot_id != observed.boot_id ||
-      lease.concurrency_key != attribution.concurrency_key ||
-      lease.owner_run_id != attribution.run_id ||
-      lease.lease_id != attribution.logical_lease_id ||
-      lease.fencing_token != attribution.logical_fencing_token ||
-      lease.clock_domain != ResourceLease::kBootTimeDomain ||
-      lease.boot_id != observed.boot_id ||
-      lease.expires_boottime_ns <= observed.boot.nanoseconds ||
-      durable.authority_event_sequence == 0U ||
-      !valid_digest(durable.authority.host.host_id) ||
-      !valid_digest(durable.authority_event_hash)) {
-    reject("journal logical-fence evidence is stale or inexact");
-  }
+  // Enumerated rather than one disjunction. "Stale or inexact" named twelve
+  // possible causes and distinguished none of them, and it is the last word a
+  // rejected grant produces: the controller retries until its lease expires,
+  // after which every later attempt reports only the expired lease and this
+  // reason is gone.
+  if (durable.authority.journal_id != attribution.journal_id)
+    reject("journal names authority " + durable.authority.journal_id +
+           "; the session claims " + attribution.journal_id);
+  if (durable.authority.host.boot_id != observed.boot_id)
+    reject("journal authority was written under boot " +
+           durable.authority.host.boot_id + "; this host is now booted as " +
+           observed.boot_id);
+  if (lease.concurrency_key != attribution.concurrency_key)
+    reject("durable lease holds concurrency key " + lease.concurrency_key +
+           "; the session claims " + attribution.concurrency_key);
+  if (lease.owner_run_id != attribution.run_id)
+    reject("durable lease is owned by " + lease.owner_run_id +
+           "; the session claims " + attribution.run_id);
+  if (lease.lease_id != attribution.logical_lease_id)
+    reject("durable lease is " + lease.lease_id + "; the session claims " +
+           attribution.logical_lease_id);
+  if (lease.fencing_token != attribution.logical_fencing_token)
+    reject("durable lease carries fencing token " +
+           std::to_string(lease.fencing_token) + "; the session claims " +
+           std::to_string(attribution.logical_fencing_token));
+  if (lease.clock_domain != ResourceLease::kBootTimeDomain)
+    reject("durable lease uses clock domain " + lease.clock_domain +
+           "; only " + std::string(ResourceLease::kBootTimeDomain) +
+           " may fence a host mutation");
+  if (lease.boot_id != observed.boot_id)
+    reject("durable lease was taken under boot " + lease.boot_id +
+           "; this host is now booted as " + observed.boot_id);
+  if (lease.expires_boottime_ns <= observed.boot.nanoseconds)
+    reject("durable lease expired " +
+           std::to_string((observed.boot.nanoseconds -
+                           lease.expires_boottime_ns) / 1'000'000LL) +
+           "ms ago");
+  if (durable.authority_event_sequence == 0U)
+    reject("journal reports no authority event sequence for this lease");
+  if (!valid_digest(durable.authority.host.host_id))
+    reject("journal authority host id is not a sha256 digest: " +
+           durable.authority.host.host_id);
+  // The journal writes this as bare hex and enforces that on its own chain
+  // head; only content digests such as host_id carry the "sha256:" prefix.
+  // Validating it as a namespaced digest rejected every well-formed hash.
+  if (!journal_event_hash_valid(durable.authority_event_hash))
+    reject("journal authority event hash is not 64 hex characters: " +
+           durable.authority_event_hash);
 
   const nlohmann::json material{
       {"api_version", kHostdLogicalFenceEvidenceApiVersion},

@@ -152,6 +152,18 @@ struct JournalAuthoritySnapshot final {
   bool operator==(const JournalAuthoritySnapshot&) const = default;
 };
 
+// Whether a value is a journal event hash: 64 lowercase hex characters, with
+// no algorithm prefix. This is the form the journal writes and enforces on its
+// own chain head, and it is deliberately not the namespaced "sha256:..." form
+// used for content digests such as host_id.
+//
+// Exported because a consumer that validates this field must use the producer's
+// rule. hostd's logical-fence verifier applied the namespaced predicate to it
+// and rejected every well-formed hash, which failed each host grant with
+// "journal logical-fence evidence is stale or inexact" until the controller's
+// lease expired.
+[[nodiscard]] bool journal_event_hash_valid(std::string_view value);
+
 // One consistent SQLite read snapshot of the retained authority and one live
 // boot-scoped logical fence. It cannot be constructed from an arbitrary path.
 struct JournalLogicalFenceSnapshot final {

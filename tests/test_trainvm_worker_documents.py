@@ -263,3 +263,33 @@ def test_v2_invocation_binds_resume_to_prior_attempt() -> None:
     resume["checkpoint"]["producer_attempt_id"] = "attempt-1"
     with pytest.raises(InvocationError, match="lineage"):
         load_worker_invocation(invocation_document(resume=resume))
+
+
+def test_worker_accepts_every_category_the_shipped_registry_uses() -> None:
+    """The worker's category gate must cover the registry the controller ships.
+
+    rwkv_lab.trainvm_worker.training._CATEGORIES is a literal because deriving
+    it would import torch during invocation decoding, before the runtime guard
+    has cleared third-party imports. That duplication is only safe if something
+    keeps it in step with the vocabulary the controller actually resolves plans
+    against. It had drifted: a plan naming activation_memory or
+    generation_policy — both implemented by this worker and both registered in
+    training-components.v1.json — was rejected as "resolved training component
+    identity is invalid", which reads like a corrupt plan rather than a stale
+    list.
+    """
+    from rwkv_lab.trainvm_worker.training import _CATEGORIES
+
+    registry = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "docs/experiment-vm/examples/training-components.v1.json"
+        ).read_text()
+    )
+    shipped = {
+        component["key"]["category"] for component in registry["components"]
+    }
+    assert shipped <= _CATEGORIES, (
+        "the shipped component registry uses categories this worker rejects: "
+        f"{sorted(shipped - _CATEGORIES)}"
+    )

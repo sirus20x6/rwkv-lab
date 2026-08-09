@@ -176,7 +176,15 @@ struct HostdPassiveAcceleratorMemory final {
   HostAcceleratorVendor vendor{};
   std::string stable_id;
   std::optional<std::string> parent_id;
+  // `audited_eligible` answers only "was this device observed unoccupied". It
+  // cannot express an occupied device that a cooperative plan may still select
+  // — the display GPU case — so a consumer that filters on it alone drops every
+  // device on a workstation whose GPU also drives the screen. The disposition
+  // is carried verbatim alongside it, and the selection rule lives in
+  // resource_disposition_permits, so acquisition and passive preflight decide
+  // by the same rule instead of two.
   bool audited_eligible{};
+  ResourceObservationDisposition disposition{};
   std::uint64_t total_memory_bytes{};
   std::uint64_t free_memory_bytes{};
   std::map<std::string, std::string> selector_labels;

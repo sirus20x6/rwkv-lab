@@ -186,8 +186,20 @@ HostdProcessAuthorityStatus process_status(
 class RuntimeAuthorityStatusSource final
     : public IHostdAuthorityStatusSource {
 public:
+  // Must stay comfortably below the controller's passive-inventory admission
+  // bound (maximum_age_ns in service.cpp, 5s), because a status reply serves
+  // the cached observation whenever it is younger than this. At 30s the two
+  // disagreed by six times: a request landing between 5s and 30s after the
+  // last capture was answered with an inventory the controller then refused as
+  // stale, so AuthorRun failed preflight for most of every refresh cycle and
+  // succeeded only just after one — which read as intermittent rather than as
+  // a constant that was simply too large.
+  //
+  // The capture itself takes about a second on this host (NVML), and it only
+  // runs when a status is actually requested, so this bounds sampling under
+  // polling rather than imposing a steady cost.
   static constexpr std::int64_t inventory_refresh_interval_ns =
-      30'000'000'000LL;
+      3'000'000'000LL;
 
   RuntimeAuthorityStatusSource(
       std::shared_ptr<SQLiteHostLedger> ledger,
@@ -264,6 +276,7 @@ public:
               .audited_eligible =
                   resource->disposition ==
                   ResourceObservationDisposition::audited_eligible,
+              .disposition = resource->disposition,
               .total_memory_bytes = memory.total_memory_bytes,
               .free_memory_bytes = memory.free_memory_bytes,
               .selector_labels = resource->labels,
