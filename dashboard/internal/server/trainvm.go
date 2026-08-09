@@ -922,9 +922,11 @@ func (s *Server) reconcileTrainVMLifecycleCommand(r *http.Request, runID string,
 	if code := status.Code(cause); code != codes.DeadlineExceeded {
 		return trainvmstore.RunActionResult{}, false
 	}
-	// The request context carries the deadline that just expired, so a lookup on
-	// it would fail before it began. Detach from the deadline but keep the
-	// client's cancellation, and bound the reconciliation read on its own.
+	// A context derived from the request would already be dead whenever the
+	// expired deadline was the request's own rather than ours, and reconciliation
+	// would then silently never run. Detaching gives the read an honest budget in
+	// both cases. It also discards client disconnection, which costs nothing
+	// here: the read is bounded, indexed, local, and mutates nothing.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()),
 		trainVMLifecycleReconcileTimeout)
 	defer cancel()
