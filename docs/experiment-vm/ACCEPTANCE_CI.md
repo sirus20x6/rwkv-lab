@@ -109,17 +109,39 @@ Measured, not estimated. The **before** figure is the ten most recent green
 PR #141 the step breakdown was 68 s to restore and load the cached toolchain
 image and 512 s to build every target and run ctest.
 
-The **after** figure is this pull request, which changes only this file and so
-selects the `catalog` tier — the tier a Python-only or documentation-only change
+The **after** figure comes from PR #150, which changed only this file and so
+selected the `catalog` tier — the tier a Python-only or documentation-only change
 gets. It still builds the real `trainvm` CLI, still runs `validate-catalog`
 against the checkout, and still crosses both native/Python worker contracts. It
 does not build the test targets or run ctest.
 
-Two costs are worth separating so the number is not read as better than it is.
-The pull request that introduced tiering was itself *slower* than baseline —
-14 m 4 s — because it edits the Dockerfile, which invalidates the toolchain image
-layer cache (206 s instead of 68 s) and starts with an empty ccache. Both are
-one-time; neither recurs on a change that leaves the Dockerfile alone.
+| | before (median of 10) | after, `catalog` tier | fail-closed `full` tier |
+|---|---|---|---|
+| whole job | 633 s | **473 s** | 695 s |
+| build + validate step | 512 s | **279 s** | 452 s |
+
+The step figure is the one to trust for the recurring saving. It is the only
+part the tiering changes, and it does not depend on how warm the toolchain image
+cache happens to be: 512 s to 279 s, a 45% cut on the dominant step, for a change
+that still proves the catalog is valid against the checkout it was built from.
+
+The whole-job figure is worse than that (25%) for a reason that decays. Adding
+ccache edited the Dockerfile, which invalidated the toolchain image layer cache,
+so runs measured immediately afterwards paid 176-212 s to rebuild that image
+instead of 68 s to restore it, and started with an empty compiler cache besides.
+The pull request that introduced tiering was for the same reason *slower* than
+baseline, at 14 m 4 s. None of that recurs on a change that leaves the Dockerfile
+alone, so the steady-state whole-job figure should approach the step figure plus
+roughly 70 s.
+
+The third column is not a regression. It is the fail-closed path, measured on a
+deliberately unrecognized change: PR #149 added one file under a `newtree/`
+directory, written in a language the build does not know, and nothing else. The
+classifier declined to guess, recorded `unrecognized path (fail closed)`, and
+bought the entire suite — full build, the exclusion declaration, and ctest — for
+a file no native target could consume. That PR was closed unmerged; the run is
+the artifact, not the diff. A tier that has never been shown doing this is not a
+tier, it is a hole nobody has looked into yet.
 
 Fail-closed has to survive the plumbing, not just the classifier, and two of the
 ways it could have leaked are worth naming because neither is visible from the
