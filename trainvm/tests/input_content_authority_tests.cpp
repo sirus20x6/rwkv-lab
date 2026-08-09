@@ -1,12 +1,14 @@
 #include "trainvm/input_content_authority.hpp"
 #include "trainvm/reflection_json.hpp"
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -14,7 +16,9 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -655,6 +659,336 @@ void unrelated_activity_in_an_ancestor_is_not_substitution() {
           "a substituted ancestor must not silently reuse the prior identity");
 }
 
+// ---------------------------------------------------------------------------
+// Owner-only persistent digest store
+// ---------------------------------------------------------------------------
+
+std::vector<unsigned char> read_bytes(const std::filesystem::path& path) {
+  std::ifstream stream(path, std::ios::binary);
+  if (!stream) throw std::runtime_error("could not open store for reading");
+  return std::vector<unsigned char>(std::istreambuf_iterator<char>(stream),
+                                    std::istreambuf_iterator<char>());
+}
+
+void overwrite_bytes(const std::filesystem::path& path,
+                     const std::vector<unsigned char>& bytes) {
+  std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+  if (!stream) throw std::runtime_error("could not open store for writing");
+  stream.write(reinterpret_cast<const char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+  if (!stream) throw std::runtime_error("could not rewrite store");
+}
+
+// Timestamps only become reusable once they are older than the store's
+// settling window, which is what stops a same-tick rewrite from hiding behind
+// an unchanged key. Tests that want a warm hit have to wait it out; there is
+// deliberately no knob to shorten it, because the knob would be the bug.
+void wait_for_timestamps_to_settle() {
+  std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+}
+
+// Restores mtime (and atime) to a previously observed value. ctime cannot be
+// set by any unprivileged interface, which is precisely why the cache key
+// carries it.
+void forge_modification_time(const std::filesystem::path& path,
+                             const struct stat& original) {
+  std::array<struct timespec, 2U> times{original.st_atim, original.st_mtim};
+  if (::utimensat(AT_FDCWD, path.c_str(), times.data(), AT_SYMLINK_NOFOLLOW) !=
+      0)
+    throw std::runtime_error("could not forge a modification time");
+}
+
+struct stat stat_of(const std::filesystem::path& path) {
+  struct stat value{};
+  if (::stat(path.c_str(), &value) != 0)
+    throw std::runtime_error("could not stat a test path");
+  return value;
+}
+
+void persistent_store_reuses_only_unchanged_bytes() {
+  TemporaryDirectory temporary;
+  const auto root = temporary.path() / "root";
+  const auto store = temporary.path() / "digests.store";
+  make_tree(root, false);
+  wait_for_timestamps_to_settle();
+
+  InputContentMeasurementStats cold_stats;
+  InputContentRootIdentity cold;
+  {
+    InputContentMeasurementCache cache;
+    const auto admitted = cache.admit_persistent_digests(store);
+    require(!admitted.present && !admitted.accepted &&
+                admitted.admitted_entries == 0U,
+            "an absent digest store contributes nothing and is not an error");
+    cold = measure_cached(cache, root, cold_stats);
+    const auto published = cache.publish_persistent_digests(store);
+    require(published.present && published.accepted &&
+                published.offered_entries == 3U &&
+                published.withheld_entries == 0U,
+            "a settled measurement is published for the next lock");
+  }
+  require(cold_stats.cache_hits == 0U && cold_stats.bytes_hashed == 14U,
+          "the first lock reads every byte");
+
+  // A second process, sharing nothing but the store on disk.
+  InputContentMeasurementStats warm_stats;
+  InputContentMeasurementCache warm_cache;
+  const auto admitted = warm_cache.admit_persistent_digests(store);
+  require(admitted.present && admitted.accepted &&
+              admitted.offered_entries == 3U &&
+              admitted.admitted_entries == 3U && admitted.refused_entries == 0U,
+          "a store written by an earlier lock is admitted whole");
+  const InputContentRootIdentity warm =
+      measure_cached(warm_cache, root, warm_stats);
+  require(warm == cold, "a warm lock compiles to the identical content identity");
+  require(warm_stats.cache_hits == 3U && warm_stats.cache_misses == 0U &&
+              warm_stats.bytes_hashed == 0U,
+          "a warm lock reads no file bytes at all");
+}
+
+// The card's central claim. Rewriting a file with a different payload of the
+// same length, then putting its modification time back, leaves size and mtime
+// identical to the sealed record. The digest must not be reused.
+void changed_bytes_cannot_reuse_a_digest_under_a_forged_mtime() {
+  TemporaryDirectory temporary;
+  const auto root = temporary.path() / "root";
+  const auto store = temporary.path() / "digests.store";
+  std::filesystem::create_directories(root);
+  const auto victim = root / "payload.bin";
+  write_file(victim, "aaaaaaaa");
+  wait_for_timestamps_to_settle();
+
+  InputContentMeasurementStats cold_stats;
+  InputContentRootIdentity cold;
+  {
+    InputContentMeasurementCache cache;
+    cold = measure_cached(cache, root, cold_stats);
+    (void)cache.publish_persistent_digests(store);
+  }
+  const struct stat sealed = stat_of(victim);
+
+  write_file(victim, "bbbbbbbb");
+  forge_modification_time(victim, sealed);
+  const struct stat forged = stat_of(victim);
+  require(forged.st_size == sealed.st_size &&
+              forged.st_mtim.tv_sec == sealed.st_mtim.tv_sec &&
+              forged.st_mtim.tv_nsec == sealed.st_mtim.tv_nsec &&
+              forged.st_ino == sealed.st_ino,
+          "the forgery reproduces size, inode, and modification time exactly");
+
+  InputContentMeasurementCache cache;
+  const auto admitted = cache.admit_persistent_digests(store);
+  require(admitted.admitted_entries == 1U,
+          "the sealed record for the victim is still in the store");
+  InputContentMeasurementStats warm_stats;
+  const InputContentRootIdentity warm = measure_cached(cache, root, warm_stats);
+  require(warm.tree_sha256 != cold.tree_sha256,
+          "changed bytes must produce a different content identity");
+  require(warm_stats.cache_hits == 0U && warm_stats.bytes_hashed == 8U,
+          "changed bytes must be read again rather than served from the store");
+}
+
+// A store record is only as trustworthy as the window it was sealed in. A file
+// whose timestamps are younger than the settling window could still be
+// rewritten inside the tick they name, so it is never persisted.
+void racily_recent_measurements_are_withheld() {
+  TemporaryDirectory temporary;
+  const auto root = temporary.path() / "root";
+  const auto store = temporary.path() / "digests.store";
+  std::filesystem::create_directories(root);
+  write_file(root / "fresh.bin", "fresh");
+
+  InputContentMeasurementCache cache;
+  InputContentMeasurementStats stats;
+  (void)measure_cached(cache, root, stats);
+  const auto published = cache.publish_persistent_digests(store);
+  require(published.accepted && published.offered_entries == 0U &&
+              published.withheld_entries == 1U,
+          "a just-written file is withheld from the store");
+
+  InputContentMeasurementCache reader;
+  const auto admitted = reader.admit_persistent_digests(store);
+  require(admitted.present && admitted.accepted &&
+              admitted.offered_entries == 0U && admitted.admitted_entries == 0U,
+          "the published store carries no racily recent record");
+}
+
+// Both link games. Adding a link moves st_nlink and st_ctime, so the file
+// misses; renaming a file re-derives the enclosing directory's digest from the
+// names it actually holds, so the tree identity moves even though every leaf
+// digest is reusable.
+void hardlink_and_rename_games_do_not_reuse_an_identity() {
+  TemporaryDirectory temporary;
+  const auto root = temporary.path() / "root";
+  const auto store = temporary.path() / "digests.store";
+  std::filesystem::create_directories(root);
+  write_file(root / "one.bin", "one");
+  write_file(root / "two.bin", "two");
+  wait_for_timestamps_to_settle();
+
+  InputContentRootIdentity cold;
+  {
+    InputContentMeasurementCache cache;
+    InputContentMeasurementStats stats;
+    cold = measure_cached(cache, root, stats);
+    (void)cache.publish_persistent_digests(store);
+  }
+
+  std::filesystem::create_hard_link(root / "one.bin", root / "linked.bin");
+  {
+    InputContentMeasurementCache cache;
+    (void)cache.admit_persistent_digests(store);
+    InputContentMeasurementStats stats;
+    const auto linked = measure_cached(cache, root, stats);
+    require(linked.tree_sha256 != cold.tree_sha256,
+            "a new link is a new tree");
+    // The relinked inode's key moved, so its persisted record is dead and its
+    // bytes are read again -- once, because the second name resolves to the
+    // measurement this same lock just staged.
+    require(stats.cache_misses == 1U && stats.bytes_hashed == 3U,
+            "a relinked inode is read again exactly once");
+    require(stats.cache_hits == 2U,
+            "the untouched file and the relinked inode's second name still hit");
+  }
+  std::filesystem::remove(root / "linked.bin");
+
+  std::filesystem::rename(root / "one.bin", root / "renamed.bin");
+  {
+    InputContentMeasurementCache cache;
+    (void)cache.admit_persistent_digests(store);
+    InputContentMeasurementStats stats;
+    const auto renamed = measure_cached(cache, root, stats);
+    require(renamed.tree_sha256 != cold.tree_sha256,
+            "a rename changes the tree identity even when no byte changed");
+    require(renamed.file_count == 2U,
+            "a rename leaves the file count alone");
+  }
+}
+
+void tampered_stores_are_refused_whole_or_per_record() {
+  TemporaryDirectory temporary;
+  const auto root = temporary.path() / "root";
+  const auto store = temporary.path() / "digests.store";
+  std::filesystem::create_directories(root);
+  write_file(root / "one.bin", "one");
+  wait_for_timestamps_to_settle();
+  {
+    InputContentMeasurementCache cache;
+    InputContentMeasurementStats stats;
+    (void)measure_cached(cache, root, stats);
+    (void)cache.publish_persistent_digests(store);
+  }
+  const std::vector<unsigned char> original = read_bytes(store);
+  require(original.size() > 96U, "the published store has a header and a record");
+
+  // Any edited byte breaks the trailing digest over the whole file.
+  std::vector<unsigned char> flipped = original;
+  flipped[flipped.size() - 40U] ^= 0x01U;
+  overwrite_bytes(store, flipped);
+  {
+    InputContentMeasurementCache cache;
+    const auto admitted = cache.admit_persistent_digests(store);
+    require(admitted.present && !admitted.accepted &&
+                admitted.admitted_entries == 0U,
+            "a store whose bytes were edited is refused whole");
+  }
+
+  // Truncation is refused for the same reason, and must not read past the end.
+  std::vector<unsigned char> truncated(original.begin(),
+                                       original.begin() + 80);
+  overwrite_bytes(store, truncated);
+  {
+    InputContentMeasurementCache cache;
+    const auto admitted = cache.admit_persistent_digests(store);
+    require(admitted.present && !admitted.accepted &&
+                admitted.admitted_entries == 0U,
+            "a truncated store is refused rather than partially decoded");
+  }
+
+  // A store sealed against another key policy describes keys this cache does
+  // not compute, so it is refused even though its own trailer is intact.
+  overwrite_bytes(store, original);
+  {
+    InputContentMeasurementCache narrow(4U);
+    require(narrow.policy_digest() != InputContentMeasurementCache().policy_digest(),
+            "capacity is part of the cache policy digest");
+    const auto admitted = narrow.admit_persistent_digests(store);
+    require(admitted.present && !admitted.accepted,
+            "a store sealed against another policy is refused");
+  }
+}
+
+void unsafe_store_ownership_is_reported_rather_than_ignored() {
+  TemporaryDirectory temporary;
+  const auto root = temporary.path() / "root";
+  const auto directory = temporary.path() / "cache";
+  std::filesystem::create_directories(root);
+  std::filesystem::create_directories(directory);
+  write_file(root / "one.bin", "one");
+  const auto store = directory / "digests.store";
+  {
+    InputContentMeasurementCache cache;
+    InputContentMeasurementStats stats;
+    (void)measure_cached(cache, root, stats);
+    (void)cache.publish_persistent_digests(store);
+  }
+
+  if (::chmod(store.c_str(), 0644) != 0)
+    throw std::runtime_error("could not relax the store mode");
+  require_rejected(
+      [&] {
+        InputContentMeasurementCache cache;
+        (void)cache.admit_persistent_digests(store);
+      },
+      "a world-readable store must be refused, not silently ignored");
+  if (::chmod(store.c_str(), 0600) != 0)
+    throw std::runtime_error("could not restore the store mode");
+
+  const auto second_link = directory / "digests.link";
+  std::filesystem::create_hard_link(store, second_link);
+  require_rejected(
+      [&] {
+        InputContentMeasurementCache cache;
+        (void)cache.admit_persistent_digests(store);
+      },
+      "a store reachable under a second name must be refused");
+  std::filesystem::remove(second_link);
+
+  if (::chmod(directory.c_str(), 0777) != 0)
+    throw std::runtime_error("could not relax the store directory mode");
+  require_rejected(
+      [&] {
+        InputContentMeasurementCache cache;
+        (void)cache.admit_persistent_digests(store);
+      },
+      "a store in a world-writable directory must be refused");
+  require_rejected(
+      [&] {
+        InputContentMeasurementCache cache;
+        (void)cache.publish_persistent_digests(store);
+      },
+      "publication into a world-writable directory must be refused");
+  if (::chmod(directory.c_str(), 0700) != 0)
+    throw std::runtime_error("could not restore the store directory mode");
+
+  require_rejected(
+      [&] {
+        InputContentMeasurementCache cache;
+        (void)cache.admit_persistent_digests("relative/store");
+      },
+      "a store path that is not absolute and normalized must be refused");
+
+  // A symlink standing in for the store is never followed.
+  const auto elsewhere = temporary.path() / "elsewhere.store";
+  write_file(elsewhere, "not a store");
+  const auto linked = directory / "linked.store";
+  std::filesystem::create_symlink(elsewhere, linked);
+  InputContentMeasurementCache cache;
+  const auto admitted = cache.admit_persistent_digests(linked);
+  require(!admitted.present && !admitted.accepted,
+          "a symlinked store is not followed");
+}
+
 int main() {
   try {
     unrelated_activity_in_an_ancestor_is_not_substitution();
@@ -685,6 +1019,18 @@ int main() {
     std::cout << "PASS cache-atomic-publication\n";
     failed_warm_touch_publication_is_atomic();
     std::cout << "PASS cache-atomic-warm-touch\n";
+    persistent_store_reuses_only_unchanged_bytes();
+    std::cout << "PASS store-warm-reuse\n";
+    changed_bytes_cannot_reuse_a_digest_under_a_forged_mtime();
+    std::cout << "PASS store-forged-mtime\n";
+    racily_recent_measurements_are_withheld();
+    std::cout << "PASS store-racily-recent\n";
+    hardlink_and_rename_games_do_not_reuse_an_identity();
+    std::cout << "PASS store-link-rename\n";
+    tampered_stores_are_refused_whole_or_per_record();
+    std::cout << "PASS store-tamper\n";
+    unsafe_store_ownership_is_reported_rather_than_ignored();
+    std::cout << "PASS store-ownership\n";
     return 0;
   } catch (const std::exception& error) {
     std::cerr << "input content authority test failure: " << error.what()

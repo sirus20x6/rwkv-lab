@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits>
@@ -741,6 +742,526 @@ bool path_within(const std::filesystem::path &child,
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Owner-only persistent digest store
+// ---------------------------------------------------------------------------
+//
+// The cache above answers "have I already hashed this exact file?" for one
+// process. `trainvm lock-input-content` is not one process -- it is a fresh
+// process per lock -- so it never answered it at all, and re-read every byte of
+// every root each time. This store carries the same answers between those
+// processes.
+//
+// Nothing here weakens the question. A record is admitted only under the key
+// the in-memory cache already uses (mount incarnation, device, inode, mode,
+// link count, ownership, size, mtime and ctime to the nanosecond) and only
+// after its seal is recomputed, so a record cannot be moved to another key or
+// edited in place without detection. Changed bytes move ctime, which is part of
+// the key, so a changed file misses. The one case a metadata key cannot see is
+// a write that lands inside the same timestamp tick the record was sealed
+// against; `kTimestampSettlingNanoseconds` below refuses to persist or admit a
+// record that recent, which is the same defence git's index applies to its
+// racily-clean entries.
+//
+// The store is trusted for the reason the runtime-closure evidence directory is
+// trusted: it is owned by this user, on a directory no one else can write, with
+// exactly one link, opened without following symlinks. It is not authenticated
+// against a privileged writer and does not claim to be.
+
+namespace {
+
+constexpr std::string_view kDigestStoreMagic =
+    "trainvm.input-content-digest-store/v1\n";
+constexpr std::size_t kDigestStorePolicyBytes = 71U;
+constexpr std::size_t kDigestStoreMaximumBootIdBytes = 256U;
+// Thirteen key fields plus kind, file count and byte count, each a big-endian
+// 64-bit word, then the measured digest and its seal. Derived rather than
+// written out so a field added to the record cannot leave the bound behind.
+constexpr std::size_t kDigestStoreEntryBytes = 16U * 8U + 2U * kDigestBytes;
+constexpr std::uint64_t kDigestStoreMaximumBytes = 64U * 1024U * 1024U;
+constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000;
+// Filesystem timestamp granularity is not observable, and a coarse one lets a
+// second write share the tick of the write we measured. One second is far
+// beyond any granularity Linux uses, so a record older than this cannot be
+// overwritten without moving ctime. Files touched within the last second are
+// simply hashed again next time and cached then.
+constexpr std::int64_t kTimestampSettlingNanoseconds = kNanosecondsPerSecond;
+// Rejects absurd or hostile timestamps before they are multiplied out.
+constexpr std::int64_t kMaximumTimestampSeconds = 100'000'000'000;
+
+[[nodiscard]] std::optional<std::int64_t> flat_nanoseconds(std::int64_t seconds,
+                                                           std::int64_t nanos) {
+  if (seconds < 0 || seconds > kMaximumTimestampSeconds || nanos < 0 ||
+      nanos >= kNanosecondsPerSecond)
+    return std::nullopt;
+  return seconds * kNanosecondsPerSecond + nanos;
+}
+
+// True when both of a key's timestamps are old enough that any later write must
+// have moved one of them.
+[[nodiscard]] bool timestamps_have_settled(const FileCacheKey &key,
+                                           std::int64_t sealed_at) {
+  const auto modified =
+      flat_nanoseconds(key.modified_seconds, key.modified_nanoseconds);
+  const auto changed =
+      flat_nanoseconds(key.changed_seconds, key.changed_nanoseconds);
+  if (!modified || !changed || sealed_at <= 0)
+    return false;
+  const std::int64_t newest = std::max(*modified, *changed);
+  return newest <= sealed_at - kTimestampSettlingNanoseconds;
+}
+
+[[nodiscard]] std::int64_t realtime_nanoseconds() {
+  struct timespec now{};
+  if (::clock_gettime(CLOCK_REALTIME, &now) != 0)
+    fail_system("could not read the wall clock");
+  const auto flat = flat_nanoseconds(static_cast<std::int64_t>(now.tv_sec),
+                                     static_cast<std::int64_t>(now.tv_nsec));
+  if (!flat)
+    throw std::runtime_error("the wall clock reported an unusable time");
+  return *flat;
+}
+
+// The mount incarnation in a cache key is unique only for the life of one boot,
+// so a store written before this boot describes mounts that no longer mean what
+// its records say. Binding the store to the boot identity is what makes the
+// mount identity in the key sound across processes.
+[[nodiscard]] std::optional<std::string> current_boot_identity() {
+  const int raw = ::open("/proc/sys/kernel/random/boot_id",
+                         O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (raw < 0)
+    return std::nullopt;
+  Descriptor descriptor(raw);
+  std::string value;
+  std::array<char, 128U> buffer{};
+  for (;;) {
+    const ssize_t count =
+        ::read(descriptor.get(), buffer.data(), buffer.size());
+    if (count < 0) {
+      if (errno == EINTR)
+        continue;
+      return std::nullopt;
+    }
+    if (count == 0)
+      break;
+    value.append(buffer.data(), static_cast<std::size_t>(count));
+    if (value.size() > kDigestStoreMaximumBootIdBytes)
+      return std::nullopt;
+  }
+  while (!value.empty() && (value.back() == '\n' || value.back() == '\r'))
+    value.pop_back();
+  if (value.empty() || value.size() > kDigestStoreMaximumBootIdBytes)
+    return std::nullopt;
+  return value;
+}
+
+// A directory nobody but this user can write, on the device it claims to be on.
+[[nodiscard]] Descriptor open_store_directory(const std::filesystem::path &directory) {
+  const int raw = ::open(directory.c_str(),
+                         O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  if (raw < 0)
+    fail_system("could not open the input content digest store directory");
+  Descriptor descriptor(raw);
+  struct stat metadata{};
+  if (::fstat(descriptor.get(), &metadata) != 0)
+    fail_system("could not inspect the input content digest store directory");
+  if (!S_ISDIR(metadata.st_mode) || metadata.st_uid != ::geteuid() ||
+      (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0)
+    throw std::runtime_error(
+        "input content digest store directory is not owner-only");
+  return descriptor;
+}
+
+void require_store_path(const std::filesystem::path &store_path) {
+  if (!store_path.is_absolute() || store_path.empty() ||
+      store_path.lexically_normal() != store_path ||
+      store_path.native().size() > kMaximumNameBytes ||
+      !store_path.has_filename() || !store_path.has_parent_path())
+    throw std::invalid_argument(
+        "input content digest store path must be an absolute normalized file");
+  const std::string name = store_path.filename().native();
+  if (name == "." || name == ".." || name.size() > kMaximumNameBytes ||
+      !valid_utf8(name))
+    throw std::invalid_argument(
+        "input content digest store name is not bounded UTF-8");
+}
+
+class ByteWriter final {
+public:
+  void raw(const void *data, std::size_t size) {
+    const auto *bytes = static_cast<const unsigned char *>(data);
+    buffer_.insert(buffer_.end(), bytes, bytes + size);
+  }
+  void text(std::string_view value) { raw(value.data(), value.size()); }
+  void unsigned64(std::uint64_t value) {
+    const auto encoded = big_endian_64(value);
+    raw(encoded.data(), encoded.size());
+  }
+  void signed64(std::int64_t value) {
+    unsigned64(static_cast<std::uint64_t>(value));
+  }
+  void unsigned32(std::uint32_t value) {
+    const auto encoded = big_endian_32(value);
+    raw(encoded.data(), encoded.size());
+  }
+  void digest(const Digest &value) { raw(value.data(), value.size()); }
+  [[nodiscard]] const std::vector<unsigned char> &bytes() const noexcept {
+    return buffer_;
+  }
+
+private:
+  std::vector<unsigned char> buffer_;
+};
+
+// Every read is bounds-checked against the declared length; a truncated or
+// oversized store therefore fails as a refusal rather than reading past its
+// buffer.
+class ByteReader final {
+public:
+  ByteReader(const unsigned char *data, std::size_t size) noexcept
+      : data_(data), size_(size) {}
+
+  [[nodiscard]] bool take(void *destination, std::size_t size) noexcept {
+    if (size > size_ - offset_)
+      return false;
+    std::memcpy(destination, data_ + offset_, size);
+    offset_ += size;
+    return true;
+  }
+  [[nodiscard]] bool matches(std::string_view value) noexcept {
+    if (value.size() > size_ - offset_)
+      return false;
+    const bool equal =
+        std::memcmp(data_ + offset_, value.data(), value.size()) == 0;
+    offset_ += value.size();
+    return equal;
+  }
+  [[nodiscard]] bool unsigned64(std::uint64_t &value) noexcept {
+    std::array<unsigned char, 8U> encoded{};
+    if (!take(encoded.data(), encoded.size()))
+      return false;
+    value = 0U;
+    for (const unsigned char byte : encoded)
+      value = (value << 8U) | byte;
+    return true;
+  }
+  [[nodiscard]] bool signed64(std::int64_t &value) noexcept {
+    std::uint64_t raw = 0U;
+    if (!unsigned64(raw))
+      return false;
+    value = static_cast<std::int64_t>(raw);
+    return true;
+  }
+  [[nodiscard]] bool unsigned32(std::uint32_t &value) noexcept {
+    std::array<unsigned char, 4U> encoded{};
+    if (!take(encoded.data(), encoded.size()))
+      return false;
+    value = 0U;
+    for (const unsigned char byte : encoded)
+      value = (value << 8U) | byte;
+    return true;
+  }
+  [[nodiscard]] bool digest(Digest &value) noexcept {
+    return take(value.data(), value.size());
+  }
+  [[nodiscard]] std::size_t remaining() const noexcept {
+    return size_ - offset_;
+  }
+
+private:
+  const unsigned char *data_;
+  std::size_t size_;
+  std::size_t offset_{};
+};
+
+void encode_store_entry(ByteWriter &writer, const FileCacheKey &key,
+                        const NodeMeasurement &value, const Digest &seal) {
+  writer.unsigned64(key.filesystem_type);
+  writer.unsigned64(key.unique_mount_id);
+  writer.unsigned64(key.device);
+  writer.unsigned64(key.inode);
+  writer.unsigned64(key.mode);
+  writer.unsigned64(key.links);
+  writer.unsigned64(key.owner);
+  writer.unsigned64(key.group);
+  writer.unsigned64(key.size);
+  writer.signed64(key.modified_seconds);
+  writer.signed64(key.modified_nanoseconds);
+  writer.signed64(key.changed_seconds);
+  writer.signed64(key.changed_nanoseconds);
+  writer.unsigned64(static_cast<std::uint64_t>(value.kind));
+  writer.unsigned64(value.file_count);
+  writer.unsigned64(value.total_bytes);
+  writer.digest(value.digest);
+  writer.digest(seal);
+}
+
+[[nodiscard]] bool decode_store_entry(ByteReader &reader, FileCacheKey &key,
+                                      NodeMeasurement &value, Digest &seal) {
+  std::uint64_t kind = 0U;
+  if (!reader.unsigned64(key.filesystem_type) ||
+      !reader.unsigned64(key.unique_mount_id) || !reader.unsigned64(key.device) ||
+      !reader.unsigned64(key.inode) || !reader.unsigned64(key.mode) ||
+      !reader.unsigned64(key.links) || !reader.unsigned64(key.owner) ||
+      !reader.unsigned64(key.group) || !reader.unsigned64(key.size) ||
+      !reader.signed64(key.modified_seconds) ||
+      !reader.signed64(key.modified_nanoseconds) ||
+      !reader.signed64(key.changed_seconds) ||
+      !reader.signed64(key.changed_nanoseconds) || !reader.unsigned64(kind) ||
+      !reader.unsigned64(value.file_count) ||
+      !reader.unsigned64(value.total_bytes) || !reader.digest(value.digest) ||
+      !reader.digest(seal))
+    return false;
+  if (kind != static_cast<std::uint64_t>(ContentRootKind::file))
+    return false;
+  value.kind = ContentRootKind::file;
+  return true;
+}
+
+Digest digest_of(std::span<const unsigned char> bytes) {
+  DigestContext context;
+  context.update(bytes.data(), bytes.size());
+  return context.finish();
+}
+
+// Reads the whole store under the safety rules above. An absent or unsafe-shaped
+// file yields nullopt; unsafe *ownership* throws, because that one is an
+// operator mistake rather than a cold cache.
+[[nodiscard]] std::optional<std::vector<unsigned char>>
+read_store_file(int directory, const std::string &name) {
+  const int raw =
+      ::openat(directory, name.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (raw < 0) {
+    if (errno == ENOENT || errno == ELOOP)
+      return std::nullopt;
+    fail_system("could not open the input content digest store");
+  }
+  Descriptor descriptor(raw);
+  struct stat before{};
+  if (::fstat(descriptor.get(), &before) != 0)
+    fail_system("could not inspect the input content digest store");
+  if (!S_ISREG(before.st_mode))
+    throw std::runtime_error(
+        "input content digest store is not a regular file");
+  if (before.st_uid != ::geteuid() ||
+      (before.st_mode & (S_IWGRP | S_IWOTH | S_IRGRP | S_IROTH)) != 0 ||
+      before.st_nlink != 1)
+    throw std::runtime_error(
+        "input content digest store is not owner-only with a single link");
+  if (before.st_size < 0 ||
+      static_cast<std::uint64_t>(before.st_size) > kDigestStoreMaximumBytes)
+    return std::nullopt;
+  std::vector<unsigned char> bytes(static_cast<std::size_t>(before.st_size));
+  std::size_t offset = 0U;
+  while (offset < bytes.size()) {
+    const ssize_t count =
+        ::read(descriptor.get(), bytes.data() + offset, bytes.size() - offset);
+    if (count < 0) {
+      if (errno == EINTR)
+        continue;
+      fail_system("could not read the input content digest store");
+    }
+    if (count == 0)
+      return std::nullopt;
+    offset += static_cast<std::size_t>(count);
+  }
+  struct stat after{};
+  if (::fstat(descriptor.get(), &after) != 0)
+    fail_system("could not reinspect the input content digest store");
+  if (!same_stat(before, after))
+    return std::nullopt;
+  return bytes;
+}
+
+void write_store_file(int directory, const std::string &name,
+                      const std::vector<unsigned char> &bytes) {
+  const std::string temporary = name + ".staged";
+  (void)::unlinkat(directory, temporary.c_str(), 0);
+  const int raw = ::openat(directory, temporary.c_str(),
+                           O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                           0600);
+  if (raw < 0)
+    fail_system("could not stage the input content digest store");
+  try {
+    Descriptor descriptor(raw);
+    std::size_t offset = 0U;
+    while (offset < bytes.size()) {
+      const ssize_t count = ::write(descriptor.get(), bytes.data() + offset,
+                                    bytes.size() - offset);
+      if (count < 0) {
+        if (errno == EINTR)
+          continue;
+        fail_system("could not write the input content digest store");
+      }
+      offset += static_cast<std::size_t>(count);
+    }
+    if (::fchmod(descriptor.get(), 0600) != 0 || ::fsync(descriptor.get()) != 0)
+      throw std::runtime_error(
+          "could not seal the staged input content digest store");
+    if (::renameat(directory, temporary.c_str(), directory, name.c_str()) != 0)
+      fail_system("could not publish the input content digest store");
+    if (::fsync(directory) != 0)
+      throw std::runtime_error(
+          "input content digest store publication was not durable");
+  } catch (...) {
+    (void)::unlinkat(directory, temporary.c_str(), 0);
+    throw;
+  }
+}
+
+} // namespace
+
+InputContentDigestStoreStats
+InputContentMeasurementCache::admit_persistent_digests(
+    const std::filesystem::path &store_path) {
+  require_store_path(store_path);
+  InputContentDigestStoreStats result;
+  const Descriptor directory = open_store_directory(store_path.parent_path());
+  const auto bytes = read_store_file(directory.get(), store_path.filename().native());
+  if (!bytes)
+    return result;
+  result.present = true;
+  if (bytes->size() < kDigestBytes)
+    return result;
+  const std::size_t body = bytes->size() - kDigestBytes;
+  Digest trailer{};
+  std::memcpy(trailer.data(), bytes->data() + body, kDigestBytes);
+  if (digest_of(std::span<const unsigned char>(bytes->data(), body)) != trailer)
+    return result;
+
+  ByteReader reader(bytes->data(), body);
+  const std::string policy = policy_digest();
+  std::array<char, kDigestStorePolicyBytes> stored_policy{};
+  std::uint32_t boot_length = 0U;
+  std::int64_t sealed_at = 0;
+  std::uint64_t declared = 0U;
+  if (!reader.matches(kDigestStoreMagic) ||
+      !reader.take(stored_policy.data(), stored_policy.size()) ||
+      policy.size() != stored_policy.size() ||
+      std::memcmp(policy.data(), stored_policy.data(), stored_policy.size()) !=
+          0 ||
+      !reader.unsigned32(boot_length) ||
+      boot_length > kDigestStoreMaximumBootIdBytes || boot_length == 0U)
+    return result;
+  std::string stored_boot(boot_length, '\0');
+  const auto boot = current_boot_identity();
+  if (!reader.take(stored_boot.data(), stored_boot.size()) || !boot ||
+      *boot != stored_boot || !reader.signed64(sealed_at) ||
+      !reader.unsigned64(declared) || declared > impl_->maximum_entries ||
+      declared > reader.remaining() / kDigestStoreEntryBytes ||
+      declared * kDigestStoreEntryBytes != reader.remaining())
+    return result;
+  result.accepted = true;
+  result.offered_entries = declared;
+
+  // Records were written most-recently-used first. Insert in reverse so the
+  // published order reproduces the recency the writing process observed.
+  std::vector<std::pair<FileCacheKey, NodeMeasurement>> admitted;
+  admitted.reserve(static_cast<std::size_t>(declared));
+  for (std::uint64_t index = 0U; index < declared; ++index) {
+    FileCacheKey key{};
+    NodeMeasurement value{};
+    Digest seal{};
+    if (!decode_store_entry(reader, key, value, seal)) {
+      result.refused_entries = declared - index;
+      break;
+    }
+    if (!valid_cached_record(key, value, seal) ||
+        !timestamps_have_settled(key, sealed_at)) {
+      ++result.refused_entries;
+      continue;
+    }
+    admitted.emplace_back(key, value);
+  }
+
+  std::scoped_lock lock(impl_->mutex);
+  for (auto entry = admitted.rbegin(); entry != admitted.rend(); ++entry) {
+    if (impl_->entries.contains(entry->first))
+      continue;
+    if (impl_->entries.size() >= impl_->maximum_entries) {
+      const auto evicted = impl_->entries.find(impl_->recency.back());
+      if (evicted == impl_->entries.end())
+        throw std::logic_error("input content cache LRU index lost an entry");
+      impl_->recency.erase(evicted->second.recency);
+      impl_->entries.erase(evicted);
+    }
+    impl_->recency.push_front(entry->first);
+    impl_->entries.emplace(
+        entry->first,
+        Impl::Entry{.value = entry->second,
+                    .seal = cache_record_seal(entry->first, entry->second),
+                    .recency = impl_->recency.begin()});
+    ++result.admitted_entries;
+  }
+  return result;
+}
+
+InputContentDigestStoreStats
+InputContentMeasurementCache::publish_persistent_digests(
+    const std::filesystem::path &store_path) const {
+  require_store_path(store_path);
+  InputContentDigestStoreStats result;
+  const auto boot = current_boot_identity();
+  if (!boot)
+    return result;
+  const Descriptor directory = open_store_directory(store_path.parent_path());
+  // Sealed after every measurement in this process finished, so a record that
+  // clears the settling window here cannot have been rewritten inside the tick
+  // its own timestamps name.
+  const std::int64_t sealed_at = realtime_nanoseconds();
+  const std::string policy = policy_digest();
+  if (policy.size() != kDigestStorePolicyBytes)
+    throw std::logic_error("input content cache policy digest changed shape");
+
+  ByteWriter writer;
+  writer.text(kDigestStoreMagic);
+  writer.text(policy);
+  writer.unsigned32(static_cast<std::uint32_t>(boot->size()));
+  writer.text(*boot);
+  writer.signed64(sealed_at);
+
+  std::scoped_lock lock(impl_->mutex);
+  std::vector<const FileCacheKey *> publishable;
+  publishable.reserve(impl_->recency.size());
+  for (const FileCacheKey &key : impl_->recency) {
+    const auto entry = impl_->entries.find(key);
+    if (entry == impl_->entries.end() ||
+        !valid_cached_record(key, entry->second.value, entry->second.seal)) {
+      ++result.refused_entries;
+      continue;
+    }
+    if (!timestamps_have_settled(key, sealed_at)) {
+      ++result.withheld_entries;
+      continue;
+    }
+    publishable.push_back(&key);
+  }
+  writer.unsigned64(static_cast<std::uint64_t>(publishable.size()));
+  const std::size_t header_bytes = writer.bytes().size();
+  for (const FileCacheKey *key : publishable) {
+    const auto &entry = impl_->entries.at(*key);
+    encode_store_entry(writer, *key, entry.value, entry.seal);
+  }
+  std::vector<unsigned char> bytes = writer.bytes();
+  // The reader locates records by multiplying this width out, so a record that
+  // stopped matching it has to fail here rather than at the next lock.
+  if (bytes.size() - header_bytes !=
+      publishable.size() * kDigestStoreEntryBytes)
+    throw std::logic_error(
+        "input content digest store record width no longer matches its bound");
+  const Digest trailer = digest_of(bytes);
+  bytes.insert(bytes.end(), trailer.begin(), trailer.end());
+  if (static_cast<std::uint64_t>(bytes.size()) > kDigestStoreMaximumBytes)
+    throw std::runtime_error(
+        "input content digest store exceeds its publication bound");
+  write_store_file(directory.get(), store_path.filename().native(), bytes);
+  result.present = true;
+  result.accepted = true;
+  result.offered_entries = static_cast<std::uint64_t>(publishable.size());
+  result.admitted_entries = result.offered_entries;
+  return result;
+}
 
 InputContentMeasurementCache::InputContentMeasurementCache(
     std::uint64_t maximum_entries, FilesystemIdentitySource filesystem_identity,

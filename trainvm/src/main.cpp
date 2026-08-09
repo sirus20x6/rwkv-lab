@@ -54,7 +54,12 @@ void usage() {
       << "  trainvm recipe diff <recipe-profiles.json> <left.json> <right.json>\n"
       << "  trainvm inspect-hostd-client <hostd-client.json>\n"
       << "  trainvm inspect-input-content-root <absolute-path>\n"
-      << "  trainvm lock-input-content <experiment.json> <root-set.json>\n"
+      << "  trainvm lock-input-content <experiment.json> <root-set.json> "
+         "[--content-cache <store>]\n"
+         "      # --content-cache reuses digests for files whose identity and "
+         "metadata\n"
+         "      # are unchanged. The store must live in an owner-only "
+         "directory.\n"
       << "  trainvm inspect-rwkv-lab-worker <sha256-code-fingerprint>\n"
       << "  trainvm inspect-rwkv-lab-runtime-requirements\n"
       << "  trainvm inspect-rwkv-lab-deployment"
@@ -438,8 +443,10 @@ int recipe_command(int argc, char** argv) {
   return 64;
 }
 
-int lock_input_content_command(const std::filesystem::path& experiment_path,
-                               const std::filesystem::path& root_set_path) {
+int lock_input_content_command(
+    const std::filesystem::path& experiment_path,
+    const std::filesystem::path& root_set_path,
+    const std::optional<std::filesystem::path>& content_cache_path) {
   nlohmann::json experiment =
       read_bounded_json_file(experiment_path, "experiment document");
   const nlohmann::json root_document =
@@ -450,7 +457,19 @@ int lock_input_content_command(const std::filesystem::path& experiment_path,
       !diagnostics.empty() || trainvm::encode_json(root_set) != root_document)
     throw std::invalid_argument(
         "input content root set does not match its reflected schema");
-  const auto identities = trainvm::measure_input_content_root_set(root_set);
+
+  // The cache is loaded before the walk and published only after the document
+  // it produced compiles, so a lock that is refused leaves no measurement
+  // behind to be reused by the next one.
+  std::optional<trainvm::InputContentMeasurementCache> content_cache;
+  std::optional<trainvm::InputContentMeasurementTransaction> transaction;
+  if (content_cache_path) {
+    content_cache.emplace();
+    (void)content_cache->admit_persistent_digests(*content_cache_path);
+    transaction.emplace(content_cache->begin_transaction());
+  }
+  const auto identities = trainvm::measure_input_content_root_set(
+      root_set, nullptr, transaction ? &*transaction : nullptr);
   if (!experiment.is_object() || !experiment.contains("spec") ||
       !experiment.at("spec").is_object() ||
       !experiment.at("spec").contains("workspace") ||
@@ -462,6 +481,10 @@ int lock_input_content_command(const std::filesystem::path& experiment_path,
   if (!compiled.valid()) {
     print_diagnostics(compiled);
     return 2;
+  }
+  if (content_cache) {
+    (void)transaction->commit();
+    (void)content_cache->publish_persistent_digests(*content_cache_path);
   }
   std::cout << experiment.dump(2) << '\n';
   return 0;
@@ -825,8 +848,17 @@ int main(int argc, char** argv) {
         std::string_view(argv[1]) == "inspect-input-content-root") {
       return inspect_input_content_root_command(argc, argv);
     }
-    if (argc == 4 && std::string_view(argv[1]) == "lock-input-content") {
-      return lock_input_content_command(argv[2], argv[3]);
+    if ((argc == 4 || argc == 6) &&
+        std::string_view(argv[1]) == "lock-input-content") {
+      std::optional<std::filesystem::path> content_cache;
+      if (argc == 6) {
+        if (std::string_view(argv[4]) != "--content-cache") {
+          usage();
+          return 64;
+        }
+        content_cache = std::filesystem::path(argv[5]);
+      }
+      return lock_input_content_command(argv[2], argv[3], content_cache);
     }
     if (argc == 3 &&
         std::string_view(argv[1]) == "inspect-rwkv-lab-worker") {

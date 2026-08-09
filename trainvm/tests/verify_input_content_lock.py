@@ -9,13 +9,16 @@ import tempfile
 from pathlib import Path
 
 
-def run(trainvm: Path, experiment: Path, roots: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [str(trainvm), "lock-input-content", str(experiment), str(roots)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+def run(
+    trainvm: Path,
+    experiment: Path,
+    roots: Path,
+    content_cache: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    argv = [str(trainvm), "lock-input-content", str(experiment), str(roots)]
+    if content_cache is not None:
+        argv += ["--content-cache", str(content_cache)]
+    return subprocess.run(argv, check=False, capture_output=True, text=True)
 
 
 def main() -> int:
@@ -81,6 +84,34 @@ def main() -> int:
             capture_output=True,
             text=True,
         )
+
+        # A digest store must never be able to change the answer, whatever it
+        # holds. Locking through one has to reproduce the identity measured
+        # without it, and has to keep reproducing it once the store has been
+        # written, rewritten with rubbish, and left owner-only on disk.
+        store = temporary / "digests.store"
+        cached_process = run(trainvm, experiment_path, roots_path, store)
+        if cached_process.returncode != 0:
+            raise SystemExit(cached_process.stderr)
+        if json.loads(cached_process.stdout) != locked:
+            raise SystemExit("a cached content lock produced a different document")
+        if not store.exists() or store.stat().st_mode & 0o077:
+            raise SystemExit("the digest store was not published owner-only")
+        repeated = run(trainvm, experiment_path, roots_path, store)
+        if repeated.returncode != 0 or json.loads(repeated.stdout) != locked:
+            raise SystemExit("a warm content lock produced a different document")
+        store.write_bytes(b"not a digest store")
+        store.chmod(0o600)
+        corrupted = run(trainvm, experiment_path, roots_path, store)
+        if corrupted.returncode != 0 or json.loads(corrupted.stdout) != locked:
+            raise SystemExit("a corrupt digest store changed the locked identity")
+        # A store anyone can write is not evidence of anything, and saying so
+        # is more useful than quietly measuring from bytes.
+        store.chmod(0o666)
+        exposed = run(trainvm, experiment_path, roots_path, store)
+        if exposed.returncode == 0:
+            raise SystemExit("a world-writable digest store was accepted")
+        store.unlink()
 
         roots_path.write_text(
             json.dumps(
