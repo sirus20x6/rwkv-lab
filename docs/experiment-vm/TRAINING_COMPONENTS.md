@@ -167,6 +167,33 @@ exact group/count/rate audit in the run contract. The catalog does not claim ano
 activation, objective, optimizer, router, or kernel until a real adapter path consumes the symbolic
 implementation and has CPU parity plus representative accelerator qualification.
 
+## A category is a kind; a slot is a role
+
+A composition maps slot names to components, and more than one slot may hold the same category.
+That is not an edge case, it is how the evaluation suite already works: `split`, the view an
+evaluator names as its held-out slot, and `test_split` are three `split_selector` components in one
+composition, and authority resolution reaches each of them by slot name. The worker bridge is built
+the same way round — its accessors take a slot and assert a category — so a second component of a
+category costs no second vocabulary.
+
+Optimizers are one of these. `rwkv-lab.transformer-mla-engram` fills `optimizer` with a dense AdamW
+over the model and `host_optimizer` with `torch.optim.SparseAdam` over the Engram embedding tables,
+which live in pinned host memory and emit sparse gradients the dense optimizer cannot consume.
+Those tables are ordinary model parameters trained by the same loss; what separates the two slots
+is gradient layout and placement, not what kind of component either is. So they share the
+`optimizer` category and are told apart by slot. What narrows the second slot to a sparse
+implementation is the adapter contract's per-slot allowlist, which is where a family-specific
+restriction belongs, and the worker re-applies it before any tensor is built.
+
+The one registry rule that reads across the optimizer category selects by the field it is about
+rather than by uniqueness: an optimizer whose configuration carries an initial `weight_decay` must
+agree with the declared weight-decay schedule, and at most one optimizer may carry one. An
+implementation with no `weight_decay` is not a party to it — `torch_sparse_adam@1.0.0` declares
+only a learning rate, two betas and an epsilon because SparseAdam has no decay term, and the v2
+no-decay AdamW implementations omit it deliberately. Demanding instead that the category hold
+exactly one member made every second optimizer slot unresolvable as a side effect, which is what
+kept the engram route unauthorable from the day it was declared.
+
 ## Model-family integration
 
 Adapters own topology-specific work only: parameter discovery and exhaustive routing, where an

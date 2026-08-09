@@ -628,18 +628,51 @@ void validate_evaluation_checkpoint_relationships(
     reject("trainable model composition requires an explicit checkpoint policy");
 }
 
+// A category is the kind of component; the slot is the role it plays. This
+// registry already admits several components of one category in a single
+// composition, and the evaluation checks above rely on it: `split`, the view
+// an evaluator names as its held-out slot, and `test_split` are three
+// split_selector components, resolved by slot name, with no demand that the
+// category hold exactly one. The worker bridge is built the same way round —
+// its accessors take a slot and assert a category, so `optimizer(slot=...)`
+// reaches a second optimizer without a second vocabulary.
+//
+// Optimizers have that shape too. rwkv-lab.transformer-mla-engram fills
+// `optimizer` with a dense AdamW over the model and `host_optimizer` with
+// torch.optim.SparseAdam over the Engram embedding tables, which live in
+// pinned host memory and emit sparse gradients the dense optimizer cannot
+// consume. Those are two roles of one kind, not two kinds; the contract, not
+// the category, is what narrows the second slot to a sparse implementation.
+//
+// So the rule here is narrower than the uniqueness it used to demand: an
+// optimizer carrying its own initial `weight_decay` must agree with the
+// declared weight-decay schedule, so a composition cannot state one decay in
+// two places and mean two things. Reaching that optimizer through
+// unique_component made every second optimizer-category slot unresolvable as
+// a side effect. Selecting by the field the rule is about keeps the rule and
+// drops the accident: an implementation whose configuration carries no
+// weight_decay was never a party to it — torch_sparse_adam declares only a
+// learning rate, two betas and an epsilon because SparseAdam has no decay
+// term, and torch_adamw_no_decay.v2 omits it deliberately. Two optimizers
+// that both declare one stay refused; that ambiguity is the case the old
+// message was reaching for, and it is now stated directly.
 void validate_optimizer_decay_relationships(
     const ResolvedTrainingComposition& composition) {
   const auto grouped = components_by_category(composition);
-  const auto* optimizer = unique_component(
-      grouped, TrainingComponentCategory::optimizer, "optimizer");
   const auto* decay = unique_component(
       grouped, TrainingComponentCategory::weight_decay_schedule,
       "weight decay schedule");
-  if (optimizer == nullptr || decay == nullptr ||
-      !optimizer->configuration.contains("weight_decay"))
-    return;
-  if (optimizer->configuration.at("weight_decay").get<double>() !=
+  const auto optimizers = grouped.find(TrainingComponentCategory::optimizer);
+  if (optimizers == grouped.end()) return;
+  const ResolvedTrainingComponent* decayed = nullptr;
+  for (const auto* optimizer : optimizers->second) {
+    if (!optimizer->configuration.contains("weight_decay")) continue;
+    if (decayed != nullptr)
+      reject("training composition may declare an initial weight decay on only one optimizer");
+    decayed = optimizer;
+  }
+  if (decayed == nullptr || decay == nullptr) return;
+  if (decayed->configuration.at("weight_decay").get<double>() !=
       decay->configuration.at("weight_decay").get<double>())
     reject("legacy optimizer and weight-decay schedule must declare one equal initial value");
 }

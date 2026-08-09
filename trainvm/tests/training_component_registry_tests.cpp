@@ -1,8 +1,10 @@
 #include "trainvm/training_component_registry.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -978,6 +980,68 @@ void checked_in_component_catalog_matches_native_authority_contract() {
             decay.descriptor.step_domain ==
                 trainvm::StepDomain::optimizer_step,
         "optimizer mechanics and weight-decay policy resolve as independent components");
+
+  // A composition may fill more than one optimizer-category slot — the
+  // Transformer MLA engram route pairs a dense AdamW over the model with a
+  // sparse one over its host-resident embedding tables — so the decay
+  // cross-check picks the optimizer by the weight_decay it carries rather
+  // than by being its category's only member. What that check refuses is
+  // unchanged in the single-optimizer case and stated directly in the new
+  // one: a decay declared twice, or a decay that disagrees with the schedule.
+  const auto two_optimizers = [](nlohmann::json host_configuration) {
+    trainvm::TrainingComposition composition{
+        .model_family = "transformer",
+        .components =
+            {{"optimizer",
+              {.key = {.category =
+                           trainvm::TrainingComponentCategory::optimizer,
+                       .name = "torch_adamw",
+                       .version = "1.0.0"},
+               .configuration = {{"learning_rate", 0.0003},
+                                 {"weight_decay", 0.1}}}},
+             {"weight_decay",
+              {.key = {.category = trainvm::TrainingComponentCategory::
+                           weight_decay_schedule,
+                       .name = "constant",
+                       .version = "1.0.0"},
+               .configuration = {{"weight_decay", 0.1}}}}},
+        .topologies = std::nullopt,
+        .post_training = std::nullopt,
+    };
+    composition.components.emplace(
+        "host_optimizer",
+        trainvm::TrainingComponentSelection{
+            .key = {.category = trainvm::TrainingComponentCategory::optimizer,
+                    .name = host_configuration.contains("weight_decay")
+                                ? "torch_adamw"
+                                : "torch_sparse_adam",
+                    .version = "1.0.0"},
+            .configuration = std::move(host_configuration)});
+    return composition;
+  };
+  const auto engram_shaped =
+      registry.resolve_composition(two_optimizers({{"learning_rate", 0.0015}}));
+  check(std::ranges::count_if(
+            engram_shaped.components,
+            [](const auto& item) {
+              return item.second.descriptor.key.category ==
+                     trainvm::TrainingComponentCategory::optimizer;
+            }) == 2 &&
+            !engram_shaped.components.at("host_optimizer")
+                 .configuration.contains("weight_decay"),
+        "a composition may pair a decayed optimizer with a sparse one that declares no decay");
+  check(rejects([&] {
+          (void)registry.resolve_composition(two_optimizers(
+              {{"learning_rate", 0.0015}, {"weight_decay", 0.1}}));
+        }),
+        "two optimizers may not each declare an initial weight decay");
+  {
+    auto disagreeing = two_optimizers({{"learning_rate", 0.0015}});
+    disagreeing.components.at("optimizer").configuration["weight_decay"] = 0.2;
+    check(rejects([&] { (void)registry.resolve_composition(disagreeing); }),
+          "a decayed optimizer must still agree with the weight-decay schedule beside a second optimizer");
+  }
+
   const auto powercool = registry.resolve({
       .key = {
           .category =
