@@ -19,6 +19,7 @@ from rwkv_lab.trainvm_worker import (
     publish_checkpoint_requests,
     resolve_resume_checkpoint,
 )
+from rwkv_lab.trainvm_worker._canonical import deep_freeze
 from rwkv_lab.trainvm_worker.checkpoint import _STATE_COMPONENTS
 
 
@@ -336,6 +337,71 @@ def test_controller_selected_resume_accepts_frozen_parent_lineage(
             "checkpoint": MappingProxyType(checkpoint),
         }
     )
+
+    resolved = resolve_resume_checkpoint(invocation)
+
+    assert resolved is not None
+    assert resolved.artifact_id == result.artifact_id
+
+
+def test_controller_selected_resume_survives_the_production_invocation_freeze(
+    tmp_path: Path,
+) -> None:
+    """The freeze `load_worker_invocation` applies is the real source of tuples.
+
+    `_load_resume` validates `parent_artifact_ids` as a list and *then* returns
+    `deep_freeze(value)`, which rewrites every list as a tuple. So a production
+    resume authority never carries a list here, while the manifest — freshly
+    `canonical_loads`-ed from bytes — always does. Freezing the whole mapping
+    the way production does keeps this test honest if `deep_freeze` changes;
+    hand-rolling one tuple would not.
+    """
+
+    session = FakeCheckpointSession(tmp_path)
+    result = CheckpointPublisher(session).publish(
+        make_checkpoint(tmp_path),
+        optimizer_step=12,
+        resume_grade="compatible",
+        state_components=("model", "optimizer", "rng_torch"),
+        parent_artifact_ids=("base-model-1",),
+    )
+    invocation = resume_invocation(session, result)
+    invocation.resume = deep_freeze(dict(invocation.resume))
+
+    assert isinstance(invocation.resume["checkpoint"]["parent_artifact_ids"], tuple)
+
+    resolved = resolve_resume_checkpoint(invocation)
+
+    assert resolved is not None
+    assert resolved.artifact_id == result.artifact_id
+
+
+def test_controller_selected_resume_accepts_frozen_empty_parent_lineage(
+    tmp_path: Path,
+) -> None:
+    """Empty lineage is the case that made this unconditional.
+
+    `[] == ()` is False, so a checkpoint with no parents at all was rejected
+    just as surely as one with parents. Nothing about the lineage contents was
+    ever required for the failure.
+    """
+
+    session = FakeCheckpointSession(tmp_path)
+    result = CheckpointPublisher(session).publish(
+        make_checkpoint(tmp_path),
+        optimizer_step=12,
+        resume_grade="compatible",
+        state_components=("model", "optimizer", "rng_torch"),
+        parent_artifact_ids=(),
+    )
+    invocation = resume_invocation(session, result)
+    resume = dict(invocation.resume)
+    checkpoint = dict(resume["checkpoint"])
+    checkpoint["parent_artifact_ids"] = []
+    resume["checkpoint"] = checkpoint
+    invocation.resume = deep_freeze(resume)
+
+    assert invocation.resume["checkpoint"]["parent_artifact_ids"] == ()
 
     resolved = resolve_resume_checkpoint(invocation)
 
