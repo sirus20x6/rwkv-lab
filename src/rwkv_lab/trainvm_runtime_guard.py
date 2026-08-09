@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 import sysconfig
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 RUNTIME_CLOSURE_MEMBER = "TRAINVM_RUNTIME_CLOSURE.json"
-RUNTIME_CLOSURE_SCHEMA = "trainvm.python-bootstrap-runtime-closure/v3"
+RUNTIME_CLOSURE_SCHEMA = "trainvm.python-bootstrap-runtime-closure/v4"
 MAXIMUM_MANIFEST_BYTES = 32 * 1024 * 1024
 MAXIMUM_FILES = 100_000
 MAXIMUM_TOTAL_BYTES = 32 * 1024 * 1024 * 1024
@@ -28,6 +29,9 @@ MAXIMUM_NATIVE_OBJECTS = 32768
 # when they disagree, which is the protection a shared import would have given.
 NATIVE_SUFFIXES = (".so",)
 NVIDIA_DRIVER_VERSION_FILE = "/proc/driver/nvidia/version"
+NVIDIA_MODULE_BUILD_ID_FILE = "/sys/module/nvidia/notes/.note.gnu.build-id"
+_NT_GNU_BUILD_ID = 3
+_DRIVER_VERSION_TOKEN = re.compile(r"\d+(?:\.\d+)+")
 
 
 class RuntimeClosureError(RuntimeError):
@@ -221,13 +225,98 @@ def native_objects(roots: list[str]) -> list[str]:
     return sorted(set(found))
 
 
-def driver_version() -> str | None:
+def driver_report() -> str | None:
+    """The kernel's own description of the NVIDIA driver, verbatim.
+
+    Evidence, never an identity. The line ends in the user and host that
+    compiled the module -- ``(root@neuromancer)`` -- so comparing it for
+    equality refuses a host for having rebuilt its driver rather than for
+    running a different one. Recorded in the manifest beside the identity, and
+    quoted in the rejection, so a human debugging one can still see both the
+    build the closure was sealed against and the build in front of them.
+    """
+
     try:
         with open(NVIDIA_DRIVER_VERSION_FILE, encoding="utf-8", errors="replace") as f:
             line = f.readline(4096).strip()
     except OSError:
         return None
     return line or None
+
+
+def _module_build_id() -> str | None:
+    """The GNU build ID of the loaded ``nvidia`` module, from its ELF note.
+
+    The build ID is the linker's hash of the module's own contents, so it
+    answers the question the build host was standing in for: is this the same
+    artifact? Read from sysfs rather than from the module file on disk, which
+    is ``/lib/modules/<release>/updates/dkms/nvidia.ko.zst`` on a DKMS host --
+    compressed, at a path that depends on how the driver was packaged, and not
+    necessarily the artifact the kernel actually has loaded. The sysfs note is
+    a fixed path, a plain read, and world-readable.
+
+    None when the kernel exposes no usable note, which is not an error: a
+    module linked with ``--build-id=none`` has none to expose, and the identity
+    falls back to the version token alone.
+    """
+
+    try:
+        with open(NVIDIA_MODULE_BUILD_ID_FILE, "rb") as stream:
+            note = stream.read(4096)
+    except OSError:
+        return None
+    if len(note) < 12:
+        return None
+    name_size = int.from_bytes(note[0:4], sys.byteorder)
+    description_size = int.from_bytes(note[4:8], sys.byteorder)
+    start = 12 + (name_size + 3) // 4 * 4
+    if (
+        int.from_bytes(note[8:12], sys.byteorder) != _NT_GNU_BUILD_ID
+        or note[12 : 12 + name_size] != b"GNU\x00"
+        or not 8 <= description_size <= 64
+        or len(note) < start + description_size
+    ):
+        return None
+    return note[start : start + description_size].hex()
+
+
+def driver_identity() -> str | None:
+    """What has to still hold for a compiled artifact to be valid on this host.
+
+    The driver's version token, plus the loaded module's build ID when the
+    kernel exposes one.
+
+    Deliberately *not* the whole first line of /proc/driver/nvidia/version.
+    That line carries the build user and host, so a DKMS rebuild, or the same
+    driver version built on another machine, moves it while the driver stays
+    bit-for-bit compatible -- and everything keyed on this identity refuses or
+    goes cold for a non-reason: this guard rejects the host, and the worker's
+    cache namespace changes underneath ``compute_compatibility_digest``. The
+    whole line is not even a legal identity downstream: it contains spaces,
+    parentheses and ``@``, none of which ``fixed_public_identity`` in
+    trainvm/src/cache_namespace.cpp accepts.
+
+    The version token alone would be too weak to stand on its own -- "same
+    version string, different build" is a real failure, and an open kernel
+    module compiled elsewhere with different flags is not obviously the same
+    artifact. The build ID closes that: a rebuild producing identical bytes
+    reads as identical, one producing different bytes reads as different, and
+    both directions are what we actually mean.
+
+    None on a host with no NVIDIA driver, which is pinned as firmly as a
+    version string is.
+    """
+
+    report = driver_report()
+    if report is None:
+        return None
+    found = _DRIVER_VERSION_TOKEN.search(report)
+    # A line whose shape this does not recognise keeps the whole line rather
+    # than dropping the driver out of the identity: too strict is recoverable
+    # by resealing, too permissive is not noticed at all.
+    version = found.group(0) if found else report
+    build_id = _module_build_id()
+    return version if build_id is None else f"{version}+gnu-build-id:{build_id}"
 
 
 def _resolve(search: list[str], needed: str) -> str | None:
@@ -434,19 +523,32 @@ def _verify_native(native: Any, index: dict[str, dict[str, Any]]) -> None:
     cuda = native["cuda"]
     if (
         not isinstance(cuda, dict)
-        or set(cuda) != {"driver_version", "sonames"}
+        or set(cuda) != {"driver_identity", "driver_report", "sonames"}
         or not isinstance(cuda["sonames"], list)
         or cuda["sonames"] != sorted(set(cuda["sonames"]))
     ):
         raise RuntimeClosureError("runtime closure CUDA identity is malformed")
-    recorded_driver = cuda["driver_version"]
-    if recorded_driver is not None and not isinstance(recorded_driver, str):
+    recorded_driver = cuda["driver_identity"]
+    recorded_report = cuda["driver_report"]
+    if (recorded_driver is not None and not isinstance(recorded_driver, str)) or (
+        recorded_report is not None and not isinstance(recorded_report, str)
+    ):
         raise RuntimeClosureError("runtime closure CUDA driver identity is malformed")
     # The driver is in the kernel, not in the closure, so nothing else here can
-    # notice it moving. Null is pinned as firmly as a version string: a host
+    # notice it moving. Null is pinned as firmly as an identity string: a host
     # that grew a driver since the closure was sealed is a changed host.
-    if recorded_driver != driver_version():
-        raise RuntimeClosureError("runtime closure CUDA driver identity changed")
+    #
+    # Only `driver_identity` is compared. `driver_report` is carried for the
+    # human reading a rejection and is deliberately never load-bearing -- it
+    # names the machine that compiled the module, and equality on that is the
+    # defect this pair replaced.
+    observed = driver_identity()
+    if recorded_driver != observed:
+        raise RuntimeClosureError(
+            "runtime closure CUDA driver identity changed: sealed against "
+            f"{recorded_driver!r} ({recorded_report!r}), host reports "
+            f"{observed!r} ({driver_report()!r})"
+        )
 
 
 def verify_embedded_runtime_closure(archive_path: str | None = None) -> str:
@@ -560,7 +662,8 @@ __all__ = [
     "RUNTIME_CLOSURE_MEMBER",
     "RUNTIME_CLOSURE_SCHEMA",
     "RuntimeClosureError",
-    "driver_version",
+    "driver_identity",
+    "driver_report",
     "native_objects",
     "native_roots",
     "self_owned_closure_ancestors",

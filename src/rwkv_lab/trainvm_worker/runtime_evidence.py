@@ -42,8 +42,12 @@ from typing import Any
 # closure pins whatever that function returned when the deployment was sealed
 # and refuses the host if it has moved since, so a probe that parsed
 # /proc/driver/nvidia/version its own way could report a driver the closure had
-# already accepted as unchanged, or the reverse.
-from ..trainvm_runtime_guard import driver_version
+# already accepted as unchanged, or the reverse. The `driver_version` field
+# below keeps its name -- it is the wire field of the worker evidence report,
+# shared with the proto and the C++ claim -- but its value is the guard's
+# identity, which is a version token and a module build ID rather than the
+# whole first line of /proc/driver/nvidia/version.
+from ..trainvm_runtime_guard import driver_identity
 from ._canonical import canonical_dumps, is_bounded_text, is_digest, sha256_digest
 from .bootstrap import WorkerBootstrap
 
@@ -189,7 +193,7 @@ def _compute_identity(
     vendor = next(iter(vendors))
     if vendor != "nvidia":
         raise RuntimeEvidenceError(f"unsupported accelerator vendor: {vendor}")
-    version = driver_version()
+    version = driver_identity()
     if not is_bounded_text(version, 256):
         raise RuntimeEvidenceError(
             "an NVIDIA device was selected but the kernel exposes no usable "
