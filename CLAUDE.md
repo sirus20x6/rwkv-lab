@@ -353,6 +353,7 @@ making the merged-PR reference structural instead of a prose convention.
 
 ```bash
 python scripts/ci_coverage_gate.py -m "not gpu"
+python scripts/ci_unwired_module_gate.py
 python scripts/validate_benchmark_matrix.py
 python scripts/validate_experiment_documents.py
 python scripts/validate_native_ci_exclusions.py
@@ -364,6 +365,24 @@ done
 Each ends with a line stating `PASSED` or `FAILED`. Read that line — the older
 form printed a neutral tally that looked identical either way, and a PR was
 pushed red because its output was truncated to exactly that line.
+
+### Adding a native module now costs a caller or a stated reason
+
+`ci_unwired_module_gate.py` fails when a header under `trainvm/include/trainvm/`
+is reached by no translation unit in `trainvm/src/` other than its own `.cpp`.
+So a new module lands red until something in production includes it — directly
+or through another header, the traversal is transitive — or until
+`docs/experiment-vm/unwired-module-exclusions.v1.json` says why not.
+
+That is deliberate friction and it is affordable, because landing the module
+ahead of its consumer is often right. What is not affordable is doing it
+silently: four modules shipped fully implemented, fully tested and green with
+zero production callers, and every one was found by a card sweep months later.
+An allowlist entry costs one sentence and turns that into a recorded decision.
+
+The allowlist is a countdown. An entry whose module later gains a production
+includer **fails**, so it can only shrink — write the entry expecting to delete
+it.
 
 ## Content pins, and how to refresh them
 
