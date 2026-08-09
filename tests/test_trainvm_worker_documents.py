@@ -293,3 +293,40 @@ def test_worker_accepts_every_category_the_shipped_registry_uses() -> None:
         "the shipped component registry uses categories this worker rejects: "
         f"{sorted(shipped - _CATEGORIES)}"
     )
+
+
+def test_worker_categories_match_the_native_enum_exactly() -> None:
+    """The registry check above is one-directional, which is not enough.
+
+    It only proves the worker admits everything the shipped registry uses. A
+    category the native enum has and the registry does not yet exercise could
+    still go missing here — which is precisely how activation_memory and
+    generation_policy were lost from the JSON Schema, unnoticed because no
+    checked-in document selected one. Pin the worker to the authority itself,
+    in both directions. `tests/test_experiment_schema_authority.py` does the
+    same for the schema's third copy of this vocabulary.
+    """
+    import re
+
+    from rwkv_lab.trainvm_worker.training import _CATEGORIES
+
+    header = (
+        Path(__file__).resolve().parents[1]
+        / "trainvm/include/trainvm/model.hpp"
+    ).read_text(encoding="utf-8")
+    body = re.search(
+        r"enum class TrainingComponentCategory\s*(?::[^{]*)?\{(.*?)\}\s*;",
+        header,
+        re.DOTALL,
+    )
+    assert body is not None, (
+        "TrainingComponentCategory is no longer a scoped enum in model.hpp; "
+        "fix this parse rather than dropping the pin"
+    )
+    native = {name.strip() for name in body.group(1).split(",") if name.strip()}
+
+    assert native == set(_CATEGORIES), (
+        "the worker's _CATEGORIES and TrainingComponentCategory disagree; "
+        f"missing from the worker: {sorted(native - set(_CATEGORIES))}; "
+        f"unknown to the authority: {sorted(set(_CATEGORIES) - native)}"
+    )

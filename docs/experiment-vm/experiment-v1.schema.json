@@ -712,7 +712,8 @@
             "image_gallery",
             "metrics",
             "report",
-            "opaque"
+            "opaque",
+            "eval_examples"
           ]
         },
         "schema": {
@@ -1066,6 +1067,7 @@
           "enum": [
             "model_loader",
             "trainability",
+            "activation_memory",
             "data_source",
             "sample_processor",
             "sample_mapper",
@@ -1083,6 +1085,7 @@
             "precision",
             "gradient_clipping",
             "gradient_accumulation",
+            "generation_policy",
             "curriculum",
             "metric_reducer",
             "evaluator",
