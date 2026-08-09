@@ -117,19 +117,40 @@ def main() -> int:
         # succeeded. The command publishes after it has measured every root and
         # recompiled the document, so a throw there costs the whole run: the
         # operator saw an uncaught exception and lost a locked document that was
-        # already correct. Forced here by a directory the process may read and
-        # traverse but not create in, which is a real permission mistake and
-        # needs no disk to be filled. The store's own safety rules are satisfied
-        # -- it is owner-only and not group- or world-writable -- so this fails
-        # at the write, which is exactly where a full disk would fail too.
+        # already correct.
+        #
+        # Forced by occupying the name publication stages through. `O_CREAT |
+        # O_EXCL` against an existing directory fails with EEXIST for every uid,
+        # which is the point: an earlier version of this test revoked write
+        # permission on the containing directory instead, and passed only
+        # because the developer running it was not root. CI is, root ignores the
+        # mode bits, publication succeeded, and the test failed honestly rather
+        # than pretending to cover this. The authority's own permission rules
+        # read st_mode directly and so are uid-independent; a test that leans on
+        # the *kernel* enforcing those bits is not.
+        #
+        # This does couple the test to the ".staged" suffix in
+        # `write_store_file`. That is deliberate: if the staging name changes,
+        # this failing is the correct outcome, because the injection would
+        # otherwise stop reaching publication and quietly prove nothing.
         sealed_directory = temporary / "sealed"
         sealed_directory.mkdir()
         sealed_store = sealed_directory / "digests.store"
-        sealed_directory.chmod(0o500)
-        try:
-            unpublishable = run(trainvm, experiment_path, roots_path, sealed_store)
-        finally:
-            sealed_directory.chmod(0o700)
+        (sealed_directory / "digests.store.staged").mkdir()
+        unpublishable = run(trainvm, experiment_path, roots_path, sealed_store)
+        # Check the precondition before the property, and report them as
+        # different facts. "The fault could not be arranged" and "the warning
+        # was missing" have the same symptom and opposite meanings, and the
+        # first version of this test conflated them -- it failed in CI saying
+        # the operator was not told, when the truth was that publication had
+        # succeeded and there was nothing to tell. That conflation is the same
+        # defect class this PR fixes one layer down, so it is worth the extra
+        # branch here.
+        if sealed_store.exists():
+            raise SystemExit(
+                "could not arrange an unpublishable store: publication succeeded "
+                "and wrote " + str(sealed_store) + ", so the case below is untested"
+            )
         if unpublishable.returncode != 0:
             raise SystemExit(
                 "an unpublishable digest store failed a lock that had succeeded: "
@@ -143,8 +164,6 @@ def main() -> int:
             raise SystemExit(
                 "a store that could not be written was not reported to the operator"
             )
-        if sealed_store.exists():
-            raise SystemExit("the sealed store was written after all")
 
         roots_path.write_text(
             json.dumps(
