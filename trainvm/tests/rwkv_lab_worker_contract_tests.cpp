@@ -299,7 +299,9 @@ trainvm::TrainingComposition transformer_mla_composition_for(bool engram) {
 // manifest provenance, then the evaluator struck out of the resolved
 // composition to prove the check is what makes the walk succeed. Every route
 // shares one composition contract, so an evaluator missing from that contract
-// would have deadlocked all eight at once.
+// would have deadlocked all eight at once. All eight walk: the engram route
+// was pinned as unresolvable here while the registry insisted its optimizer
+// category hold exactly one member, and is no longer.
 void verify_transformer_mla_evaluator_provenance(
     const trainvm::RwkvLabWorkerContract& contract,
     const trainvm::TrainingComponentRegistry& components) {
@@ -327,27 +329,21 @@ void verify_transformer_mla_evaluator_provenance(
     require(composition.components.size() ==
                 profile.training_composition->slots.size(),
             "the authored Transformer MLA composition must fill every declared slot");
-    if (engram) {
-      // The engram route's slot set cannot resolve, and this predates the
-      // evaluation suite: it declares `optimizer` and `host_optimizer`, both
-      // of category optimizer, while validate_optimizer_decay_relationships
-      // runs unique_component over that category on every resolve and refuses
-      // a second selection. So the contract slot is verifiable but the walk
-      // below is not reachable for this one route. Pinned rather than skipped
-      // so the day the registry learns about host optimizers this test says
-      // so and the walk can be extended to all eight.
-      bool refused_two_optimizers = false;
-      try {
-        (void)components.resolve_composition(composition);
-      } catch (const trainvm::TrainingComponentResolutionError&) {
-        refused_two_optimizers = true;
-      }
-      require(refused_two_optimizers,
-              "the engram route's two optimizer-category slots must still be the only thing blocking its resolution");
-      continue;
-    }
     const trainvm::ResolvedTrainingComposition resolved =
         components.resolve_composition(composition);
+    // The engram route fills two optimizer-category slots: a dense AdamW over
+    // the model and a sparse one over the Engram host embedding tables. It
+    // walks with the other seven rather than being pinned as unresolvable,
+    // which is what says validate_optimizer_decay_relationships now selects
+    // the optimizer its rule is about by the weight_decay it carries instead
+    // of by being the only member of its category.
+    require(std::ranges::count_if(
+                resolved.components,
+                [](const auto& item) {
+                  return item.second.descriptor.key.category ==
+                         trainvm::TrainingComponentCategory::optimizer;
+                }) == (engram ? 2 : 1),
+            "the engram route must resolve both of its optimizer slots and every other route exactly one");
     std::size_t evaluators = 0U;
     for (const auto& [name, component] : resolved.components) {
       (void)name;
