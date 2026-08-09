@@ -230,6 +230,37 @@ scripts/acceptance.sh                 # full non-GPU acceptance
 scripts/acceptance.sh --gpu           # also the GPU-marked suite
 ```
 
+Every suite except the `--gpu` phase runs behind
+`scripts/non_gpu_environment.py`, which blanks the CUDA/HIP/ROCm/NVIDIA/JAX
+device selectors and `exec`s the real command. That has to happen before the
+process starts, because pytest imports test modules *before* it filters on
+markers: the argument to `@pytest.mark.skipif(not torch.cuda.is_available())`
+is evaluated when the decorator is applied, so a `-m "not gpu"` run initialized
+the driver for tests it then deselected. On a workstation whose GPU also drives
+the display, that is a user-visible cost paid by a suite that ran nothing.
+
+The coverage gate is masked for the same reason and it is not incidental: it is
+a `--collect-only` run, so it imports every test module in the repository.
+
+`tests/conftest.py` applies the identical mask in top-level code — not in
+`pytest_configure`, which runs after module import and would be too late. The
+two cover disjoint cases: the conftest catches a bare `pytest` invocation the
+launcher never sees, and the launcher catches native binaries and subprocess
+trees that never enter Python. Both are wanted.
+
+Accelerator access is granted in exactly one way, `TRAINVM_TEST_ACCELERATOR_ACCESS=1`,
+set by `scripts/acceptance.sh --gpu`, `scripts/test_parallel.sh --gpu`, and the
+self-hosted GPU CI job. Without it the conftest skips every `gpu`-marked test
+even when the caller forgets `-m "not gpu"`, so the GPU suites are opt-in by
+default rather than by convention.
+
+Verify the property physically rather than by asking the masked library —
+`torch.cuda.is_available() is False` is also true of a CPU-only wheel, which is
+why hosted CI stayed green throughout. The check that means something is that no
+descriptor in `/proc/self/fd` resolves to `/dev/nvidia*` or `/dev/dri/*`;
+`tests/test_non_gpu_environment.py` asserts exactly that, and hosted CI cannot
+prove it because hosted runners have no GPU to fail against.
+
 It writes `evidence/acceptance.json`: a per-suite pass/fail/skip receipt
 stamped with the exact commit and whether the worktree was dirty, so a result
 can never be attributed to source it did not run against. Skips are recorded

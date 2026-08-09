@@ -82,7 +82,11 @@ jobs:
           # real rather than a directory full of skips.
           pip install -e '.[vision,test,trainvm-worker]'
       - name: Every test file is covered or explicitly excluded
-        run: python scripts/ci_coverage_gate.py -m "not gpu"
+        # Masked like every other non-GPU invocation. These runners have no GPU,
+        # so this cannot fail here -- it is kept identical to the local command
+        # on purpose, because a CI recipe that diverges from the one developers
+        # run is the reason the original defect was invisible to CI.
+        run: python scripts/non_gpu_environment.py python scripts/ci_coverage_gate.py -m "not gpu"
 
   python-cpu:
     name: CPU tests (Python ${{ matrix.python }})
@@ -120,7 +124,8 @@ jobs:
       - name: Run the full non-GPU suite
         run: |
           mkdir -p evidence
-          python -m pytest -q -n auto --dist worksteal -m "not gpu" tests \
+          python scripts/non_gpu_environment.py \
+            python -m pytest -q -n auto --dist worksteal -m "not gpu" tests \
             --junitxml=evidence/python-cpu-${{ matrix.python }}.xml
 
       - name: Publish evidence
@@ -167,7 +172,8 @@ jobs:
       - name: The fla-marked assertions run against the installed package
         run: |
           mkdir -p evidence
-          python -m pytest -q -m "fla and not gpu" tests \
+          python scripts/non_gpu_environment.py \
+            python -m pytest -q -m "fla and not gpu" tests \
             --junitxml=evidence/python-fla.xml
 
       - name: Publish evidence
@@ -499,7 +505,9 @@ jobs:
       - name: Run GPU-marked suite
         run: |
           mkdir -p evidence
-          python -m pytest -q -m gpu tests --junitxml=evidence/gpu.xml
+          # The only invocation in this workflow that authorizes a device.
+          TRAINVM_TEST_ACCELERATOR_ACCESS=1 \
+            python -m pytest -q -m gpu tests --junitxml=evidence/gpu.xml
       - name: Publish evidence
         if: always()
         uses: actions/upload-artifact@v4
