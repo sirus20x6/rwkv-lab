@@ -102,6 +102,25 @@ repository cannot silently narrow native coverage. Focused tests pin these
 decisions. Each native run uploads its selected mode, elapsed seconds, and
 ccache statistics; those receipts are the source of before/after claims.
 
+#### What the tiering actually saved
+
+Measured, not estimated. The **before** figure is the ten most recent green
+`TrainVM native (ctest)` jobs prior to the change: 587-751 s, median 633 s. On
+PR #141 the step breakdown was 68 s to restore and load the cached toolchain
+image and 512 s to build every target and run ctest.
+
+The **after** figure is this pull request, which changes only this file and so
+selects the `catalog` tier — the tier a Python-only or documentation-only change
+gets. It still builds the real `trainvm` CLI, still runs `validate-catalog`
+against the checkout, and still crosses both native/Python worker contracts. It
+does not build the test targets or run ctest.
+
+Two costs are worth separating so the number is not read as better than it is.
+The pull request that introduced tiering was itself *slower* than baseline —
+14 m 4 s — because it edits the Dockerfile, which invalidates the toolchain image
+layer cache (206 s instead of 68 s) and starts with an empty ccache. Both are
+one-time; neither recurs on a change that leaves the Dockerfile alone.
+
 Fail-closed has to survive the plumbing, not just the classifier, and two of the
 ways it could have leaked are worth naming because neither is visible from the
 Python:
