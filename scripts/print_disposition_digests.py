@@ -24,6 +24,23 @@ implementation over entries handed to it from outside, and
 trainvm/tests/source_disposition_catalog_tests.cpp runs both implementations
 over the same entries and compares the answers with no stored value between
 them.
+
+Refusals, which are not drift
+-----------------------------
+The C++ loader decides two things before it hashes anything: `source_path` is
+run through `validate_relative_path` (normalized, repository-relative), and the
+file is opened `O_NOFOLLOW`, so a source replaced by a symlink cannot be read at
+all. Those decisions have to hold here too, because the loader's byte check only
+runs when `load_file` is handed a repository root and the native suite guards
+that behind `TRAINVM_LEGACY_SOURCE_ROOT`, unset in CI: in a hosted run this
+script is the only thing verifying those sources' bytes, so its resolution rules
+are the effective contract. A checker that follows a link answers "are these the
+bytes at the end of this path" rather than "are these the bytes that were
+reviewed", and the two coincide right up until they matter.
+
+A refusal is reported as REFUSED, exits non-zero with or without `--check`, and
+suppresses `--write` -- repinning cannot repair it, and pinning through a link
+would record the target's bytes as though they were the reviewed ones.
 """
 
 from __future__ import annotations
@@ -45,6 +62,42 @@ def source_sha256(path: pathlib.Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def path_spelling_problem(value: str) -> str | None:
+    """Mirror of validate_relative_path() in source_disposition_catalog.cpp.
+
+    The C++ runs that on every entry's `source_path` before it hashes anything,
+    so a document this script pins through is not necessarily a document the
+    loader will accept. Pure string work on both sides -- nothing here can drift
+    the way a fold can. The sentence is the native one verbatim so one grep
+    finds either report.
+    """
+    if not value or len(value) > 1024:
+        return "source_path must be bounded and nonempty"
+    relative = pathlib.PurePosixPath(value)
+    if relative.is_absolute() or any(
+            part in ("", ".", "..") for part in relative.parts) or (
+            value != str(relative)):
+        return "source_path must be a normalized repository-relative path"
+    return None
+
+
+def symlink_problem(root: pathlib.Path, relative: str) -> str | None:
+    """The loader opens sources with O_NOFOLLOW, so a link is not a source.
+
+    Without this, a classified source replaced by a symlink hashes to whatever
+    it points at and reads as clean here, while the binary refuses to open it at
+    all -- the pin would answer "are these the bytes at the end of this link"
+    rather than "are these the bytes that were reviewed". Same sentence as
+    scripts/ci_compatibility_pin_gate.py's check, for the same grep.
+    """
+    walked = root
+    for part in pathlib.PurePosixPath(relative).parts:
+        walked = walked / part
+        if walked.is_symlink():
+            return f"resolves through a symlink at {walked.relative_to(root)}"
+    return None
+
+
 def tree_digest(entries: list[dict]) -> str:
     """Mirror of trainvm::source_tree_digest() in source_disposition_catalog.cpp.
 
@@ -62,20 +115,38 @@ def tree_digest(entries: list[dict]) -> str:
     return "sha256:" + hashlib.sha256(bytes(material)).hexdigest()
 
 
-def recompute(document: dict, root: pathlib.Path) -> tuple[list[str], dict]:
-    """Return (drifted source paths, the document with pins refreshed)."""
+def recompute(
+    document: dict, root: pathlib.Path
+) -> tuple[list[str], list[str], dict]:
+    """Return (drifted source paths, refused entries, the refreshed document).
+
+    Drift and refusal are separate because they are answered differently: a
+    drifted pin is what `--write` exists to repair, while a refused entry is one
+    the native loader would not accept at all, so pinning it would write a value
+    the binary can never agree with. Nothing refused gets a recomputed pin.
+    """
     refreshed = json.loads(json.dumps(document))
     drifted: list[str] = []
+    refused: list[str] = []
     for entry in refreshed["entries"]:
-        path = root / entry["source_path"]
+        source_path = entry["source_path"]
+        spelling = path_spelling_problem(source_path)
+        if spelling is not None:
+            refused.append(f"{source_path!r}: {spelling}")
+            continue
+        symlinked = symlink_problem(root, source_path)
+        if symlinked is not None:
+            refused.append(f"{source_path} {symlinked}")
+            continue
+        path = root / source_path
         if not path.is_file():
-            drifted.append(f"{entry['source_path']} (missing from the worktree)")
+            drifted.append(f"{source_path} (missing from the worktree)")
             continue
         actual = source_sha256(path)
         if actual != entry["source_sha256"]:
-            drifted.append(entry["source_path"])
+            drifted.append(source_path)
         entry["source_sha256"] = actual
-    return drifted, refreshed
+    return drifted, refused, refreshed
 
 
 def main() -> int:
@@ -113,7 +184,7 @@ def main() -> int:
         return 0
 
     document = json.loads(arguments.catalog.read_text(encoding="utf-8"))
-    drifted, refreshed = recompute(document, arguments.root)
+    drifted, refused, refreshed = recompute(document, arguments.root)
     computed = tree_digest(refreshed["entries"])
     # A catalog must not store this. It is derivable from entries, so a stored
     # copy carries no information, and it is the one line two independent
@@ -125,24 +196,37 @@ def main() -> int:
 
     for path in drifted:
         print(f"DRIFTED: {path}")
+    for problem in refused:
+        print(f"REFUSED: {problem}")
     if stored is not None:
         print(f"STORED TREE DIGEST: {stored}")
         print("STORED TREE DIGEST: catalogs must not store one; it is derived "
               "from entries at validation time")
 
-    problems = list(drifted) + ([] if stored is None else ["stored tree digest"])
+    problems = (list(drifted) + list(refused) +
+                ([] if stored is None else ["stored tree digest"]))
 
     if arguments.write:
-        arguments.catalog.write_text(
-            json.dumps(refreshed, indent=2) + "\n", encoding="utf-8")
-        print(f"rewrote {arguments.catalog} with {len(refreshed['entries'])} "
-              f"source pins")
+        # Refusals are not repairable by repinning. Writing here would produce a
+        # document that looks freshly pinned and that the loader still rejects
+        # -- and for a symlinked source it would pin the link target's bytes as
+        # though they were the reviewed ones, which is the failure this refuses.
+        if refused:
+            print(f"REFUSED: not rewriting {arguments.catalog}; "
+                  f"{len(refused)} entries the loader would reject")
+        else:
+            arguments.catalog.write_text(
+                json.dumps(refreshed, indent=2) + "\n", encoding="utf-8")
+            print(f"rewrote {arguments.catalog} with "
+                  f"{len(refreshed['entries'])} source pins")
 
     print(verdict_line(
         f"disposition pins ({arguments.catalog.name})",
         problems,
         f"{len(refreshed['entries'])} sources, tree digest {computed}",
     ))
+    if refused:
+        return 1
     return 1 if (arguments.check and problems) else 0
 
 
