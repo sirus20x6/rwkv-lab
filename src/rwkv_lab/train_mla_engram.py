@@ -8,12 +8,13 @@ param groups.
 
 Usage (1M-token test from our 57M MLA checkpoint, Engram freshly patched):
     python train_mla_engram.py \
-        --mla-ckpt /thearray/git/moe-mla/runs/mla_ft_50m_v4/step_001735/ckpt.pt \
-        --engram-patch-dir /thearray/git/moe-mla/engram_converted \
-        --tokens-bin /thearray/data/non_cvevc_tokens.bin \
+        --model-dir /path/to/Qwen3.6-35B-A3B \
+        --mla-ckpt /path/to/runs/mla_ft_50m_v4/step_001735/ckpt.pt \
+        --engram-patch-dir /path/to/engram_converted \
+        --tokens-bin /path/to/non_cvevc_tokens.bin \
         --total-tokens-in-bin 29284583603 \
         --max-steps 30 --log-every 1 --eval-every 10 --save-every 30 \
-        --out-dir /thearray/git/moe-mla/runs/mla_engram_1m_test
+        --out-dir /path/to/runs/mla_engram_1m_test
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ import json
 import math
 import shutil
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import MISSING, dataclass, asdict, field as dataclass_field
 from pathlib import Path
 from typing import Optional
 
@@ -33,16 +34,29 @@ from .train_mla import (
     chunked_ce, sample_windows, open_tokens, lr_at, TrainConfig,
     validate_train_config,
 )
+from .host_paths import require_host_path, resolve_host_path
 from .load_mla_engram import load_mla_engram
 from .engram_integration import collect_host_embedding_params, collect_gpu_engram_params
 from .safe_torch import safe_torch_load
+
+
+# Host-specific artifact location; see rwkv_lab.host_paths for the policy.
+ENGRAM_PATCH_DIR_ENV = "MOE_MLA_ENGRAM_PATCH_DIR"
+ENGRAM_PATCH_DIR_HISTORICAL_PATH = "/thearray/git/moe-mla/engram_converted"
+
+
+def default_engram_patch_dir() -> str | None:
+    return resolve_host_path(
+        ENGRAM_PATCH_DIR_ENV, ENGRAM_PATCH_DIR_HISTORICAL_PATH
+    )
 
 
 @dataclass
 class EngramTrainConfig(TrainConfig):
     # Additional knobs for the combined run
     mla_ckpt: str = ""                          # path to a prior MLA-only checkpoint
-    engram_patch_dir: str = "/thearray/git/moe-mla/engram_converted"
+    engram_patch_dir: str | None = dataclass_field(
+        default_factory=default_engram_patch_dir)
     engram_lr_mult: float = 5.0                 # paper: 5x lr for embedding tables
 
 
@@ -107,11 +121,23 @@ def eval_loss(model, arr: np.memmap, eval_start: int, eval_end: int,
 def main() -> None:
     ap = argparse.ArgumentParser()
     for f in EngramTrainConfig.__dataclass_fields__.values():
-        t = type(f.default) if not isinstance(f.default, bool) else bool
-        ap.add_argument(f"--{f.name.replace('_','-')}", type=t, default=f.default)
+        flag = f"--{f.name.replace('_','-')}"
+        if f.default is MISSING and f.default_factory is MISSING:
+            # No default of any kind: argparse must demand it (model_dir).
+            ap.add_argument(flag, type=str, required=True)
+        elif f.default_factory is not MISSING:
+            # A host-resolved path default; str even when it resolves to None.
+            ap.add_argument(flag, type=str, default=f.default_factory())
+        else:
+            t = type(f.default) if not isinstance(f.default, bool) else bool
+            ap.add_argument(flag, type=t, default=f.default)
     args = ap.parse_args()
     cfg = EngramTrainConfig(**{k.replace("-","_"): v for k, v in vars(args).items()})
     validate_train_config(cfg)
+    require_host_path(
+        cfg.engram_patch_dir, field="engram_patch_dir",
+        env_var=ENGRAM_PATCH_DIR_ENV, flag="engram-patch-dir",
+    )
 
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)

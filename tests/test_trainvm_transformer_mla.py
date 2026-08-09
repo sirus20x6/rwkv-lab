@@ -165,7 +165,9 @@ def test_canonical_checkpoint_persists_trainvm_composition_and_control_state(
     module = torch.nn.Linear(2, 2)
     module._save_key = "layer_0"  # type: ignore[attr-defined]
     optimizer = torch.optim.AdamW(module.parameters(), lr=1.0e-4)
-    config = TrainConfig(out_dir=str(tmp_path))
+    # model_dir has no default: the trainer requires the caller to name the
+    # model rather than inheriting one machine's 35B checkpoint.
+    config = TrainConfig(model_dir=str(tmp_path / "model"), out_dir=str(tmp_path))
     evidence = {
         "optimizer": {
             "category": "optimizer",

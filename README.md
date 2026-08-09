@@ -1048,6 +1048,41 @@ by the track you are running and keep their upstream licenses with them:
 
 For a small data-format smoke test, `build_qwen35_data.py --max-docs 1000 --out_root /tmp/qwen35-cache` writes the same flat-cache format without pulling the full corpus.
 
+### Host-specific path defaults
+
+None of those artifacts are in the repository, so the trainers and loaders that
+consume them once carried the maintainer's absolute `/thearray/...` paths as
+field defaults. A config built anywhere else inherited a path its caller never
+chose and failed on it. The policy, implemented in
+[`host_paths.py`](src/rwkv_lab/host_paths.py) and applied to every such default:
+
+1. an environment variable, for hosts that keep the artifact elsewhere;
+2. the historical path, but **only when it exists on this host**, so existing
+   runs behave exactly as before;
+3. otherwise nothing — and validation fails naming the configuration field and
+   its environment variable, rather than echoing an absolute path nobody typed.
+
+Step 2 is existence-checked deliberately: an absolute default that is merely
+absent is not an error, because the caller never asked for it. A path the
+caller *did* supply is still validated.
+
+| Environment variable | Supplies |
+|---|---|
+| `MOE_MLA_MODEL_DIR` | base checkpoint for `load_converted.py` / `load_mla_engram.py` |
+| `MOE_MLA_PATCH_DIR` | MLA conversion patch directory |
+| `MOE_MLA_TOKENS_BIN` | packed token stream for `train_mla.py` |
+| `MOE_MLA_OUT_DIR` | run directory for `train_mla.py` |
+| `MOE_MLA_ENGRAM_PATCH_DIR` | Engram patch directory |
+| `MAGE_FLOW_BASE_PATH` | locally cached Mage-Flow-Base weights |
+
+**One exception, on purpose: `train_mla.py`'s `--model-dir` is required and has
+no default at all**, not even a resolved one. Its historical default named the
+35B model, so every 9B launch had to remember the flag and a launch that forgot
+it trained against the wrong weights while looking healthy. That is a
+correctness trap rather than a portability inconvenience, and it has already
+cost real runs, so a missing `--model-dir` is now an immediate error. Launchers
+name the model explicitly — see [`supervisor_night.sh`](scripts/supervisor_night.sh).
+
 ---
 
 ## Repository layout
@@ -1175,7 +1210,8 @@ go -C dashboard run ./cmd/trainboard   # http://127.0.0.1:9124
 ```
 
 > Some research scripts retain machine-local defaults as convenience examples;
-> pass explicit paths or the documented environment variables on another host.
+> pass explicit paths or the documented environment variables on another host
+> (see [Host-specific path defaults](#host-specific-path-defaults)).
 > Conversion levers described below default off, while specialized experiment
 > launchers explicitly opt into named bundles. See
 > [`TRAINING_LEVERS.md`](TRAINING_LEVERS.md).

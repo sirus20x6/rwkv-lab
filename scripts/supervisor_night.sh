@@ -19,6 +19,9 @@ set -u
 RUN=phase3_engram_l3_l19
 DIR=/thearray/git/moe-mla/runs/$RUN
 LOG=$DIR/supervisor.log
+# train_mla no longer defaults model_dir: a default there silently trains the
+# wrong model when a launch forgets the flag, so every launcher names it.
+MODEL_DIR=${MOE_MLA_MODEL_DIR:-/thearray/git/moe-mla/Qwen3.6-35B-A3B}
 CONFIG_PATCH=/thearray/git/moe-mla/converted_bkv
 ENGRAM_PATCH=/thearray/git/moe-mla/engram_converted_l3_l19
 VENV=/thearray/git/moe-mla/.venv
@@ -73,6 +76,7 @@ launch_training() {
     MOE_MLA_ENGRAM_COMPILE=0 \
     nohup python -m rwkv_lab.train_mla \
         --resume "$resume_ckpt" \
+        --model-dir "$MODEL_DIR" \
         --patch-dir "$CONFIG_PATCH" \
         --xsa-enabled 1 \
         --engram-enabled 1 \
