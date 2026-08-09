@@ -115,24 +115,27 @@ gets. It still builds the real `trainvm` CLI, still runs `validate-catalog`
 against the checkout, and still crosses both native/Python worker contracts. It
 does not build the test targets or run ctest.
 
-| | before (median of 10) | after, `catalog` tier | fail-closed `full` tier |
-|---|---|---|---|
-| whole job | 633 s | **473 s** | 695 s |
-| build + validate step | 512 s | **279 s** | 452 s |
+| | before (median of 10) | `catalog`, cold caches | `catalog`, steady state | fail-closed `full` |
+|---|---|---|---|---|
+| whole job | 633 s | 473 s | **127 s** | 695 s |
+| build + validate step | 512 s | 279 s | **13 s** | 452 s |
 
-The step figure is the one to trust for the recurring saving. It is the only
-part the tiering changes, and it does not depend on how warm the toolchain image
-cache happens to be: 512 s to 279 s, a 45% cut on the dominant step, for a change
-that still proves the catalog is valid against the checkout it was built from.
+Read the two `catalog` columns together, because the difference between them is
+the whole story of what caching does here and it is large enough to mislead if
+only one is quoted.
 
-The whole-job figure is worse than that (25%) for a reason that decays. Adding
-ccache edited the Dockerfile, which invalidated the toolchain image layer cache,
-so runs measured immediately afterwards paid 176-212 s to rebuild that image
-instead of 68 s to restore it, and started with an empty compiler cache besides.
-The pull request that introduced tiering was for the same reason *slower* than
-baseline, at 14 m 4 s. None of that recurs on a change that leaves the Dockerfile
-alone, so the steady-state whole-job figure should approach the step figure plus
-roughly 70 s.
+The steady-state column is the recurring case: **633 s to 127 s, an 80%
+reduction**, with the dominant step falling from 512 s to 13 s once the compiler
+cache is warm. A documentation-only or Python-only pull request now spends most
+of its native minute on loading the toolchain image (86 s), not on compiling.
+
+The cold-cache column is what the first few runs after the change cost, and it
+is the honest answer to "did this help immediately?" — less than it looks.
+Adding ccache edited the Dockerfile, which invalidated the toolchain image layer
+cache, so those runs paid 176-212 s to rebuild the image instead of restoring
+it, and started with an empty compiler cache besides. The pull request that
+introduced tiering was for that reason *slower* than baseline, at 14 m 4 s. The
+saving is real but it is borrowed forward: one slow run buys many fast ones.
 
 The third column is not a regression. It is the fail-closed path, measured on a
 deliberately unrecognized change: PR #149 added one file under a `newtree/`
