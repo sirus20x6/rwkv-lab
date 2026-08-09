@@ -42,7 +42,7 @@ constexpr std::size_t kMaximumNotesBytes = 2048U;
 // entry's recorded classification, or the entrypoint/argument/checkpoint
 // surface of a referenced source, has actually changed.
 constexpr std::string_view kReviewedCatalogDigest =
-    "sha256:102aa613a69026614b4526c17034851e1bfa2997f72af7dc59b2df84406e07c6";
+    "sha256:e3374021f30862b5d75ca782b20e9455cb3432186520fa8ab749cc975a8f67cf";
 
 constexpr std::array<std::string_view, 156> kReviewedWorkflowIds = {
     "acquisition.civitai-anima",
@@ -618,6 +618,22 @@ std::string diagnostic_summary(const std::vector<Diagnostic>& diagnostics) {
   return output.dump();
 }
 
+// The schema this binary knows is compiled in; the catalog it is handed comes
+// from the working tree. So the overwhelmingly common cause of a rejection here
+// is not a bad catalog — it is an old `trainvm`. `trainvm/build/` is gitignored,
+// which means a checkout can carry a binary from months ago that `git pull`
+// never touches, and the reader who trips over it gets a wall of
+// `field.unknown` and `enum.unknown` pointing at a catalog that is perfectly
+// fine. Say so in the message rather than letting them debug the wrong file.
+std::string catalog_schema_failure(const std::vector<Diagnostic>& diagnostics) {
+  return "compatibility catalog schema validation failed: " +
+         diagnostic_summary(diagnostics) +
+         "\nunknown fields or enum values usually mean this trainvm binary is"
+         " older than the catalog. trainvm/build/ is gitignored and is not"
+         " refreshed by git pull; rebuild before assuming the catalog is at"
+         " fault: cmake --build trainvm/build -j \"$(nproc)\" --target trainvm";
+}
+
 }  // namespace
 
 CompatibilityCatalog::CompatibilityCatalog(
@@ -800,9 +816,7 @@ CompatibilityCatalog CompatibilityCatalog::load_file(
   std::vector<Diagnostic> diagnostics;
   const auto source = parse_catalog(read_catalog(catalog_path));
   if (!decode_json(source, document, "", diagnostics)) {
-    throw std::invalid_argument(
-        "compatibility catalog schema validation failed: " +
-        diagnostic_summary(diagnostics));
+    throw std::invalid_argument(catalog_schema_failure(diagnostics));
   }
   return CompatibilityCatalog(std::move(document), repository_root);
 }
@@ -814,9 +828,7 @@ CompatibilityCatalogComputedDigests CompatibilityCatalog::compute_digests(
   std::vector<Diagnostic> diagnostics;
   const auto source = parse_catalog(read_catalog(catalog_path));
   if (!decode_json(source, document, "", diagnostics)) {
-    throw std::invalid_argument(
-        "compatibility catalog schema validation failed: " +
-        diagnostic_summary(diagnostics));
+    throw std::invalid_argument(catalog_schema_failure(diagnostics));
   }
   std::set<std::string> all_source_paths;
   for (const auto& entry : document.entries) {

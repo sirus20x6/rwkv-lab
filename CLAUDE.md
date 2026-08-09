@@ -134,14 +134,55 @@ pushed red because its output was truncated to exactly that line.
 Editing a classified source moves a content digest, and several are pinned in
 more than one place. None of them should be recomputed by hand.
 
+There are **four** pin sites, and they are not next to each other. Refresh them
+in this order — later ones are computed from the values you just wrote, so out
+of order you will pin a digest of a digest that is about to change:
+
 ```bash
-# The compatibility catalog: both digests, plus any empty classification surface.
+# 1. Build first. `trainvm/build/trainvm` is gitignored, so whatever is sitting
+#    there is whatever your last build left — `git pull` never refreshes it.
+cmake -S trainvm -B trainvm/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build trainvm/build -j "$(nproc)" --target trainvm
+
+# 2. The compatibility catalog's two digests, plus any empty classification
+#    surface. Paste both into docs/experiment-vm/compatibility-workflows.v1.json.
 trainvm/build/trainvm print-catalog-digests \
   docs/experiment-vm/compatibility-workflows.v1.json .
 
-# The source-disposition catalogs: per-source hashes and the tree digest.
-python scripts/print_disposition_digests.py <catalog> --write
+# 3. kReviewedCatalogDigest, in trainvm/src/compatibility_catalog.cpp. It is
+#    computed FROM the value you just pasted, so it only settles after step 2.
+#    This command fails on purpose and names the value to pin.
+trainvm/build/trainvm validate-catalog \
+  docs/experiment-vm/compatibility-workflows.v1.json .
+
+# 4. The source-disposition catalogs: per-source hashes and the tree digest.
+for c in docs/experiment-vm/source-dispositions.*.v1.json; do
+  python scripts/print_disposition_digests.py "$c" --write
+done
 ```
+
+If step 4 changed the scripts or RWKV catalog, rebuild and run
+`ctest --test-dir trainvm/build -R source_disposition_catalog` — it prints each
+computed digest beside its name, which is how you pin the fifth and sixth values
+in `trainvm/tests/source_disposition_catalog_tests.cpp` without guessing.
+
+There is deliberately no single `refresh-all` script yet. Writing one is filed,
+and the reason it is not a five-minute job is worth knowing before you start:
+`scripts/` is an exhaustively enumerated disposition scope, so *adding a script
+to `scripts/`* itself trips the gate — it needs a catalog entry and moves three
+pinned counts in `source_disposition_catalog_tests.cpp` (the entry count, its
+disposition-class count, and the catalog digest). The tool that would relieve
+the tax pays it on the way in.
+
+**Do not skip the build**, and do not assume a checkout that already has
+`trainvm/build/trainvm` has a current one. This is a real trap, not a caution:
+the binary in the primary checkout was months old and predated
+`print-catalog-digests` entirely, so it answered with a usage dump — which reads
+as "you typed the command wrong", not "your binary is old". A slightly newer
+stale binary is worse: it knows the subcommand, refuses the catalog's schema,
+and sends you off debugging a catalog that is fine. Either way the digest you
+are chasing never appears. The build takes several minutes and needs GCC 16
+with `-freflection`; that is expected.
 
 Two things to know before you paste a new value in:
 
@@ -151,6 +192,15 @@ changed a file's entrypoint, argument surface, or checkpoint/resume call sites.
 Read the catalog entry before bumping `kReviewedCatalogDigest`; that bump is the
 review the gate exists to force. It stayed put across an eight-commit port and
 moved for a one-module one, so it does discriminate.
+
+That discrimination is **Python-only**, which is not obvious and will otherwise
+surprise you mid-card. The extractor keeps only classification-bearing lines
+from a Python source; for every other referenced file — `trainvm/src/main.cpp`
+is one — the surface is the whole file. So a comment or a help string in
+`main.cpp` moves `classification_surface_digest` exactly as far as a new
+subcommand would, and you will be bumping `kReviewedCatalogDigest` for it. That
+is a property of the extractor, not a signal about your change; say which it was
+in the commit message so the next reader does not have to re-derive it.
 
 `trainvm/tests/source_disposition_catalog_tests.cpp` holds **two** pins, scripts
 and RWKV. A regex on the first `sha256` in that file changes the wrong one. The
