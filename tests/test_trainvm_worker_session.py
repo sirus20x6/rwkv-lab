@@ -600,7 +600,7 @@ def test_real_rwkv_main_publishes_complete_step_zero_before_first_mutation(
     assert result["step"] == 1
     assert optimizer_events == ["optimizer.step"]
     step_zero_state = torch.load(
-        tmp_path / "checkpoint-step-zero" / "state.pt",
+        tmp_path / "checkpoint-baseline-0" / "state.pt",
         map_location="cpu",
         weights_only=False,
     )
