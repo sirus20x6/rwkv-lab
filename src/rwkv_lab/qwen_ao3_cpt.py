@@ -1052,6 +1052,41 @@ def _smoke_backward(model, rows: PackedRows, config: QwenAO3Config) -> dict[str,
     }
 
 
+def refuse_ungated_attempt_baseline(
+    worker_controls: WorkerControlRuntime | None, step: int
+) -> None:
+    """Refuse a resume the controller's attempt baseline does not admit.
+
+    The controller gates an attempt at an immutable baseline step: zero for a
+    fresh attempt, the resume checkpoint's step for a replacement one. The
+    pre-mutation crossing names ``step + 1``, and ``optimizer_step`` refuses
+    any step at or below the baseline, so an attempt that restored some other
+    step can never reach a legal first mutation -- it would stall at the first
+    crossing with nothing on the card to explain why.
+
+    The comparison is against ``attempt_baseline_optimizer_step`` and never
+    against a literal zero. A literal zero is right for the fresh attempt and
+    silently wrong for every replacement one, which is the shape of the bug
+    ``mage_flow_pretrain.py`` shipped (PR #94/#115, fixed in 8f0da3e): a branch
+    that never fires looks exactly like a branch with nothing to do.
+    """
+
+    if worker_controls is None:
+        return
+    if not worker_controls.step_zero_eval_gate_required:
+        return
+    if worker_controls.step_zero_eval_gate_satisfied:
+        # A reconnect whose evidence the controller replayed from its journal
+        # owes nothing further. That never licenses skipping the boundary.
+        return
+    baseline = worker_controls.attempt_baseline_optimizer_step
+    if step != baseline:
+        raise ValueError(
+            "Qwen AO3 resumed at a step the controller does not gate: "
+            f"{step} != {baseline}"
+        )
+
+
 def train(
     config: QwenAO3Config,
     *,
@@ -1060,6 +1095,11 @@ def train(
     worker_observability: WorkerObservability | None = None,
     worker_controls: WorkerControlRuntime | None = None,
 ) -> dict[str, Any]:
+    # Imported here rather than at module scope: this trainer runs standalone
+    # from its own CLI on hosts without the trainvm-worker extra, and the
+    # sentinel's package pulls in the wire protocol.
+    from rwkv_lab.trainvm_worker import OptimizerMutationSentinel
+
     run_dir = Path(config.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     complete_path = run_dir / "complete.json"
@@ -1216,197 +1256,187 @@ def train(
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
     device = torch.device(f"cuda:{config.cuda_index}")
+    refuse_ungated_attempt_baseline(worker_controls, step)
     model.train()
     last_metrics: dict[str, Any] = {}
     latest_checkpoint = Path(config.resume) if config.resume else None
     latest_checkpoint_step = step if config.resume else -1
     started = time.perf_counter()
     tokens_since_log = 0
-    while step < total_steps:
-        optimizer.zero_grad(set_to_none=True)
-        lm_total = torch.zeros((), device=device, dtype=torch.float32)
-        aux_total = torch.zeros((), device=device, dtype=torch.float32)
-        micro_batches = min(
-            config.gradient_accumulation_steps,
-            train_rows.rows - cursor,
-        )
-        if micro_batches < 1:
-            raise RuntimeError("optimizer step has no packed rows remaining")
-        for _ in range(micro_batches):
-            if mutable_controls is not None:
-                worker_controls.microbatch(step + 1, mutable_controls.apply)
-            row = int(order[cursor])
-            cursor += 1
-            if worker_step_profiler is None:
-                tokens = train_rows.tensor(row, device)
-            else:
-                with worker_step_profiler.input_wait():
+    # Installed for the whole loop, so the ordering below is enforced against
+    # every optimizer instance in the process rather than the one this module
+    # constructed. A fused update -- this route builds a fused AdamW -- a
+    # second optimizer, or an edit that moves the crossing below the mutation
+    # all fail closed here instead of mutating parameters the controller never
+    # authorized.
+    mutation_sentinel = OptimizerMutationSentinel()
+    with mutation_sentinel.installed():
+        while step < total_steps:
+            optimizer.zero_grad(set_to_none=True)
+            lm_total = torch.zeros((), device=device, dtype=torch.float32)
+            aux_total = torch.zeros((), device=device, dtype=torch.float32)
+            micro_batches = min(
+                config.gradient_accumulation_steps,
+                train_rows.rows - cursor,
+            )
+            if micro_batches < 1:
+                raise RuntimeError("optimizer step has no packed rows remaining")
+            for _ in range(micro_batches):
+                if mutable_controls is not None:
+                    worker_controls.microbatch(step + 1, mutable_controls.apply)
+                row = int(order[cursor])
+                cursor += 1
+                if worker_step_profiler is None:
                     tokens = train_rows.tensor(row, device)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                loss, lm_loss, aux_loss = _causal_loss(
-                    model,
-                    tokens,
-                    router_aux_coef=config.router_aux_loss_coef,
-                    training=True,
+                else:
+                    with worker_step_profiler.input_wait():
+                        tokens = train_rows.tensor(row, device)
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    loss, lm_loss, aux_loss = _causal_loss(
+                        model,
+                        tokens,
+                        router_aux_coef=config.router_aux_loss_coef,
+                        training=True,
+                    )
+                (loss / micro_batches).backward()
+                lm_total = lm_total + lm_loss.float()
+                if aux_loss is not None:
+                    aux_total = aux_total + aux_loss.float()
+                tokens_since_log += config.context_length
+                _write_status(
+                    run_dir,
+                    state="training",
+                    step=step,
+                    cursor=cursor,
+                    total_steps=total_steps,
                 )
-            (loss / micro_batches).backward()
-            lm_total = lm_total + lm_loss.float()
-            if aux_loss is not None:
-                aux_total = aux_total + aux_loss.float()
-            tokens_since_log += config.context_length
-            _write_status(
-                run_dir,
-                state="training",
-                step=step,
-                cursor=cursor,
-                total_steps=total_steps,
+            # The mandatory pre-mutation boundary, at the safe point this loop
+            # already used. The call itself moves from
+            # `worker_controls.optimizer_step` to
+            # `worker_controls.pre_optimizer_step` -- the same controller entry
+            # point under the name that says which side of the mutation it is
+            # on -- and it is routed through the sentinel, so a refusal leaves
+            # the token disarmed and the `optimizer.step()` below raises rather
+            # than mutating unguarded. Nothing between here and that call
+            # mutates parameters; the crossing stays above the clip and the
+            # learning-rate read so a control patch applied here is the one
+            # this step reports.
+            mutation_sentinel.cross(
+                step + 1,
+                (
+                    (
+                        lambda next_step: worker_controls.pre_optimizer_step(
+                            next_step, mutable_controls.apply
+                        )
+                    )
+                    if mutable_controls is not None
+                    else None
+                ),
             )
-        if mutable_controls is not None:
-            worker_controls.optimizer_step(step + 1, mutable_controls.apply)
-        trainable_parameters = [
-            parameter for parameter in model.parameters() if parameter.requires_grad
-        ]
-        grad_norm = (
-            worker_components.gradient_clipping(trainable_parameters)
-            if worker_components is not None
-            else torch.nn.utils.clip_grad_norm_(
-                trainable_parameters,
-                config.max_grad_norm,
-                error_if_nonfinite=True,
+            trainable_parameters = [
+                parameter for parameter in model.parameters() if parameter.requires_grad
+            ]
+            grad_norm = (
+                worker_components.gradient_clipping(trainable_parameters)
+                if worker_components is not None
+                else torch.nn.utils.clip_grad_norm_(
+                    trainable_parameters,
+                    config.max_grad_norm,
+                    error_if_nonfinite=True,
+                )
             )
-        )
-        if scheduler is None:
-            lr = config.learning_rate * powercool_multiplier(
-                step, learning_rate_schedule
-            )
-            for group in optimizer.param_groups:
-                group["lr"] = lr
-        else:
-            lr = float(scheduler.get_last_lr()[0])
-        if weight_decay_schedule is not None:
-            weight_decay_schedule.step(step)
-        optimizer.step()
-        if scheduler is not None:
-            scheduler.step()
-        step += 1
-        if worker_step_profiler is not None:
-            worker_step_profiler.step(step)
-        if worker_observability is not None:
-            worker_observability.optimizer_step(step)
-        should_log = step % config.log_every == 0
-        should_save = bool(config.save_every and step % config.save_every == 0)
-        checkpoint_requested = bool(
-            worker_controls is not None
-            and worker_controls.checkpoint_boundary_requested
-        )
-        should_save = should_save or checkpoint_requested
-        # Converting CUDA scalars to Python values synchronizes the device.
-        # Keep the hot path asynchronous and pay for that synchronization only
-        # when a metric is actually consumed.
-        if should_log or should_save or interrupted["value"]:
-            torch.cuda.synchronize(device)
-            last_metrics = {
-                "kind": "train",
-                "step": step,
-                "loss": float(lm_total / micro_batches),
-                "router_aux_loss": float(aux_total / micro_batches),
-                "lr": lr,
-                "grad_norm": float(grad_norm),
-                "gnorm": float(grad_norm),
-            }
-        if should_log:
-            elapsed = time.perf_counter() - started
-            last_metrics["tokens_per_second"] = tokens_since_log / max(elapsed, 1e-9)
-            last_metrics["tok_per_sec"] = last_metrics["tokens_per_second"]
-            last_metrics["cuda_allocated_gib"] = torch.cuda.memory_allocated() / 2**30
-            last_metrics["cuda_reserved_gib"] = torch.cuda.memory_reserved() / 2**30
+            if scheduler is None:
+                lr = config.learning_rate * powercool_multiplier(
+                    step, learning_rate_schedule
+                )
+                for group in optimizer.param_groups:
+                    group["lr"] = lr
+            else:
+                lr = float(scheduler.get_last_lr()[0])
+            if weight_decay_schedule is not None:
+                weight_decay_schedule.step(step)
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
+            step += 1
+            if worker_step_profiler is not None:
+                worker_step_profiler.step(step)
             if worker_observability is not None:
-                worker_observability.publish_if_declared(
-                    "train.loss",
-                    last_metrics["loss"],
-                    step=step,
-                    sample_weight=micro_batches * config.context_length,
-                )
-                worker_observability.publish_if_declared(
-                    "train.tokens_per_second",
-                    last_metrics["tokens_per_second"],
-                    step=step,
-                )
-                worker_observability.publish_if_declared(
-                    "system.gpu_memory_used",
-                    int(torch.cuda.memory_allocated(device)),
-                    step=step,
-                )
-            log.write(json.dumps(last_metrics) + "\n")
-            log.flush()
-            print(json.dumps(last_metrics), flush=True)
-            started = time.perf_counter()
-            tokens_since_log = 0
-        eval_every = (
-            mutable_controls.eval_every
-            if mutable_controls is not None
-            else config.eval_every
-        )
-        if eval_every and step % eval_every == 0:
-            if mutable_controls is not None:
-                worker_controls.evaluation(step, mutable_controls.apply)
-            metrics = evaluate(model, eval_rows, config)
-            log.write(
-                json.dumps(
-                    {
-                        "kind": "eval",
-                        "step": step,
-                        **metrics,
-                        "ppl": metrics["perplexity"],
-                    }
-                )
-                + "\n"
-            )
-            log.flush()
-        if should_save:
-            if mutable_controls is not None:
-                worker_controls.checkpoint(step, mutable_controls.apply)
-            latest_checkpoint = _save_checkpoint(
-                model,
-                optimizer,
-                scheduler,
-                config,
-                step,
-                cursor,
-                run_dir,
-                last_metrics,
-                component_composition_digest=component_digest,
-                worker_controls=worker_controls,
-            )
-            latest_checkpoint_step = step
-            if (
+                worker_observability.optimizer_step(step)
+            should_log = step % config.log_every == 0
+            should_save = bool(config.save_every and step % config.save_every == 0)
+            checkpoint_requested = bool(
                 worker_controls is not None
-                and worker_controls.checkpoint_completion_requested
-            ):
-                worker_controls.publish_requested_checkpoint_directory(
-                    str(latest_checkpoint),
-                    optimizer_step=step,
-                    resume_grade="exact",
-                    state_components=(
-                        "component_composition",
-                        "control_revision",
-                        "data_cursor",
-                        "expert_routing",
-                        "lr_schedule",
-                        "model",
-                        "optimizer",
-                        "rng_accelerator",
-                        "rng_numpy",
-                        "rng_python",
-                        "rng_torch",
-                    ),
+                and worker_controls.checkpoint_boundary_requested
+            )
+            should_save = should_save or checkpoint_requested
+            # Converting CUDA scalars to Python values synchronizes the device.
+            # Keep the hot path asynchronous and pay for that synchronization only
+            # when a metric is actually consumed.
+            if should_log or should_save or interrupted["value"]:
+                torch.cuda.synchronize(device)
+                last_metrics = {
+                    "kind": "train",
+                    "step": step,
+                    "loss": float(lm_total / micro_batches),
+                    "router_aux_loss": float(aux_total / micro_batches),
+                    "lr": lr,
+                    "grad_norm": float(grad_norm),
+                    "gnorm": float(grad_norm),
+                }
+            if should_log:
+                elapsed = time.perf_counter() - started
+                last_metrics["tokens_per_second"] = tokens_since_log / max(elapsed, 1e-9)
+                last_metrics["tok_per_sec"] = last_metrics["tokens_per_second"]
+                last_metrics["cuda_allocated_gib"] = torch.cuda.memory_allocated() / 2**30
+                last_metrics["cuda_reserved_gib"] = torch.cuda.memory_reserved() / 2**30
+                if worker_observability is not None:
+                    worker_observability.publish_if_declared(
+                        "train.loss",
+                        last_metrics["loss"],
+                        step=step,
+                        sample_weight=micro_batches * config.context_length,
+                    )
+                    worker_observability.publish_if_declared(
+                        "train.tokens_per_second",
+                        last_metrics["tokens_per_second"],
+                        step=step,
+                    )
+                    worker_observability.publish_if_declared(
+                        "system.gpu_memory_used",
+                        int(torch.cuda.memory_allocated(device)),
+                        step=step,
+                    )
+                log.write(json.dumps(last_metrics) + "\n")
+                log.flush()
+                print(json.dumps(last_metrics), flush=True)
+                started = time.perf_counter()
+                tokens_since_log = 0
+            eval_every = (
+                mutable_controls.eval_every
+                if mutable_controls is not None
+                else config.eval_every
+            )
+            if eval_every and step % eval_every == 0:
+                if mutable_controls is not None:
+                    worker_controls.evaluation(step, mutable_controls.apply)
+                metrics = evaluate(model, eval_rows, config)
+                log.write(
+                    json.dumps(
+                        {
+                            "kind": "eval",
+                            "step": step,
+                            **metrics,
+                            "ppl": metrics["perplexity"],
+                        }
+                    )
+                    + "\n"
                 )
-        if interrupted["value"]:
-            checkpoint = latest_checkpoint
-            if checkpoint is None or latest_checkpoint_step != step:
+                log.flush()
+            if should_save:
                 if mutable_controls is not None:
                     worker_controls.checkpoint(step, mutable_controls.apply)
-                checkpoint = _save_checkpoint(
+                latest_checkpoint = _save_checkpoint(
                     model,
                     optimizer,
                     scheduler,
@@ -1418,15 +1448,55 @@ def train(
                     component_composition_digest=component_digest,
                     worker_controls=worker_controls,
                 )
-            log.close()
-            _write_status(
-                run_dir,
-                state="interrupted",
-                step=step,
-                cursor=cursor,
-                total_steps=total_steps,
-            )
-            return {"status": "interrupted", "step": step, "checkpoint": str(checkpoint)}
+                latest_checkpoint_step = step
+                if (
+                    worker_controls is not None
+                    and worker_controls.checkpoint_completion_requested
+                ):
+                    worker_controls.publish_requested_checkpoint_directory(
+                        str(latest_checkpoint),
+                        optimizer_step=step,
+                        resume_grade="exact",
+                        state_components=(
+                            "component_composition",
+                            "control_revision",
+                            "data_cursor",
+                            "expert_routing",
+                            "lr_schedule",
+                            "model",
+                            "optimizer",
+                            "rng_accelerator",
+                            "rng_numpy",
+                            "rng_python",
+                            "rng_torch",
+                        ),
+                    )
+            if interrupted["value"]:
+                checkpoint = latest_checkpoint
+                if checkpoint is None or latest_checkpoint_step != step:
+                    if mutable_controls is not None:
+                        worker_controls.checkpoint(step, mutable_controls.apply)
+                    checkpoint = _save_checkpoint(
+                        model,
+                        optimizer,
+                        scheduler,
+                        config,
+                        step,
+                        cursor,
+                        run_dir,
+                        last_metrics,
+                        component_composition_digest=component_digest,
+                        worker_controls=worker_controls,
+                    )
+                log.close()
+                _write_status(
+                    run_dir,
+                    state="interrupted",
+                    step=step,
+                    cursor=cursor,
+                    total_steps=total_steps,
+                )
+                return {"status": "interrupted", "step": step, "checkpoint": str(checkpoint)}
 
     final_eval = evaluate(model, eval_rows, config)
     checkpoint = latest_checkpoint
