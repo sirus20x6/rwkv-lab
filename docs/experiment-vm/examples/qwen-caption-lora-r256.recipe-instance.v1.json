@@ -16,7 +16,8 @@
     "data.qualitative_manifest_name": "validation-fixed-100.jsonl",
     "data.qualitative_manifest_sha256": "sha256:e5cfb9fc5edac6cb890409efb02db477060603b8f87a42b401e6235da49a8fdc",
     "evaluation.qualitative_every_steps": 250,
-    "evaluation.full_every_steps": 250,
+    "evaluation.full_every_steps": 0,
+    "evaluation.probe_every_steps": 0,
     "checkpointing.every_steps": 250
   }
 }

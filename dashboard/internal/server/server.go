@@ -191,6 +191,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/artifacts/{artifact}/content", s.handleTrainVMArtifactContent)
 	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/observability", s.handleTrainVMObservability)
 	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/checkpoints", s.handleTrainVMCheckpoints)
+	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/evaluation-timeline", s.handleTrainVMEvaluationTimeline)
 	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/galleries", s.handleTrainVMGalleries)
 	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/galleries/{artifact}", s.handleTrainVMGallery)
 	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/galleries/{artifact}/items/{index}/{role}", s.handleTrainVMGalleryImage)

@@ -539,6 +539,23 @@ void validate_evaluation_checkpoint_relationships(
               launch_count)
         reject("legacy step-zero launch count must exactly match fixed held-out sample count");
     }
+    if (schedule->descriptor.key.version == "3.0.0") {
+      // A probe budget with no probe cadence is decorative cost: it reads as
+      // "cheap monitoring is configured" on the authoring surface while no
+      // probe milestone can ever fire. Refuse it at authoring time rather
+      // than discovering the silence two thirds of the way through a run.
+      const auto& configuration = schedule->configuration;
+      const bool probe_scheduled =
+          configuration.at("probe_every_steps").get<std::int64_t>() > 0 ||
+          !configuration.at("probe_milestone_steps").empty() ||
+          !configuration.at("probe_milestone_fractions").empty();
+      if (configuration.at("probe_examples").get<std::int64_t>() > 0 &&
+          !probe_scheduled)
+        reject("a declared probe example budget requires a probe cadence");
+      if (probe_scheduled &&
+          configuration.at("probe_examples").get<std::int64_t>() <= 0)
+        reject("a probe cadence requires a bounded probe example budget");
+    }
     if (!symbolic_identity(
             samples->configuration.at("identity_field").get_ref<const std::string&>()))
       reject("fixed held-out identity field must be a symbolic field name");
