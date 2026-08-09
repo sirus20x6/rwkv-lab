@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +16,13 @@ MAXIMUM_INLINE_CONFIG_BYTES = 40 * 1024
 MAXIMUM_MANIFEST_LINE_BYTES = 4 * 1024 * 1024
 MAXIMUM_MANIFEST_ROWS = 10_000_000
 MAXIMUM_NODE_ID_BYTES = 128
+
+# Probes a worker cannot satisfy and does not need. DeepSpeed's CUDA detection
+# shells out to a compiler toolchain that is deliberately absent from the
+# worker's filesystem view; left enabled it turns an optional capability check
+# into a hard import failure. This is a library default, not authority: it is
+# applied with setdefault so a sealed invocation can still say otherwise.
+FIXED_LIBRARY_ENVIRONMENT_DEFAULTS = (("DS_IGNORE_CUDA_DETECTION", "1"),)
 
 
 class AdapterInputError(ValueError):
@@ -325,3 +332,55 @@ def require_run_directory(configured: str, workspace: Mapping[str, Any]) -> Path
     return WorkspacePathAuthority.from_workspace(workspace).exact_run_directory(
         configured
     )
+
+
+def bind_worker_process_environment(
+    workspace: Mapping[str, Any],
+    *,
+    environment: MutableMapping[str, str] | None = None,
+) -> Path:
+    """Bind the worker's process environment to its authorized run directory.
+
+    hostd execs the worker with an empty environment on purpose -- that
+    emptiness *is* the isolation, and `hostd_linux_stopped_launcher.cpp` passes
+    a literal `{nullptr}` envp to make it unconditional. Libraries underneath
+    the trainer nevertheless resolve a home directory for their per-run caches,
+    and a worker without HOME dies after the model is already resident and
+    before the first optimizer step, reporting only an exception type name.
+
+    HOME is therefore derived from the run directory the controller already
+    authorized for this invocation. It is deliberately not read from
+    `/etc/passwd`, and deliberately not inherited from whatever launched hostd:
+    either would hand the worker a writable location the plan never granted it,
+    which is the thing the empty environment buys.
+
+    A HOME that is already present and points outside that run directory is
+    refused rather than quietly corrected, so that restoring the launcher's
+    environment fails loudly instead of appearing to work.
+    """
+
+    environment = os.environ if environment is None else environment
+    for name, value in FIXED_LIBRARY_ENVIRONMENT_DEFAULTS:
+        environment.setdefault(name, value)
+    authorized = WorkspacePathAuthority.from_workspace(workspace).run_directory
+    # hostd provisions and chowns this directory to the worker principal before
+    # the launch (provision_authorized_run_directory), so its absence here means
+    # the worker is not standing in the workspace the plan authorized.
+    if not authorized.is_dir():
+        raise AdapterInputError(
+            "authorized run directory is not a provisioned directory"
+        )
+    declared = environment.get("HOME")
+    if declared is None:
+        environment["HOME"] = str(authorized)
+        return authorized
+    home = _absolute_normalized(declared, "worker HOME")
+    try:
+        resolved = home.resolve(strict=True)
+    except OSError as error:
+        raise AdapterInputError("worker HOME is unavailable") from error
+    if not _within(resolved, (authorized,)):
+        raise AdapterInputError(
+            "worker HOME is outside the authorized run directory"
+        )
+    return resolved
