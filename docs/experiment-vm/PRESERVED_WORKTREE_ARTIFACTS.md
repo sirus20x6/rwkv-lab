@@ -35,8 +35,10 @@ authorization to start a training run.
 ## Source A — `/thearray/git/moe-mla-parity-integration`
 
 Branch `integration/parity-candidate`, HEAD `1a906c9`, unmerged. That worktree
-also carries ~32 modified tracked files which are **not** part of this commit;
-they remain there untouched.
+also carries 32 modified tracked files which are **not** part of this commit;
+they remain there untouched. They were snapshotted separately onto the branch
+`preserve/parity-integration-worktree-20260809` — see "The 32 modified tracked
+files" at the end of this document.
 
 ### The Qwen3.6 caption-distillation bundle
 
@@ -266,3 +268,93 @@ nothing needs to be recovered.
 Each of the three source worktrees was left byte-for-byte unchanged; a SHA-256
 manifest of every non-`.git` file was taken before and after and compared. No
 file was moved or deleted, and no worktree was removed.
+
+## The 32 modified tracked files (`card-247ac07a`)
+
+The section above notes that `/thearray/git/moe-mla-parity-integration` also
+held 32 modified tracked files — 1,536 insertions, 142 deletions — outside the
+scope of that commit. They were in a worse position than the untracked files
+were: uncommitted changes have no reflog, so unlike a deleted branch they are
+not recoverable, and a single `git checkout .` would have ended them.
+
+They are now on **`preserve/parity-integration-worktree-20260809`**, commit
+`39efceb` (a second commit, `6748da0`, carries the same tree's untracked files
+so the branch is a complete picture of that working tree). The branch is a
+snapshot, **not a proposal to merge** — see the pins caveat below. It was built
+with `git write-tree` against an alternate index, so the source working tree was
+never modified; it remains dirty, registered, and byte-for-byte as it was.
+
+### What the diff is
+
+Three unrelated pieces of work sharing one tree:
+
+1. **A ztok enhancement-search campaign** — `+267` lines extending
+   `scripts/materialize_ztok_search_trial.py` and `+231` extending
+   `src/rwkv_lab/trainvm_adapters/ztok_superposition.py`, with `+367` lines of
+   new tests. Adds batch and train-shape schedules, `late_linear` LR decay with
+   a cooldown fraction, late head/embedding untying, an explicit
+   `source_byte_budget`, five named runtime levers, a SpectralMuon optimizer
+   path, and an nsys GPU-trace path that drives the governed child trainer over
+   a pair of pipes.
+2. **A Qwen3.6 caption fine-tune adapter** — a 27th worker profile
+   `rwkv-lab.qwen-caption-finetune` in the native contract, its
+   `_qwen_caption_finetune` handler, a `qwen-caption` extra and console script,
+   family predicates in the qualification and acceptance scripts, and a
+   disposition catalog entry.
+3. **A host-ledger authority snapshot** — `+170` lines in
+   `trainvm/src/host_ledger.cpp` adding `authority_snapshot()`, one
+   transactionally coherent view replacing five separate reads in
+   `hostd_daemon_runtime.cpp`; `active_unlaunched_grants()`, which lets terminal
+   release recovery reclaim a grant acquired but never launched; and a
+   verification-revision cache so frequent status polls stop replaying the whole
+   tamper-evident ledger per field.
+
+### What is already on main, and what is not
+
+Checked by content — grepping distinctive identifiers against
+`git show origin/main:<path>` — rather than by ancestry, which this repository's
+squash merges make unreliable.
+
+**Already on main, verbatim:** the four `deploy/` files that carry the
+unprivileged-hostd migration — `trainvm-hostd.service`,
+`trainvm-controller.service`, `trainvm-gpu-fault-observer.service` and
+`trainvm-hostd.json` — hash identically to `origin/main` today. Those 95 lines
+of the diff are a working-tree copy newer than the worktree's own HEAD, the same
+pattern the DPO recipe edit above turned out to be. `deploy/install-hostd-sudoers.sh`
+is main's version plus four host-local grant lines.
+
+**Not on main by any route:** everything else. No identifier from pieces 1, 2 or
+3 appears anywhere on main. Six of the modified files do not exist on main *at
+all*, including the entire ztok superposition adapter and its generator.
+
+### The part worth acting on
+
+The six `experiments/ztok_modded_search_20260804_q*.json` trial documents
+preserved by the commit above are on main and **cannot run there**. All six
+declare `source_byte_budget`, `runtime_levers` and `telemetry_interval_steps`;
+main's `ZtokSuperpositionTrainConfig` accepts none of the three — and in fact
+main has no `src/rwkv_lab/trainvm_adapters/ztok_superposition.py`, no
+`scripts/materialize_ztok_search_trial.py`, and no `rwkv-lab.ztok-superposition`
+adapter profile. This branch holds the implementation those documents describe.
+`card-2005089a` records the missing design document; the missing implementation
+is the larger half of the same gap.
+
+### Why this is not a merge candidate as it stands
+
+`integration/parity-candidate` is 166 commits ahead of main and 147 behind, and
+most of this diff modifies files that exist only on that branch. It is not a
+patch that can be rebased onto main; porting it means porting its base.
+
+Its `trainvm/tests/source_disposition_catalog_tests.cpp` pins were computed
+against that branch's catalog — 170 entries going to 171, a six-class role
+split, `direct_gap` 0. Main's catalog today has 165 entries, a five-class split,
+and `direct_gap` 1. The two lineages diverged rather than one lagging, so
+**these pin values are wrong for main and must be regenerated, never carried
+across.** The same applies to `source-dispositions.rwkv-lab.v1.json`.
+
+One behavioural change needs a decision before any port:
+`hostd_daemon_runtime.cpp` now hardcodes `ledger_verified = true` and drops the
+`mutation_disabled_reason` branch for a failed ledger verification, because
+`authority_snapshot()` throws instead of reporting. Whether an unverifiable
+ledger should surface as a degraded status or as an exception out of the status
+call is a real question, and the diff answers it by removing the degraded path.
