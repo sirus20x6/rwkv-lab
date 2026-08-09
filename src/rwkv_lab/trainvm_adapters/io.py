@@ -96,8 +96,12 @@ class WorkspacePathAuthority:
                     else raw_content_roots
                 )
             except (OSError, ValueError) as error:
+                # Forward the authority's own sentence. It already distinguishes
+                # sort order from a missing path from a digest mismatch, and it
+                # names the offending root; replacing it with a flat summary
+                # sent a reader hunting corrupted content for an ordering bug.
                 raise AdapterInputError(
-                    "worker input content identity verification failed"
+                    f"worker input content identity verification failed: {error}"
                 ) from error
             for identity in input_content_roots:
                 content_path = Path(identity.path)
