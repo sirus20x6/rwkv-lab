@@ -135,6 +135,11 @@ Nothing used to compute these values, which is much of why re-pinning felt like 
 a review. Now:
 
 ```bash
+# Build first: trainvm/build/ is gitignored, so an existing binary there is as
+# old as your last build and a stale one fails misleadingly (usage dump if it
+# predates this subcommand, schema rejection if it merely predates the catalog).
+cmake -S trainvm -B trainvm/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build trainvm/build -j "$(nproc)" --target trainvm
 trainvm/build/trainvm print-catalog-digests \
   "$PWD/docs/experiment-vm/compatibility-workflows.v1.json" "$PWD"
 ```

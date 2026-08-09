@@ -73,7 +73,15 @@ void usage() {
       << "  trainvm journal init <journal.db>\n"
       << "  trainvm journal verify <journal.db>\n"
       << "  trainvm journal replay <journal.db>\n"
-      << "  trainvm journal show <journal.db> <run-id>\n";
+      << "  trainvm journal show <journal.db> <run-id>\n"
+      // A subcommand that the docs name but this list omits is the signature of
+      // a stale binary, not a typo — and it reads as a typo, which is why it
+      // costs time. `trainvm/build/` is gitignored, so a checkout can carry a
+      // months-old binary that `git pull` never refreshes.
+      << "\nif a documented subcommand is missing above, this binary predates"
+         " it. trainvm/build/ is gitignored and is not refreshed by git pull;"
+         " rebuild with:\n"
+         "  cmake --build trainvm/build -j \"$(nproc)\" --target trainvm\n";
 }
 
 nlohmann::json read_stdin_json() {
