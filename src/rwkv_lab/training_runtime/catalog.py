@@ -98,6 +98,7 @@ def supported_worker_capabilities() -> frozenset[str]:
             "split_selector.frozen_named.v1",
             "evaluation_schedule.launch_gate_periodic.v1",
             "evaluation_schedule.launch_gate_periodic.v2",
+            "evaluation_schedule.milestone_cadence.v3",
             "evaluator.scalar_loss.v1",
             "model_loader.hf_causal.v1",
             "model_loader.hf_multimodal.v1",

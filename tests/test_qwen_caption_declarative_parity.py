@@ -75,10 +75,31 @@ def test_compact_recipe_preserves_corrected_v3_semantic_contract() -> None:
         "data.qualitative_manifest_name": data["held_out_manifest"],
         "data.qualitative_manifest_sha256": "sha256:"
         + data["held_out_manifest_sha256"],
-        "evaluation.qualitative_every_steps": cadence["evaluation_every_steps"],
-        "evaluation.full_every_steps": cadence["evaluation_every_steps"],
+        "evaluation.qualitative_every_steps": cadence["qualitative_every_steps"],
+        "evaluation.full_every_steps": cadence["full_scalar_every_steps"],
+        "evaluation.probe_every_steps": cadence["probe_every_steps"],
         "checkpointing.every_steps": cadence["checkpoint_every_steps"],
     }
+
+    # The three cadences are separately declared, so the contract must not be
+    # satisfiable by one shared interval any more.
+    schedule = components["evaluation_schedule"]
+    assert schedule["key"] == {
+        "category": "evaluation_schedule",
+        "name": "milestone_cadence",
+        "version": "3.0.0",
+    }
+    schedule_configuration = schedule["configuration"]
+    assert schedule_configuration["full_step_zero"] is True
+    assert schedule_configuration["final"] is True
+    assert schedule_configuration["mutable_cadence"] is (
+        cadence["cadence_is_live_mutable"]
+    )
+    assert (
+        schedule_configuration["probe_milestone_fractions"]
+        == cadence["probe_milestone_fractions"]
+    )
+    assert schedule_configuration["probe_examples"] == cadence["probe_examples"]
 
     loader = components["model_loader"]["configuration"]
     assert components["model_loader"]["key"] == {

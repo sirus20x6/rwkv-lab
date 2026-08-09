@@ -3073,6 +3073,64 @@ def _quarantine_test_evidence(directory: Path) -> str:
     return _digest(_staged_objects(directory))
 
 
+class _EvaluationCadence:
+    """The run's live evaluation cadence, and nothing else about evaluation.
+
+    Cadence is the only part of the evaluation contract a controller may move
+    while the run is in flight, and it may only move at an evaluation safe
+    point. Which examples an evaluation reads is fixed by the split selector,
+    the evaluator, the qualitative selector, and the probe budget — none of
+    which are reachable from a control patch. The immutable identity is
+    captured once here and re-checked after every patch, so a cadence change
+    that moved the evaluated subset would fail rather than silently rebase the
+    comparison.
+
+    A patch takes effect from the next milestone: the decision for the step
+    whose safe point carried the patch was already taken.
+    """
+
+    __slots__ = ("_example_identity", "_maximum_steps", "_plan", "_schedule", "revision")
+
+    def __init__(self, schedule: Any, maximum_steps: int) -> None:
+        self._schedule = schedule
+        self._maximum_steps = maximum_steps
+        self._example_identity = schedule.configuration.example_identity
+        self._plan = schedule.plan(maximum_steps)
+        self.revision = 0
+
+    @property
+    def plan(self) -> Any:
+        return self._plan
+
+    @property
+    def probe_examples(self) -> int:
+        return self._schedule.configuration.probe_examples
+
+    def for_step(self, step: int, *, final: bool = False) -> Any:
+        return self._schedule.for_step(
+            step, final=final, total_steps=self._maximum_steps
+        )
+
+    def apply(
+        self, _candidate: Mapping[str, Any], assignments: Mapping[str, Any]
+    ) -> None:
+        if not assignments:
+            return
+        try:
+            updated = self._schedule.with_cadence_assignments(assignments)
+        except ValueError as error:
+            raise HFMultimodalSFTError(
+                "HF SFT accepts only declared evaluation cadence controls"
+            ) from error
+        if updated.configuration.example_identity != self._example_identity:
+            raise HFMultimodalSFTError(
+                "an evaluation cadence patch may not move evaluation example identity"
+            )
+        self._schedule = updated
+        self._plan = updated.plan(self._maximum_steps)
+        self.revision += 1
+
+
 def run_hf_multimodal_sft(
     *,
     invocation: Any,
@@ -3127,6 +3185,7 @@ def run_hf_multimodal_sft(
     padding_side = generation_policy.configuration.padding_side
     decode_policy_digest = generation_policy.digest
     maximum_steps = components.learning_rate_configuration()[1].max_steps
+    evaluation_cadence = _EvaluationCadence(evaluation_schedule, maximum_steps)
     loader = components.model_loader(slot="model_loader")
     loaded = loader.load()
     if not loaded.receipt.exact:
@@ -3158,18 +3217,40 @@ def run_hf_multimodal_sft(
         _candidate: Mapping[str, Any], assignments: Mapping[str, Any]
     ) -> None:
         if assignments:
-            raise HFMultimodalSFTError("HF SFT v1 exposes no live scalar controls")
+            raise HFMultimodalSFTError(
+                "HF SFT accepts a live patch only for evaluation cadence, and "
+                "only at an evaluation safe point"
+            )
+
+    # The declared milestone timeline is published before any of it is paid
+    # for, so the cost of a cadence is visible in the dashboard from the first
+    # heartbeat rather than inferred afterwards from what happened to appear.
+    def publish_cadence_plan() -> None:
+        plan = evaluation_cadence.plan
+        counts = plan.counts
+        observability.publish_if_declared(
+            "eval.planned_scalar_full_milestones", counts["scalar_full"], step=step
+        )
+        observability.publish_if_declared(
+            "eval.planned_scalar_probe_milestones", counts["scalar_probe"], step=step
+        )
+        observability.publish_if_declared(
+            "eval.planned_qualitative_milestones", counts["qualitative"], step=step
+        )
+        observability.publish_if_declared(
+            "eval.cadence_revision", evaluation_cadence.revision, step=step
+        )
 
     preoptimizer_qualitative: tuple[tuple[str, str, str], ...] | None = None
     if resume_directory is None:
-        launch_decision = evaluation_schedule.for_step(0)
+        launch_decision = evaluation_cadence.for_step(0)
         if not (
             launch_decision.launch_gate
             and launch_decision.qualitative
             and launch_decision.full_scalar
         ):
             raise HFMultimodalSFTError("HF operation lacks a complete step-zero gate")
-        controls.evaluation(0, reject_live_controls)
+        controls.evaluation(0, evaluation_cadence.apply)
         keepalive = getattr(observability, "keepalive", None)
         phase = keepalive(0, "launch_eval") if callable(keepalive) else nullcontext()
         with phase:
@@ -3498,6 +3579,7 @@ def run_hf_multimodal_sft(
                             data.qualitative_identities_digest
                             or _digest(data.qualitative_ids)
                         ),
+                        "eval_manifest_digest": eval_manifest_digest,
                     },
                 )
             )
@@ -3506,24 +3588,40 @@ def run_hf_multimodal_sft(
                 output_name="eval_gallery",
                 step=step,
                 step_domain="optimizer_step",
-                evaluator_profile_digest=_digest(
-                    {
-                        "evaluator": components.composition.components[
-                            "evaluator"
-                        ].descriptor_digest,
-                        "renderer": components.composition.components[
-                            "artifact_renderer"
-                        ].descriptor_digest,
-                    }
-                ),
+                evaluator_profile_digest=eval_manifest_digest,
                 use_policy_digest=decode_policy_digest,
                 items=tuple(items),
             ),
             checkpoint=checkpoint,
         )
 
+    # The frozen evaluation manifest: the split the evidence was read from,
+    # the evaluator that read it, the held-out identities, the renderer, and
+    # the decode policy. The cadence is deliberately absent — a schedule change
+    # must leave this digest where it was, which is what makes gallery
+    # revisions from different cadences comparable at all.
+    eval_manifest_digest = _digest(
+        {
+            "artifact_renderer": components.composition.components[
+                "artifact_renderer"
+            ].descriptor_digest,
+            "decode_policy": decode_policy_digest,
+            "evaluator": components.composition.components[
+                "evaluator"
+            ].descriptor_digest,
+            "qualitative_identities": (
+                data.qualitative_identities_digest or _digest(data.qualitative_ids)
+            ),
+            "qualitative_sample": components.composition.components[
+                "qualitative_samples"
+            ].descriptor_digest,
+            "split_membership": str(data.split_membership_digest),
+        }
+    )
+    publish_cadence_plan()
+
     if step == 0:
-        decision = evaluation_schedule.for_step(0)
+        decision = evaluation_cadence.for_step(0)
         if not (decision.launch_gate and decision.qualitative and decision.full_scalar):
             raise HFMultimodalSFTError("HF operation lacks a complete step-zero gate")
         def base_model_context() -> Any:
@@ -3577,7 +3675,7 @@ def run_hf_multimodal_sft(
             )
             observability.publish_if_declared("eval.loss", eval_loss, step=0)
         elif not launch_gallery_complete:
-            controls.evaluation(0, reject_live_controls)
+            controls.evaluation(0, evaluation_cadence.apply)
             qualitative = generate_hf_captions(
                 stack=stack,
                 codec=codec,
@@ -3613,7 +3711,7 @@ def run_hf_multimodal_sft(
                 checkpoint_artifact_id=baseline_checkpoint_artifact_id,
                 manifest_digest=baseline_checkpoint_manifest_digest,
             )
-            controls.evaluation(0, reject_live_controls)
+            controls.evaluation(0, evaluation_cadence.apply)
             keepalive = getattr(observability, "keepalive", None)
             phase = (
                 keepalive(0, "baseline_eval")
@@ -3779,9 +3877,28 @@ def run_hf_multimodal_sft(
         observability.optimizer_step(step, "train")
         controls.optimizer_step(step, reject_live_controls)
 
-        decision = evaluation_schedule.for_step(step, final=step == maximum_steps)
-        if decision.full_scalar or decision.qualitative:
-            controls.evaluation(step, reject_live_controls)
+        decision = evaluation_cadence.for_step(step, final=step == maximum_steps)
+        if decision.full_scalar or decision.qualitative or decision.probe:
+            controls.evaluation(step, evaluation_cadence.apply)
+            publish_cadence_plan()
+        if decision.probe:
+            # The probe is a bounded read over the same frozen split, published
+            # under its own name so a cheap monitoring point is never mistaken
+            # for a full validation of the split.
+            probe_value = evaluate_hf_scalar_loss(
+                stack=stack,
+                codec=codec,
+                data=data,
+                evaluator=evaluator,
+                device=selected_device,
+                maximum_examples=evaluation_cadence.probe_examples,
+            )
+            observability.publish_if_declared(
+                "eval.probe_loss", probe_value, step=step
+            )
+            observability.publish_if_declared(
+                "eval.probe_examples", evaluation_cadence.probe_examples, step=step
+            )
         if decision.full_scalar:
             value = evaluate_hf_scalar_loss(
                 stack=stack,
@@ -3837,10 +3954,10 @@ def run_hf_multimodal_sft(
         raise HFMultimodalSFTError(
             "final test evidence lacks its private baseline/checkpoint anchor"
         )
-    final_decision = evaluation_schedule.for_step(step, final=True)
+    final_decision = evaluation_cadence.for_step(step, final=True)
     if not (final_decision.full_scalar and final_decision.qualitative):
         raise HFMultimodalSFTError("HF finalization is not fully evaluable")
-    controls.evaluation(step, reject_live_controls)
+    controls.evaluation(step, evaluation_cadence.apply)
     final_model_state_digest = _checkpoint_model_state_digest(
         model_load_receipt=stack.loaded.receipt.digest,
         checkpoint_artifact_id=final_checkpoint.artifact_id,

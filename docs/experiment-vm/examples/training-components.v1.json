@@ -3105,6 +3105,123 @@
     },
     {
       "key": {
+        "category": "evaluation_schedule",
+        "name": "milestone_cadence",
+        "version": "3.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.evaluation_schedule.milestone_cadence.v3",
+      "model_families": [
+        "*"
+      ],
+      "required_capabilities": [
+        "evaluation_schedule.milestone_cadence.v3"
+      ],
+      "configuration": [
+        {
+          "name": "full_step_zero",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "final",
+          "type": "boolean",
+          "required": false,
+          "default": true
+        },
+        {
+          "name": "full_every_steps",
+          "type": "integer",
+          "required": false,
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1000000000,
+          "unit": "optimizer_step"
+        },
+        {
+          "name": "probe_every_steps",
+          "type": "integer",
+          "required": false,
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1000000000,
+          "unit": "optimizer_step"
+        },
+        {
+          "name": "qualitative_every_steps",
+          "type": "integer",
+          "required": false,
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1000000000,
+          "unit": "optimizer_step"
+        },
+        {
+          "name": "full_milestone_steps",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "set"
+        },
+        {
+          "name": "probe_milestone_steps",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "set"
+        },
+        {
+          "name": "qualitative_milestone_steps",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "set"
+        },
+        {
+          "name": "full_milestone_fractions",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "set"
+        },
+        {
+          "name": "probe_milestone_fractions",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "set"
+        },
+        {
+          "name": "qualitative_milestone_fractions",
+          "type": "string_list",
+          "required": false,
+          "default": [],
+          "collection_semantics": "set"
+        },
+        {
+          "name": "probe_examples",
+          "type": "integer",
+          "required": false,
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1000000000,
+          "unit": "samples"
+        },
+        {
+          "name": "mutable_cadence",
+          "type": "boolean",
+          "required": false,
+          "default": false
+        }
+      ],
+      "state": [],
+      "step_domain": "optimizer_step",
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
         "category": "qualitative_sample",
         "name": "fixed_held_out",
         "version": "1.0.0"
