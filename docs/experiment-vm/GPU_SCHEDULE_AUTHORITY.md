@@ -435,13 +435,15 @@ Rules:
 1. **Every rejection names a path.** A JSON pointer into the schedule document —
    `/tasks/417/waits/2/threshold`, `/buffers/9/shape/1` — not a task label and not a sentence.
 
-   These are unambiguous for free, which is worth noting because it is not generally true here.
-   `child_path` performs no RFC 6901 escaping — `~` does not become `~0`, `/` does not become `~1` —
-   and it interpolates map keys raw, so a document with an exotic key can produce a pointer that
-   does not resolve to what it names. The schedule IR indexes every entity by integer position and
-   has exactly one map-typed field, `meta`, whose contents are excluded from every proof. So every
-   pointer a *proof* emits is built from array indices and fixed field names and needs no escaping.
-   A decode-phase `field.unknown` on a `meta` key is the one place the general caveat still applies.
+   Most of these are unambiguous for free, and the exception needs stating. `child_path` performs no
+   RFC 6901 escaping — `~` does not become `~0`, `/` does not become `~1` — and it interpolates map
+   keys raw, so an exotic key produces a pointer that does not resolve to what it names. Because the
+   schedule IR indexes every entity by integer position, every pointer emitted by a *proof* is built
+   from array indices and fixed field names, and needs no escaping. The map-typed fields are `meta`,
+   `params`, and `config.tiling`; a diagnostic naming a key in one of them — `schedule.param.unknown`
+   is the realistic case — is the place where the caveat still bites, and the implementer must either
+   escape those two characters there or reject a key containing them outright. Rejecting is cheaper
+   and is the recommendation: no legitimate parameter or label name contains `/` or `~`.
 2. **Every rejection names a code** from the tables above. Codes are stable identifiers; message
    text is not, and nothing may match on it.
 
@@ -461,7 +463,8 @@ Rules:
 5. **Nothing raises.** A malformed document produces a receipt with `verdict: rejected`, not an
    exception, not a stack trace, and not a partially built program. The upstream contract said this
    and the audit disproved it at the pin; a fuzz corpus over the wire format is the regression that
-   keeps it true here, not a docstring.
+   keeps it true here, not a docstring. A receipt is emitted for a Phase A failure too, even though
+   its exit code differs, so that "there is always a receipt" holds without exception.
 6. **A rejection is complete.** All errors in the failing phase are reported, not the first. Phases
    after a failing phase are reported as not attempted, in `proved_invariants` by absence and in the
    `not_attempted` list by name, so "no error from Phase E" never reads as "Phase E passed".
@@ -471,7 +474,7 @@ Rules:
 | Code | Meaning |
 |---|---|
 | 0 | schedule accepted; receipt on stdout |
-| 2 | document malformed — Phase A failed; diagnostics on stderr |
+| 2 | document malformed — Phase A failed; receipt on stdout, diagnostics also on stderr |
 | 3 | document well-formed, schedule rejected; receipt with diagnostics on stdout |
 | 64 | usage error |
 
@@ -536,8 +539,11 @@ A new optional `spec` section:
 ```
 
 Every field is required in the reflected struct unless it is `std::optional`; the section as a whole
-is `std::optional` so existing documents are unaffected. The plan compiler adds these checks to the
-list it already performs before a run exists:
+is `std::optional` so existing documents are unaffected. It also needs a `$defs` entry and a property
+on `$defs.spec` in `experiment-v1.schema.json`, which is `additionalProperties: false` — that is the
+established path, and `spec.execution` is the precedent for an optional section added this way.
+
+The plan compiler adds these checks to the list it already performs before a run exists:
 
 - the referenced receipt exists, its `verdict` is `accepted`, and its `schedule_digest` equals the
   declared one — `gpu_schedule.receipt_missing`, `gpu_schedule.receipt_rejected`,
