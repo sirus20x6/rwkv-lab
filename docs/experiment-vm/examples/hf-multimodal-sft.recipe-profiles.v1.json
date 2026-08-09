@@ -66,6 +66,13 @@
               "fingerprint": "manifest_sha256",
               "required": true
             },
+            "eval_examples": {
+              "type": "eval_examples",
+              "schema": "rwkv-lab.eval-examples.v1",
+              "immutability": "append_only",
+              "fingerprint": "manifest_sha256",
+              "required": true
+            },
             "test_eval": {
               "type": "report",
               "schema": "rwkv-lab.hf-test-caption-evidence-bundle.v1",
@@ -396,7 +403,7 @@
                         "configuration": {
                           "split_slot": "evaluation_split",
                           "metrics": [
-                            "loss"
+                            "eval.loss"
                           ],
                           "reduction": "weighted_mean",
                           "maximum_examples": 0
@@ -470,6 +477,7 @@
                 "publishes": {
                   "checkpoint": "checkpoint",
                   "eval_gallery": "eval_gallery",
+                  "eval_examples": "eval_examples",
                   "test_eval": "test_eval",
                   "final_evaluation": "final_evaluation"
                 },
@@ -819,6 +827,13 @@
               "fingerprint": "manifest_sha256",
               "required": true
             },
+            "eval_examples": {
+              "type": "eval_examples",
+              "schema": "rwkv-lab.eval-examples.v1",
+              "immutability": "append_only",
+              "fingerprint": "manifest_sha256",
+              "required": true
+            },
             "test_eval": {
               "type": "report",
               "schema": "rwkv-lab.hf-test-caption-evidence-bundle.v1",
@@ -1150,7 +1165,7 @@
                         "configuration": {
                           "split_slot": "evaluation_split",
                           "metrics": [
-                            "loss"
+                            "eval.loss"
                           ],
                           "reduction": "weighted_mean",
                           "maximum_examples": 0
@@ -1245,6 +1260,7 @@
                 "publishes": {
                   "checkpoint": "checkpoint",
                   "eval_gallery": "eval_gallery",
+                  "eval_examples": "eval_examples",
                   "test_eval": "test_eval",
                   "final_evaluation": "final_evaluation"
                 },
@@ -1659,6 +1675,13 @@
               "fingerprint": "manifest_sha256",
               "required": true
             },
+            "eval_examples": {
+              "type": "eval_examples",
+              "schema": "rwkv-lab.eval-examples.v1",
+              "immutability": "append_only",
+              "fingerprint": "manifest_sha256",
+              "required": true
+            },
             "test_eval": {
               "type": "report",
               "schema": "rwkv-lab.hf-test-caption-evidence-bundle.v1",
@@ -2011,7 +2034,7 @@
                         "configuration": {
                           "split_slot": "evaluation_split",
                           "metrics": [
-                            "loss"
+                            "eval.loss"
                           ],
                           "reduction": "weighted_mean",
                           "maximum_examples": 0
@@ -2087,6 +2110,7 @@
                 "publishes": {
                   "checkpoint": "checkpoint",
                   "eval_gallery": "eval_gallery",
+                  "eval_examples": "eval_examples",
                   "test_eval": "test_eval",
                   "final_evaluation": "final_evaluation"
                 },

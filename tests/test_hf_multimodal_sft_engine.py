@@ -1210,7 +1210,7 @@ def _engine_harness(tmp_path, *, schedule_configuration=None, maximum_steps=1):
 
         def qualitative_samples(self):
             return SimpleNamespace(
-                configuration=SimpleNamespace(sample_count=1),
+                configuration=SimpleNamespace(sample_count=1, identity_field="id"),
                 select=lambda population, selector_digest, dataset_root: SimpleNamespace(
                     identities=tuple(population[:1]),
                     identities_digest="sha256:" + "4" * 64,
@@ -1328,6 +1328,13 @@ def _engine_harness(tmp_path, *, schedule_configuration=None, maximum_steps=1):
             applier({}, self._assignments("microbatch", step))
 
         def optimizer_step(self, step, applier):
+            # Mutation sentinel. The real controller refuses an optimizer step
+            # past the attempt baseline until the typed evidence is durable, so
+            # an engine that reached this point without having published it is
+            # already wrong here rather than only in production.
+            assert any(
+                kind == "eval_examples" for kind, *_ in self.events
+            ), "optimizer step reached before attempt-baseline eval-examples"
             self.safe_points.append(("optimizer_step", step))
             # Sampled immediately after the optimizer mutated, so a trajectory
             # comparison sees the exact post-update state at every step.
@@ -1367,6 +1374,15 @@ def _engine_harness(tmp_path, *, schedule_configuration=None, maximum_steps=1):
                 raise RuntimeError("simulated crash after launch checkpoint")
             return SimpleNamespace(
                 artifact_id="gallery", manifest_sha256="sha256:" + "7" * 64
+            )
+
+        def publish_evaluation_examples(self, request):
+            self.events.append(
+                ("eval_examples", request, model.head.weight.detach().clone())
+            )
+            return SimpleNamespace(
+                artifact_id=f"eval-examples-{request.optimizer_step}",
+                manifest_sha256="sha256:" + "e" * 64,
             )
 
         def publish_artifact(self, request):
@@ -1459,7 +1475,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
             resume_checkpoint_manifest_digest="sha256:" + "1" * 64,
             device="cpu",
         )
-    final_checkpoint = controls.events[3][1].source_directory
+    final_checkpoint = controls.events[4][1].source_directory
     final_checkpoint_state = json.loads(
         (final_checkpoint / "engine-state.json").read_text(encoding="utf-8")
     )
@@ -1482,24 +1498,30 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         observability=final_observability,
         step_profiler=SimpleNamespace(input_wait=nullcontext, step=lambda _step: None),
         resume_directory=final_checkpoint,
-        resume_parent_artifact_ids=("checkpoint-4",),
-        resume_checkpoint_manifest_digest="sha256:" + "4" * 64,
+        resume_parent_artifact_ids=("checkpoint-5",),
+        resume_checkpoint_manifest_digest="sha256:" + "5" * 64,
         device="cpu",
     )
     assert step == 1
     assert torch.equal(model.head.weight, before_eval_only_recovery)
+    # The universal typed evidence lands with the launch checkpoint, before the
+    # loop can reach an optimizer mutation, and a resumed attempt republishes it
+    # at its own baseline rather than leaning on the previous attempt's.
     assert [event[0] for event in controls.events] == [
         "checkpoint",
         "gallery",
+        "eval_examples",
         "checkpoint",
         "checkpoint",
     ]
     assert [event[0] for event in final_controls.events] == [
+        "checkpoint",
+        "eval_examples",
         "artifact",
         "gallery",
         "final_evaluation",
     ]
-    closure_request = final_controls.events[2][1]
+    closure_request = final_controls.events[4][1]
     expected_context = {
         "api_version": "rwkv-lab.hf-final-member-context/v1",
         "components": {
@@ -1536,7 +1558,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         "ordered_identities_digest": "sha256:" + "4" * 64,
         "eval_manifest_digest": frozen_eval_manifest,
     }
-    final_item = final_controls.events[1][1].items[0]
+    final_item = final_controls.events[3][1].items[0]
     assert final_item.heldout_item_id == step_zero_item.heldout_item_id
     assert final_item.prompt_or_condition_digest == (
         step_zero_item.prompt_or_condition_digest
@@ -1553,14 +1575,14 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
     }
     assert controls.events[1][1].evaluator_profile_digest == frozen_eval_manifest
     assert (
-        final_controls.events[1][1].evaluator_profile_digest == frozen_eval_manifest
+        final_controls.events[3][1].evaluator_profile_digest == frozen_eval_manifest
     )
     assert not torch.equal(model.head.weight, initial)
     assert timeline.index("generate") < timeline.index("optimizer")
     assert timeline.index("initialization") < timeline.index("data_pipeline:split")
     assert timeline.index("data_pipeline:test_split") < timeline.index("model_load")
     assert timeline.index("model_load") < timeline.index("device_move")
-    assert len(generation_weights) == 6
+    assert len(generation_weights) == 7
     assert torch.equal(generation_weights[0], initial)
     assert not torch.equal(generation_weights[-1], initial)
     assert step_zero_item.sampling_attributes["ordered_identities_digest"] == (
@@ -1596,7 +1618,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
     )
     baseline_checkpoint_state = json.loads(
         (
-            controls.events[2][1].source_directory / "engine-state.json"
+            controls.events[3][1].source_directory / "engine-state.json"
         ).read_text(encoding="utf-8")
     )
     assert baseline_checkpoint_state["runtime_state"]["baseline_complete"] is True
@@ -1608,7 +1630,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         is True
     )
     assert not (
-        controls.events[2][1].source_directory / "sealed-test-baseline"
+        controls.events[3][1].source_directory / "sealed-test-baseline"
     ).exists()
     quarantined_baseline = tmp_path / "run" / ".private-test-quarantine" / "baseline"
     assert quarantined_baseline.is_dir()
@@ -1644,10 +1666,10 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
     ]
     assert len(final_test_metrics) == 1
     assert final_test_metrics[0][1] == 1
-    assert final_controls.events[0][1].output_name == "test_eval"
-    assert final_controls.events[0][1].parent_artifact_ids == (
+    assert final_controls.events[2][1].output_name == "test_eval"
+    assert final_controls.events[2][1].parent_artifact_ids == (
         "checkpoint-1",
-        "checkpoint-4",
+        "checkpoint-5",
     )
     bundle_receipt = json.loads(
         (
@@ -1655,7 +1677,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         ).read_text(encoding="utf-8")
     )
     assert bundle_receipt["baseline_checkpoint_artifact_id"] == "checkpoint-1"
-    assert bundle_receipt["final_checkpoint_artifact_id"] == "checkpoint-4"
+    assert bundle_receipt["final_checkpoint_artifact_id"] == "checkpoint-5"
     assert timeline.index("test_artifact") < timeline.index("test_metric")
     assert controls.safe_points == [
         ("initialization", 0),

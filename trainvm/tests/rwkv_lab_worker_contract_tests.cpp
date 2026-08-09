@@ -568,7 +568,7 @@ int main() {
                 rwkv.authoring->outputs.at("eval_examples").artifact_schema ==
                     "rwkv-lab.eval-examples.v1",
             "RWKV scratch must require checkpoint-bound text eval examples");
-    require(hf.authoring && hf.authoring->outputs.size() == 4U &&
+    require(hf.authoring && hf.authoring->outputs.size() == 5U &&
                 hf.authoring->outputs.at("test_eval").required &&
                 hf.authoring->outputs.at("test_eval").artifact_type ==
                     trainvm::ArtifactType::report &&
@@ -610,6 +610,16 @@ int main() {
     require(hf_recipe_registry_valid,
             "checked-in HF recipe outputs must exactly match the production "
             "worker operation registry");
+    // `required` is the whole point: only a required eval-examples publication
+    // arms invocation_requires_step_zero_eval_gate, so this family's optimizer
+    // steps are gated by the universal contract and not only by its own engine.
+    require(hf.authoring &&
+                hf.authoring->outputs.at("eval_examples").required &&
+                hf.authoring->outputs.at("eval_examples").artifact_type ==
+                    trainvm::ArtifactType::eval_examples &&
+                hf.authoring->outputs.at("eval_examples").artifact_schema ==
+                    "rwkv-lab.eval-examples.v1",
+            "HF multimodal SFT must require checkpoint-bound eval examples");
 
     nlohmann::json exact_source = load_mageflow_fixture();
     exact_source["spec"].erase("execution");

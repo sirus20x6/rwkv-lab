@@ -66,6 +66,13 @@
               "fingerprint": "manifest_sha256",
               "required": true
             },
+            "eval_examples": {
+              "type": "eval_examples",
+              "schema": "rwkv-lab.eval-examples.v1",
+              "immutability": "append_only",
+              "fingerprint": "manifest_sha256",
+              "required": true
+            },
             "test_eval": {
               "type": "report",
               "schema": "rwkv-lab.hf-test-caption-evidence-bundle.v1",
@@ -194,10 +201,10 @@
                           "version": "2.0.0"
                         },
                         "configuration": {
-                          "learning_rate": 0.00002,
+                          "learning_rate": 2e-05,
                           "beta1": 0.9,
                           "beta2": 0.95,
-                          "epsilon": 1E-8,
+                          "epsilon": 1e-08,
                           "foreach": true,
                           "fused": false
                         }
@@ -376,7 +383,7 @@
                         "configuration": {
                           "split_slot": "evaluation_split",
                           "metrics": [
-                            "loss"
+                            "eval.loss"
                           ],
                           "reduction": "weighted_mean",
                           "maximum_examples": 0
@@ -450,6 +457,7 @@
                 "publishes": {
                   "checkpoint": "checkpoint",
                   "eval_gallery": "eval_gallery",
+                  "eval_examples": "eval_examples",
                   "test_eval": "test_eval",
                   "final_evaluation": "final_evaluation"
                 },
@@ -611,7 +619,7 @@
           "type": "number",
           "target": "/spec/workflow/nodes/train/invoke/training/components/optimizer/configuration/learning_rate",
           "required": false,
-          "minimum": 1E-8,
+          "minimum": 1e-08,
           "maximum": 0.01
         },
         {
@@ -783,6 +791,13 @@
               "fingerprint": "manifest_sha256",
               "required": true
             },
+            "eval_examples": {
+              "type": "eval_examples",
+              "schema": "rwkv-lab.eval-examples.v1",
+              "immutability": "append_only",
+              "fingerprint": "manifest_sha256",
+              "required": true
+            },
             "test_eval": {
               "type": "report",
               "schema": "rwkv-lab.hf-test-caption-evidence-bundle.v1",
@@ -924,10 +939,10 @@
                           "version": "2.0.0"
                         },
                         "configuration": {
-                          "learning_rate": 0.00002,
+                          "learning_rate": 2e-05,
                           "beta1": 0.9,
                           "beta2": 0.95,
-                          "epsilon": 1E-8,
+                          "epsilon": 1e-08,
                           "foreach": true,
                           "fused": false
                         }
@@ -1106,7 +1121,7 @@
                         "configuration": {
                           "split_slot": "evaluation_split",
                           "metrics": [
-                            "loss"
+                            "eval.loss"
                           ],
                           "reduction": "weighted_mean",
                           "maximum_examples": 0
@@ -1180,6 +1195,7 @@
                 "publishes": {
                   "checkpoint": "checkpoint",
                   "eval_gallery": "eval_gallery",
+                  "eval_examples": "eval_examples",
                   "test_eval": "test_eval",
                   "final_evaluation": "final_evaluation"
                 },
@@ -1341,7 +1357,7 @@
           "type": "number",
           "target": "/spec/workflow/nodes/train/invoke/training/components/optimizer/configuration/learning_rate",
           "required": false,
-          "minimum": 1E-8,
+          "minimum": 1e-08,
           "maximum": 0.01
         },
         {

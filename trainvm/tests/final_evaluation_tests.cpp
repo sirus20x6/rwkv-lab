@@ -352,6 +352,7 @@ int main() {
              {"eval_gallery", {{"logical_name", "eval_gallery"}}},
              {"metrics", {{"logical_name", "metrics"}}},
              {"test_eval", {{"logical_name", "test_eval"}}},
+             {"eval_examples", {{"logical_name", "eval_examples"}}},
              {"final_evaluation",
               {{"logical_name", "final_evaluation"}}}},
         .observability =

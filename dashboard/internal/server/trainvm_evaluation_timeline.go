@@ -26,6 +26,16 @@ const (
 	evaluationCadenceRevisionMetric = "eval.cadence_revision"
 )
 
+// The four kinds in rwkv_lab.training_runtime.evaluation_schedules.EvaluationKind.
+// A series_id outside this set annotates its milestone but does not invent a
+// kind, so an unknown producer cannot inflate the observed counts.
+var evaluationSeriesKinds = map[string]bool{
+	"scalar_probe": true,
+	"scalar_full":  true,
+	"qualitative":  true,
+	"final_audit":  true,
+}
+
 var evaluationPlannedMetrics = map[string]string{
 	"eval.planned_scalar_full_milestones":  "scalar_full",
 	"eval.planned_scalar_probe_milestones": "scalar_probe",
@@ -42,6 +52,13 @@ type evaluationMilestone struct {
 	GalleryArtifactID        string   `json:"gallery_artifact_id,omitempty"`
 	CheckpointManifestDigest string   `json:"checkpoint_manifest_digest,omitempty"`
 	EvalManifestDigest       string   `json:"eval_manifest_digest,omitempty"`
+	// The universal pre-mutation evidence for this milestone, when the run
+	// publishes it. Its presence at the attempt baseline is what let the
+	// controller record any optimizer step at all beyond that baseline.
+	EvalExamplesArtifactID   string   `json:"eval_examples_artifact_id,omitempty"`
+	EvalExamplesSeriesID     string   `json:"eval_examples_series_id,omitempty"`
+	EvalExampleCount         int      `json:"eval_example_count,omitempty"`
+	EvalExamplesCheckpointID string   `json:"eval_examples_checkpoint_artifact_id,omitempty"`
 }
 
 type evaluationTimelineResponse struct {
@@ -85,6 +102,7 @@ func addEvaluationKind(milestone *evaluationMilestone, kind string) {
 
 func buildEvaluationTimeline(
 	galleries []trainVMGallerySummary,
+	examples []trainVMEvalExamplesSummary,
 	metrics []trainvmstore.MetricPoint,
 	historyTruncated bool,
 ) evaluationTimelineResponse {
@@ -109,6 +127,23 @@ func buildEvaluationTimeline(
 		milestone.GalleryArtifactID = gallery.ArtifactID
 		milestone.CheckpointManifestDigest = gallery.CheckpointManifestDigest
 		milestone.EvalManifestDigest = gallery.EvaluatorProfileDigest
+	}
+
+	// series_id carries the milestone kind on the wire rather than leaving the
+	// dashboard to guess it from the step number, so a baseline qualitative
+	// milestone and a periodic scalar one stay distinguishable.
+	for _, evidence := range examples {
+		milestone := at(evidence.Step)
+		milestone.EvalExamplesArtifactID = evidence.ArtifactID
+		milestone.EvalExamplesSeriesID = evidence.SeriesID
+		milestone.EvalExampleCount = evidence.ExampleCount
+		milestone.EvalExamplesCheckpointID = evidence.CheckpointArtifactID
+		if evaluationSeriesKinds[evidence.SeriesID] {
+			addEvaluationKind(milestone, evidence.SeriesID)
+		}
+		if milestone.CheckpointManifestDigest == "" {
+			milestone.CheckpointManifestDigest = evidence.CheckpointManifestDigest
+		}
 	}
 
 	for _, metric := range metrics {
@@ -203,6 +238,15 @@ func (s *Server) handleTrainVMEvaluationTimeline(w http.ResponseWriter, r *http.
 		}
 		galleries = append(galleries, gallerySummary(artifact, manifest))
 	}
+	examples, examplesTruncated, err := s.publishedEvalExamples(r.Context(), runID)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.Error(w, "no such TrainVM run or persisted plan", http.StatusNotFound)
+			return
+		}
+		writeTrainVMAuthorityError(w, err)
+		return
+	}
 	metrics, err := trainvmstore.Metrics(
 		r.Context(), s.trainvm, runID, 0, evaluationTimelineMaxMetrics,
 	)
@@ -213,6 +257,7 @@ func (s *Server) handleTrainVMEvaluationTimeline(w http.ResponseWriter, r *http.
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(
-		buildEvaluationTimeline(galleries, metrics, historyTruncated || budgetTruncated),
+		buildEvaluationTimeline(galleries, examples, metrics,
+			historyTruncated || budgetTruncated || examplesTruncated),
 	)
 }

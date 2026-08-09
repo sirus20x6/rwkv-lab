@@ -14329,6 +14329,359 @@ void test_service_orders_physical_before_logical_release() {
   std::filesystem::remove_all(directory);
 }
 
+// The universal pre-mutation gate, proved where it is actually enforced: the
+// controller. An adapter-side test can only show that evidence was produced; it
+// cannot show that the authority refuses to record a mutation without it, and
+// "the artifact exists" passes just as happily when the mutation came first.
+// The sentinel here is the journal: a blocked optimizer step must leave zero
+// durable events behind, because a step the journal never saw is a step the run
+// can never afterwards claim to have taken.
+void test_universal_step_zero_gate_orders_controller_mutation() {
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-step-zero-gate-test-" +
+       std::to_string(static_cast<long long>(::getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const std::filesystem::path run_directory = directory / "run";
+  std::filesystem::create_directories(run_directory);
+
+  // The publication declaration is lifted verbatim from the checked-in
+  // hf_multimodal_sft recipe rather than restated here, so weakening that
+  // recipe disarms this test instead of quietly disarming production.
+  nlohmann::json recipes;
+  {
+    std::ifstream input(std::filesystem::path(TRAINVM_SOURCE_ROOT) /
+                        "docs/experiment-vm/examples/"
+                        "hf-multimodal-sft.recipe-profiles.v1.json");
+    input >> recipes;
+  }
+  const nlohmann::json declared_eval_examples = recipes.at("recipes")
+                                                    .at(0)
+                                                    .at("template_document")
+                                                    .at("spec")
+                                                    .at("artifacts")
+                                                    .at("eval_examples");
+
+  nlohmann::json fixture = load_fixture();
+  fixture["spec"]["workspace"]["root"] = directory.string();
+  fixture["spec"]["workspace"]["run_directory"] = run_directory.string();
+  fixture["spec"]["workspace"]["allowed_read_roots"] =
+      nlohmann::json::array({directory.string()});
+  fixture["spec"]["workspace"]["allowed_write_roots"] =
+      nlohmann::json::array({run_directory.string()});
+  fixture["spec"]["artifacts"]["checkpoint"]["required"] = true;
+  fixture["spec"]["artifacts"]["eval_examples"] = declared_eval_examples;
+  fixture["spec"]["workflow"]["nodes"]["train_to_boundary"]["publishes"]
+         ["eval_examples"] = "eval_examples";
+  fixture["spec"]["workflow"]["nodes"]["resume_training"]["publishes"]
+         ["eval_examples"] = "eval_examples";
+  // The training composition is the checked-in HF one, resolved against the
+  // real component registry: the controller reads the evaluator's metrics and
+  // descriptor digest out of it when it validates an eval-examples publication,
+  // so a synthetic stand-in would prove nothing about this family.
+  nlohmann::json hf_training = recipes.at("recipes")
+                                   .at(0)
+                                   .at("template_document")
+                                   .at("spec")
+                                   .at("workflow")
+                                   .at("nodes")
+                                   .at("train")
+                                   .at("invoke")
+                                   .at("training");
+  // The recipe names one operator's absolute host paths, which do not exist on
+  // a CI runner, and path-typed component configuration is resolved for real.
+  // Repoint the three of them at this source tree, exactly as
+  // recipe_profile_tests.cpp does; nothing here reads their contents.
+  const std::filesystem::path source_root =
+      std::filesystem::canonical(std::filesystem::path(TRAINVM_SOURCE_ROOT));
+  hf_training["components"]["model_loader"]["configuration"]["model_path"] =
+      source_root.string();
+  hf_training["components"]["data"]["configuration"]["dataset_root"] =
+      source_root.string();
+  hf_training["components"]["trainability"]["configuration"]
+             ["target_manifest_path"] = (source_root / "README.md").string();
+  fixture["spec"]["workflow"]["nodes"]["train_to_boundary"]["invoke"]
+         ["training"] = hf_training;
+  fixture["spec"]["workflow"]["nodes"]["resume_training"]["invoke"]
+         ["training"] = hf_training;
+  // The evaluator's own declared metric identities, so the scalar the
+  // controller demands at the baseline is the one the recipe actually names.
+  const nlohmann::json evaluator_metrics =
+      hf_training.at("components").at("evaluator").at("configuration").at(
+          "metrics");
+  for (const auto& metric : evaluator_metrics) {
+    fixture["spec"]["observability"]["metrics"].push_back(
+        {{"name", metric},
+         {"type", "gauge"},
+         {"unit", "dimensionless"},
+         {"step_domain", "optimizer_step"},
+         {"aggregation", "last"}});
+  }
+  const std::string baseline_metric_name =
+      evaluator_metrics.at(0).get<std::string>();
+  const auto compiled = trainvm::compile_document(fixture);
+  check(compiled.valid(), "universal step-zero gate fixture compiles");
+  if (!compiled.valid()) {
+    std::cerr << trainvm::diagnostics_json(compiled.diagnostics).dump(2) << '\n';
+    std::filesystem::remove_all(directory);
+    return;
+  }
+
+  // The slot map is derived from the recipe rather than transcribed, so a
+  // component added to the family cannot silently fall outside the contract.
+  std::map<std::string, trainvm::TrainingComponentCategory> hf_slots;
+  for (const auto& [slot, component] :
+       hf_training.at("components").items()) {
+    trainvm::TrainingComponentKey key;
+    std::vector<trainvm::Diagnostic> diagnostics;
+    if (!trainvm::decode_json(component.at("key"), key, "/", diagnostics) ||
+        !diagnostics.empty()) {
+      check(false, "HF recipe component key is decodable");
+      std::filesystem::remove_all(directory);
+      return;
+    }
+    hf_slots.emplace(slot, key.category);
+  }
+
+  auto profiles = fixture_adapter_profiles();
+  for (auto& profile : profiles) {
+    if (profile.key.operation != "train") continue;
+    profile.training_composition = trainvm::TrainingCompositionContract{
+        .model_family = "transformer",
+        .slots = hf_slots,
+        .allowed_components = std::nullopt,
+    };
+    profile.authoring->outputs.emplace(
+        "eval_examples",
+        operation_port(trainvm::OperationPortType::artifact, false,
+                       trainvm::ArtifactType::eval_examples,
+                       "rwkv-lab.eval-examples.v1"));
+  }
+  const auto components = trainvm::TrainingComponentRegistry::load_file(
+      std::filesystem::path(TRAINVM_SOURCE_ROOT) /
+      "docs/experiment-vm/examples/training-components.v1.json");
+
+  const std::filesystem::path database_path = directory / "gate.db";
+  const std::string run_id = "step-zero-gate-run";
+  const trainvm::WorkerLaunchRequest launch_request{
+      .code_fingerprint = "sha256:" + std::string(64U, '2'),
+      .required_capabilities = {"worker.controls", "worker.metrics"},
+  };
+  trainvm::WorkerLaunchTicket launch;
+  {
+    trainvm::Journal journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    nlohmann::json submission = adapter_locked_submission(
+        *compiled.plan, trainvm::AdapterRegistry(profiles));
+    const std::string component_manifest =
+        components.plan_lock_manifest(*compiled.plan);
+    submission["training_component_lock_digest"] =
+        "sha256:" + trainvm::sha256_hex(component_manifest);
+    submission["training_component_lock"] =
+        nlohmann::json::parse(component_manifest);
+    controller.create_queued(submission);
+    (void)controller.begin_acquisition(test_time(2'000));
+    launch = controller.prepare_worker_launch(launch_request, test_time(2'100));
+    (void)bind_test_worker_launch(controller, launch, 2'150);
+  }
+  trainvm::TrainVMService service(
+      database_path, trainvm::AdapterRegistry(std::move(profiles)),
+      fixture_test_host_launch_registry(*compiled.plan, launch),
+      fixture_test_host_identity(), [] { return test_time(2'200); },
+      trainvm::HostGrantEnforcement::legacy_process_free_test, components);
+  prime_test_service_launch(service, launch);
+  trainvm::v1::WorkerHello hello;
+  hello.set_run_id(launch.run_id);
+  hello.set_node_id(launch.node_id);
+  hello.set_attempt_id(launch.attempt_id);
+  hello.set_launch_nonce(launch.launch_nonce);
+  hello.set_adapter(launch.adapter);
+  hello.set_adapter_version(launch.adapter_version);
+  hello.set_code_fingerprint(launch.code_fingerprint);
+  for (const auto& capability : launch.required_capabilities)
+    hello.add_capabilities(capability);
+  hello.set_last_acked_controller_sequence(0);
+  hello.set_concurrency_key(launch.concurrency_key);
+  hello.set_lease_id(launch.lease_id);
+  hello.set_fencing_token(launch.fencing_token);
+  trainvm::TrainVMService::WorkerConnection connection;
+  const grpc::Status open = service.open_worker_connection(hello, connection);
+  if (!open.ok())
+    std::cerr << "open: " << open.error_message() << '\n';
+  check(open.ok() && connection.welcome.step_zero_eval_gate_required() &&
+            !connection.welcome.step_zero_eval_gate_satisfied() &&
+            connection.attempt_baseline_optimizer_step == 0U,
+        "a required eval-examples publication arms the controller gate at the "
+        "fresh attempt baseline");
+  if (!open.ok()) {
+    std::filesystem::remove_all(directory);
+    return;
+  }
+
+  // The mutation sentinel. Every attempt to record work past the baseline runs
+  // through the same commit path a real optimizer step would, and is measured
+  // by whether the journal grew.
+  const auto mutation_attempt = [&](std::uint64_t worker_sequence,
+                                    std::uint64_t step) {
+    trainvm::v1::MetricSample metric;
+    metric.set_worker_sequence(worker_sequence);
+    metric.set_name(baseline_metric_name);
+    metric.mutable_value()->set_number_value(0.5);
+    metric.set_unit("dimensionless");
+    metric.set_step_domain("optimizer_step");
+    metric.set_step(step);
+    metric.set_sample_weight(1.0);
+    metric.mutable_observed_at()->set_seconds(3);
+    std::uint64_t acknowledged = 0U;
+    const std::size_t before = service.journal_.event_count();
+    const grpc::Status status =
+        service.record_worker_metric(metric, connection, acknowledged);
+    return std::tuple{status, service.journal_.event_count() - before};
+  };
+
+  const auto [ungated_status, ungated_growth] = mutation_attempt(1U, 1U);
+  check(ungated_status.error_code() == grpc::StatusCode::FAILED_PRECONDITION &&
+            ungated_growth == 0U,
+        "the controller refuses a step past the baseline before any "
+        "attempt-baseline evidence, without mutation");
+
+  const std::string checkpoint_id = "gate-checkpoint-0";
+  const std::string checkpoint_digest = "sha256:" + std::string(64U, 'a');
+  trainvm::v1::ArtifactManifest checkpoint;
+  checkpoint.set_worker_sequence(1U);
+  checkpoint.set_artifact_id(checkpoint_id);
+  checkpoint.set_logical_name("checkpoint");
+  checkpoint.set_kind(trainvm::v1::ARTIFACT_KIND_CHECKPOINT);
+  checkpoint.set_schema("rwkv-lab.mageflow-checkpoint.v1");
+  checkpoint.set_uri("file:///sealed/gate-checkpoint-0");
+  checkpoint.set_size_bytes(4096U);
+  checkpoint.set_fingerprint_algorithm("manifest_sha256");
+  checkpoint.set_fingerprint(checkpoint_digest);
+  checkpoint.set_complete(true);
+  checkpoint.set_producer_node_id(connection.identity.node_id);
+  checkpoint.set_producer_attempt_id(connection.identity.attempt_id);
+  checkpoint.set_optimizer_step(0U);
+  checkpoint.mutable_published_at()->set_seconds(3);
+  std::uint64_t checkpoint_ack = 0U;
+  const grpc::Status checkpoint_status =
+      service.record_worker_artifact(checkpoint, connection, checkpoint_ack);
+  trainvm::v1::MetricSample baseline_metric;
+  baseline_metric.set_worker_sequence(2U);
+  baseline_metric.set_name(baseline_metric_name);
+  baseline_metric.mutable_value()->set_number_value(9.0);
+  baseline_metric.set_unit("dimensionless");
+  baseline_metric.set_step_domain("optimizer_step");
+  baseline_metric.set_step(0U);
+  baseline_metric.set_sample_weight(1.0);
+  baseline_metric.mutable_observed_at()->set_seconds(3);
+  std::uint64_t baseline_ack = 0U;
+  const grpc::Status baseline_status =
+      service.record_worker_metric(baseline_metric, connection, baseline_ack);
+  const auto [half_status, half_growth] = mutation_attempt(3U, 1U);
+  check(checkpoint_status.ok() && baseline_status.ok() &&
+            half_status.error_code() == grpc::StatusCode::FAILED_PRECONDITION &&
+            half_growth == 0U,
+        "a durable baseline checkpoint and scalar are not enough on their own: "
+        "the typed examples are still missing and the step stays refused");
+
+  const std::string artifact_id = "gate-eval-examples-0";
+  const std::string digest = "sha256:" + std::string(64U, 'b');
+  nlohmann::json manifest_body{
+      {"api_version", trainvm::kEvalExamplesSchema},
+      {"run_id", run_id},
+      {"node_id", connection.identity.node_id},
+      {"attempt_id", connection.identity.attempt_id},
+      {"optimizer_step", 0U},
+      {"step_domain", "optimizer_step"},
+      {"series_id", "qualitative"},
+      {"heldout",
+       {{"identity_field", "sample_id"},
+        {"identities_digest", digest},
+        {"selector_digest", digest}}},
+      {"evaluator",
+       {{"component_digest",
+         nlohmann::json::parse(
+             connection.welcome.canonical_invocation_json())
+             .at("training")
+             .at("components")
+             .at("evaluator")
+             .at("descriptor_digest")},
+        {"metric_names", evaluator_metrics}}},
+      {"checkpoint",
+       {{"artifact_id", checkpoint_id},
+        {"manifest_digest", checkpoint_digest}}},
+      {"policy_digest", digest},
+      {"examples",
+       {{{"example_id", "sample-1"},
+         {"heldout_item_id", "row-1"},
+         {"heldout_item_digest", digest},
+         {"input", {{{"kind", "text"}, {"text", "prompt"}}}},
+         {"target", {{{"kind", "text"}, {"text", "target caption"}}}},
+         {"prediction",
+          {{{"kind", "text"}, {"text", "predicted caption"}}}}}}}};
+  manifest_body["canonical_manifest_digest"] =
+      "sha256:" + trainvm::sha256_hex(manifest_body.dump());
+  const std::string manifest_bytes = manifest_body.dump();
+  const std::filesystem::path revision = run_directory / "trainvm_artifacts" /
+                                         "eval_examples" / "revisions" /
+                                         artifact_id;
+  std::filesystem::create_directories(revision);
+  {
+    std::ofstream output(revision / "manifest.json",
+                         std::ios::binary | std::ios::trunc);
+    output.write(manifest_bytes.data(),
+                 static_cast<std::streamsize>(manifest_bytes.size()));
+  }
+  trainvm::v1::ArtifactManifest examples;
+  // A refused observation is not durable, so the next accepted worker
+  // sequence is still 3: the rejections above left no trace to skip past.
+  examples.set_worker_sequence(3U);
+  examples.set_artifact_id(artifact_id);
+  examples.set_logical_name("eval_examples");
+  examples.set_kind(trainvm::v1::ARTIFACT_KIND_EVAL_EXAMPLES);
+  examples.set_schema(trainvm::kEvalExamplesSchema);
+  examples.set_uri("file://" + (revision / "manifest.json").string());
+  examples.set_size_bytes(manifest_bytes.size());
+  examples.set_fingerprint_algorithm("manifest_sha256");
+  examples.set_fingerprint("sha256:" + trainvm::sha256_hex(manifest_bytes));
+  examples.set_complete(true);
+  examples.set_producer_node_id(connection.identity.node_id);
+  examples.set_producer_attempt_id(connection.identity.attempt_id);
+  examples.set_optimizer_step(0U);
+  examples.add_parent_artifact_ids(checkpoint_id);
+  examples.mutable_published_at()->set_seconds(3);
+  examples.set_canonical_manifest_json(manifest_bytes);
+  std::uint64_t examples_ack = 0U;
+  const grpc::Status examples_status =
+      service.record_worker_artifact(examples, connection, examples_ack);
+  if (!examples_status.ok())
+    std::cerr << "examples: " << examples_status.error_message() << '\n';
+  const auto [gated_status, gated_growth] = mutation_attempt(4U, 1U);
+  check(examples_status.ok() && gated_status.ok() && gated_growth == 1U,
+        "the same step is admitted, and only then, once the typed examples are "
+        "durable and bound to the same-attempt baseline checkpoint");
+
+  // A resumed attempt is gated at its own baseline. The evidence above is
+  // durable in this run, so if the gate were keyed to the run rather than to
+  // the attempt, a replacement worker would start already satisfied.
+  const std::vector<trainvm::Event> durable =
+      service.journal_.events_for_run(run_id);
+  check(trainvm::durable_attempt_baseline_eval_gate_satisfied(
+            durable, run_id, connection.identity.node_id,
+            connection.identity.attempt_id, 0U) &&
+            !trainvm::durable_attempt_baseline_eval_gate_satisfied(
+                durable, run_id, connection.identity.node_id,
+                connection.identity.attempt_id + "-replacement", 0U) &&
+            !trainvm::durable_attempt_baseline_eval_gate_satisfied(
+                durable, run_id, connection.identity.node_id,
+                connection.identity.attempt_id, 1U),
+        "durable evidence satisfies only its own attempt at its own baseline");
+  std::filesystem::remove_all(directory);
+}
+
 }  // namespace
 
 int main() {
@@ -14379,6 +14732,7 @@ int main() {
     test_service_supervisor_idle_soak();
     test_service_orders_physical_before_logical_release();
     test_legacy_journal_migration_policy();
+    test_universal_step_zero_gate_orders_controller_mutation();
   } catch (const std::exception& exception) {
     std::cerr << "UNCAUGHT: " << exception.what() << '\n';
     return 1;

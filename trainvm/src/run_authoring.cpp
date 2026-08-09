@@ -1410,9 +1410,12 @@ TrainingNodeProbe make_hf_multimodal_sft_training_node_probe(
         !node.at("publishes").contains("checkpoint") ||
         node.at("publishes").at("checkpoint") != "checkpoint" ||
         !node.at("publishes").contains("test_eval") ||
-        node.at("publishes").at("test_eval") != "test_eval")
+        node.at("publishes").at("test_eval") != "test_eval" ||
+        !node.at("publishes").contains("eval_examples") ||
+        node.at("publishes").at("eval_examples") != "eval_examples")
       throw std::runtime_error(
-          "HF training node omits checkpoint or eval-gallery publication");
+          "HF training node omits checkpoint, eval-gallery, or eval-examples "
+          "publication");
     const auto &artifacts = plan.canonical_plan.at("spec").at("artifacts");
     if (artifacts.at("checkpoint").at("schema") !=
             "hf.multimodal-sft.v1" ||
@@ -1421,9 +1424,18 @@ TrainingNodeProbe make_hf_multimodal_sft_training_node_probe(
         !artifacts.at("eval_gallery").value("required", false) ||
         artifacts.at("test_eval").at("schema") !=
             "rwkv-lab.hf-test-caption-evidence-bundle.v1" ||
-        !artifacts.at("test_eval").value("required", false))
+        !artifacts.at("test_eval").value("required", false) ||
+        artifacts.at("eval_examples").at("type") != "eval_examples" ||
+        artifacts.at("eval_examples").at("schema") !=
+            "rwkv-lab.eval-examples.v1" ||
+        artifacts.at("eval_examples").at("immutability") != "append_only" ||
+        artifacts.at("eval_examples").at("fingerprint") != "manifest_sha256" ||
+        // Only `required` arms the universal controller-side pre-mutation gate.
+        // A declared-but-optional publication leaves it inert, which is the
+        // exact state this family was in.
+        !artifacts.at("eval_examples").value("required", false))
       throw std::runtime_error(
-          "HF output artifact schemas are not the admitted exact pair");
+          "HF output artifact schemas are not the admitted exact set");
 
     const std::string input_digest =
         training_preflight_node_input_digest(plan, node_id);

@@ -1,6 +1,8 @@
 #include "trainvm/service.hpp"
 #include "trainvm/final_evaluation.hpp"
 
+#include "trainvm/eval_examples_contract.hpp"
+
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -144,20 +146,24 @@ std::vector<AdapterProfile> profiles() {
                {"eval_gallery", port(OperationPortType::artifact, false,
                                 ArtifactType::image_gallery,
                                 "rwkv-lab.eval-gallery.v2")},
-               // Deliberately three outputs, matching the deployed adapter
+               // Deliberately four outputs, matching the deployed adapter
                // registry and the worker itself: hf_multimodal_sft.py publishes
-               // via output_name exactly twice, eval_gallery and test_eval,
-               // plus checkpoint state. It emits no metrics artifact. This
-               // fixture previously declared a fourth, so a recipe publishing
-               // "metrics" authored cleanly here while the live controller
-               // rejected it with author_run.adapter.
+               // via output_name exactly three times — eval_gallery, test_eval
+               // and eval_examples — plus checkpoint state. It emits no metrics
+               // artifact. This fixture once declared a "metrics" output the
+               // registry did not, so a recipe publishing it authored cleanly
+               // here while the live controller rejected it with
+               // author_run.adapter.
                {"test_eval", port(OperationPortType::artifact, false,
                                   ArtifactType::report,
                                   "rwkv-lab.hf-test-caption-evidence-bundle.v1")},
                {"final_evaluation",
                 port(OperationPortType::artifact, true,
                      ArtifactType::report,
-                     "rwkv-lab.final-evaluation.v1")}}}};
+                     "rwkv-lab.final-evaluation.v1")},
+               {"eval_examples", port(OperationPortType::artifact, false,
+                                      ArtifactType::eval_examples,
+                                      "rwkv-lab.eval-examples.v1")}}}};
   return {core("acquire_resources", "trainvm.v1.AcquireResources",
                Idempotency::receipt_required),
           core("release_resources", "trainvm.v1.ReleaseResources",
@@ -495,6 +501,19 @@ int main() {
              .value("required", false))
       throw std::runtime_error(
           "compiled HF invocation weakened its required checkpoint output");
+    // Arming, proved against the checked-in recipe rather than a fixture. This
+    // predicate is what the controller consults; while it answered false the
+    // universal pre-mutation gate was inert for this whole family no matter how
+    // much step-zero evidence the engine produced on its own.
+    if (!invocation_requires_step_zero_eval_gate(compiled_invocation.publishes))
+      throw std::runtime_error(
+          "checked-in HF recipe does not arm the universal step-zero "
+          "eval-examples gate");
+    auto optional_examples = compiled_invocation.publishes;
+    optional_examples["eval_examples"]["declaration"]["required"] = false;
+    if (invocation_requires_step_zero_eval_gate(optional_examples))
+      throw std::runtime_error(
+          "an optional eval-examples publication must not arm the gate");
 
     const auto preview = invoke(*stub, document, true);
     const auto resolving = std::ranges::find_if(
