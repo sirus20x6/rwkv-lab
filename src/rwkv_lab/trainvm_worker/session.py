@@ -32,6 +32,29 @@ from .invocation import WorkerInvocation, load_worker_invocation
 
 MAXIMUM_WORKER_MESSAGE_BYTES = 64 * 1024
 
+# The trainvm.worker-runtime-evidence/v1 members, split by wire shape. Written
+# out rather than derived from the proto descriptor so that a field appearing
+# on one side and not the other is a refusal here, not a silent drop.
+_RUNTIME_EVIDENCE_TEXT_FIELDS = (
+    "api_version",
+    "run_id",
+    "node_id",
+    "attempt_id",
+    "launch_nonce",
+    "concurrency_key",
+    "lease_id",
+    "compute_device_vendor",
+    "compute_architecture",
+    "driver_version",
+    "runtime_closure_fingerprint",
+    "host_abi_digest",
+    "compute_compatibility_digest",
+)
+_RUNTIME_EVIDENCE_OPTIONAL_FIELDS = (
+    "compute_device_uuid",
+    "compute_device_pci_address",
+)
+
 _WIRE_HEARTBEAT_PHASE = {
     ExecutionPhase.COMPILE: wire.WorkerExecutionPhaseRequest.PHASE_COMPILE,
     ExecutionPhase.WARMUP: wire.WorkerExecutionPhaseRequest.PHASE_WARMUP,
@@ -816,6 +839,55 @@ class WorkerSession:
         return self._send(
             wire.WorkerToController(phase_receipt=receipt), sequence, wait
         )
+
+    def publish_runtime_evidence(self, report: Mapping[str, Any]) -> None:
+        """Send one measured runtime-evidence report over this connection.
+
+        `report` is exactly what `measure_worker_runtime_evidence` produced;
+        an unknown key is refused rather than dropped, because a dropped key
+        would let a caller believe it had sent something the authority never
+        saw.
+
+        Unlike every other publication this carries no worker sequence and is
+        never acknowledged. The transport is the report document and nothing
+        else -- a sequence would be the first field on a message whose whole
+        property is that it carries nothing the authority derives for itself.
+        The authority's answer is the immutable receipt it publishes, or the
+        stream error it fails the connection with.
+        """
+        known = set(_RUNTIME_EVIDENCE_TEXT_FIELDS)
+        known.update(_RUNTIME_EVIDENCE_OPTIONAL_FIELDS)
+        known.update({"fencing_token", "runtime_versions"})
+        unknown = sorted(set(report) - known)
+        if unknown:
+            raise WorkerSessionError(
+                "worker runtime evidence carries fields the transport does not: "
+                + ", ".join(unknown)
+            )
+        missing = sorted(set(_RUNTIME_EVIDENCE_TEXT_FIELDS) - set(report))
+        if missing or "fencing_token" not in report:
+            raise WorkerSessionError("worker runtime evidence report is incomplete")
+        evidence = wire.WorkerRuntimeEvidence(
+            fencing_token=int(report["fencing_token"]),
+            runtime_versions=[
+                wire.WorkerRuntimeVersionIdentity(
+                    name=str(version["name"]), version=str(version["version"])
+                )
+                for version in report.get("runtime_versions", ())
+            ],
+            **{name: str(report[name]) for name in _RUNTIME_EVIDENCE_TEXT_FIELDS},
+        )
+        for name in _RUNTIME_EVIDENCE_OPTIONAL_FIELDS:
+            if name in report:
+                setattr(evidence, name, str(report[name]))
+        with self._condition:
+            self._raise_if_failed()
+            if self._welcome is None or self._receipt is not None or self._closed:
+                raise WorkerSessionError("worker session is not open for publication")
+        message = wire.WorkerToController(runtime_evidence=evidence)
+        if message.ByteSize() > MAXIMUM_WORKER_MESSAGE_BYTES:
+            raise WorkerSessionError("worker message exceeds 64 KiB")
+        self._outgoing.put(message)
 
     def acknowledge_controls(
         self,

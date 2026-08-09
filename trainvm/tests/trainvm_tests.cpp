@@ -39,6 +39,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -15001,6 +15002,420 @@ void test_universal_step_zero_gate_orders_controller_mutation() {
   std::filesystem::remove_all(directory);
 }
 
+// ---------------------------------------------------------------------------
+// The wire hop for trainvm.worker-runtime-evidence/v1.
+//
+// The producer and the consumer for this document were already proven to agree
+// (see worker_runtime_evidence_tests and its Python parity run). What is under
+// test here is the hop between them: that a worker can send its measurements
+// over its own connection, that the authority publishes an immutable receipt
+// bound to that attempt and fence, and -- the case worth designing for -- that
+// a worker whose lease has already moved is refused ON THE WIRE, before the
+// publisher is asked anything at all.
+//
+// Refusing late is not the same as refusing early. `admit_worker_runtime_
+// evidence` would refuse a superseded report too, so a test that only checks
+// the returned status cannot tell the two apart. The counting authority below
+// is what makes the distinction observable: a wire refusal leaves
+// `publish_attempts` untouched.
+// ---------------------------------------------------------------------------
+
+trainvm::v1::WorkerHello wire_hello_for(
+    const trainvm::WorkerLaunchTicket& launch) {
+  trainvm::v1::WorkerHello hello;
+  hello.set_run_id(launch.run_id);
+  hello.set_node_id(launch.node_id);
+  hello.set_attempt_id(launch.attempt_id);
+  hello.set_launch_nonce(launch.launch_nonce);
+  hello.set_adapter(launch.adapter);
+  hello.set_adapter_version(launch.adapter_version);
+  hello.set_code_fingerprint(launch.code_fingerprint);
+  for (const auto& capability : launch.required_capabilities) {
+    hello.add_capabilities(capability);
+  }
+  hello.set_last_acked_controller_sequence(0);
+  hello.set_concurrency_key(launch.concurrency_key);
+  hello.set_lease_id(launch.lease_id);
+  hello.set_fencing_token(launch.fencing_token);
+  return hello;
+}
+
+trainvm::HostInventoryReceipt fixture_test_host_inventory() {
+  const trainvm::HostIdentity host = fixture_test_host_identity();
+  trainvm::ObservedHostResource gpu{};
+  gpu.id = {.kind = trainvm::HostResourceKind::accelerator,
+            .vendor = trainvm::HostAcceleratorVendor::nvidia,
+            .stable_id = "GPU-77777777-7777-7777-7777-777777777777",
+            .parent_id = std::nullopt};
+  gpu.disposition = trainvm::ResourceObservationDisposition::audited_eligible;
+  gpu.compute_contexts = trainvm::ResourceContextDisposition::absent;
+  gpu.graphics_contexts = trainvm::ResourceContextDisposition::absent;
+  gpu.pci_bdf = "0000:07:00.0";
+  gpu.device_major = 195U;
+  gpu.device_minor = 0U;
+  gpu.total_memory_bytes = 96ULL << 30U;
+  trainvm::HostKernelSnapshot snapshot{
+      .api_version = std::string(trainvm::kHostInventoryApiVersion),
+      .host_id = host.host_id,
+      .boot_id = host.boot_id,
+      .broker_epoch = "broker-1",
+      .begin_revision = "inventory-1",
+      .end_revision = "inventory-1",
+      .probes = {{.vendor = trainvm::HostAcceleratorVendor::nvidia,
+                  .disposition = trainvm::ProbeDisposition::complete,
+                  .context_details_complete = true,
+                  .detail = "complete"}},
+      .resources = {std::move(gpu)},
+  };
+  trainvm::FakeHostKernel kernel(
+      {{.snapshot = std::move(snapshot), .failure = std::nullopt}});
+  return trainvm::capture_host_inventory(kernel);
+}
+
+// Wraps the real production authority so the test can tell "the service never
+// asked" from "the publisher said no". It adds no policy of its own.
+class CountingWorkerRuntimeEvidenceAuthority final
+    : public trainvm::IWorkerRuntimeEvidenceAuthority {
+ public:
+  explicit CountingWorkerRuntimeEvidenceAuthority(
+      trainvm::LinuxCacheEvidenceConfig config)
+      : inner_(std::move(config), [] { return fixture_test_host_inventory(); }) {
+  }
+
+  std::string publish(const trainvm::WorkerRuntimeEvidenceReport& report,
+                      const trainvm::HostIdentity& host,
+                      const trainvm::ResolvedLaunchSpec& launch) override {
+    ++publish_attempts;
+    return inner_.publish(report, host, launch);
+  }
+
+  std::size_t publish_attempts{};
+
+ private:
+  trainvm::LinuxWorkerRuntimeEvidenceAuthority inner_;
+};
+
+std::size_t runtime_receipt_count(const std::filesystem::path& root) {
+  std::size_t count = 0U;
+  for (const auto& entry :
+       std::filesystem::directory_iterator(root / "runtime")) {
+    (void)entry;
+    ++count;
+  }
+  return count;
+}
+
+void test_worker_runtime_evidence_wire_hop() {
+  // ---- The proto arm and the C++ struct are two literals nothing else keeps
+  // in step. Assert they describe the same document, and that neither has
+  // grown a field the authority derives for itself. -----------------------
+  {
+    trainvm::WorkerRuntimeEvidenceReport populated{
+        .api_version = "trainvm.worker-runtime-evidence/v1",
+        .run_id = "run-1",
+        .node_id = "train",
+        .attempt_id = "train@1",
+        .launch_nonce = "nonce-1",
+        .concurrency_key = "gpu:0",
+        .lease_id = "lease-1",
+        .fencing_token = 1U,
+        .compute_device_vendor = "nvidia",
+        .compute_architecture = "sm_120",
+        .compute_device_uuid =
+            std::string("GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        .compute_device_pci_address = std::string("0000:01:00.0"),
+        .driver_version = "610.43.03",
+        .runtime_versions = {{.name = "python", .version = "3.13.5"}},
+        .runtime_closure_fingerprint = "sha256:" + std::string(64U, 'c'),
+        .host_abi_digest = "sha256:" + std::string(64U, 'd'),
+        .compute_compatibility_digest = "sha256:" + std::string(64U, 'e'),
+    };
+    // Both optionals are set, so the encoded document carries every member the
+    // struct can express -- otherwise the comparison below would pass while
+    // the proto silently lacked the placement fields.
+    const nlohmann::json wire =
+        trainvm::worker_runtime_evidence_json(populated);
+    std::set<std::string> struct_fields;
+    for (const auto& member : wire.items()) {
+      struct_fields.insert(std::string(member.key()));
+    }
+    std::set<std::string> proto_fields;
+    const auto* const descriptor =
+        trainvm::v1::WorkerRuntimeEvidence::descriptor();
+    for (int index = 0; index < descriptor->field_count(); ++index) {
+      proto_fields.insert(std::string(descriptor->field(index)->name()));
+    }
+    check(struct_fields == proto_fields,
+          "the WorkerRuntimeEvidence proto arm carries exactly the fields of "
+          "the C++ report struct, no more and no fewer");
+    const auto version_fields =
+        trainvm::reflected_field_names<trainvm::RuntimeVersionIdentity>();
+    std::set<std::string> nested_proto_fields;
+    const auto* const nested =
+        trainvm::v1::WorkerRuntimeVersionIdentity::descriptor();
+    for (int index = 0; index < nested->field_count(); ++index) {
+      nested_proto_fields.insert(std::string(nested->field(index)->name()));
+    }
+    check(nested_proto_fields ==
+              std::set<std::string>(version_fields.begin(),
+                                    version_fields.end()),
+          "the nested runtime-version arm agrees with RuntimeVersionIdentity");
+    // Named individually rather than left to the set comparison: these are the
+    // fields that would name the receipt a cache lookup reads, and
+    // `worker_sequence` is the transport-bookkeeping field whose addition
+    // would reopen the door for the rest.
+    for (const std::string_view owned :
+         {"host_id", "boot_id", "launch_spec_digest",
+          "inventory_receipt_digest", "resource_binding_digest",
+          "receipt_name", "namespace_digest", "receipt_digest",
+          "worker_sequence"}) {
+      check(descriptor->FindFieldByName(std::string(owned)) == nullptr,
+            "the WorkerRuntimeEvidence proto arm must never grow the "
+            "authority-derived field " +
+                std::string(owned));
+    }
+  }
+
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "runtime-evidence fixture compiles");
+  if (!compiled.valid()) return;
+  const nlohmann::json submission_identity =
+      fixture_adapter_locked_submission(*compiled.plan);
+  const trainvm::WorkerLaunchRequest launch_request{
+      .code_fingerprint = "sha256:" + std::string(64U, '2'),
+      .required_capabilities = {"worker.controls", "worker.metrics"},
+  };
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-worker-runtime-evidence-wire-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory / "receipts" / "runtime");
+  std::filesystem::create_directories(directory / "receipts" / "qualification");
+  const std::filesystem::path receipt_root = directory / "receipts";
+
+  const auto database_path = directory / "evidence.db";
+  const std::string run_id = "worker-runtime-evidence-run";
+  trainvm::WorkerLaunchTicket launch;
+  {
+    trainvm::Journal journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued(submission_identity);
+    (void)controller.begin_acquisition(test_time(2'000));
+    launch = controller.prepare_worker_launch(launch_request, test_time(2'100));
+    (void)bind_test_worker_launch(controller, launch, 2'150);
+  }
+
+  CountingWorkerRuntimeEvidenceAuthority authority({
+      .receipt_root = receipt_root,
+      .authority_uid = ::geteuid(),
+      .maximum_receipt_bytes = 1U << 20U,
+  });
+  trainvm::TrainVMService service(
+      database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+      fixture_test_host_launch_registry(*compiled.plan, launch),
+      fixture_test_host_identity(), [] { return test_time(2'200); },
+      trainvm::HostGrantEnforcement::legacy_process_free_test,
+      trainvm::TrainingComponentRegistry({}), {}, {}, {}, nullptr,
+      trainvm::SqliteAuthorityEnforcementGrade::cooperative_test, {},
+      std::filesystem::path(std::string(trainvm::kInstalledRecipeProfilePath)),
+      &authority);
+  prime_test_service_launch(service, launch);
+  trainvm::TrainVMService::WorkerConnection connection;
+  const grpc::Status open =
+      service.open_worker_connection(wire_hello_for(launch), connection);
+  check(open.ok(), "runtime-evidence worker connection opens");
+  if (!open.ok()) {
+    std::filesystem::remove_all(directory);
+    return;
+  }
+
+  // The sealed launch decided which runtime this worker was authorized to be,
+  // so the report's closure fingerprint is the profile's -- see
+  // fixture_test_host_launch_registry. The launch holds no device fence, so
+  // this is the portable CPU probe: the shared validator refuses placement
+  // identity in a namespace the launch is not placement specific for.
+  const auto measured_evidence = [&connection] {
+    trainvm::v1::WorkerRuntimeEvidence evidence;
+    evidence.set_api_version("trainvm.worker-runtime-evidence/v1");
+    evidence.set_run_id(connection.identity.run_id);
+    evidence.set_node_id(connection.identity.node_id);
+    evidence.set_attempt_id(connection.identity.attempt_id);
+    evidence.set_launch_nonce(connection.identity.launch_nonce);
+    evidence.set_concurrency_key(connection.identity.concurrency_key);
+    evidence.set_lease_id(connection.identity.lease_id);
+    evidence.set_fencing_token(connection.identity.fencing_token);
+    evidence.set_compute_device_vendor("cpu");
+    evidence.set_compute_architecture("x86_64");
+    evidence.set_driver_version("none");
+    auto* const version = evidence.add_runtime_versions();
+    version->set_name("python");
+    version->set_version("3.13.5");
+    evidence.set_runtime_closure_fingerprint("sha256:" + std::string(64U, 'd'));
+    evidence.set_host_abi_digest("sha256:" + std::string(64U, '4'));
+    evidence.set_compute_compatibility_digest(
+        "sha256:" + std::string(64U, '5'));
+    return evidence;
+  }();
+
+  // ---- A malformed report never reaches the publisher either. ------------
+  {
+    auto malformed = measured_evidence;
+    malformed.set_host_abi_digest("not-a-digest");
+    const grpc::Status status =
+        service.record_worker_runtime_evidence(malformed, connection);
+    check(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT &&
+              authority.publish_attempts == 0U,
+          "a malformed worker runtime evidence report is refused on the wire");
+  }
+
+  // ---- A report claiming an attempt fence this connection does not hold. --
+  {
+    auto foreign = measured_evidence;
+    foreign.set_fencing_token(connection.identity.fencing_token + 1U);
+    const grpc::Status status =
+        service.record_worker_runtime_evidence(foreign, connection);
+    check(status.error_code() == grpc::StatusCode::PERMISSION_DENIED &&
+              authority.publish_attempts == 0U,
+          "a worker speaking for a fence its own connection does not hold is "
+          "refused on the wire");
+  }
+
+  // ---- THE CASE: evidence that arrives after its lease has moved. --------
+  //
+  // The worker's session and its report agree with each other -- from inside a
+  // superseded worker everything looks consistent. Only the authority's
+  // durable launch binding disagrees, and the handler re-reads it rather than
+  // trusting the identity the connection was opened with. Deleting that
+  // re-read leaves this report to be refused by admission instead, which the
+  // publish_attempts assertion catches.
+  {
+    trainvm::TrainVMService::WorkerConnection superseded = connection;
+    superseded.identity.fencing_token =
+        connection.identity.fencing_token == 1U
+            ? connection.identity.fencing_token + 1U
+            : connection.identity.fencing_token - 1U;
+    auto late = measured_evidence;
+    late.set_fencing_token(superseded.identity.fencing_token);
+    const grpc::Status status =
+        service.record_worker_runtime_evidence(late, superseded);
+    check(status.error_code() == grpc::StatusCode::PERMISSION_DENIED &&
+              authority.publish_attempts == 0U &&
+              runtime_receipt_count(receipt_root) == 0U,
+          "a worker whose evidence arrives after its lease moved is refused "
+          "on the wire, without the publisher being asked");
+  }
+  {
+    trainvm::TrainVMService::WorkerConnection relaunched = connection;
+    relaunched.identity.launch_nonce =
+        connection.identity.launch_nonce + "-relaunch";
+    auto late = measured_evidence;
+    late.set_launch_nonce(relaunched.identity.launch_nonce);
+    const grpc::Status status =
+        service.record_worker_runtime_evidence(late, relaunched);
+    check(status.error_code() == grpc::StatusCode::PERMISSION_DENIED &&
+              authority.publish_attempts == 0U,
+          "a worker from another launch of this attempt is refused on the "
+          "wire, without the publisher being asked");
+  }
+
+  // ---- The admitted report, and only it, is published. -------------------
+  {
+    const grpc::Status status =
+        service.record_worker_runtime_evidence(measured_evidence, connection);
+    check(status.ok() && authority.publish_attempts == 1U &&
+              runtime_receipt_count(receipt_root) == 1U,
+          "a worker's measured runtime evidence crosses its own connection "
+          "and becomes one immutable receipt");
+    // The receipt is the authority's document, not the worker's: it carries
+    // the measurements that were sent and the identity that was derived.
+    nlohmann::json receipt;
+    for (const auto& entry :
+         std::filesystem::directory_iterator(receipt_root / "runtime")) {
+      std::ifstream stream(entry.path());
+      std::ostringstream buffer;
+      buffer << stream.rdbuf();
+      receipt = nlohmann::json::parse(buffer.str());
+    }
+    const auto binding = trainvm::Journal(database_path).launch_binding(
+        run_id + ":worker-launch:" + connection.identity.node_id + ":" +
+        connection.identity.attempt_id);
+    check(binding.has_value(), "the published receipt has a launch binding");
+    const nlohmann::json probe =
+        receipt.value("snapshot", nlohmann::json::object());
+    check(probe.value("host_abi_digest", std::string{}) ==
+                  measured_evidence.host_abi_digest() &&
+              probe.value("compute_compatibility_digest", std::string{}) ==
+                  measured_evidence.compute_compatibility_digest() &&
+              probe.value("compute_architecture", std::string{}) ==
+                  measured_evidence.compute_architecture() &&
+              probe.value("driver_version", std::string{}) ==
+                  measured_evidence.driver_version() &&
+              probe.value("host_id", std::string{}) ==
+                  fixture_test_host_identity().host_id &&
+              (!binding ||
+               probe.value("launch_spec_digest", std::string{}) ==
+                   binding->spec_digest),
+          "the receipt carries the worker's measurements under the identity "
+          "the authority derived for itself");
+    // Exact replay, not a second receipt.
+    const grpc::Status replay =
+        service.record_worker_runtime_evidence(measured_evidence, connection);
+    check(replay.ok() && runtime_receipt_count(receipt_root) == 1U,
+          "an identical second report is exact replay, not a second receipt");
+    // A later measurement never rewrites the receipt this attempt is bound to.
+    auto revised = measured_evidence;
+    revised.set_compute_architecture("aarch64");
+    const grpc::Status rewritten =
+        service.record_worker_runtime_evidence(revised, connection);
+    check(!rewritten.ok() && runtime_receipt_count(receipt_root) == 1U,
+          "a second worker measurement never replaces the receipt the first "
+          "is bound to");
+  }
+
+  // ---- A deployment that configures no receipt root refuses, typed. ------
+  {
+    const auto unconfigured_path = directory / "unconfigured.db";
+    trainvm::WorkerLaunchTicket unconfigured_launch;
+    {
+      trainvm::Journal journal(
+          unconfigured_path, std::nullopt,
+          trainvm::HostGrantEnforcement::legacy_process_free_test);
+      trainvm::Controller controller(*compiled.plan, journal, run_id);
+      controller.create_queued(submission_identity);
+      (void)controller.begin_acquisition(test_time(2'000));
+      unconfigured_launch =
+          controller.prepare_worker_launch(launch_request, test_time(2'100));
+      (void)bind_test_worker_launch(controller, unconfigured_launch, 2'150);
+    }
+    trainvm::TrainVMService unconfigured(
+        unconfigured_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        fixture_test_host_launch_registry(*compiled.plan, unconfigured_launch),
+        fixture_test_host_identity(), [] { return test_time(2'200); },
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
+    prime_test_service_launch(unconfigured, unconfigured_launch);
+    trainvm::TrainVMService::WorkerConnection unconfigured_connection;
+    const grpc::Status unconfigured_open = unconfigured.open_worker_connection(
+        wire_hello_for(unconfigured_launch), unconfigured_connection);
+    auto evidence = measured_evidence;
+    evidence.set_launch_nonce(unconfigured_connection.identity.launch_nonce);
+    evidence.set_concurrency_key(
+        unconfigured_connection.identity.concurrency_key);
+    evidence.set_lease_id(unconfigured_connection.identity.lease_id);
+    evidence.set_fencing_token(unconfigured_connection.identity.fencing_token);
+    const grpc::Status status = unconfigured.record_worker_runtime_evidence(
+        evidence, unconfigured_connection);
+    check(unconfigured_open.ok() &&
+              status.error_code() == grpc::StatusCode::FAILED_PRECONDITION,
+          "a deployment with no configured receipt root refuses worker "
+          "runtime evidence rather than silently accepting it");
+  }
+
+  std::filesystem::remove_all(directory);
+}
+
 }  // namespace
 
 int main() {
@@ -15062,6 +15477,8 @@ int main() {
       {"legacy_journal_migration_policy", test_legacy_journal_migration_policy},
       {"universal_step_zero_gate_orders_controller_mutation",
        test_universal_step_zero_gate_orders_controller_mutation},
+      {"worker_runtime_evidence_wire_hop",
+       test_worker_runtime_evidence_wire_hop},
   };
 
   for (const NamedCase& test_case : kCases) {

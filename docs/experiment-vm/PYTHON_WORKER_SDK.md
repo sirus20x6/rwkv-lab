@@ -279,6 +279,48 @@ two sides are not each testing their own idea of the other. It uses the
 portable CPU path deliberately: no accelerator, no driver and no CUDA stack, so
 it asserts the same thing on a hosted runner as on the training host.
 
+### Sending it
+
+`WorkerSession.publish_runtime_evidence(report)` puts the measured report on
+the `WorkerToController` stream the worker already holds, as the
+`runtime_evidence` arm. The authority decodes it, resolves the active attempt's
+`ResolvedLaunchSpec` and `HostInventoryReceipt`, and publishes one immutable
+receipt through `publish_worker_runtime_evidence`.
+
+Two things about this arm are unlike every other worker publication, and both
+follow from the message being exactly the report and nothing else:
+
+- **It carries no `worker_sequence` and is never acknowledged.** A sequence
+  would be the first field on a message whose whole property is that it carries
+  nothing the authority derives for itself, and once one bookkeeping field is
+  admissible the argument for the next one is already made. Acceptance is the
+  receipt the authority published; refusal is the stream's terminal status. The
+  call therefore returns nothing and does not wait.
+- **A field the report does not have is refused, not dropped.** Passing an
+  authority-derived key raises rather than silently sending a document without
+  it, so a caller cannot believe it sent something the authority never saw.
+
+Three literals now describe this one document — the proto arm, the C++ struct,
+and the session's field lists — and nothing keeps them in step on its own. Two
+tests do: `worker_runtime_evidence_wire_hop` in the native suite compares the
+proto descriptor against the reflected struct, and
+`test_runtime_evidence_transport_matches_the_protocol_message` compares it
+against the session's. Both also assert, by name, that the arm has grown none
+of the authority-derived fields.
+
+The authority refuses a report whose lease has already moved **on the wire**,
+before the publisher is asked anything: it re-reads the durable launch binding
+rather than trusting the identity its connection was opened with, because a
+connection's identity was true when the stream opened and says nothing about
+now. Refusing at admission instead would reach the same verdict and is not the
+same property — the native test proves the distinction by counting publisher
+invocations, not by reading the status.
+
+A deployment that configures no immutable receipt root holds no evidence
+authority at all, and the message is then refused with `FAILED_PRECONDITION`.
+Silently accepting a report that cannot be published would be indistinguishable
+to a worker from a published one.
+
 ## Fixed adapter runner
 
 `scripts/build_trainvm_worker_artifact.py` deterministically builds the sole sealed project-code

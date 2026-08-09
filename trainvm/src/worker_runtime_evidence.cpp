@@ -182,4 +182,34 @@ std::string publish_worker_runtime_evidence(
   return publisher.publish_runtime(admitted.context, admitted.snapshot);
 }
 
+LinuxWorkerRuntimeEvidenceAuthority::LinuxWorkerRuntimeEvidenceAuthority(
+    LinuxCacheEvidenceConfig config,
+    std::function<HostInventoryReceipt()> inventory)
+    : publisher_(std::move(config)), inventory_(std::move(inventory)) {
+  if (!inventory_) {
+    fail("worker runtime evidence authority requires an inventory source");
+  }
+}
+
+std::string LinuxWorkerRuntimeEvidenceAuthority::publish(
+    const WorkerRuntimeEvidenceReport& report, const HostIdentity& host,
+    const ResolvedLaunchSpec& launch) {
+  const HostInventoryReceipt inventory = inventory_();
+  // Placement specificity is derived, never configured and never claimed. A
+  // launch fenced to exactly one device is the only shape whose measured UUID
+  // and PCI address are admissible at all -- the shared validator refuses a
+  // placement-specific probe against any other count -- and a launch holding
+  // no device fence has no placement to be specific about. Deriving it here
+  // keeps one answer to the question; a second one would name a receipt the
+  // namespace derivation never looks for.
+  const CacheResourceBinding devices = cache_resource_binding(launch, inventory);
+  const WorkerRuntimeEvidenceBinding binding{
+      .host = host,
+      .launch = launch,
+      .inventory = inventory,
+      .placement_specific = devices.devices.size() == 1U,
+  };
+  return publish_worker_runtime_evidence(publisher_, report, binding);
+}
+
 }  // namespace trainvm

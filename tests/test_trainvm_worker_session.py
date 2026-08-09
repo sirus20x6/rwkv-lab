@@ -36,6 +36,9 @@ from rwkv_lab.trainvm_worker import (
     state_fingerprint,
 )
 from rwkv_lab.trainvm_worker._canonical import canonical_dumps, sha256_digest
+from rwkv_lab.trainvm_worker.runtime_evidence import (
+    measure_worker_runtime_evidence,
+)
 from rwkv_lab.trainvm_worker.session import wire
 
 
@@ -199,6 +202,11 @@ class FakeController:
         for message in iterator:
             self.received.append(message)
             selected = message.WhichOneof("message")
+            if selected == "runtime_evidence":
+                # Mirrors the authority: runtime evidence carries no worker
+                # sequence and is answered by an immutable receipt rather than
+                # an acknowledgement, so nothing is sent back for it.
+                continue
             sequence = getattr(message, selected).worker_sequence
             if (
                 self.reject_eval_examples
@@ -1001,3 +1009,70 @@ def test_heartbeat_execution_phase_is_typed_and_bound_to_a_request() -> None:
         == wire.WorkerExecutionPhaseRequest.PHASE_UNSPECIFIED
     )
     session.close()
+
+
+def test_runtime_evidence_crosses_the_worker_connection_unacknowledged() -> None:
+    # A worker measures its own runtime; the report reaches the authority over
+    # the stream it already holds. It is deliberately not part of the ordered
+    # worker sequence: nothing is acknowledged, and the next telemetry message
+    # numbers as though the evidence had never been sent.
+    controller = FakeController()
+    bootstrap = load_worker_bootstrap(bootstrap_document())
+    session = WorkerSession(bootstrap, connector=controller)
+    session.start()
+    report = measure_worker_runtime_evidence(
+        bootstrap, runtime_closure_fingerprint="sha256:" + "c" * 64
+    )
+    session.publish_runtime_evidence(report)
+    assert session.heartbeat(1, "training", wait=True) == 1
+    assert [message.WhichOneof("message") for message in controller.received] == [
+        "hello",
+        "runtime_evidence",
+        "heartbeat",
+    ]
+    evidence = controller.received[1].runtime_evidence
+    assert evidence.api_version == "trainvm.worker-runtime-evidence/v1"
+    assert evidence.attempt_id == bootstrap.attempt_id
+    assert evidence.fencing_token == bootstrap.fencing_token
+    assert evidence.runtime_closure_fingerprint == "sha256:" + "c" * 64
+    assert {version.name for version in evidence.runtime_versions} == {
+        version["name"] for version in report["runtime_versions"]
+    }
+
+    # A field the authority derives for itself cannot be smuggled through by
+    # adding it to the report: it is refused, not dropped.
+    with pytest.raises(WorkerSessionError, match="does not"):
+        session.publish_runtime_evidence(
+            {**report, "resource_binding_digest": "sha256:" + "f" * 64}
+        )
+    with pytest.raises(WorkerSessionError, match="incomplete"):
+        session.publish_runtime_evidence(
+            {name: value for name, value in report.items() if name != "host_abi_digest"}
+        )
+    session.close()
+
+
+def test_runtime_evidence_transport_matches_the_protocol_message() -> None:
+    # A third copy of the same field list, and the one furthest from the other
+    # two: the session's literals and the proto arm are kept in step here
+    # rather than by review. The native suite asserts the same agreement
+    # between the proto arm and the C++ struct.
+    from rwkv_lab.trainvm_worker import session as worker_session
+
+    declared = set(worker_session._RUNTIME_EVIDENCE_TEXT_FIELDS)
+    declared.update(worker_session._RUNTIME_EVIDENCE_OPTIONAL_FIELDS)
+    declared.update({"fencing_token", "runtime_versions"})
+    assert declared == set(wire.WorkerRuntimeEvidence.DESCRIPTOR.fields_by_name)
+    assert {"name", "version"} == set(
+        wire.WorkerRuntimeVersionIdentity.DESCRIPTOR.fields_by_name
+    )
+    for derived in (
+        "host_id",
+        "boot_id",
+        "launch_spec_digest",
+        "inventory_receipt_digest",
+        "resource_binding_digest",
+        "receipt_name",
+        "worker_sequence",
+    ):
+        assert derived not in wire.WorkerRuntimeEvidence.DESCRIPTOR.fields_by_name

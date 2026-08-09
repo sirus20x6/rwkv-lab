@@ -484,6 +484,52 @@ message WorkerExecutionPhaseReceipt {
   google.protobuf.Timestamp completed_at = 13;
 }
 
+// One name/version pair a compiled artifact binds to, as the worker observes
+// it.  Carried only inside WorkerRuntimeEvidence.
+message WorkerRuntimeVersionIdentity {
+  string name = 1;
+  string version = 2;
+}
+
+// What a worker measured about the runtime it is actually running in, and the
+// attempt identity it claims while saying so.
+//
+// This message is EXACTLY trainvm::WorkerRuntimeEvidenceReport, field for
+// field, and must stay that way: every member is either a fact only the worker
+// can observe, or an identity claim the authority already knows independently
+// and compares rather than believes.  Nothing here names a receipt or carries
+// a digest the authority derives for itself -- no host_id, boot_id,
+// launch_spec_digest, inventory_receipt_digest, resource_binding_digest or
+// receipt name -- because those are the fields that would let a worker author
+// the receipt a cache lookup reads.  Admission assigns them from derived
+// context instead.
+//
+// There is deliberately no worker_sequence either.  Runtime evidence is not an
+// observation in the worker's ordered stream; it is published as its own
+// immutable receipt, so the transport stays the report and nothing else.
+// `worker_runtime_evidence_wire_field_names` in the native suite asserts this
+// message and the C++ struct agree exactly, because they are two literals
+// nothing else keeps in step.
+message WorkerRuntimeEvidence {
+  string api_version = 1;
+  string run_id = 2;
+  string node_id = 3;
+  string attempt_id = 4;
+  string launch_nonce = 5;
+  string concurrency_key = 6;
+  string lease_id = 7;
+  uint64 fencing_token = 8;
+  string compute_device_vendor = 9;
+  string compute_architecture = 10;
+  optional string compute_device_uuid = 11;
+  optional string compute_device_pci_address = 12;
+  string driver_version = 13;
+  repeated WorkerRuntimeVersionIdentity runtime_versions = 14;
+  string runtime_closure_fingerprint = 15;
+  string host_abi_digest = 16;
+  string compute_compatibility_digest = 17;
+}
+
 message ControlPatchAcknowledgement {
   enum Disposition {
     DISPOSITION_UNSPECIFIED = 0;
@@ -562,6 +608,7 @@ message WorkerToController {
     CheckpointAcknowledgement checkpoint_ack = 7;
     LifecycleAcknowledgement lifecycle_ack = 8;
     WorkerExecutionPhaseReceipt phase_receipt = 9;
+    WorkerRuntimeEvidence runtime_evidence = 10;
   }
 }
 

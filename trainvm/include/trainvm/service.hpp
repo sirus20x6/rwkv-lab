@@ -27,6 +27,7 @@
 #include "trainvm/run_authoring.hpp"
 #include "trainvm/lease_renewal.hpp"
 #include "trainvm/training_component_registry.hpp"
+#include "trainvm/worker_runtime_evidence.hpp"
 #include "trainvm/v1/trainvm.grpc.pb.h"
 
 namespace trainvm {
@@ -113,7 +114,12 @@ class TrainVMService final : public v1::TrainVM::Service,
       std::shared_ptr<ITrainingPreflightEvidenceProvider>
           preflight_evidence = {},
       std::filesystem::path recipe_registry_path =
-          std::filesystem::path(std::string(kInstalledRecipeProfilePath)));
+          std::filesystem::path(std::string(kInstalledRecipeProfilePath)),
+      // Optional authority seam for worker-measured runtime evidence.
+      // Deployments that configure no immutable receipt root hold none, and a
+      // WorkerRuntimeEvidence message is then refused rather than accepted
+      // and dropped.
+      IWorkerRuntimeEvidenceAuthority* worker_runtime_evidence = nullptr);
   ~TrainVMService() override;
 
   grpc::Status SubmitExperiment(grpc::ServerContext* context,
@@ -225,6 +231,13 @@ class TrainVMService final : public v1::TrainVM::Service,
   grpc::Status record_worker_execution_phase_receipt(
       const v1::WorkerExecutionPhaseReceipt& receipt,
       const WorkerConnection& connection, std::uint64_t& acknowledged);
+  // No `acknowledged` out-parameter, and that is deliberate: runtime evidence
+  // carries no worker_sequence, because the transport is exactly the report
+  // struct. Its durable record is the immutable receipt this publishes, and a
+  // refusal reaches the worker as the stream's terminal status.
+  grpc::Status record_worker_runtime_evidence(
+      const v1::WorkerRuntimeEvidence& evidence,
+      const WorkerConnection& connection);
   grpc::Status acknowledge_worker_control(
       const v1::ControlPatchAcknowledgement& acknowledgement,
       const WorkerConnection& connection, std::uint64_t& acknowledged);
@@ -295,7 +308,9 @@ class TrainVMService final : public v1::TrainVM::Service,
                      preflight_evidence = {},
                  std::filesystem::path recipe_registry_path =
                      std::filesystem::path(
-                         std::string(kInstalledRecipeProfilePath)));
+                         std::string(kInstalledRecipeProfilePath)),
+                 IWorkerRuntimeEvidenceAuthority* worker_runtime_evidence =
+                     nullptr);
 
   static constexpr std::size_t kMaximumRetainedLaunches = 32U;
   static constexpr std::uint64_t kMaximumRetainedLaunchBytes = 2ULL << 30U;
@@ -379,6 +394,7 @@ class TrainVMService final : public v1::TrainVM::Service,
   bool reconciliation_started_{};
   std::jthread reconciliation_thread_;
   std::map<std::string, ResolvedLaunch> resolved_launches_;
+  IWorkerRuntimeEvidenceAuthority* worker_runtime_evidence_{};
   std::mutex worker_sessions_mutex_;
   std::mutex author_run_mutex_;
   std::set<std::string> active_worker_attempts_;
