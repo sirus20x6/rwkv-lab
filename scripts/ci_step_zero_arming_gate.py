@@ -121,6 +121,12 @@ HEADERS = (
 EVAL_EXAMPLES_SCHEMA = "rwkv-lab.eval-examples.v1"
 EVAL_EXAMPLES_TYPE = "eval_examples"
 
+# The "what is missing" cell for a route some of whose compositions arm and
+# some of which do not. Shared rather than repeated because the summary counts
+# that population and a second copy of the prefix would drift out of agreement
+# with the cell it is meant to detect.
+PARTIALLY_ARMED = "armed, but not everywhere: "
+
 
 def dictionaries(value: object):
     """Every dict anywhere in a parsed document.
@@ -270,7 +276,7 @@ def missing(entry: dict, armed: set[str], rejected: list[str]) -> str:
             # Some compositions arm and others do not. Saying only "armed"
             # would let a sibling recipe lose its declaration behind a
             # neighbour that kept it.
-            return "armed, but not everywhere: " + "; ".join(sorted(rejected))
+            return PARTIALLY_ARMED + "; ".join(sorted(rejected))
         return "nothing — armed"
     if not entry.get("stateful"):
         # A non-stateful operation mutates nothing, so there is no first
@@ -380,6 +386,62 @@ def registry_parity_note() -> str:
     )
 
 
+def population_summary(built: list[tuple[str, ...]]) -> str:
+    """Say which population each number counts, in the line that gets quoted.
+
+    This sentence used to read `{armed} able to arm today`, over a variable that
+    counts routes a shipped composition **already arms**. Those are different
+    claims: "able to arm today" is a capability that has not been exercised, so
+    the number reads as a backlog. It was read that way, and "0 routes are
+    armed, 2 possible today" travelled from here into three cards and an agent
+    dispatch sent to arm a route that had been armed end to end for some time.
+    The investigation to discover that was the whole cost.
+
+    The generated table was never wrong -- its cell for both routes says
+    `nothing — armed`, and `missing()` reasons carefully about the partial case.
+    But a verdict line is read far more often than the document it summarises,
+    so an ambiguity here propagates in a way the same ambiguity in a table cell
+    does not.
+
+    The two populations are genuinely distinct and both are worth printing:
+    arming needs an adapter port **and** a composition that publishes through
+    it, and the port half can be in place with nothing publishing it. Today that
+    second population is empty, which is exactly when a single number under two
+    names is indistinguishable from either -- and exactly why it is printed.
+
+    The four counts partition the routes, in this order, so they always sum to
+    the total and a reader can check that they do:
+
+    - armed: some shipped composition satisfies all three conjuncts;
+    - armable but unarmed: the adapter's port is usable, no composition arms it;
+    - blocked: stateful, and the port is missing or unusable;
+    - not stateful: nothing mutates, so there is no first optimizer step to gate.
+    """
+    total = len(built)
+    stateful = sum(1 for row in built if row[1] == "yes")
+    armed = sum(1 for row in built if row[5] != "no")
+    # Counted off the cell `missing()` writes, so the summary cannot claim a
+    # different partial set than the table shows.
+    partial = sum(1 for row in built if row[6].startswith(PARTIALLY_ARMED))
+    armable = sum(1 for row in built if row[5] == "no" and row[4] == "yes")
+    blocked = sum(
+        1 for row in built if row[5] == "no" and row[4] != "yes" and row[1] == "yes"
+    )
+    inert = total - armed - armable - blocked
+
+    armed_clause = f"{armed} armed today by a shipped composition"
+    if partial:
+        # Collapsing this would let a sibling recipe lose its declaration behind
+        # a neighbour that kept it, in the one line most likely to be read alone.
+        armed_clause += f", {partial} of those armed in some compositions and not others"
+    return (
+        f"{total} registered {'route' if total == 1 else 'routes'} "
+        f"({stateful} stateful); {armed_clause}, {armable} armable but unarmed "
+        f"(port in place, no shipped composition arms it), {blocked} blocked, "
+        f"{inert} not stateful"
+    )
+
+
 def render(built: list[tuple[str, ...]]) -> str:
     lines = [
         "| " + " | ".join(HEADERS) + " |",
@@ -477,15 +539,13 @@ def main() -> int:
         # make CI green: the run that had to correct the document is the run
         # that should be red, and the next one passes.
 
-    armed = sum(1 for row in built if row[5] != "no")
-    stateful = sum(1 for row in built if row[1] == "yes")
     print(
         verdict_line(
             "step-zero arming gate",
             problems,
-            f"{len(built)} registered routes ({stateful} stateful), {armed} able "
-            "to arm today, checked against the pinned registry and every "
-            f"composition document under {EXAMPLES}; {registry_parity_note()}",
+            f"{population_summary(built)}; checked against the pinned registry "
+            f"and every composition document under {EXAMPLES}; "
+            f"{registry_parity_note()}",
         )
     )
     return 1 if problems else 0

@@ -135,6 +135,14 @@ particular it is **not** evidence for any of the following:
   correctly-stepped eval-examples artifact, and whether a resumed attempt
   recovers gate satisfaction from journal or checkpoint evidence, is untested
   here.
+- **That an armed row is open work.** This is the converse of the point above,
+  and it is the direction that actually misled someone: a route in the armed
+  rows may already publish its evidence end to end. Read the producer before
+  concluding there is anything left to do. The gate's summary line said `2 able
+  to arm today` over a count of routes that were *already armed*; that number
+  reached three cards and a dispatch sent to arm a route that had been armed for
+  some time. The summary now names each population separately, and the cell here
+  has always said `nothing — armed`.
 - **That the pre-mutation boundary is crossed.** Being able to arm and calling
   `pre_optimizer_step` before mutating are different properties.
   `tests/test_step_zero_interception_enumeration.py` owns the second one, and
