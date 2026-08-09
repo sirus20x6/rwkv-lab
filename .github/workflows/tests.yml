@@ -22,8 +22,23 @@ on:
 #
 # Keyed on the event rather than the branch name because `push` also covers
 # dashboard/declarative-vm-fsm, whose runs are equally not supersessions.
+#
+# Not cancelling was necessary but not sufficient. A concurrency group holds at
+# most one PENDING run, and that displacement is not governed by
+# cancel-in-progress: a newer arrival evicts the queued one regardless. So the
+# group must also differ per commit for pushes, or a merge landing while the
+# previous main run is still going still loses a commit's validation.
+#
+# The triggering condition is common rather than exceptional. A main run takes
+# 8-14 minutes, so ANY two merges closer together than that queue the second and
+# drop the first. Measured on 2026-08-09: #117 and #113 merged three seconds
+# apart while a9edb82's run was still in progress, and 9135b44's queued run was
+# evicted — after the cancel-in-progress fix was already in place.
+#
+# For a pull request the group stays per-PR, because there a second push really
+# does supersede the first and cancelling is free.
 concurrency:
-  group: tests-${{ github.ref }}
+  group: tests-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
