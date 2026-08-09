@@ -446,24 +446,62 @@ def main() -> int:
         profiles = deployment["host_launch_registry"]["profiles"]
         if deployment["schema"] != "trainvm.rwkv-lab-worker-deployment/v3":
             raise SystemExit("deployment inspector emitted the wrong schema")
+        # Main's identity comparison is kept verbatim and is strictly stronger
+        # than the count check this branch originally carried: comparing the
+        # deployed keys against the adapter registry and against the registered
+        # adapter set catches a profile for the WRONG adapter, which a count
+        # cannot. Only the decomposition below is this branch's contribution.
+        #
+        # These were five distinct properties ANDed behind a single message, so
+        # a failure said that something had drifted but not what, and not which
+        # profile. A stale pin and a corrupted fingerprint reported identically,
+        # which is why identifying the stale one took a separate investigation.
         deployed_keys = tuple(profile["key"] for profile in profiles)
         adapter_registry_keys = tuple(
             profile["key"] for profile in deployment["adapter_registry"]["profiles"]
         )
         deployed_adapters = tuple(key["adapter"] for key in deployed_keys)
-        if (
-            deployed_keys != adapter_registry_keys
-            or deployed_adapters != adapters
-            or any(
-                profile["code_argument_index"] != 1
-                or profile["public_arguments"] != ["-I", "rwkv-lab-worker.pyz"]
-                or profile["code_fingerprint"] != digest(first)
-                or profile["bootstrap_runtime_closure_fingerprint"]
-                != closure_document["closure_digest"]
-                for profile in profiles
+        if deployed_keys != adapter_registry_keys:
+            raise SystemExit(
+                "deployment launch profiles and adapter registry disagree: "
+                f"{len(deployed_keys)} launch keys vs "
+                f"{len(adapter_registry_keys)} registry keys"
             )
-        ):
-            raise SystemExit("deployment registry drifted from sealed worker artifact")
+        if deployed_adapters != adapters:
+            missing = tuple(a for a in adapters if a not in deployed_adapters)
+            extra = tuple(a for a in deployed_adapters if a not in adapters)
+            raise SystemExit(
+                "deployed adapters do not match the registered adapter set; "
+                f"missing={missing} unexpected={extra}"
+            )
+        for index, profile in enumerate(profiles):
+            if profile["code_argument_index"] != 1:
+                raise SystemExit(
+                    f"profile {index} code_argument_index is "
+                    f"{profile['code_argument_index']}, expected 1"
+                )
+            if profile["public_arguments"] != ["-I", "rwkv-lab-worker.pyz"]:
+                raise SystemExit(
+                    f"profile {index} public_arguments are "
+                    f"{profile['public_arguments']}, expected "
+                    '["-I", "rwkv-lab-worker.pyz"]'
+                )
+            if profile["code_fingerprint"] != digest(first):
+                raise SystemExit(
+                    f"profile {index} code_fingerprint "
+                    f"{profile['code_fingerprint']} does not match the sealed "
+                    f"artifact digest {digest(first)}"
+                )
+            if (
+                profile["bootstrap_runtime_closure_fingerprint"]
+                != closure_document["closure_digest"]
+            ):
+                raise SystemExit(
+                    f"profile {index} bootstrap_runtime_closure_fingerprint "
+                    f"{profile['bootstrap_runtime_closure_fingerprint']} does "
+                    f"not match the closure digest "
+                    f"{closure_document['closure_digest']}"
+                )
         run_completed_replay(
             first,
             source_root,
