@@ -18,6 +18,15 @@ class WorkerExecutionPhaseError(ValueError):
     pass
 
 
+class WorkerExecutionPhaseCancelled(Exception):
+    """A controller cancellation stopped an enabled phase at a step boundary.
+
+    Deliberately not a ``WorkerExecutionPhaseError``: nothing was violated, so
+    an adapter that catches phase *errors* to report a defect must not swallow
+    this one.  The phase is still receipted before it is raised.
+    """
+
+
 class ExecutionPhase(str, Enum):
     COMPILE = "compile"
     WARMUP = "warmup"
@@ -27,6 +36,7 @@ class ExecutionPhaseDisposition(str, Enum):
     COMPLETED = "completed"
     SKIPPED = "skipped"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +48,15 @@ class ExecutionPhaseRequest:
 
 
 class _PhaseReceiptChannel(Protocol):
+    @property
+    def execution_phase_cancellation(self) -> str | None:
+        """The controller's cancellation reason, or None while it has not sent one.
+
+        Read-only and sticky.  The phase runtime consults this between bounded
+        steps instead of draining the command queue, because the adapter still
+        has to receive that command to acknowledge the lifecycle transition.
+        """
+
     def execution_phase_receipt(
         self,
         request: ExecutionPhaseRequest,
@@ -204,10 +223,20 @@ class WorkerExecutionPhaseRuntime:
                     "execution phase completed more steps than requested"
                 )
             steps_executed += 1
+            # Checked after the step rather than before, so a cancellation
+            # always lands on a completed step boundary. `execute` must call
+            # mark_step once per step for this to bound anything; a callback
+            # that ignores the raise is caught by the step-count check below.
+            reason = self._channel.execution_phase_cancellation
+            if reason is not None:
+                raise WorkerExecutionPhaseCancelled(reason)
 
         after: str | None = None
         try:
             if request.enabled:
+                reason = self._channel.execution_phase_cancellation
+                if reason is not None:
+                    raise WorkerExecutionPhaseCancelled(reason)
                 execute(steps, mark_step)
                 if steps_executed != steps:
                     raise WorkerExecutionPhaseError(
@@ -218,6 +247,32 @@ class WorkerExecutionPhaseRuntime:
                 raise WorkerExecutionPhaseError(
                     "execution phase did not restore the training trajectory"
                 )
+        except WorkerExecutionPhaseCancelled as cancellation:
+            # The trajectory still has to be intact: a cancelled phase is as
+            # disposable as a completed one. If the adapter left it moved, the
+            # authority refuses the cancelled receipt and the session raises,
+            # which is the correct outcome — that is a real defect.
+            self._channel.execution_phase_receipt(
+                request,
+                ExecutionPhaseDisposition.CANCELLED,
+                steps_executed=steps_executed,
+                state_fingerprint_before=before,
+                state_fingerprint_after=state_fingerprint(snapshot()),
+                started_at_ns=started_at_ns,
+                completed_at_ns=time.time_ns(),
+                diagnostics=(
+                    (
+                        wire.Diagnostic.SEVERITY_WARNING,
+                        "execution.phase_cancelled",
+                        f"/spec/execution/{request.phase.value}",
+                        str(cancellation)
+                        or "the controller cancelled this attempt",
+                        "the phase stopped at a step boundary; its receipt "
+                        "records how far it got",
+                    ),
+                ),
+            )
+            raise
         except Exception as error:
             if after is None:
                 after = state_fingerprint(snapshot())
@@ -327,6 +382,7 @@ __all__ = [
     "ExecutionPhase",
     "ExecutionPhaseDisposition",
     "ExecutionPhaseRequest",
+    "WorkerExecutionPhaseCancelled",
     "WorkerExecutionPhaseError",
     "WorkerExecutionPhaseRuntime",
     "WorkerExecutionPhases",

@@ -77,7 +77,14 @@ class FakeSession:
     ) -> None:
         self.finished.append((event_type, payload, optimizer_step))
 
-    def heartbeat(self, optimizer_step: int, phase: str, *, wait: bool = False) -> int:
+    def heartbeat(
+        self,
+        optimizer_step: int,
+        phase: str,
+        *,
+        execution_phase: object = None,
+        wait: bool = False,
+    ) -> int:
         assert wait is False
         self.heartbeats.append((optimizer_step, phase))
         return len(self.heartbeats)
@@ -1902,9 +1909,10 @@ def test_a_declared_post_training_arm_no_handler_honours_is_refused() -> None:
 def test_nonadopted_adapter_receipts_enabled_phase_failure_before_dispatch() -> None:
     receipts = []
     channel = SimpleNamespace(
+        execution_phase_cancellation=None,
         execution_phase_receipt=lambda request, disposition, **values: (
             receipts.append((request, disposition, values)) or 1
-        )
+        ),
     )
     phases = WorkerExecutionPhases(
         channel,

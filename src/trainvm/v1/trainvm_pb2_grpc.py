@@ -89,6 +89,11 @@ class TrainVMStub(object):
                 request_serializer=trainvm_dot_v1_dot_trainvm__pb2.GetHostAuthorityStatusRequest.SerializeToString,
                 response_deserializer=trainvm_dot_v1_dot_trainvm__pb2.GetHostAuthorityStatusResponse.FromString,
                 _registered_method=True)
+        self.GetReconciliationStatus = channel.unary_unary(
+                '/trainvm.v1.TrainVM/GetReconciliationStatus',
+                request_serializer=trainvm_dot_v1_dot_trainvm__pb2.GetReconciliationStatusRequest.SerializeToString,
+                response_deserializer=trainvm_dot_v1_dot_trainvm__pb2.GetReconciliationStatusResponse.FromString,
+                _registered_method=True)
 
 
 class TrainVMServicer(object):
@@ -160,6 +165,15 @@ class TrainVMServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetReconciliationStatus(self, request, context):
+        """Deliberately not folded into GetHostAuthorityStatus: that call fails closed
+        when no hostd is configured, and supervisor telemetry has to be readable
+        exactly when the host authority is missing or poisoned.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_TrainVMServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -217,6 +231,11 @@ def add_TrainVMServicer_to_server(servicer, server):
                     servicer.GetHostAuthorityStatus,
                     request_deserializer=trainvm_dot_v1_dot_trainvm__pb2.GetHostAuthorityStatusRequest.FromString,
                     response_serializer=trainvm_dot_v1_dot_trainvm__pb2.GetHostAuthorityStatusResponse.SerializeToString,
+            ),
+            'GetReconciliationStatus': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetReconciliationStatus,
+                    request_deserializer=trainvm_dot_v1_dot_trainvm__pb2.GetReconciliationStatusRequest.FromString,
+                    response_serializer=trainvm_dot_v1_dot_trainvm__pb2.GetReconciliationStatusResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -516,6 +535,33 @@ class TrainVM(object):
             '/trainvm.v1.TrainVM/GetHostAuthorityStatus',
             trainvm_dot_v1_dot_trainvm__pb2.GetHostAuthorityStatusRequest.SerializeToString,
             trainvm_dot_v1_dot_trainvm__pb2.GetHostAuthorityStatusResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetReconciliationStatus(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/trainvm.v1.TrainVM/GetReconciliationStatus',
+            trainvm_dot_v1_dot_trainvm__pb2.GetReconciliationStatusRequest.SerializeToString,
+            trainvm_dot_v1_dot_trainvm__pb2.GetReconciliationStatusResponse.FromString,
             options,
             channel_credentials,
             insecure,

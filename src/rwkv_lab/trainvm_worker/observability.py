@@ -17,6 +17,7 @@ from types import MappingProxyType
 from typing import Protocol
 
 from ._canonical import is_bounded_text
+from .execution_phases import ExecutionPhase
 
 MAXIMUM_METRICS = 256
 MAXIMUM_LABELS = 16
@@ -46,7 +47,12 @@ class WorkerObservabilityError(ValueError):
 
 class _Session(Protocol):
     def heartbeat(
-        self, optimizer_step: int, phase: str, *, wait: bool = False
+        self,
+        optimizer_step: int,
+        phase: str,
+        *,
+        execution_phase: ExecutionPhase | None = None,
+        wait: bool = False,
     ) -> int: ...
 
     def metric(
@@ -176,7 +182,20 @@ class WorkerObservability:
         self._last_heartbeat_ns: int | None = None
         self._heartbeat_lock = threading.Lock()
 
-    def optimizer_step(self, step: int, phase: str = "train") -> int | None:
+    def optimizer_step(
+        self,
+        step: int,
+        phase: str = "train",
+        *,
+        execution_phase: ExecutionPhase | None = None,
+    ) -> int | None:
+        """Publish a rate-limited heartbeat.
+
+        ``execution_phase`` binds the heartbeat to an authority-requested
+        compile or warmup.  It is the routed field; ``phase`` remains the
+        free-text operator label and may not name a phase on its own.
+        """
+
         step = _uint64(step, "optimizer step")
         if not is_bounded_text(phase, 128):
             raise WorkerObservabilityError("worker heartbeat phase is invalid")
@@ -192,18 +211,26 @@ class WorkerObservability:
                 and now - self._last_heartbeat_ns < interval
             ):
                 return None
-            sequence = self._session.heartbeat(step, phase, wait=False)
+            sequence = self._session.heartbeat(
+                step, phase, execution_phase=execution_phase, wait=False
+            )
             self._last_heartbeat_ns = now
             return sequence
 
     @contextmanager
-    def keepalive(self, step: int, phase: str):
+    def keepalive(
+        self,
+        step: int,
+        phase: str,
+        *,
+        execution_phase: ExecutionPhase | None = None,
+    ):
         """Keep a declared heartbeat alive around one blocking worker phase."""
 
         step = _uint64(step, "optimizer step")
         if not is_bounded_text(phase, 128):
             raise WorkerObservabilityError("worker heartbeat phase is invalid")
-        self.optimizer_step(step, phase)
+        self.optimizer_step(step, phase, execution_phase=execution_phase)
         stopped = threading.Event()
         failures: list[BaseException] = []
 
@@ -211,7 +238,9 @@ class WorkerObservability:
             interval = max(0.05, self.declaration.heartbeat_seconds / 2.0)
             while not stopped.wait(interval):
                 try:
-                    self.optimizer_step(step, phase)
+                    self.optimizer_step(
+                        step, phase, execution_phase=execution_phase
+                    )
                 except BaseException as error:  # noqa: BLE001 - relay after join
                     failures.append(error)
                     stopped.set()

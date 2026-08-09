@@ -1360,6 +1360,40 @@ std::uint64_t invocation_attempt_baseline_optimizer_step(
   return invocation.resume.at("optimizer_step").get<std::uint64_t>();
 }
 
+// The journal name of a typed execution phase, or nullopt when the value is
+// PHASE_UNSPECIFIED or an unknown enumerator from a newer peer. Callers that
+// require a phase reject on nullopt; the heartbeat path separates the two
+// cases itself, because "outside any phase" is legal there and an unknown
+// enumerator is not.
+[[nodiscard]] std::optional<std::string_view> execution_phase_name(
+    v1::WorkerExecutionPhaseRequest::Phase phase) {
+  switch (phase) {
+    case v1::WorkerExecutionPhaseRequest::PHASE_COMPILE:
+      return "compile";
+    case v1::WorkerExecutionPhaseRequest::PHASE_WARMUP:
+      return "warmup";
+    case v1::WorkerExecutionPhaseRequest::PHASE_UNSPECIFIED:
+    default:
+      return std::nullopt;
+  }
+}
+
+// The immutable request for one phase on this attempt, or nullptr when the
+// authority never issued it. A duplicate is reported as absent so a caller
+// cannot pick whichever copy authorizes it; the receipt path separately
+// distinguishes duplicates for its own DATA_LOSS diagnosis.
+[[nodiscard]] const v1::WorkerExecutionPhaseRequest* find_phase_request(
+    const v1::WorkerWelcome& welcome,
+    v1::WorkerExecutionPhaseRequest::Phase phase) {
+  const v1::WorkerExecutionPhaseRequest* found = nullptr;
+  for (const auto& candidate : welcome.execution_phase_requests()) {
+    if (candidate.phase() != phase) continue;
+    if (found != nullptr) return nullptr;
+    found = &candidate;
+  }
+  return found;
+}
+
 void populate_invocation(v1::WorkerWelcome& welcome,
                          const WorkerInvocationSpec& invocation) {
   const std::string canonical =
@@ -3751,6 +3785,38 @@ grpc::Status TrainVMService::record_worker_heartbeat(
       return {grpc::StatusCode::INVALID_ARGUMENT,
               "worker heartbeat requires sequence, phase, and observed_at"};
     }
+
+    // `phase` is an operator label and stays free text. `execution_phase` is
+    // the routed one, so it is checked against this attempt's immutable
+    // requests rather than believed. Two separate refusals below: an unknown
+    // or unrequested phase, and a label that claims a phase the typed field
+    // does not. Without the second, a worker could report `phase: "compile"`
+    // while the authority never requested compilation, and every downstream
+    // reader of the journal would show a compile it never authorized.
+    const bool in_phase = heartbeat.execution_phase() !=
+                          v1::WorkerExecutionPhaseRequest::PHASE_UNSPECIFIED;
+    std::string execution_phase_label;
+    if (in_phase) {
+      const auto name = execution_phase_name(heartbeat.execution_phase());
+      if (!name) {
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "worker heartbeat names an unknown execution phase"};
+      }
+      const v1::WorkerExecutionPhaseRequest* const request =
+          find_phase_request(connection.welcome, heartbeat.execution_phase());
+      if (request == nullptr || !request->enabled()) {
+        return {grpc::StatusCode::PERMISSION_DENIED,
+                "worker heartbeat claims an execution phase this attempt did "
+                "not request"};
+      }
+      execution_phase_label.assign(*name);
+    }
+    if ((heartbeat.phase() == "compile" || heartbeat.phase() == "warmup") &&
+        heartbeat.phase() != execution_phase_label) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "worker heartbeat label impersonates an execution phase its "
+              "typed field does not name"};
+    }
     const std::int64_t observed_at_ns = timestamp_ns(heartbeat.observed_at());
     const Event event{
         .event_id = connection.dispatch.dispatch_id + ":heartbeat:" +
@@ -3767,6 +3833,7 @@ grpc::Status TrainVMService::record_worker_heartbeat(
         .monotonic_time_ns = 0,
         .optimizer_step = heartbeat.optimizer_step(),
         .payload = {{"phase", heartbeat.phase()},
+                    {"execution_phase", execution_phase_label},
                     {"observed_at_ns", observed_at_ns}},
     };
     return commit_worker_observation(event, connection, acknowledged);
@@ -4046,19 +4113,12 @@ grpc::Status TrainVMService::record_worker_execution_phase_receipt(
               "execution-phase receipt has invalid content or fenced identity"};
     }
 
-    std::string phase_name;
-    switch (receipt.phase()) {
-      case v1::WorkerExecutionPhaseRequest::PHASE_COMPILE:
-        phase_name = "compile";
-        break;
-      case v1::WorkerExecutionPhaseRequest::PHASE_WARMUP:
-        phase_name = "warmup";
-        break;
-      case v1::WorkerExecutionPhaseRequest::PHASE_UNSPECIFIED:
-      default:
-        return {grpc::StatusCode::INVALID_ARGUMENT,
-                "execution-phase receipt phase is invalid"};
+    const auto receipt_phase_name = execution_phase_name(receipt.phase());
+    if (!receipt_phase_name) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "execution-phase receipt phase is invalid"};
     }
+    const std::string phase_name{*receipt_phase_name};
     const v1::WorkerExecutionPhaseRequest* request = nullptr;
     for (const auto& candidate :
          connection.welcome.execution_phase_requests()) {
@@ -4086,6 +4146,9 @@ grpc::Status TrainVMService::record_worker_execution_phase_receipt(
       case v1::WorkerExecutionPhaseReceipt::DISPOSITION_FAILED:
         disposition = "failed";
         break;
+      case v1::WorkerExecutionPhaseReceipt::DISPOSITION_CANCELLED:
+        disposition = "cancelled";
+        break;
       case v1::WorkerExecutionPhaseReceipt::DISPOSITION_UNSPECIFIED:
       default:
         return {grpc::StatusCode::INVALID_ARGUMENT,
@@ -4095,10 +4158,16 @@ grpc::Status TrainVMService::record_worker_execution_phase_receipt(
     const bool completed = disposition == "completed";
     const bool skipped = disposition == "skipped";
     const bool failed = disposition == "failed";
+    // A cancellation stops an enabled phase at a step boundary. Nothing went
+    // wrong, so unlike a failure the trajectory must still be restored — the
+    // fingerprint equality below covers it. It carries diagnostics for the
+    // same reason a failure does: the receipt has to say what stopped it, or
+    // a partial step count in the journal is unattributable.
+    const bool cancelled = disposition == "cancelled";
     if ((request->enabled() && skipped) ||
         (!request->enabled() && !skipped) ||
-        (failed && diagnostics.empty()) ||
-        ((completed || skipped) &&
+        ((failed || cancelled) && diagnostics.empty()) ||
+        ((completed || skipped || cancelled) &&
          receipt.state_fingerprint_before() !=
              receipt.state_fingerprint_after())) {
       return {grpc::StatusCode::INVALID_ARGUMENT,
@@ -4108,7 +4177,8 @@ grpc::Status TrainVMService::record_worker_execution_phase_receipt(
         request->has_steps() ? request->steps() : 0U;
     if ((skipped && receipt.steps_executed() != 0U) ||
         (completed && receipt.steps_executed() != requested_steps) ||
-        (failed && receipt.steps_executed() > requested_steps)) {
+        ((failed || cancelled) &&
+         receipt.steps_executed() > requested_steps)) {
       return {grpc::StatusCode::INVALID_ARGUMENT,
               "execution-phase receipt step count disagrees with its request"};
     }

@@ -21,6 +21,7 @@ from rwkv_lab.trainvm_worker import (
 class _Channel:
     def __init__(self) -> None:
         self.receipts = []
+        self.execution_phase_cancellation: str | None = None
 
     def execution_phase_receipt(self, request, disposition, **values):
         self.receipts.append((request, disposition, values))
