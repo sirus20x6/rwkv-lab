@@ -109,11 +109,11 @@ Measured, not estimated. The **before** figure is the ten most recent green
 PR #141 the step breakdown was 68 s to restore and load the cached toolchain
 image and 512 s to build every target and run ctest.
 
-The **after** figure comes from PR #150, which changed only this file and so
-selected the `catalog` tier — the tier a Python-only or documentation-only change
-gets. It still builds the real `trainvm` CLI, still runs `validate-catalog`
-against the checkout, and still crosses both native/Python worker contracts. It
-does not build the test targets or run ctest.
+The **after** figures come from PRs #150 and #153, each of which changed only
+this file and so selected the `catalog` tier — the tier a Python-only or
+documentation-only change gets. That tier still builds the real `trainvm` CLI,
+still runs `validate-catalog` against the checkout, and still crosses both
+native/Python worker contracts. It does not build the test targets or run ctest.
 
 | | before (median of 10) | `catalog`, cold caches | `catalog`, steady state | fail-closed `full` |
 |---|---|---|---|---|
