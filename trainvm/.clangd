@@ -33,5 +33,12 @@ CompileFlags:
   Add: [-std=c++26, -I../include]
 
 Diagnostics:
+  # A deliberate suppression, not a fix. clangd's include-cleaner decides an
+  # include is unused by looking at which declarations the AST references, and
+  # reflection defeats that: a type reached only through std::meta or ^^T
+  # leaves no ordinary reference behind, and clangd cannot evaluate either
+  # construct in the first place. Its verdicts on this tree are therefore
+  # unsound in the dangerous direction -- it proposes removing headers the GCC
+  # build needs. Everything that reports an actual compile error is still on.
   UnusedIncludes: None
   MissingIncludes: None

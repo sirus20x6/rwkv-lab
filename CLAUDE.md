@@ -134,9 +134,12 @@ diagnostics, none of them real. **`compile_commands.json` is gitignored and per
 worktree — a fresh worktree always starts in this state.**
 
 `trainvm/.clangd` handles the rest: it strips `-freflection` from the recorded
-GCC command (clang's driver hard-errors on unknown `-f` flags), and supplies
+GCC command (clang's driver hard-errors on unknown `-f` flags), supplies
 `-std=c++26 -I../include` as a fallback so an unconfigured tree is merely
-incomplete rather than actively lying. That file configures the indexer only.
+incomplete rather than actively lying, and turns off clangd's include-cleaner,
+which cannot see a header that is reached only through `std::meta` or `^^T` and
+so proposes deleting includes the GCC build needs. That file configures the
+indexer only.
 Do not "fix" an indexer complaint by editing `trainvm/CMakeLists.txt` — the
 build is correct and the flags there are load-bearing.
 
