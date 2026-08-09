@@ -113,6 +113,39 @@ def main() -> int:
             raise SystemExit("a world-writable digest store was accepted")
         store.unlink()
 
+        # A store that cannot be written must not discard a lock that already
+        # succeeded. The command publishes after it has measured every root and
+        # recompiled the document, so a throw there costs the whole run: the
+        # operator saw an uncaught exception and lost a locked document that was
+        # already correct. Forced here by a directory the process may read and
+        # traverse but not create in, which is a real permission mistake and
+        # needs no disk to be filled. The store's own safety rules are satisfied
+        # -- it is owner-only and not group- or world-writable -- so this fails
+        # at the write, which is exactly where a full disk would fail too.
+        sealed_directory = temporary / "sealed"
+        sealed_directory.mkdir()
+        sealed_store = sealed_directory / "digests.store"
+        sealed_directory.chmod(0o500)
+        try:
+            unpublishable = run(trainvm, experiment_path, roots_path, sealed_store)
+        finally:
+            sealed_directory.chmod(0o700)
+        if unpublishable.returncode != 0:
+            raise SystemExit(
+                "an unpublishable digest store failed a lock that had succeeded: "
+                + unpublishable.stderr
+            )
+        if json.loads(unpublishable.stdout) != locked:
+            raise SystemExit(
+                "an unpublishable digest store changed or withheld the locked document"
+            )
+        if "not published" not in unpublishable.stderr:
+            raise SystemExit(
+                "a store that could not be written was not reported to the operator"
+            )
+        if sealed_store.exists():
+            raise SystemExit("the sealed store was written after all")
+
         roots_path.write_text(
             json.dumps(
                 {

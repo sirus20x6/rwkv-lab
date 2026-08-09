@@ -265,6 +265,12 @@ struct InputContentMeasurementCache::Impl final {
     NodeMeasurement value;
     Digest seal{};
     std::list<FileCacheKey>::iterator recency;
+    // False only for a record admitted from a previous store that no
+    // transaction has consulted yet. Publication uses it to distinguish "this
+    // process has evidence about this file" from "some earlier process did",
+    // and drops the latter. It is deliberately not part of the sealed record:
+    // it describes this process's use of the entry, not the file.
+    bool used{};
   };
 
   explicit Impl(std::uint64_t maximum, FilesystemIdentitySource identity_source,
@@ -1191,7 +1197,8 @@ InputContentMeasurementCache::admit_persistent_digests(
         entry->first,
         Impl::Entry{.value = entry->second,
                     .seal = cache_record_seal(entry->first, entry->second),
-                    .recency = impl_->recency.begin()});
+                    .recency = impl_->recency.begin(),
+                    .used = false});
     ++result.admitted_entries;
   }
   return result;
@@ -1229,6 +1236,14 @@ InputContentMeasurementCache::publish_persistent_digests(
     if (entry == impl_->entries.end() ||
         !valid_cached_record(key, entry->second.value, entry->second.seal)) {
       ++result.refused_entries;
+      continue;
+    }
+    // A record inherited from the previous store that no transaction consulted
+    // is evidence about a file this lock never visited. Republishing it is what
+    // made the store grow with every file ever seen rather than with the tree
+    // being locked, until it crossed the publication bound and failed the lock.
+    if (!entry->second.used) {
+      ++result.unused_entries;
       continue;
     }
     if (!timestamps_have_settled(key, sealed_at)) {
@@ -1364,6 +1379,9 @@ InputContentMeasurementTransaction::commit() {
     for (const auto entry : touches) {
       owner.recency.splice(owner.recency.begin(), owner.recency,
                            entry->second.recency);
+      // A consulted record is evidence this lock relied on, so it earns a place
+      // in the next store even though this process did not measure it.
+      entry->second.used = true;
     }
     result.entries_after = static_cast<std::uint64_t>(owner.entries.size());
     impl_->committed = true;
@@ -1473,6 +1491,7 @@ InputContentMeasurementTransaction::commit() {
                                          .value = staged.value,
                                          .seal = staged.seal,
                                          .recency = owner.recency.begin(),
+                                         .used = true,
                                      });
       (void)unused;
       if (!was_inserted)
@@ -1486,6 +1505,18 @@ InputContentMeasurementTransaction::commit() {
   } catch (...) {
     rollback();
     throw;
+  }
+  // Marking use only after the mutation phase has succeeded keeps an abandoned
+  // or rolled-back transaction a complete cache no-op, which rollback() cannot
+  // undo for us: it restores entries by node, and the flag would travel with
+  // them. Both loops are lookups on an already-sized map and cannot throw.
+  for (const auto &key : impl_->touch_order) {
+    if (const auto entry = owner.entries.find(key); entry != owner.entries.end())
+      entry->second.used = true;
+  }
+  for (const auto &key : keys) {
+    if (const auto entry = owner.entries.find(key); entry != owner.entries.end())
+      entry->second.used = true;
   }
   result.entries_after = static_cast<std::uint64_t>(owner.entries.size());
   impl_->committed = true;

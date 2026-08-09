@@ -333,6 +333,18 @@ one gap a metadata key cannot see: a write landing inside the timestamp tick the
 against. The store is bound to the boot identity, because the mount incarnation is unique only for
 the life of one boot.
 
+Publication writes back what the lock *used*: the digests it measured, plus the admitted records it
+actually consulted. A record inherited from the previous store and never looked up describes a file
+this lock did not visit, and is dropped. Without that the store was an append-only log of every
+(file, version) pair ever seen through it -- a churning tree added records every lock and removed
+none -- which grew past the 64 MiB publication bound and, because the command published before it
+printed, failed the lock outright with the locked document already computed and thrown away. The
+store is now proportional to the tree being locked. The cost is that a store shared by locks over
+*disjoint* roots keeps the most recent root's records rather than their union; a per-record
+generation or last-used stamp would keep both, and is the thing to add if one store is ever shared
+across roots. Publication failure of any kind is now a diagnostic on stderr and a successful exit:
+the cache is an optimisation, and the next lock simply measures from bytes.
+
 A record outlives the file it describes -- deleting a file does not remove its record -- so the
 remaining question is whether a *different* file handed the same recycled inode number could satisfy
 that record's key. It cannot: the replacement is created after the record was sealed, so its ctime is
