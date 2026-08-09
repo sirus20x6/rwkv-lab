@@ -1,0 +1,8 @@
+{
+  "api_version": "trainvm.input-content-root-set/v1",
+  "paths": [
+    "/thearray/git/datasets/captiontest/qwen36-caption-finetune-v1",
+    "/thearray/git/moe-mla/src/rwkv_lab",
+    "/thearray/git/ob/text-generation-webui/models/Qwen3.6-35B-A3B-heretic"
+  ]
+}

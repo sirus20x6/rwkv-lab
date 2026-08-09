@@ -25,6 +25,34 @@ only as current as your last fetch. Do not branch from `HEAD` — the primary
 checkout is not necessarily on main, and cannot always be, because git allows a
 branch in one worktree at a time and a sibling checkout may hold main.
 
+### Before you remove a worktree, look for untracked files
+
+A clean `git status` is not evidence that a worktree holds nothing. It reports
+tracked files. The things most worth not losing — a handoff document, a locked
+experiment document, a generated specification — arrive as untracked files and
+never appear there.
+
+```bash
+git -C <wt> status --porcelain --untracked-files=all | grep '^??' | grep -v build
+```
+
+Run that on every worktree before removing it, and act on any output. "Branch
+merged and tree clean" is a *weaker* claim than it sounds: it means nothing is
+tracked-and-uncommitted, which is a different statement.
+
+This is written down because it nearly went wrong. A sweep on 2026-08-09 removed
+sixty worktrees, and the rule it started with would have deleted a 269-line
+live-launch handoff recording an explicit user instruction; it survived only
+because that tree happened to be dirty for an unrelated reason. Adding the check
+partway through caught two more trees holding eighteen untracked files between
+them, including four content-pinned locked documents that existed on no ref at
+all. They are preserved in `docs/experiment-vm/PRESERVED_WORKTREE_ARTIFACTS.md`.
+
+The signal is noisy in both directions — most dirty trees hold only stray build
+directories — so the check is a prompt to read, not a rule that decides. Read
+what the files are before concluding they are disposable, and if you conclude
+they are, record the reason somewhere that outlives the worktree.
+
 ### If you do branch from unmerged work, you inherit its blockers
 
 The escape clause above is real — building on a colleague's branch to avoid
