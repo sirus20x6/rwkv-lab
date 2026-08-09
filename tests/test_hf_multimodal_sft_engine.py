@@ -1521,7 +1521,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         "gallery",
         "final_evaluation",
     ]
-    closure_request = final_controls.events[2][1]
+    closure_request = final_controls.events[4][1]
     expected_context = {
         "api_version": "rwkv-lab.hf-final-member-context/v1",
         "components": {
