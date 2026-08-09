@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "trainvm/document.hpp"
+#include "trainvm/host_resources.hpp"
 
 namespace trainvm {
 
@@ -77,6 +78,11 @@ struct PassiveAcceleratorMemoryEvidence final {
   std::uint64_t free_memory_bytes{};
   std::map<std::string, std::string> selector_labels;
   std::string observation_digest;
+  // As observed by the host authority. Preflight applies
+  // resource_disposition_permits to it rather than requiring
+  // `audited_eligible`, so a plan declaring cooperative access can select a
+  // device that is occupied only because it is driving a display.
+  ResourceObservationDisposition disposition{};
 
   bool operator==(const PassiveAcceleratorMemoryEvidence &) const = default;
 };

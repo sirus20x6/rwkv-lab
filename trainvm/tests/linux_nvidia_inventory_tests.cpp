@@ -176,16 +176,22 @@ LinuxNvidiaInventoryConfig config() {
           .maximum_capture_duration_ns = 1'000'000U,
           .maximum_snapshot_age_ns = 1'000'000U,
           .trusted_host_namespace = true,
-          .trusted_nvml_loader = true};
+          .trusted_nvml_loader = true,
+          .authorized_display_gpu_ids = {}};
 }
 
-HostInventoryReceipt capture(LinuxNvidiaRawSnapshot snapshot) {
+HostInventoryReceipt capture_with_config(LinuxNvidiaRawSnapshot snapshot,
+                                         LinuxNvidiaInventoryConfig configuration) {
   auto fake = std::make_shared<FakeReadOnlyKernel>(std::move(snapshot));
-  LinuxNvidiaInventoryCollector collector(config(), fake);
+  LinuxNvidiaInventoryCollector collector(std::move(configuration), fake);
   auto receipt = capture_host_inventory(collector);
   require(fake->calls == 1U,
           "collector consumes one bounded point-in-time fake capture");
   return receipt;
+}
+
+HostInventoryReceipt capture(LinuxNvidiaRawSnapshot snapshot) {
+  return capture_with_config(std::move(snapshot), config());
 }
 
 const ObservedHostResource &resource(const HostInventoryReceipt &receipt,
@@ -263,6 +269,57 @@ void free_memory_is_separate_from_inventory_identity() {
   require(first_memory && second_memory &&
               first_memory->accelerators != second_memory->accelerators,
           "volatile passive memory remains a distinct point-in-time sample");
+}
+
+void display_sharing_requires_an_exact_authorized_uuid() {
+  const auto default_receipt = capture(complete_snapshot());
+  require(!resource(default_receipt, kGpuB)
+               .labels.contains(std::string(kLinuxNvidiaDisplaySharingLabel)),
+          "display sharing has no implicit default authorization");
+
+  auto authorized = config();
+  authorized.authorized_display_gpu_ids = {std::string(kGpuB)};
+  const auto authorized_receipt =
+      capture_with_config(complete_snapshot(), std::move(authorized));
+  require(resource(authorized_receipt, kGpuB)
+                  .labels.at(std::string(kLinuxNvidiaDisplaySharingLabel)) ==
+              kLinuxNvidiaDisplaySharingAuthorized &&
+              !resource(authorized_receipt, kGpuA)
+                   .labels.contains(
+                       std::string(kLinuxNvidiaDisplaySharingLabel)),
+          "only the exact authorized display UUID receives cooperative authority");
+
+  auto malformed = config();
+  malformed.authorized_display_gpu_ids = {"GPU-not-a-canonical-uuid"};
+  require_throws<HostResourceError>(
+      [&] {
+        [[maybe_unused]] LinuxNvidiaInventoryCollector collector(
+            std::move(malformed),
+            std::make_shared<FakeReadOnlyKernel>(complete_snapshot()));
+      },
+      "malformed display UUID authority must fail closed");
+
+  auto duplicate = config();
+  duplicate.authorized_display_gpu_ids = {std::string(kGpuA),
+                                          std::string(kGpuA)};
+  require_throws<HostResourceError>(
+      [&] {
+        [[maybe_unused]] LinuxNvidiaInventoryCollector collector(
+            std::move(duplicate),
+            std::make_shared<FakeReadOnlyKernel>(complete_snapshot()));
+      },
+      "duplicate display UUID authority must fail closed");
+
+  auto unsorted = config();
+  unsorted.authorized_display_gpu_ids = {std::string(kGpuB),
+                                         std::string(kGpuA)};
+  require_throws<HostResourceError>(
+      [&] {
+        [[maybe_unused]] LinuxNvidiaInventoryCollector collector(
+            std::move(unsorted),
+            std::make_shared<FakeReadOnlyKernel>(complete_snapshot()));
+      },
+      "noncanonical display UUID ordering must fail closed");
 }
 
 void missing_partial_and_torn_evidence_fail_closed() {
@@ -587,6 +644,8 @@ int main() {
     std::cout << "PASS complete\n";
     free_memory_is_separate_from_inventory_identity();
     std::cout << "PASS passive-memory-separation\n";
+    display_sharing_requires_an_exact_authorized_uuid();
+    std::cout << "PASS display-authorization\n";
     missing_partial_and_torn_evidence_fail_closed();
     std::cout << "PASS fail-closed\n";
     display_mig_pci_and_mode_regressions();

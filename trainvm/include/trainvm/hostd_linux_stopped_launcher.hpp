@@ -16,10 +16,21 @@ inline constexpr int kLinuxWorkerBootstrapDescriptor = 4;
 inline constexpr int kLinuxProfilerAuthorityDescriptor = 5;
 inline constexpr int kLinuxProfilerTargetExecutableDescriptor = 6;
 
+// Bounds the sealed supplementary group set so both the parent-side attestation
+// and the post-clone child check work from fixed-size storage.
+inline constexpr std::size_t kMaximumSupplementaryGroups = 64U;
+
 struct LinuxWorkerCredentialSpec final {
   uid_t uid{};
   gid_t gid{};
   bool no_new_privileges{};
+  // The exact supplementary group set the worker must carry, sorted and
+  // deduplicated. Empty means "prove the set was dropped to nothing", which is
+  // what a privileged authority does with setgroups(2). A non-empty set is
+  // sealed evidence, not a wish: an unprivileged authority cannot drop groups,
+  // so it records the set it already had and the worker is attested to carry
+  // exactly that and nothing more.
+  std::vector<gid_t> supplementary_gids;
 
   bool operator==(const LinuxWorkerCredentialSpec&) const = default;
 };

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
@@ -102,6 +103,11 @@ def _model_configuration(model_path: Path) -> HuggingFaceModelConfiguration:
             "AutoModelForImageTextToText",
             "AutoProcessor",
         ),
+        (
+            ModelLoaderImplementation.HF_MULTIMODAL_V2,
+            "AutoModelForImageTextToText",
+            "AutoProcessor",
+        ),
     ],
 )
 def test_hugging_face_loaders_produce_exact_checkpoint_receipts(
@@ -154,6 +160,67 @@ def test_hugging_face_load_receipt_binds_processor_template_identity(
     assert first.receipt.digest != second.receipt.digest
 
 
+def test_hugging_face_loader_passes_only_declared_expert_backend(
+    tmp_path: Path,
+) -> None:
+    seen: list[dict[str, object]] = []
+
+    class RecordingFactory(_AutoFactory):
+        @classmethod
+        def from_pretrained(cls, *_args, **kwargs):
+            seen.append(dict(kwargs))
+            return super().from_pretrained(*_args, **kwargs)
+
+    facade = SimpleNamespace(
+        AutoModelForImageTextToText=RecordingFactory,
+        AutoProcessor=_AuxiliaryFactory,
+    )
+    automatic = build_registered_model_loader(
+        ModelLoaderImplementation.HF_MULTIMODAL_V1,
+        _model_configuration(tmp_path),
+    )
+    automatic_receipt = automatic.load(transformers_module=facade).receipt
+    assert "experts_implementation" not in seen[-1]
+    assert "load_configuration_digest" not in automatic_receipt.canonical_dict()
+
+    grouped = build_registered_model_loader(
+        ModelLoaderImplementation.HF_MULTIMODAL_V2,
+        HuggingFaceModelConfiguration(
+            model_path=str(tmp_path),
+            checkpoint_fingerprint="sha256:" + "a" * 64,
+            experts_implementation="grouped_mm",
+        ),
+    )
+    grouped_receipt = grouped.load(transformers_module=facade).receipt
+    assert seen[-1]["experts_implementation"] == "grouped_mm"
+    assert grouped_receipt.canonical_dict()["load_configuration_digest"] == (
+        grouped_receipt.load_configuration_digest
+    )
+    assert grouped_receipt.load_configuration_digest != (
+        automatic_receipt.load_configuration_digest
+    )
+    assert grouped_receipt.digest != automatic_receipt.digest
+
+    with pytest.raises(ValueError, match="experts implementation"):
+        HuggingFaceModelConfiguration(
+            model_path=str(tmp_path),
+            checkpoint_fingerprint="sha256:" + "a" * 64,
+            experts_implementation="unbounded_import",
+        )
+
+    grouped_configuration = HuggingFaceModelConfiguration(
+        model_path=str(tmp_path),
+        checkpoint_fingerprint="sha256:" + "a" * 64,
+        experts_implementation="grouped_mm",
+    )
+    for legacy in (
+        ModelLoaderImplementation.HF_CAUSAL_V1,
+        ModelLoaderImplementation.HF_MULTIMODAL_V1,
+    ):
+        with pytest.raises(ValueError, match="versioned multimodal loader"):
+            build_registered_model_loader(legacy, grouped_configuration)
+
+
 def test_hugging_face_auxiliary_identity_rejects_process_local_object_repr(
     tmp_path: Path,
 ) -> None:
@@ -193,6 +260,193 @@ def test_exact_checkpoint_loader_rejects_loading_drift(tmp_path: Path) -> None:
     )
     with pytest.raises(RuntimeError, match="did not load exactly"):
         loader.load(transformers_module=facade)
+
+
+def test_unexpected_keys_are_only_tolerated_when_declared(tmp_path: Path) -> None:
+    """An undeclared dropped key fails; the same key declared is recorded, not hidden."""
+
+    class DroppedHead(_AutoFactory):
+        loading_info: ClassVar[dict[str, object]] = {
+            **_AutoFactory.loading_info,
+            "unexpected_keys": ["mtp.fc.weight", "mtp.norm.weight"],
+        }
+
+    facade = SimpleNamespace(
+        AutoModelForCausalLM=DroppedHead, AutoTokenizer=_AuxiliaryFactory
+    )
+    undeclared = build_registered_model_loader(
+        ModelLoaderImplementation.HF_CAUSAL_V1, _model_configuration(tmp_path)
+    )
+    with pytest.raises(RuntimeError, match="did not load exactly"):
+        undeclared.load(transformers_module=facade)
+
+    declared = build_registered_model_loader(
+        ModelLoaderImplementation.HF_CAUSAL_V1,
+        replace(_model_configuration(tmp_path), ignorable_unexpected_prefixes=("mtp.",)),
+    )
+    receipt = declared.load(transformers_module=facade).receipt
+    assert receipt.exact
+    assert receipt.unexpected_keys == ()
+    # The exclusion is evidence in the receipt, not an invisible allowance.
+    assert receipt.ignored_unexpected_keys == ("mtp.fc.weight", "mtp.norm.weight")
+
+
+def test_required_family_that_is_not_source_bound_fails_by_name(
+    tmp_path: Path,
+) -> None:
+    """The Qwen3.6 vision drop: a whole family missing must fail naming the family.
+
+    Regression guard for a checkpoint that nests the vision tower where the model
+    class never looks, so every one of its tensors is silently randomly
+    initialized while the load still reports success.
+    """
+
+    class VisionDropped(_AutoFactory):
+        loading_info: ClassVar[dict[str, object]] = {
+            **_AutoFactory.loading_info,
+            "missing_keys": ["vision_tower.weight", "vision_tower.bias"],
+        }
+
+    facade = SimpleNamespace(
+        AutoModelForImageTextToText=VisionDropped, AutoProcessor=_AuxiliaryFactory
+    )
+    configuration = replace(
+        _model_configuration(tmp_path),
+        exact_checkpoint=False,  # the blunt gate is off; the family gate must still bite
+        required_tensor_families=("vision_tower.",),
+    )
+    loader = build_registered_model_loader(
+        ModelLoaderImplementation.HF_MULTIMODAL_V1, configuration
+    )
+    with pytest.raises(RuntimeError, match=r"vision_tower\. \(0/2 bound\)"):
+        loader.load(transformers_module=facade)
+
+
+def test_required_family_absent_from_the_model_is_never_vacuously_satisfied(
+    tmp_path: Path,
+) -> None:
+    """A family the model does not declare at all binds zero, and must fail."""
+    facade = SimpleNamespace(
+        AutoModelForImageTextToText=_AutoFactory, AutoProcessor=_AuxiliaryFactory
+    )
+    configuration = replace(
+        _model_configuration(tmp_path),
+        required_tensor_families=("model.visual.",),
+    )
+    loader = build_registered_model_loader(
+        ModelLoaderImplementation.HF_MULTIMODAL_V1, configuration
+    )
+    with pytest.raises(RuntimeError, match=r"model\.visual\. \(0/0 bound\)"):
+        loader.load(transformers_module=facade)
+
+
+def test_fully_bound_families_are_recorded_in_the_receipt(tmp_path: Path) -> None:
+    facade = SimpleNamespace(
+        AutoModelForImageTextToText=_AutoFactory, AutoProcessor=_AuxiliaryFactory
+    )
+    configuration = replace(
+        _model_configuration(tmp_path),
+        required_tensor_families=("vision_tower.", "language_model."),
+    )
+    receipt = (
+        build_registered_model_loader(
+            ModelLoaderImplementation.HF_MULTIMODAL_V1, configuration
+        )
+        .load(transformers_module=facade)
+        .receipt
+    )
+    bound = {family: (got, want) for family, got, want in receipt.family_binding}
+    assert bound["vision_tower."] == (2, 2)
+    assert bound["language_model."][0] == bound["language_model."][1]
+    assert bound["language_model."][0] > 0
+
+
+def test_checkpoint_key_remap_is_passed_per_call_and_recorded(tmp_path: Path) -> None:
+    """The remap reaches from_pretrained as key_mapping, and lands in the receipt.
+
+    Per-call rather than through the global conversion-mapping registry, so one
+    model's remap can never leak into another load in the same process.
+    """
+    seen: dict[str, object] = {}
+
+    class Recording(_AutoFactory):
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            seen.update(kwargs)
+            return super().from_pretrained(*args, **kwargs)
+
+    facade = SimpleNamespace(
+        AutoModelForImageTextToText=Recording, AutoProcessor=_AuxiliaryFactory
+    )
+    configuration = replace(
+        _model_configuration(tmp_path),
+        checkpoint_key_remap=("model.language_model.visual.=>model.visual.",),
+    )
+    receipt = (
+        build_registered_model_loader(
+            ModelLoaderImplementation.HF_MULTIMODAL_V1, configuration
+        )
+        .load(transformers_module=facade)
+        .receipt
+    )
+    assert seen["key_mapping"] == {"model.language_model.visual.": "model.visual."}
+    assert receipt.applied_key_remap == (
+        "model.language_model.visual.=>model.visual.",
+    )
+
+    # No remap declared means the argument is not sent at all, so an unrelated
+    # load keeps Transformers' own default conversion behaviour.
+    seen.clear()
+    build_registered_model_loader(
+        ModelLoaderImplementation.HF_MULTIMODAL_V1, _model_configuration(tmp_path)
+    ).load(transformers_module=facade)
+    assert "key_mapping" not in seen
+
+
+def test_malformed_checkpoint_key_remap_is_rejected(tmp_path: Path) -> None:
+    for entry in ("no-separator", "=>target", "source=>", ""):
+        with pytest.raises(ValueError, match="source=>target"):
+            replace(_model_configuration(tmp_path), checkpoint_key_remap=(entry,))
+    with pytest.raises(ValueError, match="unique"):
+        replace(
+            _model_configuration(tmp_path),
+            checkpoint_key_remap=("a=>b", "a=>c"),
+        )
+
+
+def test_qwen36_vision_remap_reconciles_the_published_key_layout() -> None:
+    """Pin the Qwen3.6 nesting so a Transformers upgrade cannot silently revert it.
+
+    Qwen3.6 publishes its ViT at model.language_model.visual.*, while
+    Qwen3_5MoeForConditionalGeneration expects model.visual.*. Nothing remaps it,
+    so without the declared remap all 333 vision tensors load as missing and are
+    randomly initialized while the load still reports success. This asserts the
+    rename is a pure prefix substitution over the real published key names.
+    """
+    published = [
+        "model.language_model.visual.patch_embed.proj.weight",
+        "model.language_model.visual.pos_embed",
+        "model.language_model.visual.blocks.0.attn.qkv.weight",
+        "model.language_model.visual.merger.linear_fc1.bias",
+    ]
+    expected = [
+        "model.visual.patch_embed.proj.weight",
+        "model.visual.pos_embed",
+        "model.visual.blocks.0.attn.qkv.weight",
+        "model.visual.merger.linear_fc1.bias",
+    ]
+    configuration = HuggingFaceModelConfiguration(
+        model_path=str(Path(__file__).resolve().parent),
+        checkpoint_fingerprint="sha256:" + "a" * 64,
+        checkpoint_key_remap=("model.language_model.visual.=>model.visual.",),
+    )
+    (source, target), = configuration.remap_pairs().items()
+    assert [key.replace(source, target, 1) for key in published] == expected
+
+    # The language side must be untouched: the checkpoint already nests it where
+    # the class looks, so a remap that caught it too would break the load.
+    language = "model.language_model.layers.0.self_attn.q_proj.weight"
+    assert language.replace(source, target, 1) == language
 
 
 def test_named_rules_freeze_and_unfreeze_qwen_tensors_deterministically() -> None:
@@ -275,9 +529,11 @@ def test_resolved_component_string_lists_and_resume_state_are_exact(
                 "attention_implementation": "sdpa",
                 "checkpoint_fingerprint": "sha256:" + "b" * 64,
                 "exact_checkpoint": True,
+                "ignorable_unexpected_prefixes": [],
                 "local_files_only": True,
                 "model_path": str(tmp_path),
                 "quantization": "none",
+                "required_tensor_families": [],
                 "revision": "main",
                 "trust_remote_code": False,
             },
@@ -361,10 +617,13 @@ def test_resolved_component_factories_dispatch_without_workload_imports(
             "configuration": {
                 "attention_implementation": "sdpa",
                 "checkpoint_fingerprint": "sha256:" + "a" * 64,
+                "checkpoint_key_remap": [],
                 "exact_checkpoint": True,
+                "ignorable_unexpected_prefixes": [],
                 "local_files_only": True,
                 "model_path": str(tmp_path),
                 "quantization": "none",
+                "required_tensor_families": [],
                 "revision": "main",
                 "trust_remote_code": False,
             },
@@ -389,3 +648,36 @@ def test_resolved_component_factories_dispatch_without_workload_imports(
     )
     assert loader.implementation is ModelLoaderImplementation.HF_MULTIMODAL_V1
     assert policy.implementation is TrainabilityImplementation.LORA_V1
+
+
+def test_resolved_model_loader_rejects_cross_version_configuration(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    descriptors = json.loads(
+        (root / "docs/experiment-vm/examples/training-components.v1.json").read_text()
+    )["components"]
+    descriptor = next(
+        item
+        for item in descriptors
+        if item["key"]
+        == {"category": "model_loader", "name": "hf_multimodal", "version": "1.0.0"}
+    )
+    with pytest.raises(ValueError, match="does not match its implementation"):
+        model_loader_from_resolved_component(
+            {
+                "configuration": {
+                    "attention_implementation": "sdpa",
+                    "checkpoint_fingerprint": "sha256:" + "a" * 64,
+                    "exact_checkpoint": True,
+                    "experts_implementation": "grouped_mm",
+                    "local_files_only": True,
+                    "model_path": str(tmp_path),
+                    "quantization": "none",
+                    "revision": "main",
+                    "trust_remote_code": False,
+                },
+                "descriptor": descriptor,
+                "descriptor_digest": _digest(descriptor),
+            }
+        )

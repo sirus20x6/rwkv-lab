@@ -1,0 +1,92 @@
+{
+  "api_version": "rwkv-lab.qwen-caption-declarative-parity/v1",
+  "legacy_evidence": {
+    "run": "qwen36-caption-distill-lora-r256-corrected-v3",
+    "receipt": "/thearray/git/moe-mla/runs/qwen36-caption-distill-lora-r256-corrected-v3/run-receipt.json",
+    "failed_final_audit": "/thearray/git/moe-mla/runs/qwen36-caption-distill-lora-r256-corrected-v3/adapter-test.failed-cuda-timeout-20260806.jsonl",
+    "legacy_handler_status_is_not_accepted": true
+  },
+  "identity": {
+    "model_path": "/thearray/git/ob/text-generation-webui/models/Qwen3.6-35B-A3B-heretic",
+    "model_config_sha256": "95900c00edc8dd640787d1d1c3e60456712a9f95a6787650f54f8c159bec0fc7",
+    "weight_index_sha256": "397060cbef522dd29c5743de10bb69d7b9ea6b80b96854d74b284e5e231ca770",
+    "exact_checkpoint_tensor_count": 1045,
+    "exact_vision_tensor_count": 333,
+    "legacy_vision_key_mapping": {"^model\\.language_model\\.visual\\.": "model.visual."},
+    "attention_implementation": "flash_attention_2",
+    "experts_implementation": "grouped_mm",
+    "parameter_dtype": "bfloat16"
+  },
+  "data": {
+    "dataset_root": "/thearray/git/datasets/captiontest/qwen36-caption-finetune-v1",
+    "dataset_digest": "4869008d3853b22c83fcf67ec02f9fb22b331203c58efad8a6d2e7b9d2760347",
+    "split_counts": {"train": 11909, "validation": 680, "test": 674},
+    "split_rule": "int(Path(file_name).stem.casefold()[:8], 16) % 1000",
+    "target_column": "caption",
+    "assistant_only": true,
+    "append_eos": true,
+    "held_out_manifest": "validation-fixed-100.jsonl",
+    "held_out_manifest_sha256": "e5cfb9fc5edac6cb890409efb02db477060603b8f87a42b401e6235da49a8fdc",
+    "held_out_count": 10,
+    "held_out_identities_sha256": "sha256:ede4bdf7da1bc9d4106b492d8fec62b14d44216623aaa7606e6dd956f0b85878"
+  },
+  "trainability": {
+    "kind": "lora_target_manifest",
+    "rank": 256,
+    "alpha": 512,
+    "dropout": 0.05,
+    "target_count": 311,
+    "target_manifest_sha256": "f501a5d8a91e8324182556f6cc3d2d900c9d63b5627fa7efa88c961d1e4c2456",
+    "target_policy_digest": "sha256:5f29468be7a2bbfeebb9ccc58fd2bdc01ee3027ce50cfd3b03bec624545c1390",
+    "vision_frozen": true,
+    "router_frozen": true,
+    "fused_experts_frozen": true,
+    "mtp_loaded": false
+  },
+  "optimization": {
+    "micro_batch_size": 1,
+    "gradient_accumulation": 16,
+    "optimizer": "torch_adamw_no_decay@2.0.0",
+    "learning_rate": 0.00002,
+    "beta1": 0.9,
+    "beta2": 0.95,
+    "epsilon": 0.00000001,
+    "foreach": false,
+    "fused": true,
+    "weight_decay": 0.01,
+    "warmup_steps": 22,
+    "maximum_steps": 745,
+    "minimum_ratio": 0.1,
+    "max_gradient_norm": 1.0
+  },
+  "cadence": {
+    "step_zero_scalar_and_triplet_gate": true,
+    "evaluation_every_steps": 250,
+    "checkpoint_every_steps": 250,
+    "final_test_records": 674,
+    "final_test_must_have_zero_errors": true,
+    "exact_resume": true,
+    "eval_only_recovery_from_final_checkpoint": true
+  },
+  "bounded_schedule_trajectory": [
+    {"step": 0, "multiplier": 0.00000001},
+    {"step": 1, "multiplier": 0.045454545454545456},
+    {"step": 21, "multiplier": 0.9545454545454546},
+    {"step": 22, "multiplier": 1.0},
+    {"step": 23, "multiplier": 0.9999957517996969},
+    {"step": 250, "multiplier": 0.7966433714616376},
+    {"step": 500, "multiplier": 0.3318071683612077},
+    {"step": 744, "multiplier": 0.1000042482003031},
+    {"step": 745, "multiplier": 0.1}
+  ],
+  "tolerances": {
+    "configuration": 0.0,
+    "schedule_absolute": 1e-15,
+    "bounded_cpu_optimizer_absolute": 5e-7
+  },
+  "qualification": {
+    "bounded_cpu_trajectory_is_not_real_run_qualification": true,
+    "bespoke_path_may_not_be_retired_before_successful_real_run": true,
+    "universal_step_zero_contract_required": true
+  }
+}

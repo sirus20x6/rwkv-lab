@@ -6,6 +6,7 @@
 
 #include <cerrno>
 #include <algorithm>
+#include <iostream>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -19,6 +20,7 @@
 
 #include "trainvm/authority_time.hpp"
 #include "trainvm/document.hpp"
+#include "trainvm/gpu_fault_observer.hpp"
 #include "trainvm/reflection_json.hpp"
 #include "trainvm/host_ledger.hpp"
 #include "trainvm/sqlite_filesystem_authority.hpp"
@@ -63,6 +65,29 @@ void require_inventory_identity(
         "configured host, boot, or broker identity does not match live "
         "authority evidence");
   }
+}
+
+// Captured once, before NVML and before any fork, while the daemon is still
+// single-threaded. An unprivileged authority cannot drop its supplementary
+// groups, so the worker inherits them; sealing the observed set here — rather
+// than declaring it in configuration, where it would rot the first time
+// /etc/group changed — lets the launcher attest the worker against an exact
+// set instead of loosening the check to whatever the child happens to carry.
+std::vector<gid_t> seal_authority_supplementary_groups() {
+  const int count = ::getgroups(0, nullptr);
+  if (count < 0 || static_cast<std::size_t>(count) > kMaximumSupplementaryGroups)
+    throw HostdDaemonRuntimeError("hostd supplementary group set is unbounded");
+  std::vector<gid_t> groups(static_cast<std::size_t>(count));
+  if (count > 0 && ::getgroups(count, groups.data()) != count)
+    throw HostdDaemonRuntimeError(
+        "hostd supplementary group set changed while sealing");
+  std::ranges::sort(groups);
+  if (std::ranges::adjacent_find(groups) != groups.end() ||
+      std::ranges::find(groups, 0U) != groups.end()) {
+    throw HostdDaemonRuntimeError(
+        "hostd supplementary group set is not a canonical non-root set");
+  }
+  return groups;
 }
 
 int open_socket_parent(const std::filesystem::path &path) {
@@ -161,8 +186,20 @@ HostdProcessAuthorityStatus process_status(
 class RuntimeAuthorityStatusSource final
     : public IHostdAuthorityStatusSource {
 public:
+  // Must stay comfortably below the controller's passive-inventory admission
+  // bound (maximum_age_ns in service.cpp, 5s), because a status reply serves
+  // the cached observation whenever it is younger than this. At 30s the two
+  // disagreed by six times: a request landing between 5s and 30s after the
+  // last capture was answered with an inventory the controller then refused as
+  // stale, so AuthorRun failed preflight for most of every refresh cycle and
+  // succeeded only just after one — which read as intermittent rather than as
+  // a constant that was simply too large.
+  //
+  // The capture itself takes about a second on this host (NVML), and it only
+  // runs when a status is actually requested, so this bounds sampling under
+  // polling rather than imposing a steady cost.
   static constexpr std::int64_t inventory_refresh_interval_ns =
-      30'000'000'000LL;
+      3'000'000'000LL;
 
   RuntimeAuthorityStatusSource(
       std::shared_ptr<SQLiteHostLedger> ledger,
@@ -239,6 +276,7 @@ public:
               .audited_eligible =
                   resource->disposition ==
                   ResourceObservationDisposition::audited_eligible,
+              .disposition = resource->disposition,
               .total_memory_bytes = memory.total_memory_bytes,
               .free_memory_bytes = memory.free_memory_bytes,
               .selector_labels = resource->labels,
@@ -254,31 +292,20 @@ public:
               HostdAuthorityStatus::maximum_passive_memory_rows);
           status.passive_accelerator_memory_truncated = true;
         }
-        const auto identity = [&] {
-          return nlohmann::json{
-              {"api_version", "trainvm.hostd-passive-memory/v1"},
-              {"host_id", status.passive_memory_host_id},
-              {"boot_id", status.passive_memory_boot_id},
-              {"inventory_digest", status.passive_memory_inventory_digest},
-              {"inventory_receipt_digest",
-               status.passive_memory_inventory_receipt_digest},
-              {"observed_monotonic_ns",
-               status.passive_memory_observed_monotonic_ns},
-              {"accelerator_count", status.passive_accelerator_memory_count},
-              {"accelerators_truncated",
-               status.passive_accelerator_memory_truncated},
-              {"accelerators", encode_json(status.passive_accelerator_memory)},
-          };
-        };
+        // Both the trim bound and the digest come from the transport's own
+        // encoder. A second encoding written here drifted from it — it omitted
+        // api_version and encoded the accelerator rows reflectively — so every
+        // status carrying passive memory failed the transport's digest check
+        // and was closed with no reply.
         while (!status.passive_accelerator_memory.empty() &&
-               identity().dump().size() >
+               hostd_passive_memory_identity_bytes(status) >
                    HostdAuthorityStatus::
                        maximum_passive_memory_identity_bytes) {
           status.passive_accelerator_memory.pop_back();
           status.passive_accelerator_memory_truncated = true;
         }
         status.passive_memory_observation_digest =
-            "sha256:" + sha256_hex(identity().dump());
+            hostd_passive_memory_observation_digest(status);
       }
       for (const ResourceFence &fence : occupancy.active_fences) {
         const auto observed = std::find_if(
@@ -414,16 +441,32 @@ private:
 } // namespace
 
 struct HostdDaemonRuntime::Implementation final {
-  explicit Implementation(HostdDaemonConfiguration input)
-      : configuration(std::move(input)), owner_pid(::getpid()),
+  Implementation(HostdDaemonConfiguration input,
+                 HostdGpuAuthorization input_gpu_authorization)
+      : configuration(std::move(input)),
+        gpu_authorization(std::move(input_gpu_authorization)),
+        owner_pid(::getpid()),
         owner_tid(current_tid()),
-        launch_capable(configuration.document().authority_uid == 0U &&
-                       ::geteuid() == 0U &&
+        launch_capable(configuration.document().authority_uid != 0U &&
+                       ::geteuid() ==
+                           static_cast<uid_t>(
+                               configuration.document().authority_uid) &&
                        configuration.worker_credentials().uid != 0U &&
                        configuration.worker_credentials().gid != 0U &&
                        configuration.worker_credentials().no_new_privileges) {
     if (owner_tid <= 0)
       throw HostdDaemonRuntimeError("could not bind hostd owner thread");
+    // hostd_main enforces this before publishing, but the runtime is also
+    // constructed directly, and every ownership expectation below is derived
+    // from the configured authority rather than from the running identity.
+    if (::geteuid() !=
+            static_cast<uid_t>(configuration.document().authority_uid) ||
+        ::getegid() !=
+            static_cast<gid_t>(configuration.document().authority_gid)) {
+      throw HostdDaemonRuntimeError(
+          "hostd runtime identity is not its configured authority");
+    }
+    gpu_authorization.require_matches(configuration);
 
     clock = std::make_unique<AuthorityClock>();
     session_kernel =
@@ -434,43 +477,72 @@ struct HostdDaemonRuntime::Implementation final {
     service_identity = std::make_shared<HostdLinuxServiceIdentityAuthority>(
         configuration.service_identity());
     cgroups = std::make_unique<LinuxCgroupAuthority>(configuration.cgroup());
-    inventory_kernel = std::make_unique<LinuxNvidiaInventoryCollector>(
-        configuration.inventory());
-    inventory = capture_host_inventory(*inventory_kernel);
-    require_inventory_identity(configuration.document(), inventory,
-                               clock->sample());
-
+    // hostd attests the established controller journal; it must never become a
+    // second writer, so it opens read-only and without exclusive WAL ownership.
     journal = std::make_unique<Journal>(
         configuration.journal_path(), configuration.document().journal_identity,
         HostGrantEnforcement::required, configuration.journal_host(), nullptr,
-        true);
+        false, JournalAccessMode::read_only);
 
     ledger_authority = std::make_shared<SqliteFilesystemAuthority>(
         SqliteFilesystemAuthority::acquire(
             configuration.ledger_authority()));
     singleton = std::make_shared<HostdLedgerSingletonToken>(ledger_authority);
+    // Socket self-bind temporarily changes the process working directory to a
+    // pinned descriptor, so it must happen before NVML loads the CUDA driver
+    // and creates its helper thread.  The retained singleton token is already
+    // sufficient to authorize the bind; request serving is assembled only
+    // after the inventory, ledger, and recovery authorities are admitted.
+    CloseDescriptor parent(
+        open_socket_parent(configuration.document().socket.path));
+    socket = std::make_shared<HostdSocketAuthority>(
+        HostdSocketAuthority::self_bind(configuration.socket(), parent.get(),
+                                        singleton));
+
+    LinuxNvidiaInventoryConfig inventory_configuration =
+        configuration.inventory();
+    inventory_configuration.authorized_display_gpu_ids =
+        gpu_authorization.allowed_display_gpu_ids();
+    inventory_kernel = std::make_unique<LinuxNvidiaInventoryCollector>(
+        std::move(inventory_configuration));
+    inventory = capture_host_inventory(*inventory_kernel);
+    require_inventory_identity(configuration.document(), inventory,
+                               clock->sample());
     ledger = std::make_shared<SQLiteHostLedger>(
         ledger_authority, inventory, nullptr,
         configuration.startup_auditor().policy);
     logical_fence = std::make_shared<JournalHostdLogicalFenceEvidenceSource>(
         *journal, *clock);
+    if (configuration.document().gpu_fault_guard) {
+      const auto& guard = *configuration.document().gpu_fault_guard;
+      gpu_fault_guard = std::make_shared<LinuxGpuFaultAdmissionGuard>(
+          guard.state_path, configuration.document().boot_id,
+          guard.maximum_state_age_ns, configuration.document().authority_uid);
+    }
     coordinator = std::make_shared<HostGrantCoordinator>(
-        configuration.coordinator(), ledger, logical_fence);
+        configuration.coordinator(), ledger, logical_fence, gpu_fault_guard);
 
     launcher = std::make_unique<LinuxStoppedLauncherKernel>();
-    device_kernel = std::make_unique<LinuxCgroupDeviceKernel>();
-    device_installer =
-        std::make_unique<LinuxDevicePolicyInstaller>(*device_kernel);
+    // No device policy: installing one needs CAP_BPF, which an unprivileged
+    // authority does not hold. The BPF layer stays built and unit-tested; it is
+    // simply not wired into any production launch.
     process_policy_kernel =
         std::make_unique<LinuxCgroupProcessPolicyKernel>();
     process_policy_installer =
         std::make_unique<LinuxProcessPolicyInstaller>(*process_policy_kernel);
     context_auditor = std::make_unique<LinuxInventoryProcessContextAuditor>(
         *inventory_kernel);
+    LinuxWorkerCredentialSpec worker_credentials =
+        configuration.worker_credentials();
+    if (configuration.document()
+            .worker_identity.inherit_authority_supplementary_groups
+            .value_or(false)) {
+      worker_credentials.supplementary_gids =
+          seal_authority_supplementary_groups();
+    }
     process_authority = std::make_unique<LinuxProcessAuthority>(
-        *ledger, *clock, *cgroups, *device_installer,
-        *process_policy_installer, *launcher,
-        configuration.worker_credentials(), *context_auditor);
+        *ledger, *clock, *cgroups, nullptr, *process_policy_installer,
+        *launcher, worker_credentials, *context_auditor);
     process_supervisor =
         std::make_shared<HostdLinuxProcessSupervisor>(*process_authority);
     release_authority =
@@ -508,34 +580,44 @@ struct HostdDaemonRuntime::Implementation final {
           "hostd runtime used outside its authority owner thread");
   }
 
+  // The authority socket is already self-bound by the constructor, which must
+  // happen before NVML loads the CUDA driver.  This step only assembles
+  // request serving over that bound socket, which the constructor deliberately
+  // deferred until the inventory, ledger, and recovery authorities were
+  // admitted.
   void bind_transport() {
     if (unified_server)
       return;
-    if (socket || status_server || mutation_server)
+    if (status_server || mutation_server)
       throw HostdDaemonRuntimeError(
           "hostd transport assembly is partially initialized");
-    CloseDescriptor parent(
-        open_socket_parent(configuration.document().socket.path));
-    auto bound = HostdSocketAuthority::self_bind(configuration.socket(),
-                                                 parent.get(), singleton);
-    auto candidate_socket =
-        std::make_shared<HostdSocketAuthority>(std::move(bound));
+    if (!socket)
+      throw HostdDaemonRuntimeError(
+          "hostd transport assembly requires the bound authority socket");
+    // Every status rejection is otherwise silent: the connection is closed with
+    // no reply and nothing is recorded, so a controller that cannot complete a
+    // status exchange reports only that the peer closed on it. Surface the
+    // reason the transport already computes.
+    HostdStatusTransportLimits status_limits = configuration.status_transport();
+    status_limits.rejection_observer = [](std::string_view reason) {
+      std::cerr << "trainvm-hostd: status rejected: " << reason << '\n';
+    };
     auto candidate_status = std::make_unique<HostdStatusServer>(
-        candidate_socket, coordinator, configuration.status_peer(),
-        configuration.status_transport(), authority_status_source);
+        socket, coordinator, configuration.status_peer(), status_limits,
+        authority_status_source);
     auto candidate_mutation = std::make_unique<HostdMutationServer>(
-        candidate_socket, coordinator, challenge_verifier, session_kernel,
+        socket, coordinator, challenge_verifier, session_kernel,
         service_identity, ledger_time, configuration.mutation_transport(),
         launch_capable ? process_supervisor : nullptr);
     auto candidate_unified = std::make_unique<HostdUnifiedServer>(
-        candidate_socket, *candidate_status, *candidate_mutation);
-    socket = std::move(candidate_socket);
+        socket, *candidate_status, *candidate_mutation);
     status_server = std::move(candidate_status);
     mutation_server = std::move(candidate_mutation);
     unified_server = std::move(candidate_unified);
   }
 
   HostdDaemonConfiguration configuration;
+  HostdGpuAuthorization gpu_authorization;
   pid_t owner_pid{};
   pid_t owner_tid{};
   bool launch_capable{};
@@ -547,6 +629,7 @@ struct HostdDaemonRuntime::Implementation final {
   std::shared_ptr<SQLiteHostLedger> ledger;
   std::unique_ptr<Journal> journal;
   std::shared_ptr<JournalHostdLogicalFenceEvidenceSource> logical_fence;
+  std::shared_ptr<LinuxGpuFaultAdmissionGuard> gpu_fault_guard;
   std::shared_ptr<HostGrantCoordinator> coordinator;
   std::unique_ptr<LinuxCgroupAuthority> cgroups;
   std::unique_ptr<LinuxStoppedLauncherKernel> launcher;
@@ -578,9 +661,11 @@ struct HostdDaemonRuntime::Implementation final {
   std::unique_ptr<HostdUnifiedServer> unified_server;
 };
 
-HostdDaemonRuntime::HostdDaemonRuntime(HostdDaemonConfiguration configuration)
-    : implementation_(
-          std::make_unique<Implementation>(std::move(configuration))) {}
+HostdDaemonRuntime::HostdDaemonRuntime(
+    HostdDaemonConfiguration configuration,
+    HostdGpuAuthorization gpu_authorization)
+    : implementation_(std::make_unique<Implementation>(
+          std::move(configuration), std::move(gpu_authorization))) {}
 
 HostdDaemonRuntime::~HostdDaemonRuntime() = default;
 

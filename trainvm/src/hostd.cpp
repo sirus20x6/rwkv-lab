@@ -175,6 +175,7 @@ struct HostGrantCoordinator::Implementation final {
   HostdCoordinatorConfig config;
   std::shared_ptr<IHostdLedgerBoundary> ledger;
   std::shared_ptr<IHostdLogicalFenceEvidenceSource> logical_fence_evidence;
+  std::shared_ptr<IHostdGrantAdmissionGuard> grant_admission_guard;
   HostInventoryReceipt startup_inventory;
   HostdLifecycle lifecycle{HostdLifecycle::sealed};
   std::optional<HostStartupAuditReceipt> startup_audit;
@@ -506,14 +507,17 @@ struct HostGrantCoordinator::Implementation final {
 
 HostGrantCoordinator::HostGrantCoordinator(
     HostdCoordinatorConfig config, std::shared_ptr<SQLiteHostLedger> ledger,
-    std::shared_ptr<IHostdLogicalFenceEvidenceSource> logical_fence_evidence)
+    std::shared_ptr<IHostdLogicalFenceEvidenceSource> logical_fence_evidence,
+    std::shared_ptr<IHostdGrantAdmissionGuard> grant_admission_guard)
     : HostGrantCoordinator(std::move(config), wrap_sqlite_ledger(std::move(ledger)),
-                           std::move(logical_fence_evidence)) {}
+                           std::move(logical_fence_evidence),
+                           std::move(grant_admission_guard)) {}
 
 HostGrantCoordinator::HostGrantCoordinator(
     HostdCoordinatorConfig config,
     std::shared_ptr<IHostdLedgerBoundary> ledger,
-    std::shared_ptr<IHostdLogicalFenceEvidenceSource> logical_fence_evidence)
+    std::shared_ptr<IHostdLogicalFenceEvidenceSource> logical_fence_evidence,
+    std::shared_ptr<IHostdGrantAdmissionGuard> grant_admission_guard)
     : implementation_(std::make_unique<Implementation>()) {
   if (config.api_version != kHostdCoordinatorApiVersion ||
       !valid_identifier(config.host_id) || !valid_identifier(config.boot_id) ||
@@ -542,6 +546,7 @@ HostGrantCoordinator::HostGrantCoordinator(
   implementation_->ledger = std::move(ledger);
   implementation_->logical_fence_evidence =
       std::move(logical_fence_evidence);
+  implementation_->grant_admission_guard = std::move(grant_admission_guard);
 }
 
 HostGrantCoordinator::~HostGrantCoordinator() = default;
@@ -1016,6 +1021,8 @@ HostGrantCoordinator::request_bundle(std::string_view session_id,
       Implementation::observe_peer(snapshot.peer_source);
   const HostdLogicalFenceEvidence logical =
       implementation_->observe_logical_fence(attribution);
+  if (implementation_->grant_admission_guard)
+    implementation_->grant_admission_guard->require_new_grant_allowed();
   const Implementation::RuntimeIdentityEvidence runtime =
       implementation_->observe_runtime_identity();
   {

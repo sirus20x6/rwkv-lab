@@ -53,7 +53,12 @@ JournalLogicalFenceSnapshot durable_snapshot() {
                   .expires_wall_time_ns = 20'000U};
   result.authority_revision = 0U;
   result.authority_event_sequence = 9U;
-  result.authority_event_hash = "sha256:" + std::string(64U, 'b');
+  // Bare hex, no algorithm prefix — the form the journal writes and
+  // enforces on its own chain head via journal_event_hash_valid. This
+  // fixture previously carried the namespaced "sha256:..." form, agreeing
+  // with a verifier that demanded it and with nothing that produced it, so
+  // both sides passed while every real journal hash was rejected.
+  result.authority_event_hash = std::string(64U, 'b');
   return result;
 }
 
@@ -149,8 +154,21 @@ void boundary_failure_propagates_without_fabricated_evidence() {
 
 }  // namespace
 
+// The fixture must carry a hash the journal would actually write. Asserting it
+// against the journal's own predicate is what keeps this test honest: the
+// previous fixture and the verifier agreed on a namespaced digest that the
+// journal never produces, so both passed while every real hash was rejected.
+void fixture_hash_is_what_the_journal_writes() {
+  const auto snapshot = durable_snapshot();
+  if (!journal_event_hash_valid(snapshot.authority_event_hash))
+    throw std::runtime_error(
+        "fixture authority_event_hash is not in the form the journal writes: " +
+        snapshot.authority_event_hash);
+}
+
 int main() {
   try {
+    fixture_hash_is_what_the_journal_writes();
     exact_live_snapshot_produces_bounded_evidence();
     journal_or_lease_identity_drift_is_rejected();
     boundary_failure_propagates_without_fabricated_evidence();

@@ -40,6 +40,13 @@ struct HostdDaemonInventoryDocument final {
   bool operator==(const HostdDaemonInventoryDocument &) const = default;
 };
 
+struct HostdDaemonGpuFaultGuardDocument final {
+  std::string state_path;
+  std::uint64_t maximum_state_age_ns{};
+
+  bool operator==(const HostdDaemonGpuFaultGuardDocument &) const = default;
+};
+
 struct HostdDaemonCgroupDocument final {
   std::string root_path;
   std::string root_unified_path;
@@ -51,6 +58,12 @@ struct HostdDaemonWorkerIdentityDocument final {
   std::uint32_t uid{};
   std::uint32_t gid{};
   bool no_new_privileges{};
+  // An unprivileged authority cannot call setgroups(2), so a worker that shares
+  // its identity necessarily inherits its supplementary groups. Declaring that
+  // here keeps the sharing deliberate: the exact inherited set is sealed at
+  // startup and the worker is then attested against it, rather than the
+  // attestation being loosened to whatever the child happens to carry.
+  std::optional<bool> inherit_authority_supplementary_groups;
 
   bool operator==(const HostdDaemonWorkerIdentityDocument &) const = default;
 };
@@ -117,6 +130,7 @@ struct HostdDaemonConfigurationDocument final {
   std::string journal_path;
   JournalFileIdentity journal_identity;
   HostdDaemonInventoryDocument inventory;
+  std::optional<HostdDaemonGpuFaultGuardDocument> gpu_fault_guard;
   HostdDaemonCgroupDocument cgroup;
   HostdDaemonSocketDocument socket;
   HostdLinuxHostNamespacePolicy host_namespaces;

@@ -23,10 +23,15 @@ inline constexpr std::string_view kAuthorRunApiVersion =
     "trainvm.author-run/v1";
 inline constexpr std::string_view kAuthoringClientApiVersion =
     "trainvm.authoring-client/v1";
+// Registries live outside /etc so the service user can replace one without
+// running anything as root. Under /etc they were root-owned, which made every
+// registry update a privileged install, and the recipe profile path was not
+// even overridable — relocating it meant a recompile.
+inline constexpr std::string_view kInstalledRegistryRoot = "/opt/trainvm";
 inline constexpr std::string_view kInstalledAuthoringClientPath =
-    "/etc/trainvm/authoring-client.json";
+    "/opt/trainvm/authoring-client.json";
 inline constexpr std::string_view kInstalledRecipeProfilePath =
-    "/etc/trainvm/recipe-profiles.json";
+    "/opt/trainvm/recipe-profiles.json";
 inline constexpr std::string_view kSealedStructuralPreflightCapability =
     "trainvm.passive-preflight.structural@1";
 inline constexpr std::string_view kInputContentMeasurementReceiptApiVersion =

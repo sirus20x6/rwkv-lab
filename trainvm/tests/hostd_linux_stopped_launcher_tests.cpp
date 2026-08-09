@@ -78,7 +78,8 @@ void malformed_launch_fails_before_clone() {
       .working_directory_fd = -1,
       .credentials = {.uid = 1000U,
                       .gid = 1000U,
-                      .no_new_privileges = true},
+                      .no_new_privileges = true,
+                      .supplementary_gids = {}},
       .nice = std::nullopt,
       .arguments = {},
       .profiler = std::nullopt,
@@ -240,8 +241,10 @@ void profiled_descriptor_abi_survives_the_outer_exec() {
 void worker_credential_status_is_strict_and_capability_free() {
   using hostd_linux_stopped_launcher_test_seam::
       worker_status_has_credentials;
-  const LinuxWorkerCredentialSpec expected{
-      .uid = 1000U, .gid = 1000U, .no_new_privileges = true};
+  const LinuxWorkerCredentialSpec expected{.uid = 1000U,
+                                           .gid = 1000U,
+                                           .no_new_privileges = true,
+                                           .supplementary_gids = {}};
   const std::string valid =
       "Name:\tworker\n"
       "Uid:\t1000\t1000\t1000\t1000\n"
@@ -270,11 +273,59 @@ void worker_credential_status_is_strict_and_capability_free() {
   }
 }
 
+// An unprivileged authority cannot drop supplementary groups, so the worker
+// inherits them and the attestation asserts the exact sealed set instead.
+void supplementary_group_attestation_is_an_exact_set() {
+  using hostd_linux_stopped_launcher_test_seam::
+      worker_status_has_credentials;
+  const LinuxWorkerCredentialSpec expected{
+      .uid = 1000U,
+      .gid = 1000U,
+      .no_new_privileges = true,
+      .supplementary_gids = {985U, 989U, 1004U}};
+  const std::string prefix =
+      "Name:\tworker\n"
+      "Uid:\t1000\t1000\t1000\t1000\n"
+      "Gid:\t1000\t1000\t1000\t1000\n";
+  const std::string suffix =
+      "CapInh:\t0000000000000000\n"
+      "CapPrm:\t0000000000000000\n"
+      "CapEff:\t0000000000000000\n"
+      "CapAmb:\t0000000000000000\n"
+      "NoNewPrivs:\t1\n";
+  const auto status = [&](std::string_view groups) {
+    return prefix + "Groups:\t" + std::string(groups) + "\n" + suffix;
+  };
+  require(worker_status_has_credentials(status("989 985 1004"), expected),
+          "the sealed supplementary set matches regardless of kernel order");
+  for (const std::string_view groups : {
+           std::string_view("985 989"),          // subset
+           std::string_view("985 989 1004 19"),  // superset
+           std::string_view("989 989 985 1004"), // duplicate
+           std::string_view("0 985 989 1004"),   // gid 0 may never appear
+           std::string_view("985 989 abc"),      // non-numeric
+           std::string_view(""),                 // dropped entirely
+       }) {
+    require(!worker_status_has_credentials(status(groups), expected),
+            "a supplementary set that is not exactly the sealed set fails");
+  }
+  // The privileged path is unchanged: an empty sealed set still demands that
+  // the worker carry no supplementary groups at all.
+  const LinuxWorkerCredentialSpec dropped{.uid = 1000U,
+                                          .gid = 1000U,
+                                          .no_new_privileges = true,
+                                          .supplementary_gids = {}};
+  require(worker_status_has_credentials(status(""), dropped) &&
+              !worker_status_has_credentials(status("19"), dropped),
+          "an empty sealed set still requires the groups to be dropped");
+}
+
 }  // namespace
 
 int main() {
   try {
     proc_parsers_are_strict_and_comm_safe();
+    supplementary_group_attestation_is_an_exact_set();
     malformed_launch_fails_before_clone();
     inherited_descriptor_abi_is_exact_and_exec_surviving();
     profiled_launch_has_a_fixed_noninjectable_exec_shape();

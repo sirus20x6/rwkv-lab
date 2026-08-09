@@ -31,6 +31,14 @@
 #include <utility>
 
 namespace trainvm {
+
+bool journal_event_hash_valid(std::string_view value) {
+  return value.size() == 64U &&
+         std::ranges::all_of(value, [](char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f');
+         });
+}
 namespace {
 
 bool valid_sha256_digest(std::string_view value) {
@@ -44,6 +52,13 @@ bool valid_sha256_digest(std::string_view value) {
 
 constexpr std::string_view kConnectionPragmas = R"sql(
 PRAGMA synchronous=FULL;
+PRAGMA foreign_keys=ON;
+PRAGMA busy_timeout=5000;
+PRAGMA trusted_schema=OFF;
+)sql";
+
+constexpr std::string_view kReadOnlyConnectionPragmas = R"sql(
+PRAGMA query_only=ON;
 PRAGMA foreign_keys=ON;
 PRAGMA busy_timeout=5000;
 PRAGMA trusted_schema=OFF;
@@ -866,11 +881,7 @@ constexpr std::string_view kControllerIdentityMetadataPrefix =
     "hostd_controller_id:";
 
 bool valid_hash_hex(std::string_view value) {
-  return value.size() == 64U &&
-         std::ranges::all_of(value, [](char character) {
-           return (character >= '0' && character <= '9') ||
-                  (character >= 'a' && character <= 'f');
-         });
+  return journal_event_hash_valid(value);
 }
 
 std::string lease_authority_identity(std::string_view concurrency_key,
@@ -983,6 +994,53 @@ bool verify_controller_scope_metadata(sqlite3* database,
   if (status != SQLITE_DONE)
     return fail("hostd controller scope metadata is unreadable");
   return true;
+}
+
+void require_established_authority_metadata(sqlite3* database,
+                                            std::string_view version) {
+  std::map<std::string, std::string> metadata;
+  Statement query(database,
+                  "SELECT key, value FROM journal_meta ORDER BY key");
+  int status = SQLITE_ROW;
+  while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
+    metadata.emplace(column_text(query.get(), 0), column_text(query.get(), 1));
+  }
+  if (status != SQLITE_DONE) {
+    throw std::runtime_error("journal authority metadata is unreadable");
+  }
+  const auto chain = metadata.find("chain_head");
+  const auto identity = metadata.find("journal_id");
+  const auto schema_version = metadata.find("schema_version");
+  const bool extension_metadata_valid = std::ranges::all_of(
+      metadata, [&](const auto& entry) {
+        const auto& [key, value] = entry;
+        if (key == "chain_head" || key == "journal_id" ||
+            key == "schema_version")
+          return true;
+        const auto valid_hashed_extension = [&](std::string_view prefix) {
+          return key.starts_with(prefix) &&
+                 valid_hash_hex(std::string_view(key).substr(prefix.size())) &&
+                 !value.empty() && value.size() <= 4096U;
+        };
+        return (key == kLegacyControllerAuthorityMetadataKey &&
+                !value.empty() && value.size() <= 4096U) ||
+               valid_hashed_extension(kLeaseAuthorityMetadataPrefix) ||
+               valid_hashed_extension(kControllerAuthorityMetadataPrefix) ||
+               valid_hashed_extension(kControllerIdentityMetadataPrefix);
+      });
+  std::string controller_scope_reason;
+  if (chain == metadata.end() || identity == metadata.end() ||
+      schema_version == metadata.end() || !extension_metadata_valid ||
+      schema_version->second != version || !valid_hash_hex(chain->second) ||
+      !valid_journal_id(identity->second) ||
+      !verify_controller_scope_metadata(database, &controller_scope_reason)) {
+    throw std::runtime_error(
+        "established journal authority metadata is missing, malformed, or "
+        "unexpected" +
+        (controller_scope_reason.empty()
+             ? std::string{}
+             : ": " + controller_scope_reason));
+  }
 }
 
 struct LeaseAuthorityHead final {
@@ -2297,13 +2355,16 @@ Journal::Journal(const std::filesystem::path& path,
                  HostGrantEnforcement host_grant_enforcement,
                  std::optional<HostIdentity> expected_host_grant_authority,
                  std::shared_ptr<SqliteFilesystemAuthority> filesystem_authority,
-                 bool require_exclusive_wal)
+                 bool require_exclusive_wal,
+                 JournalAccessMode access_mode)
     : expected_file_(std::move(expected_file)),
       filesystem_authority_(std::move(filesystem_authority)),
-      exclusive_wal_(
-          require_exclusive_wal ||
-          (filesystem_authority_ &&
-           filesystem_authority_->is_protected_filesystem_boundary())),
+      // A protected filesystem boundary does not itself require exclusive
+      // WAL ownership.  The caller must opt into that stronger single-reader
+      // mode explicitly; forcing it here rejects the established production
+      // journal during its connection PRAGMAs.
+      exclusive_wal_(require_exclusive_wal),
+      access_mode_(access_mode),
       host_grant_enforcement_(host_grant_enforcement),
       expected_host_grant_authority_(
           std::move(expected_host_grant_authority)) {
@@ -2323,8 +2384,17 @@ Journal::Journal(const std::filesystem::path& path,
           "trusted host grant authority has a malformed host or boot identity");
     }
   }
+  if (access_mode_ == JournalAccessMode::read_only && !expected_file_) {
+    throw std::invalid_argument(
+        "read-only journal access requires an exact file identity");
+  }
+  if (access_mode_ == JournalAccessMode::read_only && exclusive_wal_) {
+    throw std::invalid_argument(
+        "read-only journal access cannot request exclusive WAL ownership");
+  }
   const auto parent = path.parent_path();
-  if (!expected_file_ && !parent.empty()) {
+  if (access_mode_ == JournalAccessMode::read_write && !expected_file_ &&
+      !parent.empty()) {
     std::filesystem::create_directories(parent);
   }
   // Create the database at the protected 0600 mode before SQLite can create it
@@ -2333,7 +2403,8 @@ Journal::Journal(const std::filesystem::path& path,
   // auxiliary satisfy the authority's owned-0600-singleton policy. A file that
   // already exists is left untouched: widening or narrowing an established
   // inode here would mask exactly the interference the authority must detect.
-  if (!filesystem_authority_) {
+  if (access_mode_ == JournalAccessMode::read_write &&
+      !filesystem_authority_) {
     const int created =
         ::open(path.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
                S_IRUSR | S_IWUSR);
@@ -2387,8 +2458,11 @@ Journal::Journal(const std::filesystem::path& path,
     open_vfs = authority_vfs_->vfs_name().c_str();
   }
 
-  const int open_flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
-                         (expected_file_ ? 0 : SQLITE_OPEN_NOFOLLOW);
+  const int open_flags =
+      (access_mode_ == JournalAccessMode::read_only
+           ? SQLITE_OPEN_READONLY
+           : SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE) |
+      (expected_file_ ? 0 : SQLITE_OPEN_NOFOLLOW);
   if (sqlite3_open_v2(open_path.c_str(), &database_, open_flags, open_vfs) !=
       SQLITE_OK) {
     const std::string message = database_ ? sqlite3_errmsg(database_) : "unknown error";
@@ -2416,7 +2490,11 @@ Journal::Journal(const std::filesystem::path& path,
       }
       (void)sqlite3_commit_hook(database_, &Journal::authorize_commit, this);
     }
-    initialize();
+    if (access_mode_ == JournalAccessMode::read_only) {
+      initialize_read_only();
+    } else {
+      initialize();
+    }
     if (filesystem_authority_) {
       (void)filesystem_authority_->attest_after_open();
       const auto auxiliary = filesystem_authority_->validate_auxiliary_files();
@@ -3293,6 +3371,33 @@ void Journal::initialize() {
                              saga_reason);
   }
   execute_sql(kWalPragma, "could not enable WAL for journal schema v7");
+}
+
+void Journal::initialize_read_only() {
+  execute_connection_pragma(database_, kReadOnlyConnectionPragmas,
+                            "could not configure read-only journal connection");
+  auto read = read_snapshot();
+  (void)read;
+
+  Statement version(
+      database_,
+      "SELECT value FROM journal_meta WHERE key='schema_version'");
+  if (sqlite3_step(version.get()) != SQLITE_ROW ||
+      sqlite3_column_type(version.get(), 0) != SQLITE_TEXT ||
+      column_text(version.get(), 0) != "7" ||
+      sqlite3_step(version.get()) != SQLITE_DONE) {
+    throw std::runtime_error(
+        "read-only journal requires the exact current schema version 7");
+  }
+  require_exact_schema(database_, canonical_schema_v7(), "v7");
+  require_established_authority_metadata(database_, "7");
+
+  std::string reason;
+  if (!verify_event_chain(&reason) ||
+      !verify_host_saga_projection(database_, &reason)) {
+    throw std::runtime_error(
+        "read-only journal authority is inconsistent: " + reason);
+  }
 }
 
 std::uint64_t Journal::append(const Event& event) {

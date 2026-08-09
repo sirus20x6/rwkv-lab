@@ -176,7 +176,15 @@ struct HostdPassiveAcceleratorMemory final {
   HostAcceleratorVendor vendor{};
   std::string stable_id;
   std::optional<std::string> parent_id;
+  // `audited_eligible` answers only "was this device observed unoccupied". It
+  // cannot express an occupied device that a cooperative plan may still select
+  // — the display GPU case — so a consumer that filters on it alone drops every
+  // device on a workstation whose GPU also drives the screen. The disposition
+  // is carried verbatim alongside it, and the selection rule lives in
+  // resource_disposition_permits, so acquisition and passive preflight decide
+  // by the same rule instead of two.
   bool audited_eligible{};
+  ResourceObservationDisposition disposition{};
   std::uint64_t total_memory_bytes{};
   std::uint64_t free_memory_bytes{};
   std::map<std::string, std::string> selector_labels;
@@ -234,6 +242,18 @@ struct HostdAuthorityStatus final {
 
   bool operator==(const HostdAuthorityStatus &) const = default;
 };
+
+// The passive-memory observation digest, and the size of the evidence it is
+// taken over. Both are exported so a status producer and the transport that
+// validates it agree by construction: they were previously computed from two
+// separately written JSON encodings, which silently disagreed — the validating
+// side included an api_version field and hand-built each accelerator row, the
+// producing side did neither — so every status carrying passive memory failed
+// its own digest check and the connection was closed with no reply.
+[[nodiscard]] std::string hostd_passive_memory_observation_digest(
+    const HostdAuthorityStatus &status);
+[[nodiscard]] std::size_t hostd_passive_memory_identity_bytes(
+    const HostdAuthorityStatus &status);
 
 class IHostdAuthorityStatusSource {
 public:

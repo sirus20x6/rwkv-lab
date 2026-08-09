@@ -152,6 +152,7 @@ class TrainVMService final : public v1::TrainVM::Service,
     WorkerSessionIdentity identity;
     Dispatch dispatch;
     nlohmann::json publishes = nlohmann::json::object();
+    std::uint64_t attempt_baseline_optimizer_step{};
     v1::WorkerWelcome welcome;
     std::optional<v1::WorkerReceipt> completed_receipt;
   };
@@ -298,6 +299,9 @@ int serve(const std::filesystem::path& journal_path,
           TrainingComponentRegistry training_components =
               TrainingComponentRegistry({}),
           std::optional<HostdClientConfiguration> hostd_configuration =
-              std::nullopt);
+              std::nullopt,
+          std::optional<std::uint32_t> worker_socket_gid = std::nullopt,
+          std::filesystem::path recipe_registry_path =
+              std::filesystem::path(std::string(kInstalledRecipeProfilePath)));
 
 }  // namespace trainvm

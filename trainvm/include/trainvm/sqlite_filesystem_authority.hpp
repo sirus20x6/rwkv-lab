@@ -23,6 +23,11 @@ inline constexpr int kSqliteAuthorityMinimumVersionNumber = 3'053'003;
 
 enum class SqliteAuthorityEnforcementGrade {
   strict_filesystem,
+  // A host-global daemon that must retain kernel capabilities may own its
+  // ledger as uid 0.  This remains an exact 0700/0600 local-filesystem
+  // boundary; the separate grade prevents ordinary journal services from
+  // silently acquiring the broader privilege model.
+  strict_privileged_filesystem,
   cooperative_test,
 };
 

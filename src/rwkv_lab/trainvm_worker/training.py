@@ -53,11 +53,23 @@ _DESCRIPTOR_REQUIRED_FIELDS = frozenset(
 )
 _DESCRIPTOR_OPTIONAL_FIELDS = frozenset({"step_domain"})
 _KEY_FIELDS = frozenset({"category", "name", "version"})
+# The component categories this worker will accept in a resolved plan.
+#
+# Kept as a literal rather than derived from
+# rwkv_lab.training_runtime.catalog.supported_worker_capabilities(), which is
+# where the same vocabulary is really defined: importing that module pulls in
+# torch, and this runs while the invocation is still being decoded, before any
+# third-party import is meant to happen. test_trainvm_worker_documents pins the
+# two together so they cannot drift again — they had, and a plan naming
+# activation_memory or generation_policy was rejected as "resolved training
+# component identity is invalid" even though the worker implements both.
 _CATEGORIES = frozenset(
     {
         "optimizer",
         "model_loader",
         "trainability",
+        "activation_memory",
+        "generation_policy",
         "parameter_router",
         "learning_rate_schedule",
         "weight_decay_schedule",

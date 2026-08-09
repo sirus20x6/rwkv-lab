@@ -373,6 +373,37 @@ int main() {
                                    occupancy(graphics_inventory)),
             "exclusive device rejects an observed graphics context");
 
+    auto workstation_snapshot = base_snapshot("revision-workstation");
+    for (auto& resource : workstation_snapshot.resources) {
+      if (resource.id.stable_id == kGpuA) {
+        resource.disposition = ResourceObservationDisposition::occupied;
+        resource.compute_contexts = ResourceContextDisposition::present;
+        resource.graphics_contexts = ResourceContextDisposition::present;
+        resource.labels["display"] = "active";
+      }
+    }
+    auto authorized_workstation_snapshot = workstation_snapshot;
+    const auto workstation_inventory = capture(std::move(workstation_snapshot));
+    auto cooperative = request(ResourceAccessMode::cooperative_compute,
+                               TopologyPolicy::exact_resources, 1U);
+    cooperative.selector.exact_resources = {gpu_id(kGpuA)};
+    cooperative = seal_resource_request(std::move(cooperative));
+    require(!select_host_resources(workstation_inventory, cooperative,
+                                   occupancy(workstation_inventory)),
+            "display occupancy is denied without explicit operator authority");
+    for (auto& resource : authorized_workstation_snapshot.resources) {
+      if (resource.id.stable_id == kGpuA) {
+        resource.labels["display-sharing"] =
+            "operator-authorized-cooperative";
+      }
+    }
+    const auto authorized_workstation_inventory =
+        capture(std::move(authorized_workstation_snapshot));
+    require(select_host_resources(authorized_workstation_inventory, cooperative,
+                                  occupancy(authorized_workstation_inventory))
+                .has_value(),
+            "cooperative display sharing requires the exact operator label");
+
     for (const auto disposition : {ProbeDisposition::unavailable,
                                    ProbeDisposition::partial,
                                    ProbeDisposition::denied,

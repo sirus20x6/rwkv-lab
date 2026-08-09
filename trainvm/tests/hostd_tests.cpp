@@ -253,6 +253,17 @@ private:
   std::map<std::string, CleanupEvidence> cleanup_;
 };
 
+class FakeGrantAdmissionGuard final : public IHostdGrantAdmissionGuard {
+ public:
+  void require_new_grant_allowed() override {
+    ++observations;
+    if (blocked) throw HostdStateError("test GPU fault admission block");
+  }
+
+  bool blocked{};
+  std::size_t observations{};
+};
+
 class AdversarialLedgerBoundary final : public IHostdLedgerBoundary {
 public:
   enum class GrantFault {
@@ -627,6 +638,41 @@ void lifecycle_and_pre_audit_gate() {
       session.session_id, request_for(scope, "lifecycle-request"), {10, 20});
   require(granted.grant.has_value(),
           "audited mutation-capable session can grant");
+}
+
+void dynamic_fault_guard_blocks_only_new_grants() {
+  Fixture fixture;
+  auto guard = std::make_shared<FakeGrantAdmissionGuard>();
+  HostGrantCoordinator coordinator(fixture.config(), fixture.ledger,
+                                   fixture.logical_fences, guard);
+  admit(coordinator, *fixture.ledger);
+  const auto scope = attribution("journal-guard", "run-guard", "lease-guard");
+  const auto session =
+      connect_admission(coordinator, scope, *fixture.logical_fences);
+  const auto granted = coordinator.request_bundle(
+      session.session_id, request_for(scope, "guard-grant"), {10, 20});
+  require(granted.grant.has_value() && guard->observations == 1U,
+          "fresh clear guard evidence permits one new physical grant");
+
+  guard->blocked = true;
+  require_throws<HostdStateError>(
+      [&] {
+        (void)coordinator.request_bundle(
+            session.session_id, request_for(scope, "guard-blocked"), {20, 30});
+      },
+      "dynamic GPU fault evidence blocks a subsequent new grant");
+  const auto release = release_for(*granted.grant, "guard-release");
+  fixture.logical_fences->authorize_cleanup(scope, *granted.grant, release);
+  require(coordinator.release_bundle(session.session_id, release, {30, 40})
+              .receipt.allocation_id == granted.grant->allocation_id,
+          "a fault block never prevents exact resource cleanup");
+  require_throws<HostdStateError>(
+      [&] {
+        (void)coordinator.request_bundle(
+            session.session_id, request_for(scope, "guard-still-blocked"),
+            {40, 50});
+      },
+      "releasing an old allocation does not clear the external fault latch");
 }
 
 void failed_policy_mismatch_and_malformed_audits_fail_closed() {
@@ -1735,6 +1781,7 @@ void malformed_ledger_outputs_poison_exactly() {
 int main() {
   try {
     lifecycle_and_pre_audit_gate();
+    dynamic_fault_guard_blocks_only_new_grants();
     failed_policy_mismatch_and_malformed_audits_fail_closed();
     concurrent_startup_audits_are_single_flight();
     stale_startup_report_is_rejected_by_ledger_cas();

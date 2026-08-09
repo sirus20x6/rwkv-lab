@@ -249,6 +249,43 @@ HostProcessSpawnRequest process_policy_bound_spawn_request(
   return seal_host_process_spawn_request(std::move(value));
 }
 
+// v4 is v3 without device evidence: what an unprivileged authority, which
+// cannot install a cgroup device program, is able to seal truthfully.
+HostProcessLaunchRequest unprivileged_launch_request(
+    const ResourceBundleGrant& grant, std::string launch_id) {
+  auto value = process_policy_bound_launch_request(grant, std::move(launch_id));
+  value.api_version = std::string(kHostProcessLaunchRequestApiVersionV4);
+  value.device_policy = std::nullopt;
+  value.canonical_request_digest.clear();
+  return seal_host_process_launch_request(std::move(value));
+}
+
+HostProcessSpawnRequest unprivileged_spawn_request(
+    const HostProcessLaunchIntent& intent, std::int64_t pid = 4444) {
+  auto value = spawn_request(intent, pid);
+  value.api_version = std::string(kHostProcessSpawnRequestApiVersionV4);
+  value.worker_credentials = intent.request.worker_credentials;
+  const auto& policy = *intent.request.process_policy;
+  HostProcessPolicyInstallationBinding installed{
+      .api_version = "trainvm.linux-process-policy-installation/v1",
+      .policy_digest = policy.policy_digest,
+      .cpuset = policy.cpuset,
+      .cpuset_mems = policy.cpuset ? std::optional<std::string>{"0-1"}
+                                   : std::nullopt,
+      .cpu_weight = policy.cpu_weight,
+      .io_weight = policy.io_weight,
+      .nice = policy.nice,
+      .installation_digest = {},
+  };
+  installed.installation_digest = host_process_policy_installation_digest(
+      intent.request.allocation_id, value.launch_id, value.cgroup_path,
+      value.cgroup_device, value.cgroup_inode, installed);
+  value.process_policy = std::move(installed);
+  value.device_policy = std::nullopt;
+  value.canonical_request_digest.clear();
+  return seal_host_process_spawn_request(std::move(value));
+}
+
 HostProcessExitRequest exit_request(const HostProcessSpawnReceipt& spawn,
                                     std::string exit_request_id) {
   return seal_host_process_exit_request({
@@ -1140,6 +1177,77 @@ void process_authority_is_durable_and_replay_safe() {
   }
 }
 
+// An unprivileged authority cannot install a cgroup device program, so v4 binds
+// worker credentials and process policy while requiring device evidence to be
+// absent rather than merely unchecked.
+void unprivileged_process_policy_is_bound_without_device_evidence() {
+  const auto observed = inventory({"mutex-unprivileged-policy"});
+  const auto path = test_path("process-unprivileged-policy");
+  SQLiteHostLedger ledger(authority_for(path), observed);
+  const auto bundle =
+      ledger.request_bundle(request("unprivileged-grant"), {10, 20});
+  require(bundle.grant.has_value(),
+          "unprivileged fixture obtains an active grant");
+
+  const auto launch =
+      unprivileged_launch_request(*bundle.grant, "launch-unprivileged");
+  const auto intended = ledger.commit_process_launch_intent(launch, {30, 40});
+  require(!intended.replayed &&
+              intended.intent.api_version ==
+                  kHostProcessLaunchIntentApiVersionV4 &&
+              !intended.intent.request.device_policy &&
+              intended.intent.request.process_policy ==
+                  launch.process_policy &&
+              intended.intent.request.worker_credentials ==
+                  launch.worker_credentials &&
+              host_process_launch_intent_from_json(
+                  host_process_launch_intent_json(intended.intent)) ==
+                  intended.intent &&
+              ledger.verify(),
+          "a v4 launch intent commits worker credentials and process policy");
+
+  const auto spawn = unprivileged_spawn_request(intended.intent);
+  const auto spawned = ledger.commit_process_spawn(spawn, {50, 60});
+  require(!spawned.replayed &&
+              spawned.receipt.api_version ==
+                  kHostProcessSpawnReceiptApiVersionV4 &&
+              !spawned.receipt.request.device_policy &&
+              host_process_spawn_receipt_from_json(
+                  host_process_spawn_receipt_json(spawned.receipt)) ==
+                  spawned.receipt &&
+              ledger.verify(),
+          "a v4 spawn receipt round-trips and keeps the chain verifiable");
+
+  // A v4 record may not smuggle device evidence back in, and it may not drop
+  // the process policy that is now its only confinement evidence.
+  auto smuggled = launch;
+  smuggled.device_policy = HostDevicePolicyIntentBinding{
+      .policy_digest = test_digest('5'),
+      .image_digest = test_digest('6'),
+      .program_name = "tvmdev_66666666",
+  };
+  smuggled.canonical_request_digest.clear();
+  require_throws<HostLedgerError>(
+      [&] { (void)seal_host_process_launch_request(std::move(smuggled)); },
+      "a v4 launch request may not carry device evidence");
+
+  auto policyless = launch;
+  policyless.process_policy = std::nullopt;
+  policyless.canonical_request_digest.clear();
+  require_throws<HostLedgerError>(
+      [&] { (void)seal_host_process_launch_request(std::move(policyless)); },
+      "a v4 launch request must carry its process policy");
+
+  // v3 must not have been loosened into accepting a missing device policy.
+  auto stripped_v3 =
+      process_policy_bound_launch_request(*bundle.grant, "launch-v3-stripped");
+  stripped_v3.device_policy = std::nullopt;
+  stripped_v3.canonical_request_digest.clear();
+  require_throws<HostLedgerError>(
+      [&] { (void)seal_host_process_launch_request(std::move(stripped_v3)); },
+      "v3 still requires the device evidence it was defined with");
+}
+
 void device_policy_authority_is_bound_into_process_history() {
   const auto observed = inventory({"mutex-device-policy"});
   const auto path = test_path("process-device-policy");
@@ -1533,6 +1641,7 @@ int main() {
     request_and_release_rollback();
     process_authority_is_durable_and_replay_safe();
     device_policy_authority_is_bound_into_process_history();
+    unprivileged_process_policy_is_bound_without_device_evidence();
     process_policy_authority_is_bound_into_process_history();
     tamper_is_fail_closed();
     degraded_inventory_publication_rolls_back();

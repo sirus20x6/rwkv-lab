@@ -1,0 +1,38 @@
+[Unit]
+Description=TrainVM non-destructive NVIDIA Xid observer
+After=systemd-journald.service
+Before=trainvm-hostd.service
+
+[Service]
+Type=simple
+# Reading kernel messages needs journal membership, not root, and the state
+# document must be owned by the authority that reads it. Running as the same
+# unprivileged identity as hostd gives both without a privileged writer.
+User=sirus
+Group=sirus
+RuntimeDirectory=trainvm-gpu-fault
+RuntimeDirectoryMode=0700
+UMask=0077
+# Initialization preserves a same-boot fault latch and creates clear evidence
+# only when no prior state exists or the Linux boot ID changed.
+ExecStartPre=/usr/local/sbin/trainvm-gpu-fault-observer --initialize --state /run/trainvm-gpu-fault/state.json
+# This path only reads the kernel journal and updates its own state file. It has
+# no signal, module, PCI, display-manager, or device-reset authority.
+ExecStart=/usr/bin/sh -c 'exec /usr/bin/journalctl --dmesg --follow --output=cat --no-pager | /usr/local/sbin/trainvm-gpu-fault-observer --state /run/trainvm-gpu-fault/state.json'
+Restart=always
+RestartSec=1s
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=no
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

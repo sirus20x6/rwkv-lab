@@ -78,7 +78,7 @@ ResourceBundleRequest build_resource_bundle_request(
       .count = static_cast<std::uint32_t>(accelerators.count),
       .access_mode = accelerators.exclusive
                          ? ResourceAccessMode::exclusive_device
-                         : ResourceAccessMode::exclusive_compute,
+                         : ResourceAccessMode::cooperative_compute,
       .topology = TopologyPolicy::any,
       .selector = {.vendor = vendor,
                    .minimum_memory_bytes =

@@ -1,0 +1,44 @@
+[Unit]
+Description=TrainVM native experiment authority
+Before=trainvm-hostd.service
+PartOf=trainvm-hostd.service
+After=local-fs.target
+StartLimitIntervalSec=30s
+StartLimitBurst=3
+
+[Service]
+Type=notify
+NotifyAccess=all
+User=sirus
+Group=sirus
+SupplementaryGroups=webteam
+RuntimeDirectory=trainvm-controller
+RuntimeDirectoryMode=0750
+WorkingDirectory=/thearray/git/moe-mla-parity-integration
+# A controller restart invalidates the prior host authority. Clear any worker
+# subgroup left behind by a failed hostd control handoff before publishing a
+# new authority, otherwise an orphan can retain the accelerator indefinitely.
+ExecStartPre=+/usr/bin/sh -eu -c 'if [ -w /sys/fs/cgroup/system.slice/trainvm-hostd.service/workers/cgroup.kill ]; then printf "1" > /sys/fs/cgroup/system.slice/trainvm-hostd.service/workers/cgroup.kill; fi'
+# The stable service process and cgroup exist before hostd starts. Snapshot any
+# prior client-document inode, tell systemd the cgroup is ready for hostd to
+# pin, and accept only the different inode produced by hostd's atomic current-
+# activation publication. This prevents a same-boot restart from consuming a
+# stale endpoint receipt without introducing a startup dependency cycle.
+ExecStart=/usr/bin/sh -eu -c 'old=""; if [ -e /run/trainvm-hostd/client.json ]; then old=$$(/usr/bin/stat -Lc "%%d:%%i" /run/trainvm-hostd/client.json); fi; /usr/bin/systemd-notify --ready --status="waiting for current hostd client authority"; while :; do current=""; if [ -r /run/trainvm-hostd/client.json ]; then current=$$(/usr/bin/stat -Lc "%%d:%%i" /run/trainvm-hostd/client.json); fi; if [ -n "$$current" ] && [ "$$current" != "$$old" ]; then break; fi; /usr/bin/sleep 0.1; done; exec /usr/local/bin/trainvm serve --journal /thearray/git/moe-mla/runs/trainvm-ztok-optimization-authority-20260804/journal.sqlite3 --socket /run/trainvm-controller/trainvm.sock --registry /opt/trainvm/adapters.json --host-launch-registry /opt/trainvm/host-launches.json --training-component-registry /opt/trainvm/training-components.json --hostd-client /run/trainvm-hostd/client.json --worker-socket-gid 1001'
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateDevices=no
+ProtectSystem=strict
+ProtectHome=read-only
+# The controller creates one directory per authored run under runs/, so the
+# writable root is runs/ itself, not a single run inside it. Naming only the
+# journal directory left AuthorRun failing at provisioning with "Read-only
+# file system" for every run but the one that happened to be listed. What a
+# run may then write is bounded by the plan's own allowed_write_roots, which
+# recipe expansion derives from the run identity.
+ReadWritePaths=/thearray/git/moe-mla/runs /run/trainvm-controller
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

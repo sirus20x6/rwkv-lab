@@ -7,7 +7,9 @@
 #include <iostream>
 #include <stdexcept>
 #include <string_view>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -337,7 +339,7 @@ void checked_in_qwen_example_expands_without_source_changes() {
   if (!input) throw std::runtime_error("could not open recipe instance fixture");
   const auto expanded = registry.expand_json(nlohmann::json::parse(input));
   check(expanded.recipe ==
-            trainvm::RecipeKey{.name = "hf_multimodal_sft", .version = "1"},
+            trainvm::RecipeKey{.name = "hf_multimodal_sft", .version = "2"},
         "compact Qwen instance selects the exact versioned recipe");
   check(expanded.effective_overrides.at("trainability.lora_rank") == 256 &&
             expanded.effective_overrides.at(
@@ -368,6 +370,63 @@ void checked_in_qwen_example_expands_without_source_changes() {
         "Qwen graph resolves registered model, data, evaluation, and checkpoint slots");
 }
 
+void checked_in_qwen_dpo_example_resolves_exact_preference_graph() {
+  const std::filesystem::path root(TRAINVM_SOURCE_ROOT);
+  const auto registry = trainvm::RecipeProfileRegistry::load_file(
+      root / "docs/experiment-vm/examples/"
+             "hf-multimodal-sft.recipe-profiles.v1.json");
+  std::ifstream input(
+      root / "docs/experiment-vm/examples/"
+             "qwen36-caption-dpo-lora-r256.recipe-instance.v1.json");
+  if (!input) throw std::runtime_error("could not open DPO recipe instance fixture");
+  const nlohmann::json declared = nlohmann::json::parse(input);
+  const auto expanded = registry.expand_json(declared);
+  const auto &components = expanded.plan.canonical_plan.at("spec")
+                               .at("workflow")
+                               .at("nodes")
+                               .at("train")
+                               .at("invoke")
+                               .at("training")
+                               .at("components");
+  check(expanded.recipe == trainvm::RecipeKey{
+                               .name = "hf_multimodal_cached_dpo", .version = "1"} &&
+            components.at("objective").at("key").at("name") ==
+                "cached_reference_dpo" &&
+            components.at("trainability").at("configuration").at("rank") == 256 &&
+            components.at("sample_mapping").at("configuration").at(
+                "enable_thinking") == false,
+        "compact DPO instance selects the exact cached-reference policy and token template");
+  // Plan validation calls filesystem::exists on every field of type `path`, and
+  // this instance names the deployment host's real model directory and dataset
+  // — inside read roots the recipe itself pins to that host, so redirecting the
+  // paths elsewhere is rejected before validation is even reached. Validating
+  // unconditionally therefore asserted the contents of whichever machine ran the
+  // suite: it passed on the deployment host and failed everywhere else. The
+  // assertions above are the portable ones and always run. This half runs only
+  // where its inputs exist, and says so when it does not, because a check that
+  // quietly evaporates off-host reads exactly like one that passed.
+  std::vector<std::string> absent;
+  for (const auto &[name, value] : declared.at("overrides").items()) {
+    if (!value.is_string()) continue;
+    const std::filesystem::path candidate(value.get<std::string>());
+    if (candidate.is_absolute() && !std::filesystem::exists(candidate))
+      absent.push_back(name);
+  }
+  if (!absent.empty()) {
+    std::cerr << "SKIP: DPO graph catalog validation needs inputs this host "
+                 "does not have:";
+    for (const std::string &name : absent) std::cerr << ' ' << name;
+    std::cerr << '\n';
+    return;
+  }
+
+  const auto catalog = trainvm::TrainingComponentRegistry::load_file(
+      root / "docs/experiment-vm/examples/training-components.v1.json");
+  catalog.validate_plan(expanded.plan);
+  check(true,
+        "DPO graph resolves its model-bound LoRA, preference columns, and evaluation policies");
+}
+
 }  // namespace
 
 int main() {
@@ -376,6 +435,7 @@ int main() {
   invalid_and_ambiguous_authoring_fails_closed();
   expanded_instances_have_source_aware_diffs();
   checked_in_qwen_example_expands_without_source_changes();
+  checked_in_qwen_dpo_example_resolves_exact_preference_graph();
   if (failures == 0) {
     std::cout << "recipe profile tests passed\n";
     return 0;
