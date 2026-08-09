@@ -1083,6 +1083,37 @@ correctness trap rather than a portability inconvenience, and it has already
 cost real runs, so a missing `--model-dir` is now an immediate error. Launchers
 name the model explicitly — see [`supervisor_night.sh`](scripts/supervisor_night.sh).
 
+### The `engram-ext` runtime dependency
+
+The MLA+Engram entry points — [`load_mla_engram.py`](src/rwkv_lab/load_mla_engram.py),
+[`train_mla_engram.py`](src/rwkv_lab/train_mla_engram.py), and
+`train_mla.py --engram-enabled=1` — need `engram_ext`, a separately attested
+runtime distribution built outside this repository. It is deliberately not a
+dependency of `rwkv-lab`: only those entry points need it, and the sealed
+runtime deployment owns the install. Build the extension from the engram
+checkout and install its Python distribution:
+
+```bash
+pip install /path/to/engram/python
+```
+
+Do not prepend a machine-local checkout to `sys.path` instead — that bypasses
+the dependency attestation.
+
+**Everything else imports without it.** `engram_integration.py` used to import
+`engram_ext` at module scope, so `import rwkv_lab.load_mla_engram` and
+`import rwkv_lab.train_mla_engram` raised on any machine that was not the
+training host — which is every machine CI runs on. The consequence was not a
+failing test but the absence of one: both modules had zero coverage and nothing
+reported that they had none. The import is now deferred to its point of use
+(`engram_integration.require_engram_ext`), matching what `train_mla.py` already
+did, and a genuinely missing runtime raises `EngramExtensionUnavailable` naming
+the distribution and this section rather than an ImportError pointing at an
+import line the caller never asked about.
+[`test_engram_entry_points.py`](tests/test_engram_entry_points.py) holds both
+halves: the modules import with `engram_ext` blocked, and the Engram surface
+still builds real modules against the runtime when it is present.
+
 ---
 
 ## Repository layout
