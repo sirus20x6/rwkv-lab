@@ -5,9 +5,11 @@ modules for param-group management.
 
 Usage:
     model, mla_mods, eng_mods = load_mla_engram(
-        mla_trained_ckpt="/thearray/git/moe-mla/runs/mla_ft_50m_v4/step_001735/ckpt.pt",
-        engram_patch_dir="/thearray/git/moe-mla/engram_converted",
+        mla_trained_ckpt="/path/to/runs/mla_ft_50m_v4/step_001735/ckpt.pt",
+        engram_patch_dir="/path/to/engram_converted",
     )
+
+Omitted paths resolve per the policy in :mod:`rwkv_lab.host_paths`.
 """
 from __future__ import annotations
 
@@ -18,7 +20,11 @@ from typing import Optional
 import torch
 from safetensors import safe_open
 
-from .load_converted import load_converted_model
+from .host_paths import require_host_path, resolve_host_path
+from .load_converted import (
+    MODEL_DIR_ENV, PATCH_DIR_ENV, default_model_dir, default_patch_dir,
+    load_converted_model,
+)
 from .engram_integration import install_engram, offload_engram_embedding
 from .safe_torch import safe_torch_load
 
@@ -72,11 +78,24 @@ def _apply_engram_patch(engram_mods, engram_patch: dict[str, torch.Tensor],
             raise RuntimeError(f"engram layer {li}: unexpected keys {unexpected}")
 
 
+# Host-specific artifact location. The model and MLA-patch defaults are shared
+# with load_converted; see rwkv_lab.host_paths for the resolution policy and
+# the README section "Host-specific path defaults".
+ENGRAM_PATCH_DIR_ENV = "MOE_MLA_ENGRAM_PATCH_DIR"
+ENGRAM_PATCH_DIR_HISTORICAL_PATH = "/thearray/git/moe-mla/engram_converted"
+
+
+def default_engram_patch_dir() -> str | None:
+    return resolve_host_path(
+        ENGRAM_PATCH_DIR_ENV, ENGRAM_PATCH_DIR_HISTORICAL_PATH
+    )
+
+
 def load_mla_engram(
-    model_dir: str = "/thearray/git/moe-mla/Qwen3.6-35B-A3B",
-    mla_patch_dir: str = "/thearray/git/moe-mla/converted",
+    model_dir: str | None = None,
+    mla_patch_dir: str | None = None,
     mla_trained_ckpt: Optional[str] = None,
-    engram_patch_dir: str = "/thearray/git/moe-mla/engram_converted",
+    engram_patch_dir: str | None = None,
     device_map: str = "cuda:0",
     dtype: torch.dtype = torch.bfloat16,
 ):
@@ -88,6 +107,22 @@ def load_mla_engram(
     - Installs Engram modules at layers listed in engram_patch's manifest
     - Loads Engram weights from patch (random-init, zero-conv)
     """
+    # None means "not supplied": fall back to this host's resolved default and
+    # name the argument if it has none, rather than TypeError-ing inside Path.
+    model_dir = require_host_path(
+        default_model_dir() if model_dir is None else model_dir,
+        field="model_dir", env_var=MODEL_DIR_ENV,
+    )
+    mla_patch_dir = require_host_path(
+        default_patch_dir() if mla_patch_dir is None else mla_patch_dir,
+        field="mla_patch_dir", env_var=PATCH_DIR_ENV,
+    )
+    engram_patch_dir = require_host_path(
+        default_engram_patch_dir() if engram_patch_dir is None
+        else engram_patch_dir,
+        field="engram_patch_dir", env_var=ENGRAM_PATCH_DIR_ENV,
+    )
+
     # 1. MLA load (SVD-init + optional trained state)
     model, mla_modules = load_converted_model(
         model_dir=model_dir, patch_dir=mla_patch_dir,

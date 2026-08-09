@@ -27,7 +27,7 @@ import signal
 import sys
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass, asdict
+from dataclasses import MISSING, dataclass, asdict, field as dataclass_field
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -139,6 +139,7 @@ def chunked_metrics(logits: torch.Tensor, labels: torch.Tensor,
         "n_tokens": N,
     }
 
+from .host_paths import require_host_path, resolve_host_path
 from .load_converted import load_converted_model
 from .mla_module import MLAAttention
 from .mutor_module import MuToRHead, mutor_loss
@@ -160,15 +161,50 @@ def _last_hidden(outputs):
     return outputs[0]
 
 
+# Host-specific artifact locations. These were bare absolute paths that exist
+# only on the maintainer's host; see rwkv_lab.host_paths for the resolution
+# policy and the README section "Host-specific path defaults".
+PATCH_DIR_ENV = "MOE_MLA_PATCH_DIR"
+PATCH_DIR_HISTORICAL_PATH = "/thearray/git/moe-mla/converted"
+TOKENS_BIN_ENV = "MOE_MLA_TOKENS_BIN"
+TOKENS_BIN_HISTORICAL_PATH = "/thearray/data/engram_tokens.bin"
+OUT_DIR_ENV = "MOE_MLA_OUT_DIR"
+OUT_DIR_HISTORICAL_PATH = "/thearray/git/moe-mla/runs/mla_ft_v1"
+# The run directory is created by the run, so its own absence says nothing.
+# The run root it would live under is what tells us this is that host.
+OUT_DIR_HISTORICAL_ROOT = "/thearray/git/moe-mla/runs"
+
+
+def default_patch_dir() -> str | None:
+    return resolve_host_path(PATCH_DIR_ENV, PATCH_DIR_HISTORICAL_PATH)
+
+
+def default_tokens_bin() -> str | None:
+    return resolve_host_path(TOKENS_BIN_ENV, TOKENS_BIN_HISTORICAL_PATH)
+
+
+def default_out_dir() -> str | None:
+    return resolve_host_path(
+        OUT_DIR_ENV, OUT_DIR_HISTORICAL_PATH, probe=OUT_DIR_HISTORICAL_ROOT
+    )
+
+
 @dataclass
 class TrainConfig:
     # Model / data
-    model_dir: str = "/thearray/git/moe-mla/Qwen3.6-35B-A3B"
-    patch_dir: str = "/thearray/git/moe-mla/converted"
-    tokens_bin: str = "/thearray/data/engram_tokens.bin"
+    #
+    # model_dir is REQUIRED and deliberately has no default of any kind, not
+    # even a resolved one. Its historical default named the 35B model, so every
+    # 9B launch had to remember --model-dir and a launch that forgot it trained
+    # against the wrong weights without saying so. That is a correctness trap
+    # rather than a portability inconvenience, and it has already cost real
+    # runs; a missing flag is now an immediate error.
+    model_dir: str
+    patch_dir: str | None = dataclass_field(default_factory=default_patch_dir)
+    tokens_bin: str | None = dataclass_field(default_factory=default_tokens_bin)
     total_tokens_in_bin: int = 75_306_005_724   # from the manifest
     eval_tokens: int = 100_000_000              # held out from the tail
-    out_dir: str = "/thearray/git/moe-mla/runs/mla_ft_v1"
+    out_dir: str | None = dataclass_field(default_factory=default_out_dir)
     resume: str = ""                            # path to a previous ckpt.pt, or "" to start fresh from SVD init
     resume_warmup_steps: int = 100              # re-warmup lr linearly over this many steps after resume
                                                 # (Adam's v_t adapted to small updates at the end of the prior run;
@@ -395,6 +431,25 @@ def open_tokens(cfg: TrainConfig) -> tuple[np.memmap, int, int]:
 
 def validate_train_config(cfg: TrainConfig) -> None:
     """Validate knobs that otherwise fail late with modulo/division errors."""
+    # Host-specific paths resolve to None on a machine that has neither the
+    # environment variable nor the historical location, so say which field is
+    # unconfigured here rather than raising a TypeError inside Path() later.
+    if not cfg.model_dir:
+        raise ValueError(
+            "model_dir is required and has no default: pass --model-dir with "
+            "the model this run is meant to train. It is required precisely "
+            "because a default here silently trains the wrong model."
+        )
+    require_host_path(
+        cfg.patch_dir, field="patch_dir", env_var=PATCH_DIR_ENV, flag="patch-dir"
+    )
+    require_host_path(
+        cfg.tokens_bin, field="tokens_bin", env_var=TOKENS_BIN_ENV,
+        flag="tokens-bin",
+    )
+    require_host_path(
+        cfg.out_dir, field="out_dir", env_var=OUT_DIR_ENV, flag="out-dir"
+    )
     positive = {
         "seq_len": cfg.seq_len,
         "micro_batch_size": cfg.micro_batch_size,
@@ -2494,11 +2549,15 @@ def train(
 def main() -> None:
     ap = argparse.ArgumentParser()
     for field in TrainConfig.__dataclass_fields__.values():
-        ap.add_argument(
-            f"--{field.name.replace('_','-')}",
-            type=type(field.default),
-            default=field.default,
-        )
+        flag = f"--{field.name.replace('_','-')}"
+        if field.default is MISSING and field.default_factory is MISSING:
+            # No default of any kind: argparse must demand it (model_dir).
+            ap.add_argument(flag, type=str, required=True)
+        elif field.default_factory is not MISSING:
+            # A host-resolved path default; str even when it resolves to None.
+            ap.add_argument(flag, type=str, default=field.default_factory())
+        else:
+            ap.add_argument(flag, type=type(field.default), default=field.default)
     args = ap.parse_args()
     cfg = TrainConfig(**vars(args))
     train(cfg)

@@ -8,11 +8,15 @@ Usage:
     from .load_converted import load_converted_model
 
     model = load_converted_model(
-        model_dir="/thearray/git/moe-mla/Qwen3.6-35B-A3B",
-        patch_dir="/thearray/git/moe-mla/converted",
+        model_dir="/path/to/Qwen3.6-35B-A3B",
+        patch_dir="/path/to/converted",
         device_map="auto",
         freeze_non_mla=True,
     )
+
+Both paths may be omitted, in which case they resolve per the policy in
+:mod:`rwkv_lab.host_paths` (environment variable, then the historical location
+if this host has it, then an error naming the argument).
 """
 from __future__ import annotations
 
@@ -24,6 +28,7 @@ from typing import Optional
 import torch
 from safetensors import safe_open
 
+from .host_paths import require_host_path, resolve_host_path
 from .svd_init import GQAConfig, MLAConfig
 from .mla_module import MLAAttention
 from .mtp_module import Qwen3_5MoeMTPModule, load_mtp_weights_from_checkpoint
@@ -101,9 +106,26 @@ def _load_attn_from_patch(patch: dict[str, torch.Tensor], mla: MLAAttention,
             raise RuntimeError(f"{label}: missing keys {hard}")
 
 
+# Host-specific artifact locations. These were bare absolute paths that exist
+# only on the maintainer's host; see rwkv_lab.host_paths for the resolution
+# policy and the README section "Host-specific path defaults".
+MODEL_DIR_ENV = "MOE_MLA_MODEL_DIR"
+MODEL_DIR_HISTORICAL_PATH = "/thearray/git/moe-mla/Qwen3.6-35B-A3B"
+PATCH_DIR_ENV = "MOE_MLA_PATCH_DIR"
+PATCH_DIR_HISTORICAL_PATH = "/thearray/git/moe-mla/converted"
+
+
+def default_model_dir() -> str | None:
+    return resolve_host_path(MODEL_DIR_ENV, MODEL_DIR_HISTORICAL_PATH)
+
+
+def default_patch_dir() -> str | None:
+    return resolve_host_path(PATCH_DIR_ENV, PATCH_DIR_HISTORICAL_PATH)
+
+
 def load_converted_model(
-    model_dir: str = "/thearray/git/moe-mla/Qwen3.6-35B-A3B",
-    patch_dir: str = "/thearray/git/moe-mla/converted",
+    model_dir: str | None = None,
+    patch_dir: str | None = None,
     device_map: str | dict = "auto",
     dtype: torch.dtype = torch.bfloat16,
     freeze_non_mla: bool = True,
@@ -129,6 +151,18 @@ def load_converted_model(
     an extra module is appended (tagged _save_key="mtp"), and model.mtp_trainer
     is set.
     """
+    # None means "not supplied": fall back to this host's resolved default and
+    # name the argument if it has none, rather than TypeError-ing inside Path.
+    # Resolved before the transformers import so an unconfigured host is told
+    # what it has to configure rather than what it has to install.
+    model_dir = require_host_path(
+        default_model_dir() if model_dir is None else model_dir,
+        field="model_dir", env_var=MODEL_DIR_ENV,
+    )
+    patch_dir = require_host_path(
+        default_patch_dir() if patch_dir is None else patch_dir,
+        field="patch_dir", env_var=PATCH_DIR_ENV,
+    )
     from transformers import AutoModelForCausalLM  # lazy: import only when used
 
     model_dir_p = Path(model_dir)
@@ -289,7 +323,11 @@ def _smoke() -> None:
     from transformers import AutoTokenizer
 
     model, new_modules = load_converted_model(freeze_non_mla=False)
-    tok = AutoTokenizer.from_pretrained("/thearray/git/moe-mla/Qwen3.6-35B-A3B")
+    tok = AutoTokenizer.from_pretrained(
+        require_host_path(
+            default_model_dir(), field="model_dir", env_var=MODEL_DIR_ENV
+        )
+    )
 
     prompt = "The fundamental theorem of calculus states that"
     ids = tok(prompt, return_tensors="pt").to(next(model.parameters()).device)
