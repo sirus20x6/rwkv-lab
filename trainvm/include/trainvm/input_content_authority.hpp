@@ -17,6 +17,8 @@ inline constexpr std::string_view kInputContentRootSetApiVersion =
     "trainvm.input-content-root-set/v1";
 inline constexpr std::string_view kInputContentMeasurementCacheApiVersion =
     "trainvm.input-content-measurement-cache/v1";
+inline constexpr std::string_view kInputContentDigestStoreApiVersion =
+    "trainvm.input-content-digest-store/v1";
 
 enum class ContentRootKind {
   file,
@@ -77,6 +79,28 @@ struct InputContentMeasurementCacheCommitStats final {
   operator==(const InputContentMeasurementCacheCommitStats &) const = default;
 };
 
+// A lock run by `trainvm lock-input-content` is one short-lived process, so an
+// in-memory cache cannot help it: the expensive work -- reading every byte of a
+// 17 GiB root -- is repeated in full by the next invocation. These counters
+// describe what the owner-only on-disk store contributed to, or took from, one
+// such process.
+//
+// `refused` counts entries dropped because they failed revalidation: a seal
+// that does not reproduce, a record whose shape contradicts its key, or a
+// timestamp too recent to be trusted. `withheld` counts measurements this
+// process declined to persist for that last reason. Both are ordinary, not
+// errors; the affected files are simply hashed again.
+struct InputContentDigestStoreStats final {
+  std::uint64_t offered_entries{};
+  std::uint64_t admitted_entries{};
+  std::uint64_t refused_entries{};
+  std::uint64_t withheld_entries{};
+  bool present{};
+  bool accepted{};
+
+  bool operator==(const InputContentDigestStoreStats &) const = default;
+};
+
 class InputContentMeasurementTransaction;
 
 // This cache belongs to one long-lived controller authority. Measurements are
@@ -106,6 +130,20 @@ public:
 
   [[nodiscard]] InputContentMeasurementTransaction begin_transaction();
   [[nodiscard]] std::string policy_digest() const;
+
+  // Admit previously measured file digests from an owner-only store, and
+  // publish this cache's contents back to it. The store is trusted only
+  // because nothing but its owner can write it, exactly as the runtime-closure
+  // evidence directory is; a store whose file or containing directory is
+  // writable by anyone else, is not owned by this process, or carries more
+  // than one link is rejected by throwing rather than ignored, because that is
+  // a misconfiguration an operator has to see. A store that is merely absent,
+  // truncated, sealed against another policy, or written before the current
+  // boot is ignored, and the lock measures from bytes.
+  [[nodiscard]] InputContentDigestStoreStats
+  admit_persistent_digests(const std::filesystem::path &store_path);
+  InputContentDigestStoreStats
+  publish_persistent_digests(const std::filesystem::path &store_path) const;
 
 private:
   std::unique_ptr<Impl> impl_;
