@@ -1072,8 +1072,19 @@ caller *did* supply is still validated.
 | `MOE_MLA_PATCH_DIR` | MLA conversion patch directory |
 | `MOE_MLA_TOKENS_BIN` | packed token stream for `train_mla.py` |
 | `MOE_MLA_OUT_DIR` | run directory for `train_mla.py` |
-| `MOE_MLA_ENGRAM_PATCH_DIR` | Engram patch directory |
+| `MOE_MLA_ENGRAM_PATCH_DIR` | Engram patch directory, for every module that loads one |
+| `MOE_MLA_ENGRAM_PREFILL_OUT` | output directory for `gpu_engram_prefill.py` |
+| `MOE_MLA_TEACHER_MODEL_DIR` | 9B teacher for `build_memory_targets.py` |
+| `MOE_MLA_CKPT` | trained MLA checkpoint for `verify_engram.py` |
 | `MAGE_FLOW_BASE_PATH` | locally cached Mage-Flow-Base weights |
+
+`MOE_MLA_TEACHER_MODEL_DIR` is deliberately separate from `MOE_MLA_MODEL_DIR`
+even though both are reached through a flag spelled `--model-dir`. They name
+different models — the 35B checkpoint MLA patches, and the 9B base
+`build_memory_targets.py` distills from — and one variable for both would let a
+9B extraction resolve to the 35B weights and look healthy. Same trap as the
+`--model-dir` exception below; two flags sharing a spelling is not evidence
+they share an artifact.
 
 **One exception, on purpose: `train_mla.py`'s `--model-dir` is required and has
 no default at all**, not even a resolved one. Its historical default named the
@@ -1086,7 +1097,8 @@ name the model explicitly — see [`supervisor_night.sh`](scripts/supervisor_nig
 ### The `engram-ext` runtime dependency
 
 The MLA+Engram entry points — [`load_mla_engram.py`](src/rwkv_lab/load_mla_engram.py),
-[`train_mla_engram.py`](src/rwkv_lab/train_mla_engram.py), and
+[`train_mla_engram.py`](src/rwkv_lab/train_mla_engram.py),
+[`gpu_engram_prefill.py`](src/rwkv_lab/gpu_engram_prefill.py), and
 `train_mla.py --engram-enabled=1` — need `engram_ext`, a separately attested
 runtime distribution built outside this repository. It is deliberately not a
 dependency of `rwkv-lab`: only those entry points need it, and the sealed
@@ -1098,7 +1110,10 @@ pip install /path/to/engram/python
 ```
 
 Do not prepend a machine-local checkout to `sys.path` instead — that bypasses
-the dependency attestation.
+the dependency attestation. `gpu_engram_prefill.py` did exactly that, with the
+maintainer's own checkout path baked in, so it imported the runtime on one
+machine and failed on every other; it now resolves through the same helper as
+the rest.
 
 **Everything else imports without it.** `engram_integration.py` used to import
 `engram_ext` at module scope, so `import rwkv_lab.load_mla_engram` and

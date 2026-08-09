@@ -40,6 +40,27 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from .host_paths import require_host_path, resolve_host_path
+
+
+# Host-specific artifact location; see rwkv_lab.host_paths for the resolution
+# policy and the README section "Host-specific path defaults".
+#
+# This is deliberately NOT MOE_MLA_MODEL_DIR. That variable supplies the 35B
+# checkpoint load_converted patches; the teacher distilled from here is the 9B
+# base, a different model that merely happens to be reached through a flag
+# spelled the same way. Sharing one variable would let a 9B run resolve to the
+# 35B weights and look healthy while training against the wrong teacher, which
+# is the exact trap that made train_mla.py's --model-dir required.
+TEACHER_MODEL_DIR_ENV = "MOE_MLA_TEACHER_MODEL_DIR"
+TEACHER_MODEL_DIR_HISTORICAL_PATH = "/thearray/git/moe-mla/Qwen3.5-9B-Base"
+
+
+def default_teacher_model_dir() -> str | None:
+    return resolve_host_path(
+        TEACHER_MODEL_DIR_ENV, TEACHER_MODEL_DIR_HISTORICAL_PATH
+    )
+
 
 # ---------------------------------------------------------------------------
 # calibration token source
@@ -118,7 +139,7 @@ def find_gdn_layer(model, layer_idx: int):
 # ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model-dir", default="/thearray/git/moe-mla/Qwen3.5-9B-Base")
+    ap.add_argument("--model-dir", default=default_teacher_model_dir())
     ap.add_argument("--layer", type=int, required=True, help="GDN layer index to extract")
     ap.add_argument("--data", required=True, help="shard dir or tokens.bin (val split)")
     ap.add_argument("--seq-len", type=int, default=2048)
@@ -129,6 +150,11 @@ def main():
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
+
+    args.model_dir = require_host_path(
+        args.model_dir, field="model_dir", env_var=TEACHER_MODEL_DIR_ENV,
+        flag="model-dir",
+    )
 
     torch.manual_seed(args.seed)
     dtype = getattr(torch, args.dtype)

@@ -48,6 +48,7 @@ ENGRAM_MODULES = (
     "rwkv_lab.engram_integration",
     "rwkv_lab.load_mla_engram",
     "rwkv_lab.train_mla_engram",
+    "rwkv_lab.gpu_engram_prefill",
 )
 
 
@@ -136,9 +137,14 @@ def test_the_engram_modules_import_without_the_runtime(
 ):
     """The regression this file exists for.
 
-    Restoring a module-scope ``from engram_ext...`` import in any of these three
+    Restoring a module-scope ``from engram_ext...`` import in any of these
     modules fails this immediately, on every machine, instead of removing them
     from CI while the suite stays green.
+
+    ``gpu_engram_prefill`` joined the list when its host paths were fixed: it
+    reached the runtime by prepending a machine-local checkout to ``sys.path``
+    and importing at module scope, which is the shape the README section "The
+    ``engram-ext`` runtime dependency" tells callers not to use.
     """
     module = importlib.import_module(module_name)
     assert module.__name__ == module_name
