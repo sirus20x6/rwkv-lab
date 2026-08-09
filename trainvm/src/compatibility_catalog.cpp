@@ -42,7 +42,7 @@ constexpr std::size_t kMaximumNotesBytes = 2048U;
 // entry's recorded classification, or the entrypoint/argument/checkpoint
 // surface of a referenced source, has actually changed.
 constexpr std::string_view kReviewedCatalogDigest =
-    "sha256:25e996a3fa471182e05277dc6e0234d5bee3fbcd530095a2e8923463e89b1d47";
+    "sha256:c1eaa7cf3563455ddd53f805cc4d3ad0f6354f1298e9016dc32b2a406132584b";
 
 constexpr std::array<std::string_view, 156> kReviewedWorkflowIds = {
     "acquisition.civitai-anima",
@@ -429,23 +429,37 @@ FileDescriptor open_source_beneath(int root_descriptor,
   return FileDescriptor(static_cast<int>(result));
 }
 
-std::string compute_source_tree_digest(
-    int root_descriptor, const std::set<std::string>& source_paths) {
+// The fold, over pairs rather than over files. Byte-for-byte the material the
+// whole-tree digest was always computed from, so a catalog carrying honest
+// per-path hashes derives exactly the value that used to be stored -- which is
+// what makes the storage removable rather than merely a different scheme.
+std::string source_tree_digest_from_pairs(
+    const std::vector<CompatibilitySourceDigest>& source_digests) {
   std::string tree_material = "trainvm.compatibility-source-tree/v1";
+  for (const auto& pinned : source_digests) {
+    std::string leaf_material = "trainvm.compatibility-source-leaf/v1";
+    leaf_material.push_back('\0');
+    leaf_material.append(pinned.source_path);
+    leaf_material.push_back('\0');
+    leaf_material.append(pinned.source_sha256.substr(7));
+    tree_material.push_back('\0');
+    tree_material.append(sha256_bytes(leaf_material));
+  }
+  return "sha256:" + sha256_bytes(tree_material);
+}
+
+std::vector<CompatibilitySourceDigest> compute_source_digests(
+    int root_descriptor, const std::set<std::string>& source_paths) {
+  std::vector<CompatibilitySourceDigest> computed;
+  computed.reserve(source_paths.size());
   for (const auto& path : source_paths) {
     auto descriptor = open_source_beneath(root_descriptor, path);
     const auto bytes = read_regular_file_stably(
         descriptor.get(), kMaximumSourceBytes,
         "compatibility source " + path);
-    std::string leaf_material = "trainvm.compatibility-source-leaf/v1";
-    leaf_material.push_back('\0');
-    leaf_material.append(path);
-    leaf_material.push_back('\0');
-    leaf_material.append(sha256_bytes(bytes));
-    tree_material.push_back('\0');
-    tree_material.append(sha256_bytes(leaf_material));
+    computed.push_back({path, "sha256:" + sha256_bytes(bytes)});
   }
-  return "sha256:" + sha256_bytes(tree_material);
+  return computed;
 }
 
 // The substrings that make a line able to change how its file is classified.
@@ -625,6 +639,20 @@ std::string diagnostic_summary(const std::vector<Diagnostic>& diagnostics) {
 // never touches, and the reader who trips over it gets a wall of
 // `field.unknown` and `enum.unknown` pointing at a catalog that is perfectly
 // fine. Say so in the message rather than letting them debug the wrong file.
+// A retired field, refused by name. The reflected decoder would refuse it too,
+// as an unknown field -- but with the message above, which sends the reader off
+// to rebuild a binary that is already current. This one says what actually
+// happened, because a catalog carrying a stale whole-tree digest is exactly
+// what a rebase resolved by hand produces.
+void refuse_retired_fields(const nlohmann::json& source) {
+  if (source.is_object() && source.contains("source_tree_digest")) {
+    throw std::invalid_argument(
+        "compatibility catalog must not store source_tree_digest; it is "
+        "derived from source_digests at load time. Remove the line and run "
+        "`trainvm print-catalog-digests <catalog> <root> --write`");
+  }
+}
+
 std::string catalog_schema_failure(const std::vector<Diagnostic>& diagnostics) {
   return "compatibility catalog schema validation failed: " +
          diagnostic_summary(diagnostics) +
@@ -659,9 +687,22 @@ CompatibilityCatalog::CompatibilityCatalog(
                     (character >= 'a' && character <= 'f');
            });
   };
-  if (!is_lowercase_sha256(document.source_tree_digest)) {
+  if (document.source_digests.empty()) {
     throw std::invalid_argument(
-        "compatibility source_tree_digest must be lowercase sha256");
+        "compatibility source_digests must pin every referenced source");
+  }
+  for (const auto& pinned : document.source_digests) {
+    validate_source_path_spelling(pinned.source_path);
+    if (!is_lowercase_sha256(pinned.source_sha256)) {
+      throw std::invalid_argument(
+          "compatibility source_sha256 must be lowercase sha256 for " +
+          pinned.source_path);
+    }
+  }
+  if (!std::ranges::is_sorted(document.source_digests, {},
+                              &CompatibilitySourceDigest::source_path)) {
+    throw std::invalid_argument(
+        "compatibility source_digests must be sorted by source_path");
   }
   if (!is_lowercase_sha256(document.classification_surface_digest)) {
     throw std::invalid_argument(
@@ -742,11 +783,45 @@ CompatibilityCatalog::CompatibilityCatalog(
     }
   }
 
-  const auto computed_source_digest =
-      compute_source_tree_digest(root_descriptor.get(), all_source_paths);
-  if (computed_source_digest != document.source_tree_digest) {
-    throw std::invalid_argument(
-        "compatibility source tree digest does not match referenced file bytes");
+  // The byte binding, per path. It fails closed exactly as the whole-tree
+  // digest did -- every referenced source is still hashed through the same
+  // descriptor it is inspected through, and any drift refuses the catalog --
+  // but a mismatch can now say WHICH file drifted, which the single digest
+  // never could.
+  std::set<std::string> pinned_paths;
+  for (const auto& pinned : document.source_digests) {
+    if (!pinned_paths.insert(pinned.source_path).second) {
+      throw std::invalid_argument(
+          "compatibility source_digests must pin each path once: " +
+          pinned.source_path);
+    }
+  }
+  if (pinned_paths != all_source_paths) {
+    for (const auto& path : all_source_paths) {
+      if (!pinned_paths.contains(path)) {
+        throw std::invalid_argument(
+            "compatibility source_digests does not pin referenced source " +
+            path);
+      }
+    }
+    for (const auto& path : pinned_paths) {
+      if (!all_source_paths.contains(path)) {
+        throw std::invalid_argument(
+            "compatibility source_digests pins " + path +
+            ", which no entry references");
+      }
+    }
+  }
+  const auto computed_source_digests =
+      compute_source_digests(root_descriptor.get(), all_source_paths);
+  for (std::size_t index = 0; index < computed_source_digests.size(); ++index) {
+    if (computed_source_digests[index].source_sha256 !=
+        document.source_digests[index].source_sha256) {
+      throw std::invalid_argument(
+          "compatibility source " +
+          computed_source_digests[index].source_path +
+          " does not match its pinned bytes");
+    }
   }
 
   std::set<std::string> paths_with_empty_surface;
@@ -784,7 +859,7 @@ CompatibilityCatalog::CompatibilityCatalog(
   std::ranges::sort(document.entries, {},
                     &CompatibilityWorkflowEntry::stable_id);
   authority_ = document.authority;
-  source_tree_digest_ = document.source_tree_digest;
+  source_tree_digest_ = source_tree_digest_from_pairs(document.source_digests);
   classification_surface_digest_ = document.classification_surface_digest;
   entries_ = std::move(document.entries);
   // source_tree_digest is deliberately NOT here. It still fails closed above,
@@ -815,6 +890,7 @@ CompatibilityCatalog CompatibilityCatalog::load_file(
   CompatibilityCatalogDocument document;
   std::vector<Diagnostic> diagnostics;
   const auto source = parse_catalog(read_catalog(catalog_path));
+  refuse_retired_fields(source);
   if (!decode_json(source, document, "", diagnostics)) {
     throw std::invalid_argument(catalog_schema_failure(diagnostics));
   }
@@ -827,6 +903,7 @@ CompatibilityCatalogComputedDigests CompatibilityCatalog::compute_digests(
   CompatibilityCatalogDocument document;
   std::vector<Diagnostic> diagnostics;
   const auto source = parse_catalog(read_catalog(catalog_path));
+  refuse_retired_fields(source);
   if (!decode_json(source, document, "", diagnostics)) {
     throw std::invalid_argument(catalog_schema_failure(diagnostics));
   }
@@ -843,8 +920,10 @@ CompatibilityCatalogComputedDigests CompatibilityCatalog::compute_digests(
   auto root_descriptor = open_repository_root(repository_root);
   std::set<std::string> paths_with_empty_surface;
   CompatibilityCatalogComputedDigests computed;
+  computed.source_digests =
+      compute_source_digests(root_descriptor.get(), all_source_paths);
   computed.source_tree_digest =
-      compute_source_tree_digest(root_descriptor.get(), all_source_paths);
+      source_tree_digest_from_pairs(computed.source_digests);
   computed.classification_surface_digest = compute_classification_surface_digest(
       root_descriptor.get(), all_source_paths, paths_with_empty_surface);
   computed.paths_with_empty_classification_surface.assign(
@@ -872,6 +951,11 @@ const std::string& CompatibilityCatalog::classification_surface_digest() const {
 std::string CompatibilityCatalog::classification_surface_for_testing(
     std::string_view relative_path, std::string_view bytes) {
   return extract_classification_surface(relative_path, bytes);
+}
+
+std::string CompatibilityCatalog::source_tree_digest_for_testing(
+    const std::vector<CompatibilitySourceDigest>& source_digests) {
+  return source_tree_digest_from_pairs(source_digests);
 }
 
 const std::string& CompatibilityCatalog::repository_root_identity_display()

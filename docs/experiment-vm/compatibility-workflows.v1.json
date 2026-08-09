@@ -1,8 +1,629 @@
 {
   "api_version": "trainvm.compatibility-workflows/v1",
   "authority": "compatibility_evidence_only",
-  "classification_surface_digest": "sha256:b178eb2b0e833ca529f3accca4c94997cb8ccae9395e4ed674b403f48b1ce383",
-  "source_tree_digest": "sha256:ff440d4be9aa55c6bc900fbff4dd73384d7bc380f785f59401a2bff7dd023f47",
+  "classification_surface_digest": "sha256:974d7c794977f95319f02c8d11993ea31d41a890e5f96ea8640c5337d75662a2",
+  "source_digests": [
+    {
+      "source_path": "dashboard/internal/server/alerts_handlers.go",
+      "source_sha256": "sha256:53b4bbd6d6f54f6e5885d40c6f025b12c0ad078b68d638076bd3c1f68d05efa6"
+    },
+    {
+      "source_path": "dashboard/internal/server/control.go",
+      "source_sha256": "sha256:35555787aa0d3b3c9f8edeacad0a351606db0c14f431d320182919a05e72a192"
+    },
+    {
+      "source_path": "dashboard/internal/server/convboard.go",
+      "source_sha256": "sha256:4b7fbb00038e0733290efd034272b414b91e04538ddc8ec014991e23cc983465"
+    },
+    {
+      "source_path": "dashboard/internal/server/experiments.go",
+      "source_sha256": "sha256:8fadf0942b4baa804deaca8739095ce9af5549d762ad6b9a04e4e6d9f9403abf"
+    },
+    {
+      "source_path": "dashboard/internal/server/livetune.go",
+      "source_sha256": "sha256:cf4e78bb1795346f2de34cfbf8a3f3c3f66712e8666329793caf11661a3decea"
+    },
+    {
+      "source_path": "dashboard/internal/server/posttraining.go",
+      "source_sha256": "sha256:5ca70b61a0a1710a0c32a5e6c94d01081dadd415cf843170283b4793e41d4029"
+    },
+    {
+      "source_path": "dashboard/internal/server/qualification.go",
+      "source_sha256": "sha256:88c331bc96a901856d7bce745e34551eb1ea86bb050ed8e4d0e2449d0ad14298"
+    },
+    {
+      "source_path": "dashboard/internal/server/queue.go",
+      "source_sha256": "sha256:7b09bcf8cb55f7839ee7f73208fdb5091e1c78abcc390dda72b4372fd2a4bf3f"
+    },
+    {
+      "source_path": "dashboard/internal/server/rlvr.go",
+      "source_sha256": "sha256:d7773a1ebb8d03462845492eddab1741621c102d68c0cbe949cc422dd9ddf670"
+    },
+    {
+      "source_path": "dashboard/internal/server/sample.go",
+      "source_sha256": "sha256:ee3ba0c7153111d1c157e62db009a2d54afe352046165cc95e0224a2d2cb110a"
+    },
+    {
+      "source_path": "dashboard/internal/server/server.go",
+      "source_sha256": "sha256:34b4b7ac85ab5552b7190a9e6befcb099dcee30ef91fa8d37b23b2c5359147ba"
+    },
+    {
+      "source_path": "docs/experiment-vm/examples/vision-representation-ab.input-roots.json",
+      "source_sha256": "sha256:a30e83e0bcc7b4ce58da71babeb383f479801697d1f1ca9ffe7d09a9d17c96bc"
+    },
+    {
+      "source_path": "docs/experiment-vm/examples/vision-representation-ab.json",
+      "source_sha256": "sha256:d5da05e085ec371cb2291a08345d766070d2e6aea18bbcd1b6c7931738a2ba1b"
+    },
+    {
+      "source_path": "docs/mage_flow_high_resolution_joint_refinement.md",
+      "source_sha256": "sha256:a370bac3e5851e7e3cde93c90cb8e618a49ab6958a931e88dc46ced1a2796568"
+    },
+    {
+      "source_path": "scripts/assemble_vision_cache_overlay.py",
+      "source_sha256": "sha256:570abdc427e61044d6989e289235f7d5893f88eff0d0fd317862deadd10bc6f4"
+    },
+    {
+      "source_path": "scripts/benchmark_mage_flow_runtime.py",
+      "source_sha256": "sha256:5cb77fc6bb472a037a239decfb467028d0838842283d11ced991a5c919ac36da"
+    },
+    {
+      "source_path": "scripts/benchmark_qwen_prompt_hints.py",
+      "source_sha256": "sha256:6a4049e5501ab5dfbcbb4ab23a48e741681114320d2f3f05f6fd6fcaba70cf05"
+    },
+    {
+      "source_path": "scripts/build_gelbooru_trainer_dataset.py",
+      "source_sha256": "sha256:0319a9581cfd4073e8dfc12eba5e689f02de97fb5837ae5fd438bb55114b1375"
+    },
+    {
+      "source_path": "scripts/build_reddit_trainer_snapshot.py",
+      "source_sha256": "sha256:254fcdfbe48a349df31e939e588770f79360cf46cee2ddbe3f8a2bdf85628284"
+    },
+    {
+      "source_path": "scripts/build_unlabeled_image_manifest.py",
+      "source_sha256": "sha256:f612a03b60b8cd86b07362cd4771abffb6cf768bf0628bf800e8a5820f9d02d1"
+    },
+    {
+      "source_path": "scripts/build_v4h_dino_compactor.py",
+      "source_sha256": "sha256:f6773be427ffd02a53cd7d420ffe6baa0366d64178dab301e390aa5c94a88e67"
+    },
+    {
+      "source_path": "scripts/cache_radio1d_features.py",
+      "source_sha256": "sha256:beb9b3730dc5e54705d07f765a7588bef477cd282e57354b942032f2b7be5cee"
+    },
+    {
+      "source_path": "scripts/cache_v4h_all_adaptors.py",
+      "source_sha256": "sha256:892b0be224a63ab0eaf51674f51fe85375d9ea61b4ef5764ec646c14aef8edbe"
+    },
+    {
+      "source_path": "scripts/cache_v4h_features.py",
+      "source_sha256": "sha256:85ecf72f3038f337faeec651d7839f3d5706502858567e73003f3477ae082f90"
+    },
+    {
+      "source_path": "scripts/cache_v4h_native.py",
+      "source_sha256": "sha256:1bbf31c1035f589b779ec1c09476980aa22f72a6b652666ac2c01b5635be1955"
+    },
+    {
+      "source_path": "scripts/caption_radio1d_directory.py",
+      "source_sha256": "sha256:98cbc01e5bded12c3f625901293a6549ddbd18b684fdae67a862c203117ee211"
+    },
+    {
+      "source_path": "scripts/classify_i1_deepghs.py",
+      "source_sha256": "sha256:aa547911e778104e63462ed94bf80efbb9c32bf0747fbc61497a9ba111ed63bd"
+    },
+    {
+      "source_path": "scripts/convert_terminal_mageflow_to_tread_looped.py",
+      "source_sha256": "sha256:330f9c5d33087081110020957af43a22be283be122e9fc4ef94b2b595255112c"
+    },
+    {
+      "source_path": "scripts/dedupe_cutoff_review.py",
+      "source_sha256": "sha256:a2933c30bdbf125af0e0ffae5e77ee56264f2ddfd122483bf289d9313b3dcf7d"
+    },
+    {
+      "source_path": "scripts/download_civitai_anima_balanced.py",
+      "source_sha256": "sha256:57d8c80a873a8252d7783f97699b821d79a4867964e35356bdf7cb6d50e42a19"
+    },
+    {
+      "source_path": "scripts/download_civitai_anima_dataset.py",
+      "source_sha256": "sha256:cf709b2cf5c4a04dde34f5d5cc5faa03ab8bc62a0d07d5d37c412b9d6324221d"
+    },
+    {
+      "source_path": "scripts/export_frozen_vision_compressor.py",
+      "source_sha256": "sha256:0ba063bf5b8bada668d2bd0ca28c36cfe0738a434eb8c2fa37a37b13264a9e30"
+    },
+    {
+      "source_path": "scripts/factored_loop_sweep.sh",
+      "source_sha256": "sha256:bf67e79a0e74cb32e0f5a8623db3b12632101836647de074242c219ef77bb3fc"
+    },
+    {
+      "source_path": "scripts/fetch_i1_archives.py",
+      "source_sha256": "sha256:9bdfb12c6228c14dcbeb6358a984ac40044d2e2b153d7824f687fd2422f27937"
+    },
+    {
+      "source_path": "scripts/finalize_vision_cache.py",
+      "source_sha256": "sha256:89bcafb063db7bc598bd95078267002f28a3e9f476ae5588323bb915f0025403"
+    },
+    {
+      "source_path": "scripts/g1g_sweep.sh",
+      "source_sha256": "sha256:d8e17a0f10c88c21a7245b02c8b61141792a9357b316460838dddbeb59b18cbf"
+    },
+    {
+      "source_path": "scripts/gate_ab.sh",
+      "source_sha256": "sha256:62e4584558a3806437f6c5ea8a26b7d27cd4d09c05eefee23acd71c8b583c6cf"
+    },
+    {
+      "source_path": "scripts/gate_ab2.sh",
+      "source_sha256": "sha256:55058b98e2e650de5a14f35946dd309b5f9b8ecb22dbca1f0bb2ceab1c55febc"
+    },
+    {
+      "source_path": "scripts/gdn_sweep.sh",
+      "source_sha256": "sha256:6d6e15f902f17274b24e06c32f9300ca41fa0ec5fffc366e33096efe43616d16"
+    },
+    {
+      "source_path": "scripts/handoff_vision_cache_at_10_percent.py",
+      "source_sha256": "sha256:b69b6c491d5b035eb6a6aa4018243e318cafa09c8b3618d1b5d3654deeb4f295"
+    },
+    {
+      "source_path": "scripts/i1_quality_viewer.py",
+      "source_sha256": "sha256:ee7224795e6aea6ba0a48317bf9060515ce2c7ae128421b6e110a01fe1874c6d"
+    },
+    {
+      "source_path": "scripts/latent_steps_sweep.sh",
+      "source_sha256": "sha256:ce05a759066cd58c9e6b5f3127399cb778c01f5d0ad44cc059af0f8455924643"
+    },
+    {
+      "source_path": "scripts/latent_sweep.sh",
+      "source_sha256": "sha256:60506037455d74078d1c362724a38e65004306e57da99a4ff2778efac4545880"
+    },
+    {
+      "source_path": "scripts/loop_sweep.sh",
+      "source_sha256": "sha256:bd396bf824f330090d0dde72d21a78d992eeadd40caa2ee07b1a684fa7ecd79b"
+    },
+    {
+      "source_path": "scripts/mageflow_cache_rest_and_resume.sh",
+      "source_sha256": "sha256:4f370e20bf2df2b198a933b20718b7308b4d11caef19753edb9b7d9d19b0d8c0"
+    },
+    {
+      "source_path": "scripts/mageflow_finish_cache_and_resume.sh",
+      "source_sha256": "sha256:2dced95a262c98ec8e4f2984efe43ee13ba033e069f191ce0b99d83bf157e1a7"
+    },
+    {
+      "source_path": "scripts/materialize_exact_dedup.py",
+      "source_sha256": "sha256:b69e3936e699c83c639c9ba148df78a7b77c69762bf8d89903ac1508073e52e9"
+    },
+    {
+      "source_path": "scripts/materialize_midjourney_v6_continuation.py",
+      "source_sha256": "sha256:f5adc334e0557c905a47b6666f6d0b8bf5c5013e07aa6c793c9715b4d7a07315"
+    },
+    {
+      "source_path": "scripts/materialize_midjourney_v6_expert_stage.py",
+      "source_sha256": "sha256:66f480ab4acd165adde5fcf5a6b720f1d2865bcd4ab11f29ca8e0a712a4aab2b"
+    },
+    {
+      "source_path": "scripts/migrate_mage_flow_terminal_experts.py",
+      "source_sha256": "sha256:110f3f907a4c8f4df91a6dbc1ce2d091e10ea421dc23d95f733cbb9ec895c72b"
+    },
+    {
+      "source_path": "scripts/overnight_teacher_student_supervisor.py",
+      "source_sha256": "sha256:85ead77771c506a825bd6bc57a0299847cfc198310929618e5331aecf15ea9e8"
+    },
+    {
+      "source_path": "scripts/overnight_vision_watchdog.py",
+      "source_sha256": "sha256:5dd21d2a32f1ba416e0ea622fc33694ce2279d81d6a6e218f170191ca16888c8"
+    },
+    {
+      "source_path": "scripts/prepare_ao3_cpt.py",
+      "source_sha256": "sha256:8cc15fefbf6fa43781872be430c08ccc500d834b372b65b2f167d6acec9d2f8d"
+    },
+    {
+      "source_path": "scripts/prepare_ao3_cpt_tokens.py",
+      "source_sha256": "sha256:445540a11dc7193b1ef2388e8bdb79ff7fd7c45a48c54999172e8e74c94dfeaf"
+    },
+    {
+      "source_path": "scripts/prepare_qwen_ao3_cpt.sh",
+      "source_sha256": "sha256:a961963b50013b1883af63431518989e36517afcc039ac113d3982103bd7b25c"
+    },
+    {
+      "source_path": "scripts/prepare_qwen_ao3_cpt_run.py",
+      "source_sha256": "sha256:fcf4f38677fe0ec2333b82639d9d469d825535eacec21bd4b96048d493c7e537"
+    },
+    {
+      "source_path": "scripts/rel_sweep.sh",
+      "source_sha256": "sha256:af6e664f11f7be3d0f73efd6da4cdc5bbadf31f89ed70a87318036c43702fa80"
+    },
+    {
+      "source_path": "scripts/run_radio1d_captioning_first.sh",
+      "source_sha256": "sha256:3318bed60789baadd8de7d91c58a35606c746ac3319301f6d27fa556642c333c"
+    },
+    {
+      "source_path": "scripts/run_radio1d_civitai_joy_continuation.sh",
+      "source_sha256": "sha256:f5036d48f6ab1190b7c06046d1bf8186b992d9bd59b0bb1af98249f00ca05184"
+    },
+    {
+      "source_path": "scripts/run_radio1d_eight_hour_grounded.sh",
+      "source_sha256": "sha256:235074f2ee5141a61b82b84475c7b1fe345717f1ca423e1b98008dedb40f2d51"
+    },
+    {
+      "source_path": "scripts/run_v4h_all_adaptors_7b.sh",
+      "source_sha256": "sha256:9d22ce23c91dc78f94f98b50463ea72da9505c03c75bd5a372491852c751008b"
+    },
+    {
+      "source_path": "scripts/run_v4h_captioning_first.sh",
+      "source_sha256": "sha256:d11b24b46f7545de24c8850c1d4b36bcf340a798f00dd94313f628551ec4773d"
+    },
+    {
+      "source_path": "scripts/run_v4h_captioning_ocr_fixed.sh",
+      "source_sha256": "sha256:4243c3f6d58dba7740a288b33905147f2cc33d3a317682ff68be38dde613c67a"
+    },
+    {
+      "source_path": "scripts/run_vision_eight_hour.sh",
+      "source_sha256": "sha256:15e4f61be1901de107e1416109d48a575a7c70d03a71aa68a3ddf6e781dd675c"
+    },
+    {
+      "source_path": "scripts/run_vision_eight_hour_grounded.sh",
+      "source_sha256": "sha256:44157382623a52aca61110d8e424cf2191bbeb01708aed114c52daac11141f18"
+    },
+    {
+      "source_path": "scripts/run_vision_finish_grounded.sh",
+      "source_sha256": "sha256:236cc8d05f1536008a0c70e085ca6ca4a6530c9cec7c13bedcea1fa8bc6cf9ec"
+    },
+    {
+      "source_path": "scripts/run_vision_i1_next.sh",
+      "source_sha256": "sha256:77120222c8afa392dc508205a70c0e17926bad655a92411b5a44399033bf4281"
+    },
+    {
+      "source_path": "scripts/run_vision_native_arm2.sh",
+      "source_sha256": "sha256:6471e838fced2f421e9e1a2f875ac1e29388c2411a84694614693cabd674ef3f"
+    },
+    {
+      "source_path": "scripts/run_vision_next_levers.sh",
+      "source_sha256": "sha256:884a6ef69512392fe8297150bc9c334c19a9184efa68c7e51bd48cb8b54880d2"
+    },
+    {
+      "source_path": "scripts/run_vision_next_levers_256.sh",
+      "source_sha256": "sha256:4a8b51a713290e5518b8589f42f24b475f8084132b3ee9cdc1df3f7edcf94428"
+    },
+    {
+      "source_path": "scripts/run_vision_representation_ab.py",
+      "source_sha256": "sha256:c6f2561bd4604287b32b087bdfb84ded78307d9d315c0c515a472eefae45bbfe"
+    },
+    {
+      "source_path": "scripts/run_vision_representation_ab_arm.sh",
+      "source_sha256": "sha256:c6dbf570a2ede4d15ed6e0c6b2974a83eaf8ea135c5ddcb9a184c9f260b603f7"
+    },
+    {
+      "source_path": "scripts/run_vision_rwkv_student.sh",
+      "source_sha256": "sha256:5762a88477c229289617bfc84540b9f4d13e385ed29855b8d58b12135ea5245e"
+    },
+    {
+      "source_path": "scripts/run_vision_teacher_compressor.sh",
+      "source_sha256": "sha256:e94e79c853116cc6a87c08333c4022930caa3cb626965ecec8388eaa5b982cfc"
+    },
+    {
+      "source_path": "scripts/scan_midjourney_v6_caption_routes.py",
+      "source_sha256": "sha256:1b5a27c113d96fb5ed38f76fcc81356504a991efacc3e3cdad7d99d53521d0ab"
+    },
+    {
+      "source_path": "scripts/score_i1_anime_aesthetic.py",
+      "source_sha256": "sha256:238bffcc8813088110371e2f4cfad7b763ca59a4e95fd7252982a503fa3162d3"
+    },
+    {
+      "source_path": "scripts/supervisor_night.sh",
+      "source_sha256": "sha256:73f50687a5d03f34d76b2ff580a2e25eed92cbcf34f3a33c615878835b483bc3"
+    },
+    {
+      "source_path": "scripts/vision_run_evidence.py",
+      "source_sha256": "sha256:cd908727aa3f1e22746fd9502b4dfa0e8d9bbe406227fbbacd921e3a300d025a"
+    },
+    {
+      "source_path": "scripts/write_vision_loop_telemetry.py",
+      "source_sha256": "sha256:d19b0e5f83678ff50145a1b452053018366e637fedf6d059d943d35dbb39f0d0"
+    },
+    {
+      "source_path": "src/rwkv_lab/adapter_consolidation.py",
+      "source_sha256": "sha256:726af29bd1cb88628ccd70c08529c8abf2b82db348c2afc3fab9ea9cc4747642"
+    },
+    {
+      "source_path": "src/rwkv_lab/adapter_recursive.py",
+      "source_sha256": "sha256:fcf45d011f30f353bfcb9d707403d5242f44985103aa36cab5570bfdce6fcc15"
+    },
+    {
+      "source_path": "src/rwkv_lab/ao3_cpt_data.py",
+      "source_sha256": "sha256:f92a6ba363a4aed7306afa60aff270f3410d48bead4c78f9bc1ecebafc2934aa"
+    },
+    {
+      "source_path": "src/rwkv_lab/ao3_cpt_tokens.py",
+      "source_sha256": "sha256:7fa5131b1b98f5ba966b7f724e2d8dde83cafc93536ac6f893f6d48d40644b04"
+    },
+    {
+      "source_path": "src/rwkv_lab/assemble_looped.py",
+      "source_sha256": "sha256:775a5c3badbb9596ef02d25c1aa8c5aaf99870a8593fc225d5b89bc94598eca3"
+    },
+    {
+      "source_path": "src/rwkv_lab/attn_L3_poc.py",
+      "source_sha256": "sha256:9f3ceea46eff1b8122f5932af1b5237853a86fc402b04866ed43252d10eaedf6"
+    },
+    {
+      "source_path": "src/rwkv_lab/build_corpus.py",
+      "source_sha256": "sha256:9b0456a17d016faee5ab7f72e03349574e41dee340908c5db3532aa23a78bfa5"
+    },
+    {
+      "source_path": "src/rwkv_lab/build_engram_patch.py",
+      "source_sha256": "sha256:33692b21883c4f6b34fb461bab97519429e4935cd315260a8d1a8f7d0b6dc47d"
+    },
+    {
+      "source_path": "src/rwkv_lab/build_memory_targets.py",
+      "source_sha256": "sha256:125d29a4c9c491b626e90f79ee5094a228eef3f1bbd01df966a62029aebb208d"
+    },
+    {
+      "source_path": "src/rwkv_lab/build_qwen35_data.py",
+      "source_sha256": "sha256:f7b99a8bdd80236886770eaa11d690ebd23a47140f89dc915cdd9f5952379569"
+    },
+    {
+      "source_path": "src/rwkv_lab/config.py",
+      "source_sha256": "sha256:a077f1cbc4d1a8768848da7f0ee1a878f602d4f2bd71bcda2f948f1184e7f671"
+    },
+    {
+      "source_path": "src/rwkv_lab/convert_gdn_lossless.py",
+      "source_sha256": "sha256:d2407ee2bffe822f0705d5f9fec131c37056fe039cbb0532945c0f6686ac7e74"
+    },
+    {
+      "source_path": "src/rwkv_lab/convert_train.py",
+      "source_sha256": "sha256:775ac0dc58446c97c71911eb2b9e7e1fd431bb403c92c113e2cdba378168f83a"
+    },
+    {
+      "source_path": "src/rwkv_lab/decoding_eval.py",
+      "source_sha256": "sha256:ce7fb7af354d060362f7fafc9b55cfcaa689d4da4a25ae478bafbbacddc749b7"
+    },
+    {
+      "source_path": "src/rwkv_lab/diffusion_rwkv.py",
+      "source_sha256": "sha256:c4b0f0afdd913bc85ee6aac5468ce767d549b537c8a6bfbec8e8211733ee7816"
+    },
+    {
+      "source_path": "src/rwkv_lab/distill_consolidate.py",
+      "source_sha256": "sha256:1fdc8cdec8762f6c6e673183e61ad96308768b69a5cd1bbd0277058c8c6d0110"
+    },
+    {
+      "source_path": "src/rwkv_lab/distillation_merge.py",
+      "source_sha256": "sha256:b6e66e8dd51853e2394a41b1405b18d719badef01ed58fdf8afe982dcb527b1e"
+    },
+    {
+      "source_path": "src/rwkv_lab/drive_isolation.py",
+      "source_sha256": "sha256:434618d2036b30ae3f3d4638293fd3e3f1d24f0fd8dd2d300b112e0d58fddb94"
+    },
+    {
+      "source_path": "src/rwkv_lab/engram_lmb.py",
+      "source_sha256": "sha256:84e53ec2c61673727e87352f42b1d03a20ed617aff4fbb0c9e704a741c584d07"
+    },
+    {
+      "source_path": "src/rwkv_lab/engram_lmb_build.py",
+      "source_sha256": "sha256:8e16b91a665dd5cdc199b1bfb74e59a4c4feefbf9c0327127f53b2da18ed9b79"
+    },
+    {
+      "source_path": "src/rwkv_lab/eval_baseline.py",
+      "source_sha256": "sha256:e06613f275234b1c5404950565710b08914974d9fe191887d948513437817450"
+    },
+    {
+      "source_path": "src/rwkv_lab/experiment.py",
+      "source_sha256": "sha256:36409bbb9f08f0facd4fc950b74f77b6f30ab466d5ea025412c18449bedad0f5"
+    },
+    {
+      "source_path": "src/rwkv_lab/export_bundle.py",
+      "source_sha256": "sha256:13b3d0442fd046680ea6c2182b1a112fefd2ce2fdfebec5a0771c8392d541eeb"
+    },
+    {
+      "source_path": "src/rwkv_lab/generate.py",
+      "source_sha256": "sha256:81b4d9d5d2d3618ba3a5d4e030f7ecee090c6d7accb7c300091c00affad40e33"
+    },
+    {
+      "source_path": "src/rwkv_lab/gpu_engram_prefill.py",
+      "source_sha256": "sha256:fab2ff186778f2ef4775812a58abc19564aa2f0447ab8052c840d7ac8682faaf"
+    },
+    {
+      "source_path": "src/rwkv_lab/kimi_teacher.py",
+      "source_sha256": "sha256:f33477d57b77d2e68a10194eab214ea1b2a6993cd2d488d7743f8c3edbe727a1"
+    },
+    {
+      "source_path": "src/rwkv_lab/layer_swap.py",
+      "source_sha256": "sha256:201775e93e47dc99457f66b40c3fe9380410b597be934d0b5e3befaa5f01933e"
+    },
+    {
+      "source_path": "src/rwkv_lab/load_converted.py",
+      "source_sha256": "sha256:ce385cede39423288e26eef3bc00e691fa2adb1109e2cc5c7eaef22f2b2f23e7"
+    },
+    {
+      "source_path": "src/rwkv_lab/loop_probe.py",
+      "source_sha256": "sha256:78bce124fe7f1b19fecf1d6a35b2ff3111a16aba72c818dfb3f34feb8c756e6f"
+    },
+    {
+      "source_path": "src/rwkv_lab/looped_rwkv_rosa_engram_v3.py",
+      "source_sha256": "sha256:b438dbc054323d6ec4a5cf5f554b3699092d4da99159e0085ed29f0882aba9f7"
+    },
+    {
+      "source_path": "src/rwkv_lab/ltx23_lora.py",
+      "source_sha256": "sha256:737af7401930107548a32943d6440257c67315199c1126747be7467eb60ca7ee"
+    },
+    {
+      "source_path": "src/rwkv_lab/mage_flow_adaptation.py",
+      "source_sha256": "sha256:2dabfea1c351ceb14c5aa5b6dd37afb97ed1c483993d9c53a73c574a9fc7ac43"
+    },
+    {
+      "source_path": "src/rwkv_lab/mage_flow_expert_train.py",
+      "source_sha256": "sha256:bd4ab30b12523aeebb46d2e2daf3d1ddad0818df9c59ea1b65297d9e07e46190"
+    },
+    {
+      "source_path": "src/rwkv_lab/mage_flow_pretrain.py",
+      "source_sha256": "sha256:4ff6d22d29e46ac4373190f92e1e2f7f2e8d722fd84d60f2f7d18c714f0da684"
+    },
+    {
+      "source_path": "src/rwkv_lab/mage_flow_terminal_train.py",
+      "source_sha256": "sha256:ea05f4c59af776a7e08d320f7be886b6e9cfceff4f01ae34d909304fca47fbe2"
+    },
+    {
+      "source_path": "src/rwkv_lab/megakernel.py",
+      "source_sha256": "sha256:d9e94e0e04ec61c0e3a0efa84c1af405dfd5575ceb0a85d1341a2e2e4a175e7e"
+    },
+    {
+      "source_path": "src/rwkv_lab/mla_module.py",
+      "source_sha256": "sha256:5df74c280052042992df25c2b42e7e9f29631af82761de54ad9f18b4bbd82482"
+    },
+    {
+      "source_path": "src/rwkv_lab/native_g1g.py",
+      "source_sha256": "sha256:096880f6a1f40fa8cef17914676012c5ab63cd8b5203192971158724b7416fe7"
+    },
+    {
+      "source_path": "src/rwkv_lab/posttrain_campaign.py",
+      "source_sha256": "sha256:dd46d5cde650604ce8be35c37e69f15fb4b0717c7c25cb2bde376bc30cf12ab2"
+    },
+    {
+      "source_path": "src/rwkv_lab/posttrain_data.py",
+      "source_sha256": "sha256:4b0fd03049ed1a35a91ffed1bdabb9a5f2273d83ea42e15e7c704b3e90ad7f12"
+    },
+    {
+      "source_path": "src/rwkv_lab/posttrain_kernels.py",
+      "source_sha256": "sha256:466e2f269637a3ee65bb381d2d45bdb53fa09a7784a9c36e63ed00c79c9cfd93"
+    },
+    {
+      "source_path": "src/rwkv_lab/posttrain_train.py",
+      "source_sha256": "sha256:2df54c652e2dc1fac7b5900da6ab637edbb16ae3e5c5a0a36d9d0b97e843c683"
+    },
+    {
+      "source_path": "src/rwkv_lab/production_kernels.py",
+      "source_sha256": "sha256:7380c2b37958ce0550cbd486a24204fcee63c958797175a678261375aa48b50e"
+    },
+    {
+      "source_path": "src/rwkv_lab/qwen_ao3_cpt.py",
+      "source_sha256": "sha256:2f1f495c4c57d171ff244221a8f9a5ec603c7a36f2fc0af7f754943b4d4d741c"
+    },
+    {
+      "source_path": "src/rwkv_lab/reasoning_cache.py",
+      "source_sha256": "sha256:1605c7e97273363c3c8c5da5668757377a1ecd8c82b2a5a0daf26196b7f69473"
+    },
+    {
+      "source_path": "src/rwkv_lab/recurrent_serving.py",
+      "source_sha256": "sha256:11353cd2d2ef565cf1d5a9ad8214b309ffffd2bd73a8200f969e8d236590eecd"
+    },
+    {
+      "source_path": "src/rwkv_lab/recursive_improve.py",
+      "source_sha256": "sha256:e8ee9e8e1fc3979e0ab8ec1e109e4a9ba8881e741ef547b73a0afcf826b3256b"
+    },
+    {
+      "source_path": "src/rwkv_lab/rlvr_campaign.py",
+      "source_sha256": "sha256:2bdac353731a5acb7e83944f4a74381da3b8792ff4385030acad4e1366a34218"
+    },
+    {
+      "source_path": "src/rwkv_lab/rlvr_train.py",
+      "source_sha256": "sha256:75dfbf2e6911dd4b2d98c16512eb9c2c4ddcfe8e7860e8cb28fd8584ee446bd1"
+    },
+    {
+      "source_path": "src/rwkv_lab/rosa.py",
+      "source_sha256": "sha256:3f1d7fe6ebe54698847b88ef07acfbb9fafdaab9cac4bd106c629754e0e91c87"
+    },
+    {
+      "source_path": "src/rwkv_lab/rosa_sam.py",
+      "source_sha256": "sha256:4e309152a06e89127a9a5c2abc6fcfd72818212a96e00dc79fc5a9fe12fc3c25"
+    },
+    {
+      "source_path": "src/rwkv_lab/rosa_soft_layer.py",
+      "source_sha256": "sha256:50b0a42b18a05e3ee3126e082bc65fc5b79b281af0531d6436e4758b1ee7fd27"
+    },
+    {
+      "source_path": "src/rwkv_lab/rwkv_finetune.py",
+      "source_sha256": "sha256:9669abee452204c036045ae12ac3a6b76a54052ac2c451b7727695f7ae429adc"
+    },
+    {
+      "source_path": "src/rwkv_lab/rwkv_pretrain.py",
+      "source_sha256": "sha256:d9819d39bb0865bdfb2794085f14ca7fc0c568ddbc4f21582e94260d9abf873a"
+    },
+    {
+      "source_path": "src/rwkv_lab/smt_dmt.py",
+      "source_sha256": "sha256:917207af6797d4fbe31bfc01848ac0d40a110b9cd936418007e042591f93b8eb"
+    },
+    {
+      "source_path": "src/rwkv_lab/svd_init.py",
+      "source_sha256": "sha256:2db06e88244fa0d4e2aed427c39aa9170e79677a4174d59c1e7e5dbcd19a9ecf"
+    },
+    {
+      "source_path": "src/rwkv_lab/test_time_training.py",
+      "source_sha256": "sha256:21de37c3914f36b875052c77b8fdefaba0f4689a8df7911f29431716bdba2093"
+    },
+    {
+      "source_path": "src/rwkv_lab/train_mla.py",
+      "source_sha256": "sha256:c5190e9a87c098d0c4233e8b80220b740f32803d62598e1176958cb31e37856d"
+    },
+    {
+      "source_path": "src/rwkv_lab/train_mla_engram.py",
+      "source_sha256": "sha256:a785b9ef5eb46547cf47e930d0e96b4c3650290c6583036ed15c2308d232e6ad"
+    },
+    {
+      "source_path": "src/rwkv_lab/trainvm_adapters/handlers.py",
+      "source_sha256": "sha256:49e7e648ff68fa27b80abd814f5ae306e09b6824c558e7f59dc87ba219389de3"
+    },
+    {
+      "source_path": "src/rwkv_lab/trainvm_adapters/io.py",
+      "source_sha256": "sha256:dca30ab7d7692f99b55e4815c67c23dd2dc0485e3a16c5c2d7fd716c7be92fb7"
+    },
+    {
+      "source_path": "src/rwkv_lab/trainvm_adapters/metric_decision.py",
+      "source_sha256": "sha256:c7acaa38c03d02b660a72407d24e848478c7191ee44397286229b1dcaedd446f"
+    },
+    {
+      "source_path": "src/rwkv_lab/trainvm_adapters/vision_frozen.py",
+      "source_sha256": "sha256:62e25140e744b320ecbb304a6a948502ae1df57bd87a9eb0a7b0fdbb04865af7"
+    },
+    {
+      "source_path": "src/rwkv_lab/trainvm_worker/artifact.py",
+      "source_sha256": "sha256:31ad8f073579780415d404493c83ee3d8a5a0ab3365d0acbcdf5cfbceb087015"
+    },
+    {
+      "source_path": "src/rwkv_lab/verify_engram.py",
+      "source_sha256": "sha256:fabb5549f3d780965734a7ff7f6bed387f8cfa30dd84ddc753ac3fc4424f5adf"
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_cache.py",
+      "source_sha256": "sha256:ae8ad453eb804358b6631267d796690cbae00553fa346736b0bd4a756ebb360b"
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_caption.py",
+      "source_sha256": "sha256:5fb8b5595a1316cf7a335b84c1cb5fbc47d05128a00c4ad55795c49a369527d0"
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_fusion_cache.py",
+      "source_sha256": "sha256:869c6ca0bd1bdb2b677642cca96951b694f10c0df72de46db1e9b75a20d25bd8"
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_native_train.py",
+      "source_sha256": "sha256:9d6dd1bedc85fb15e2f0e11eb49732a3d43066216b4f4a5fc319bcb6ffad6e11"
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_rwkv_student_train.py",
+      "source_sha256": "sha256:7c8a8d0111a6dccaf464fbd362b8d4023b9d6593a95b9e2c1e600bbc6a1e7ff8"
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_sam_dense_cache.py",
+      "source_sha256": "sha256:2a003de7a5df32ace21ef6c3c0280245f0ce5af8b0724dfa6057ebc37d527ed5"
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_teacher_compressor.py",
+      "source_sha256": "sha256:d7e9697920bdc1294539282b0698ef8c8f30421b06e6af2e3b3f02b768d48323"
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_train.py",
+      "source_sha256": "sha256:16bb7eec0eef43c1c6fcbe1197f8fbbe60573ecc708482b308956dd0cac07e34"
+    },
+    {
+      "source_path": "trainvm/include/trainvm/input_content_authority.hpp",
+      "source_sha256": "sha256:4bcc2efef93c66f8d582a1f693927e3af9ceee51cc0742836fd8677bfab95fa1"
+    },
+    {
+      "source_path": "trainvm/src/input_content_authority.cpp",
+      "source_sha256": "sha256:ac8e05ab0b0b2278e84f9bdde2b1170e7b16df0a524fcf8f463daae540edbe07"
+    },
+    {
+      "source_path": "trainvm/src/main.cpp",
+      "source_sha256": "sha256:f810941097c471cfa76538fed20e20e0f51c4a8916c039b8235561d14d1b848c"
+    }
+  ],
   "entries": [
     {
       "stable_id": "rwkv.synthetic-campaign",

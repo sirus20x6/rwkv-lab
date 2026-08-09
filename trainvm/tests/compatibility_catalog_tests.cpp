@@ -756,8 +756,17 @@ int main() {
     }
     auto recomputed = trainvm::CompatibilityCatalog::compute_digests(
         fixture, cloned_root);
+    const auto encode_source_digests =
+        [](const std::vector<trainvm::CompatibilitySourceDigest>& pinned) {
+          nlohmann::json encoded = nlohmann::json::array();
+          for (const auto& one : pinned) {
+            encoded.push_back({{"source_path", one.source_path},
+                               {"source_sha256", one.source_sha256}});
+          }
+          return encoded;
+        };
     nlohmann::json repinned = original;
-    repinned["source_tree_digest"] = recomputed.source_tree_digest;
+    repinned["source_digests"] = encode_source_digests(recomputed.source_digests);
     check(recomputed.classification_surface_digest ==
               original.at("classification_surface_digest").get<std::string>(),
           "a comment leaves the classification surface digest untouched");
@@ -786,7 +795,8 @@ int main() {
               original.at("classification_surface_digest").get<std::string>(),
           "renaming an entrypoint moves the classification surface digest");
     nlohmann::json honestly_repinned = original;
-    honestly_repinned["source_tree_digest"] = recomputed.source_tree_digest;
+    honestly_repinned["source_digests"] =
+        encode_source_digests(recomputed.source_digests);
     honestly_repinned["classification_surface_digest"] =
         recomputed.classification_surface_digest;
     check(throws_invalid_argument([&] {
@@ -795,6 +805,105 @@ int main() {
           }),
           "a classification change still fails against the compiled digest");
     restore_source(root / python_victim, victim_path);
+
+    // The point of the whole change: an edit to one referenced source rewrites
+    // only that source's pin, so two independent refreshes touch two different
+    // objects and git can merge them. While the tree digest was stored, both
+    // rewrote the same line and conflicted by construction.
+    {
+      restore_source(root / python_victim, victim_path);
+      const auto baseline = trainvm::CompatibilityCatalog::compute_digests(
+          fixture, cloned_root);
+      std::ofstream output(victim_path, std::ios::app | std::ios::binary);
+      output << "\n# a second classification-irrelevant comment\n";
+      output.close();
+      const auto after = trainvm::CompatibilityCatalog::compute_digests(
+          fixture, cloned_root);
+      std::size_t moved = 0;
+      for (std::size_t index = 0; index < after.source_digests.size(); ++index) {
+        if (after.source_digests[index].source_sha256 !=
+            baseline.source_digests[index].source_sha256) {
+          ++moved;
+          check(after.source_digests[index].source_path == python_victim,
+                "the pin that moved is the edited source's own");
+        }
+      }
+      check(moved == 1,
+            "editing one referenced source moves exactly one per-source pin");
+      restore_source(root / python_victim, victim_path);
+    }
+
+    // A stale whole-tree digest left behind by a hand-resolved rebase is
+    // refused by name rather than as an anonymous unknown field, because the
+    // unknown-field message tells the reader to rebuild a current binary.
+    {
+      nlohmann::json stale = original;
+      stale["source_tree_digest"] = recomputed.source_tree_digest;
+      check(throws_invalid_argument([&] {
+              (void)trainvm::CompatibilityCatalog::load_file(
+                  write_fixture(stale, "stale-tree-digest.json"), cloned_root);
+            }),
+            "a catalog that still stores source_tree_digest is refused");
+    }
+
+    // The per-path pins have to cover the referenced set exactly, or a source
+    // could drop out of the byte binding without anything noticing -- which is
+    // the one way this change could quietly weaken the gate it replaces.
+    {
+      nlohmann::json short_pins = original;
+      short_pins["source_digests"].erase(0);
+      check(throws_invalid_argument([&] {
+              (void)trainvm::CompatibilityCatalog::load_file(
+                  write_fixture(short_pins, "short-pins.json"), cloned_root);
+            }),
+            "a referenced source with no pin is refused");
+
+      nlohmann::json extra_pins = original;
+      extra_pins["source_digests"].push_back(
+          {{"source_path", "zzz/not-referenced.py"},
+           {"source_sha256", std::string("sha256:") + std::string(64U, 'a')}});
+      check(throws_invalid_argument([&] {
+              (void)trainvm::CompatibilityCatalog::load_file(
+                  write_fixture(extra_pins, "extra-pins.json"), cloned_root);
+            }),
+            "a pin for a source no entry references is refused");
+
+      nlohmann::json unsorted = original;
+      std::swap(unsorted["source_digests"][0], unsorted["source_digests"][1]);
+      check(throws_invalid_argument([&] {
+              (void)trainvm::CompatibilityCatalog::load_file(
+                  write_fixture(unsorted, "unsorted-pins.json"), cloned_root);
+            }),
+            "unsorted source_digests are refused");
+    }
+  }
+
+  // The fold, pinned directly. The catalog used to store the whole-tree digest,
+  // and that stored constant incidentally held this computation still: change a
+  // separator and the shipped catalog stopped loading. Deriving the digest
+  // removes that accident, so the fold is pinned here instead -- over fixed
+  // pairs, so ordinary source edits never move it. The expected value is the
+  // same construction computed independently: leaf =
+  // "trainvm.compatibility-source-leaf/v1" NUL path NUL hex, tree =
+  // "trainvm.compatibility-source-tree/v1" then NUL + sha256(leaf) each.
+  {
+    const std::vector<trainvm::CompatibilitySourceDigest> pairs = {
+        {"scripts/alpha.py", "sha256:" + std::string(32U, '1') +
+                                 std::string(32U, '1')},
+        {"src/beta.py",
+         "sha256:" + std::string(32U, '2') + std::string(32U, '2')},
+    };
+    check(trainvm::CompatibilityCatalog::source_tree_digest_for_testing(pairs) ==
+              "sha256:bdd08803045d7349f5c85ca27e7fae14f2cc4b7a1aaf3b2448da9e77"
+              "3c3ed021",
+          "the source tree fold matches its independently computed value");
+    auto reordered = pairs;
+    std::swap(reordered[0], reordered[1]);
+    check(trainvm::CompatibilityCatalog::source_tree_digest_for_testing(
+              reordered) !=
+              trainvm::CompatibilityCatalog::source_tree_digest_for_testing(
+                  pairs),
+          "the fold is order sensitive, so it binds the set and its order");
   }
 
   if (failures != 0) {
