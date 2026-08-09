@@ -10,16 +10,19 @@ from urllib.parse import unquote, urlparse
 
 import pytest
 
+from test_trainvm_worker_documents import invocation_document
+
 from rwkv_lab.trainvm_worker import (
     CHECKPOINT_SNAPSHOT_SCHEMA,
     CheckpointPublicationError,
     CheckpointPublicationRequest,
     CheckpointPublisher,
     PublishedCheckpoint,
+    WorkerInvocation,
+    load_worker_invocation,
     publish_checkpoint_requests,
     resolve_resume_checkpoint,
 )
-from rwkv_lab.trainvm_worker._canonical import deep_freeze
 from rwkv_lab.trainvm_worker.checkpoint import _STATE_COMPONENTS
 
 
@@ -249,7 +252,27 @@ def resume_invocation(
     result: PublishedCheckpoint,
     *,
     attempt_id: str = "train@3",
-) -> SimpleNamespace:
+    parent_artifact_ids: list[str] | None = None,
+    optimizer_step: int = 12,
+) -> WorkerInvocation:
+    """Build the resume invocation the way the worker actually receives one.
+
+    This routes a canonical invocation document through
+    `load_worker_invocation`, so the returned object carries the real
+    `deep_freeze` production applies: every `list` becomes a `tuple` and every
+    `dict` a `MappingProxyType`. Hand-building a `SimpleNamespace` here is what
+    hid an unconditional resume rejection — `resolve_resume_checkpoint`
+    compared the manifest's `list` of parents against the authority's frozen
+    `tuple`, and `list == tuple` is False for any contents including empty.
+    The suite could not see it because no test had ever been handed the frozen
+    shape.
+
+    Anything a test needs to vary must be varied in the *document*, before the
+    load, exactly as a controller would. The returned `WorkerInvocation` is a
+    frozen dataclass holding read-only mappings, so it cannot be edited
+    afterwards — which is the point.
+    """
+
     manifest_path = result.manifest_path
     manifest_bytes = manifest_path.read_bytes()
     checkpoint = {
@@ -264,21 +287,25 @@ def resume_invocation(
         "complete": True,
         "producer_node_id": "train",
         "producer_attempt_id": "train@2",
-        "parent_artifact_ids": ["base-model-1"],
+        "parent_artifact_ids": (
+            ["base-model-1"] if parent_artifact_ids is None else parent_artifact_ids
+        ),
         "published_at_ns": 1,
     }
-    return SimpleNamespace(
-        run_id="run-1",
-        node_id="train",
-        attempt_id=attempt_id,
-        workspace=session.invocation.workspace,
-        resume={
-            "api_version": "trainvm.resume-checkpoint/v1",
-            "checkpoint": checkpoint,
-            "optimizer_step": 12,
-            "pause_command_id": "pause-1",
-            "resume_command_id": "resume-1",
-        },
+    return load_worker_invocation(
+        invocation_document(
+            run_id="run-1",
+            node_id="train",
+            attempt_id=attempt_id,
+            workspace=dict(session.invocation.workspace),
+            resume={
+                "api_version": "trainvm.resume-checkpoint/v1",
+                "checkpoint": checkpoint,
+                "optimizer_step": optimizer_step,
+                "pause_command_id": "pause-1",
+                "resume_command_id": "resume-1",
+            },
+        )
     )
 
 
@@ -329,14 +356,8 @@ def test_controller_selected_resume_accepts_frozen_parent_lineage(
         parent_artifact_ids=("base-model-1",),
     )
     invocation = resume_invocation(session, result)
-    checkpoint = dict(invocation.resume["checkpoint"])
-    checkpoint["parent_artifact_ids"] = tuple(checkpoint["parent_artifact_ids"])
-    invocation.resume = MappingProxyType(
-        {
-            **invocation.resume,
-            "checkpoint": MappingProxyType(checkpoint),
-        }
-    )
+
+    assert isinstance(invocation.resume["checkpoint"]["parent_artifact_ids"], tuple)
 
     resolved = resolve_resume_checkpoint(invocation)
 
@@ -352,9 +373,13 @@ def test_controller_selected_resume_survives_the_production_invocation_freeze(
     `_load_resume` validates `parent_artifact_ids` as a list and *then* returns
     `deep_freeze(value)`, which rewrites every list as a tuple. So a production
     resume authority never carries a list here, while the manifest — freshly
-    `canonical_loads`-ed from bytes — always does. Freezing the whole mapping
-    the way production does keeps this test honest if `deep_freeze` changes;
-    hand-rolling one tuple would not.
+    `canonical_loads`-ed from bytes — always does.
+
+    `resume_invocation` now routes through `load_worker_invocation`, so that
+    freeze is applied by the production loader rather than restated here. This
+    test asserts the *other* half of `deep_freeze` too: every mapping on the
+    path arrives as a read-only `MappingProxyType`, so a consumer that assumes
+    a mutable `dict` fails here rather than in production.
     """
 
     session = FakeCheckpointSession(tmp_path)
@@ -366,9 +391,12 @@ def test_controller_selected_resume_survives_the_production_invocation_freeze(
         parent_artifact_ids=("base-model-1",),
     )
     invocation = resume_invocation(session, result)
-    invocation.resume = deep_freeze(dict(invocation.resume))
 
+    assert isinstance(invocation.resume, MappingProxyType)
+    assert isinstance(invocation.resume["checkpoint"], MappingProxyType)
     assert isinstance(invocation.resume["checkpoint"]["parent_artifact_ids"], tuple)
+    with pytest.raises(TypeError):
+        invocation.resume["checkpoint"]["parent_artifact_ids"] = ["forged"]
 
     resolved = resolve_resume_checkpoint(invocation)
 
@@ -394,12 +422,7 @@ def test_controller_selected_resume_accepts_frozen_empty_parent_lineage(
         state_components=("model", "optimizer", "rng_torch"),
         parent_artifact_ids=(),
     )
-    invocation = resume_invocation(session, result)
-    resume = dict(invocation.resume)
-    checkpoint = dict(resume["checkpoint"])
-    checkpoint["parent_artifact_ids"] = []
-    resume["checkpoint"] = checkpoint
-    invocation.resume = deep_freeze(resume)
+    invocation = resume_invocation(session, result, parent_artifact_ids=[])
 
     assert invocation.resume["checkpoint"]["parent_artifact_ids"] == ()
 
@@ -421,8 +444,9 @@ def test_resume_checkpoint_rejects_authority_manifest_lineage_mismatch(
         state_components=("model", "optimizer", "rng_torch"),
         parent_artifact_ids=("base-model-1",),
     )
-    invocation = resume_invocation(session, result)
-    invocation.resume["checkpoint"]["parent_artifact_ids"] = ["forged-parent"]
+    invocation = resume_invocation(
+        session, result, parent_artifact_ids=["forged-parent"]
+    )
 
     with pytest.raises(CheckpointPublicationError, match="semantics"):
         resolve_resume_checkpoint(invocation)
