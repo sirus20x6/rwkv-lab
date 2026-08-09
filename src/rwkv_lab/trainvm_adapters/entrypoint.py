@@ -12,6 +12,7 @@ from rwkv_lab.trainvm_worker import (
     WorkerExecutionPhases,
     WorkerInvocation,
     WorkerObservability,
+    WorkerPublicationRuntime,
     WorkerResourcesReleasedPause,
     WorkerSession,
     WorkerStepProfiler,
@@ -44,6 +45,7 @@ InvocationExecutor = Callable[
         WorkerObservability,
         WorkerControlRuntime,
         WorkerExecutionPhases,
+        WorkerPublicationRuntime,
     ],
     HandlerResult,
 ]
@@ -85,6 +87,15 @@ def run_worker(
                     session, session.invocation
                 )
                 controls = controls_from_invocation(session, session.invocation)
+                publications = WorkerPublicationRuntime(
+                    session,
+                    checkpoint_progress=lambda step: observability.optimizer_step(
+                        step, "publishing_checkpoint"
+                    ),
+                    gallery_progress=lambda step: observability.optimizer_step(
+                        step, "publishing_eval_gallery"
+                    ),
+                )
                 execution_phases = WorkerExecutionPhases(
                     session, session.execution_phase_requests
                 )
@@ -95,14 +106,25 @@ def run_worker(
                     observability,
                     controls,
                     execution_phases,
+                    publications,
                 )
                 execution_phases.require_complete()
-            published_checkpoints = publish_checkpoint_requests(
+            terminal_checkpoints = publish_checkpoint_requests(
                 session,
                 result.checkpoint_requests,
                 progress=lambda step: observability.optimizer_step(
                     step, "publishing_checkpoint"
                 ),
+            )
+            # A live revision is already durable by the time the trainer
+            # returns, so the terminal result must report it alongside the
+            # terminal checkpoint. Gallery binding below deliberately uses only
+            # `terminal_checkpoints`: a live gallery was bound to its own
+            # same-step checkpoint when it was frozen, and re-binding by index
+            # here would attach it to whatever happened to land first.
+            published_checkpoints = (
+                *publications.published_checkpoints,
+                *terminal_checkpoints,
             )
             if published_checkpoints:
                 result = replace(
@@ -132,14 +154,18 @@ def run_worker(
                         ],
                     },
                 )
-            published_galleries = publish_eval_gallery_requests(
+            terminal_galleries = publish_eval_gallery_requests(
                 session,
                 bind_eval_gallery_checkpoints(
-                    result.eval_gallery_requests, published_checkpoints
+                    result.eval_gallery_requests, terminal_checkpoints
                 ),
                 progress=lambda step: observability.optimizer_step(
                     step, "publishing_eval_gallery"
                 ),
+            )
+            published_galleries = (
+                *publications.published_galleries,
+                *terminal_galleries,
             )
             if published_galleries:
                 result = replace(

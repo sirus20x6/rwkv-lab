@@ -514,7 +514,7 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
     monkeypatch.setattr(
         mage_flow_expert_train,
         "train",
-        lambda config, *, worker_components, worker_step_profiler, worker_observability, worker_controls, worker_execution_phases: (
+        lambda config, *, worker_components, worker_step_profiler, worker_observability, worker_controls, worker_execution_phases, worker_eval_publication: (
             observed.append(
                 (
                     config,
@@ -523,6 +523,7 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
                     worker_observability,
                     worker_controls,
                     worker_execution_phases,
+                    worker_eval_publication,
                 )
             )
         ),
@@ -2216,7 +2217,7 @@ def test_runner_reports_success_with_optimizer_step() -> None:
             else pytest.fail("wrong descriptor")
         ),
         session_factory=factory,
-        executor=lambda invocation, _profiler, _observability, _controls, _phases: HandlerResult(
+        executor=lambda invocation, _profiler, _observability, _controls, _phases, _publications: HandlerResult(
             "worker.completed", {"reason": "training_complete"}, 41
         ),
     )
@@ -2284,7 +2285,7 @@ def test_runner_publishes_handler_checkpoints_before_terminal_event(
     status = run_worker(
         bootstrap_reader=lambda _descriptor: bootstrap,
         session_factory=lambda _bootstrap: session,
-        executor=lambda _invocation, _profiler, _observability, _controls, _phases: (
+        executor=lambda _invocation, _profiler, _observability, _controls, _phases, _publications: (
             HandlerResult(
                 "worker.completed",
                 {"reason": "training_complete"},
@@ -2329,7 +2330,7 @@ def test_runner_publishes_handler_artifacts_before_terminal_event(
     status = run_worker(
         bootstrap_reader=lambda _descriptor: bootstrap,
         session_factory=lambda _bootstrap: session,
-        executor=lambda _invocation, _profiler, _observability, _controls, _phases: (
+        executor=lambda _invocation, _profiler, _observability, _controls, _phases, _publications: (
             HandlerResult(
                 "worker.completed",
                 {"reason": "training_complete"},
@@ -2384,7 +2385,7 @@ def test_runner_publishes_handler_eval_galleries_before_terminal_event(
     status = run_worker(
         bootstrap_reader=lambda _descriptor: bootstrap,
         session_factory=lambda _bootstrap: session,
-        executor=lambda _invocation, _profiler, _observability, _controls, _phases: (
+        executor=lambda _invocation, _profiler, _observability, _controls, _phases, _publications: (
             HandlerResult(
                 "worker.completed",
                 {"reason": "evaluation_complete"},
@@ -2418,6 +2419,7 @@ def test_runner_reports_sanitized_failure_and_skips_completed_replay() -> None:
         _observability: object,
         _controls: object,
         _phases: object,
+        _publications: object,
     ) -> HandlerResult:
         raise RuntimeError("secret dataset path")
 
@@ -2443,7 +2445,7 @@ def test_runner_reports_sanitized_failure_and_skips_completed_replay() -> None:
         run_worker(
             bootstrap_reader=lambda _descriptor: bootstrap,
             session_factory=lambda _bootstrap: completed,
-            executor=lambda _invocation, _profiler, _observability, _controls, _phases: (
+            executor=lambda _invocation, _profiler, _observability, _controls, _phases, _publications: (
                 pytest.fail("replayed completed work")
             ),
         )
@@ -2488,3 +2490,123 @@ def test_cli_accepts_only_the_authority_descriptor(monkeypatch) -> None:
     for arguments in ([], ["--trainvm-bootstrap-fd=5"], ["--help"]):
         with pytest.raises(WorkerEntrypointError, match="only its fixed"):
             main(arguments)
+
+
+def test_runner_reports_live_revisions_beside_the_terminal_checkpoint(
+    monkeypatch, tmp_path
+) -> None:
+    """A live revision is already durable, so the terminal payload must name it.
+
+    The gallery binding below must still use only the terminal checkpoints: a
+    live gallery was bound to its own same-step checkpoint when it was frozen,
+    and re-binding by index here would attach it to whichever checkpoint
+    happened to be first in the combined tuple.
+    """
+
+    from rwkv_lab.trainvm_worker import (
+        CheckpointPublicationRequest,
+        EvalGalleryPublicationRequest,
+    )
+
+    bootstrap = SimpleNamespace(run_id="run-1")
+    session = FakeSession(bootstrap)
+    terminal_checkpoint = CheckpointPublicationRequest(
+        tmp_path,
+        optimizer_step=40,
+        resume_grade="compatible",
+        state_components=("model",),
+    )
+    live_checkpoint = CheckpointPublicationRequest(
+        tmp_path,
+        optimizer_step=20,
+        resume_grade="compatible",
+        state_components=("model",),
+    )
+    terminal_gallery = EvalGalleryPublicationRequest(
+        output_name="eval_gallery",
+        step=40,
+        step_domain="optimizer_step",
+        evaluator_profile_digest="sha256:" + "d" * 64,
+        use_policy_digest="sha256:" + "e" * 64,
+        items=(),
+        checkpoint_request_index=0,
+    )
+    live_gallery = EvalGalleryPublicationRequest(
+        output_name="eval_gallery",
+        step=20,
+        step_domain="optimizer_step",
+        evaluator_profile_digest="sha256:" + "d" * 64,
+        use_policy_digest="sha256:" + "e" * 64,
+        items=(),
+        checkpoint_request_index=0,
+    )
+    bound: list[tuple[object, ...]] = []
+
+    def publish_checkpoints(_session, requests, *, progress):
+        published = []
+        for request in requests:
+            progress(request.optimizer_step)
+            published.append(
+                SimpleNamespace(
+                    artifact_id=f"checkpoint-{request.optimizer_step}",
+                    manifest_sha256="sha256:" + "a" * 64,
+                )
+            )
+        return tuple(published)
+
+    def publish_galleries(_session, requests, *, progress):
+        published = []
+        for request in requests:
+            progress(request.step)
+            published.append(
+                SimpleNamespace(artifact_id=f"eval-gallery-{request.step}")
+            )
+        return tuple(published)
+
+    def bind(requests, checkpoints):
+        bound.append(tuple(checkpoints))
+        return tuple(requests)
+
+    for module in (
+        "rwkv_lab.trainvm_adapters.entrypoint",
+        "rwkv_lab.trainvm_worker.publication",
+    ):
+        monkeypatch.setattr(f"{module}.publish_checkpoint_requests", publish_checkpoints)
+        monkeypatch.setattr(
+            f"{module}.publish_eval_gallery_requests", publish_galleries
+        )
+    monkeypatch.setattr(
+        "rwkv_lab.trainvm_worker.publication.bind_eval_gallery_checkpoints",
+        lambda requests, _checkpoints: tuple(requests),
+    )
+    monkeypatch.setattr(
+        "rwkv_lab.trainvm_adapters.entrypoint.bind_eval_gallery_checkpoints", bind
+    )
+
+    def executor(_invocation, _profiler, _observability, _controls, _phases, publications):
+        publications.publish_eval_revision(live_checkpoint, live_gallery)
+        return HandlerResult(
+            "worker.completed",
+            {"reason": "training_complete"},
+            40,
+            (terminal_checkpoint,),
+            eval_gallery_requests=(terminal_gallery,),
+        )
+
+    status = run_worker(
+        bootstrap_reader=lambda _descriptor: bootstrap,
+        session_factory=lambda _bootstrap: session,
+        executor=executor,
+    )
+    assert status == 0
+    event_type, payload, step = session.finished[0]
+    assert event_type == "worker.completed"
+    assert step == 40
+    assert payload["checkpoint_artifact_ids"] == ["checkpoint-20", "checkpoint-40"]
+    assert payload["eval_gallery_artifact_ids"] == [
+        "eval-gallery-20",
+        "eval-gallery-40",
+    ]
+    assert [
+        checkpoint.artifact_id for checkpoint in bound[0]
+    ] == ["checkpoint-40"]
