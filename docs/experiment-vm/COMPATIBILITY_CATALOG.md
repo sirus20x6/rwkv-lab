@@ -10,7 +10,15 @@ The catalog is evidence only. Its root `authority` is fixed to
 capability, credential, or execution method. Only the sealed adapter and host-execution registries
 can authorize work.
 
-The reviewed v1 inventory contains 156 effect-specific records over 145 unique source files.
+The reviewed v1 inventory contains 156 effect-specific records over 155 unique source files.
+Every figure this document states about the catalog — that pair, the 155 referenced sources and
+155 pins named below, and the disposition overlaps — is checked against the catalog by
+`scripts/ci_catalog_doc_counts_gate.py`, which prints the correct value and can splice it in with
+`--write`. It is checked because it was wrong: this sentence said 145 unique source files while the
+catalog held 155, and had for long enough that the paragraphs below quoting 155 were disagreeing
+with it in plain sight. 156 survived only because it is the length of a compiled array. Rewording a
+sentence the gate reads fails the gate rather than quietly retiring the check, so update the
+pattern it names.
 Its closed families are `rwkv`, `transformer`, `vision_multimodal`, `mageflow_diffusion`,
 `conversion_distillation`, `rwkv_posttraining`, `rwkv_rlvr`, `external_trainer`, `data_cache`,
 `evaluation_profile_export`, and `control_plane`. The broad `transformer` name is intentional:
