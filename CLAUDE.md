@@ -113,6 +113,40 @@ documentation too.
 - File a card whenever you notice something worth fixing. A finding that is not
   on the board is lost when the session ends.
 
+### Check mergeability BEFORE you read the checks
+
+```bash
+gh pr view <n> --json mergeStateStatus   # DIRTY means conflicting
+```
+
+`pull_request` workflows run against the `refs/pull/N/merge` ref, and GitHub
+cannot compute that ref while the PR conflicts with its base. So a conflicting
+PR gets **no workflow run at all** — not queued, not failed, absent.
+`gh pr checks <n>` reports `no checks reported on the '<branch>' branch`, and
+`gh api .../actions/runs?branch=<branch>` returns `total_count: 0`.
+
+That is indistinguishable from CI not having started, and it costs in two
+different ways depending on how you read it. Waiting for green means waiting
+forever for a build that will never exist — 25 minutes and three pushes on one
+card, including a close/reopen attempted as a re-trigger, which also did
+nothing. Worse, a script that counts failing checks sees **zero failed, zero
+running** and concludes the PR is ready. Absence of checks is not a state most
+logic models, so it inherits whatever the default branch happens to be, and
+"nothing is failing" is the tempting default.
+
+Hence the ordering: **if `mergeStateStatus` is DIRTY, the check counts carry no
+information and must not be interpreted at all.** Rebase, push, and a run
+appears within about thirty seconds. Any tooling that reads check state has to
+short-circuit on mergeability first; documenting only "no checks may mean
+conflicting" still lets a classifier reach the wrong conclusion.
+
+Expect this often here rather than rarely. Several agents work this board at
+once and main can move every few minutes, and **every** PR that touches a
+classified source conflicts on the same regenerated pin files — two PRs need
+not touch the same code, only any classified source. At one point on
+2026-08-09 all six open PRs were simultaneously green and conflicting, none of
+them blocked by anything in its own change.
+
 ## Running the gates locally
 
 ```bash
@@ -165,6 +199,29 @@ If step 4 changed the scripts or RWKV catalog, rebuild and run
 `ctest --test-dir trainvm/build -R source_disposition_catalog` — it prints each
 computed digest beside its name, which is how you pin the fifth and sixth values
 in `trainvm/tests/source_disposition_catalog_tests.cpp` without guessing.
+
+### Pin conflicts on a rebase are mechanical — never resolve them by hand
+
+Because every PR touching a classified source rewrites the same pin files, a
+rebase conflicts in them constantly. Do **not** resolve those hunks by editing
+them or by picking a side. A pin is a digest of content: whichever side you
+choose was computed against a tree that no longer exists, so both sides are
+wrong after the merge, and the result is a plausible-looking digest that
+matches nothing.
+
+Take the base version and regenerate:
+
+```bash
+git checkout --theirs docs/experiment-vm/compatibility-workflows.v1.json \
+                      docs/experiment-vm/source-dispositions.*.v1.json
+# then re-run the four numbered steps above
+```
+
+(During a rebase `--theirs` is the commit being replayed and `--ours` is the
+new base; check which you have before trusting either.) The pinned digests in
+`trainvm/tests/source_disposition_catalog_tests.cpp` are recovered the same way
+— take one side, then let the ctest print the two correct values beside their
+names.
 
 There is deliberately no single `refresh-all` script yet. Writing one is filed,
 and the reason it is not a five-minute job is worth knowing before you start:
