@@ -42,16 +42,27 @@ run_suite() {
   fi
 }
 
+# Every suite that is not the GPU phase runs behind the accelerator mask. The
+# mask has to be applied before the process starts: pytest imports test modules
+# before it filters on markers, so a `-m "not gpu"` run still evaluates every
+# module-level `torch.cuda.is_available()` and initializes the driver that is
+# also driving this host's display. tests/conftest.py repeats the mask for
+# direct `pytest` invocations, which this launcher cannot reach.
+run_non_gpu_suite() {
+  local name="$1"; shift
+  run_suite "$name" python3 "$repo_root/scripts/non_gpu_environment.py" "$@"
+}
+
 echo "== TrainVM acceptance =="
 
 # Native: the authority implementation. Requires GCC 16 with -freflection.
 if command -v cmake >/dev/null && command -v g++ >/dev/null &&
    [[ "$(g++ -dumpversion | cut -d. -f1)" -ge 16 ]]; then
-  run_suite native-configure cmake -S trainvm -B "$build_dir" -DCMAKE_BUILD_TYPE=Debug
-  run_suite native-build cmake --build "$build_dir" -j
-  run_suite native-ctest ctest --test-dir "$build_dir" --output-on-failure
+  run_non_gpu_suite native-configure cmake -S trainvm -B "$build_dir" -DCMAKE_BUILD_TYPE=Debug
+  run_non_gpu_suite native-build cmake --build "$build_dir" -j
+  run_non_gpu_suite native-ctest ctest --test-dir "$build_dir" --output-on-failure
   if [[ -x "$build_dir/trainvm" ]]; then
-    run_suite compatibility-catalog "$build_dir/trainvm" validate-catalog \
+    run_non_gpu_suite compatibility-catalog "$build_dir/trainvm" validate-catalog \
       "$repo_root/docs/experiment-vm/compatibility-workflows.v1.json" "$repo_root"
   else
     record compatibility-catalog skipped "trainvm binary was not built"
@@ -62,24 +73,28 @@ else
 fi
 
 # Portable halves, all runnable without the native toolchain.
-run_suite schema-golden python3 scripts/validate_experiment_documents.py
-run_suite authoring-matrix python3 scripts/validate_no_code_authoring_matrix.py
-run_suite coverage-gate python3 scripts/ci_coverage_gate.py -m "not gpu"
-run_suite python-cpu python3 -m pytest -q -n "${PYTEST_WORKERS:-auto}" \
+run_non_gpu_suite schema-golden python3 scripts/validate_experiment_documents.py
+run_non_gpu_suite authoring-matrix python3 scripts/validate_no_code_authoring_matrix.py
+# The coverage gate is a `--collect-only` run, so it imports every test module
+# and is exactly as capable of initializing the driver as the suite itself.
+run_non_gpu_suite coverage-gate python3 scripts/ci_coverage_gate.py -m "not gpu"
+run_non_gpu_suite python-cpu python3 -m pytest -q -n "${PYTEST_WORKERS:-auto}" \
   --dist worksteal -m "not gpu" tests \
   --junitxml="$evidence_dir/python-cpu.xml"
 
 if command -v go >/dev/null; then
-  (cd dashboard && go build ./... && go vet ./... && go test ./...) \
-    >"$evidence_dir/go.log" 2>&1 &&
-    record go passed "$evidence_dir/go.log" ||
-    record go FAILED "$evidence_dir/go.log"
+  run_non_gpu_suite go bash -c \
+    'cd "$1/dashboard" && go build ./... && go vet ./... && go test ./...' \
+    _ "$repo_root"
 else
   record go skipped "go toolchain not installed"
 fi
 
 if [[ "$run_gpu" == "1" ]]; then
-  run_suite gpu python3 -m pytest -q -m gpu tests \
+  # The one place accelerator access is granted, and it is granted explicitly:
+  # the suite is opt-in twice over, by --gpu and by the marker expression.
+  run_suite gpu env TRAINVM_TEST_ACCELERATOR_ACCESS=1 \
+    python3 -m pytest -q -m gpu tests \
     --junitxml="$evidence_dir/gpu.xml"
 else
   record gpu skipped "not requested; pass --gpu (shares the device with live training)"

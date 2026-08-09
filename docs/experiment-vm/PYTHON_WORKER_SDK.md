@@ -327,7 +327,7 @@ to a worker from a published one.
 artifact for the currently migrated training adapters. The stored zipapp contains the complete
 `rwkv_lab` Python source surface, the checked-in TrainVM protobuf package, one fixed `__main__`, and
 an embedded canonical per-member SHA-256 manifest. It also embeds a
-`trainvm.python-bootstrap-runtime-closure/v3` manifest produced by the exact copied interpreter.
+`trainvm.python-bootstrap-runtime-closure/v4` manifest produced by the exact copied interpreter.
 That manifest binds the interpreter identity, Python standard-library tree, declared root
 distributions, and their recursively complete installed-file closure. Since v3 it also closes over
 what the dynamic loader would then load underneath that file closure, which the file closure by
@@ -336,6 +336,22 @@ itself cannot express: the ELF graph reachable from the closure and the import p
 NVIDIA driver identity — which lives in the kernel and so is carried by no file digest — and a
 kernel registry inventorying every loadable object on the import path, scoped to the directories
 rather than to the closure's distributions so an extension no distribution claims is still seen.
+
+v4 splits that driver identity in two. `driver_identity` is what is compared: the version token from
+`/proc/driver/nvidia/version` plus the GNU build ID of the loaded `nvidia` module, read from
+`/sys/module/nvidia/notes/.note.gnu.build-id`. `driver_report` is the whole first line of
+`/proc/driver/nvidia/version`, recorded and quoted in a rejection but never compared. v3 compared
+that whole line, which ends in the user and host that compiled the module, so a DKMS rebuild — or
+the same driver version built on another machine — read as a driver change: the closure refused the
+host and every cache namespace went cold for a bit-for-bit compatible driver. The whole line was
+never a legal identity downstream either, since it contains spaces, parentheses and `@` and
+`fixed_public_identity` in `trainvm/src/cache_namespace.cpp` accepts none of them. The build ID is
+kept because the version token alone is too weak on its own: it is the linker's hash of the module's
+own contents, so a rebuild producing identical bytes reads as identical and one producing different
+bytes reads as different. A v3 manifest is refused by its `api_version`, so closures sealed against
+the old whole-line form must be resealed — a one-time cold cache, taken deliberately in preference
+to accepting an old-format identity as equal to a new-format one.
+
 The system search path is not re-derived at verification time; the `ld.so.conf` files that produce
 it are pinned instead. The reflected native
 `trainvm.rwkv-lab-worker-runtime-requirements/v1` contract is the sole adapter-to-root-distribution
@@ -481,6 +497,7 @@ scripts/materialize_trainvm_worker_deployment.py \
   --source-root /src/rwkv-lab/src \
   --output-directory /opt/trainvm/workers/rwkv-lab-v1 \
   --working-directory /srv/trainvm/work \
+  --runtime-digest-cache /opt/trainvm/cache/runtime-digests.json \
   --trusted-root /opt/trainvm \
   --trusted-root /srv/trainvm
 ```
@@ -491,6 +508,27 @@ publishes contract-grouped worker zipapps and closure manifests plus `adapters.j
 share one runtime group; Qwen and RWKV remain separate. `--python` remains a shared-root fixture and
 compatibility mode. Materialization is byte-idempotent and refuses to replace changed outputs
 unless the operator explicitly supplies `--replace`.
+
+`--runtime-digest-cache` stops the builder re-reading an unchanged multi-gigabyte package closure
+on every deployment; it is passed straight through to the closure builder's own `--digest-cache`.
+A cached digest is bound to the open descriptor's device, inode, mode, ownership, size, mtime **and
+ctime**, and the descriptor is reattested after the digest is settled whether it came from the
+cache or from a read. `st_ctime_ns` is the field that makes this safe rather than merely fast:
+`st_mtime_ns` is forgeable with no privilege by the file's own owner via `utimensat`, so an
+mtime-keyed cache can be made to serve a stale digest for changed bytes, while `st_ctime_ns` is
+kernel-maintained and moves on every write regardless. It is also why no boot fence is needed
+against `st_ino` reuse — a recycled inode carries its own creation ctime, which would have to
+collide to the nanosecond.
+
+The cache file itself must be a bounded, owner-only, non-group-or-world-writable regular file
+carrying the `trainvm.runtime-closure-digest-cache/v1` schema; anything else is rejected rather
+than read leniently. Without the flag the cache still exists for the duration of one
+materialization, so runtime groups sharing a stdlib hit it. Measured on this host's live
+torch/grpcio/pillow/protobuf closure — 19,969 files, 8.14 GB pinned — a cold build hashes 10.18 GB
+across 20,129 opened descriptors and a warm one hashes 4.05 MB across 234, for a byte-identical
+closure manifest. The cache affects build latency only and is never part of worker launch
+authority: `rwkv_lab.trainvm_runtime_guard` re-reads every pinned byte at worker start and has no
+cache, deliberately.
 
 The interpreter path must be a regular executable, not the usual symlink created by many virtual
 environment tools. Hostd refuses symlink traversal for launch artifacts, and silently resolving a

@@ -132,7 +132,7 @@ int main() {
       scripts_checked, std::nullopt, known_ids);
   check(scripts_catalog.entries().size() == 129U,
         "script disposition catalog covers all 129 reviewed scripts");
-  check(scripts_catalog.catalog_digest() == "sha256:e45a3d56f9498124fa0c717d30ac09a9e8ee188b2e5821f775d7b08339b12cb3",
+  check(scripts_catalog.catalog_digest() == "sha256:7cd380a910d2bf0a47713cc5eec57d9d2e57190d251eb7104e49f89b2d666108",
         std::string("script catalog pins the exact reviewed canonical mapping") +
             " (computed " + scripts_catalog.catalog_digest() + ")");
   std::map<trainvm::SourceDispositionClass, std::size_t> classes;

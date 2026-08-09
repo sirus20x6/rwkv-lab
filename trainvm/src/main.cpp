@@ -74,7 +74,8 @@ void usage() {
          "<host-launches.json> [--training-component-registry "
          "<training-components.json>] [--hostd-client <hostd-client.json>] "
          "[--worker-socket-gid <gid>] "
-         "[--recipe-registry <recipe-profiles.json>]\n"
+         "[--recipe-registry <recipe-profiles.json>] "
+         "[--cache-evidence-root <receipts/>]\n"
       << "  trainvm simulate <experiment.json> <events.jsonl> [run-id]\n"
       << "  trainvm journal init <journal.db>\n"
       << "  trainvm journal verify <journal.db>\n"
@@ -695,9 +696,9 @@ int serve_command(int argc, char** argv) {
   std::map<std::string_view, std::string_view> options;
   static constexpr std::array<std::string_view, 4> required = {
       "--journal", "--socket", "--registry", "--host-launch-registry"};
-  static constexpr std::array<std::string_view, 4> optional = {
+  static constexpr std::array<std::string_view, 5> optional = {
       "--training-component-registry", "--hostd-client", "--recipe-registry",
-      "--worker-socket-gid"};
+      "--worker-socket-gid", "--cache-evidence-root"};
   if (argc % 2 != 0) {
     usage();
     return trainvm::kExitUsage;
@@ -741,6 +742,16 @@ int serve_command(int argc, char** argv) {
   }
   const auto components = options.find("--training-component-registry");
   const auto recipes = options.find("--recipe-registry");
+  // Absolute and lexically normal, resolved here for the same reason
+  // --hostd-client is: a relative path read from a command line means
+  // whatever the daemon's working directory happened to be. The service
+  // attests the rest of the root's provisioning at construction.
+  std::optional<std::filesystem::path> cache_evidence_root;
+  if (const auto root = options.find("--cache-evidence-root");
+      root != options.end()) {
+    cache_evidence_root =
+        std::filesystem::absolute(root->second).lexically_normal();
+  }
   return trainvm::serve(
       options["--journal"], options["--socket"],
       trainvm::AdapterRegistry::load_file(options["--registry"]),
@@ -752,7 +763,8 @@ int serve_command(int argc, char** argv) {
       recipes == options.end()
           ? std::filesystem::path(
                 std::string(trainvm::kInstalledRecipeProfilePath))
-          : std::filesystem::path(recipes->second));
+          : std::filesystem::path(recipes->second),
+      std::move(cache_evidence_root));
 }
 
 int inspect_rwkv_lab_worker_command(std::string code_fingerprint) {

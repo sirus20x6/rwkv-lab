@@ -141,6 +141,32 @@ documentation too.
 - File a card whenever you notice something worth fixing. A finding that is not
   on the board is lost when the session ends.
 
+### Done means merged to main, and a Done card must cite the PR that merged it
+
+The board's Done column is not a private note about how far you got. Other
+cards are written against it: `card-5020d5ca` instructed its reader to model a
+new cache on "the safe owner-only inode digest cache the runtime-closure
+materializer already has", because the card for that cache sat in Done. It was
+not on main. It was on `integration/parity-candidate` and a handful of card
+branches, and the reader spent an investigation discovering there was nothing to
+read. So:
+
+- **Move a card to Done only when its work is on `origin/main`.** Green CI on an
+  open PR is not Done. Merged into an integration branch is not Done. Working
+  perfectly in your worktree is certainly not Done.
+- **Record `result_pr_url` when you complete it.** Under squash merging that PR
+  number is the only decisive evidence the work landed — see the ancestry
+  section above for why every git-native check silently fails here. A completion
+  comment citing a branch-local sha is not evidence and will mislead the next
+  reader exactly as it did this time.
+- If the work is real but stopped short of main, say where it lives — in a
+  comment, naming the branch and the commits — and leave the card out of Done.
+  "Implemented at `<sha>`" is a true sentence that reads as completion; it is
+  the specific phrasing that caused this.
+
+A card in Done is a promise that `git grep` against `origin/main` will find the
+thing. Anything weaker belongs in a comment.
+
 ### Check mergeability BEFORE you read the checks
 
 ```bash
@@ -281,6 +307,47 @@ done.
 The cost of not having this written down was five days: three cards recorded
 work as complete, citing shas, that had never reached main, and nobody noticed
 because the obvious check silently does not work here.
+
+### Before you cherry-pick anything a card calls "stranded"
+
+A sweep of all 239 cards on 2026-08-09 found 173 citing a sha: 125 present on
+main, 19 stranded, 16 partially present, and **13 superseded** — the identifier
+absent from main while its subsystem is present and *larger*. Superseded is the
+dangerous verdict, because the port applies cleanly, CI stays green, and a
+weaker mechanism lands beside the working one.
+
+Two numbers from that sweep are worth carrying:
+
+- An automated line-matching pass triaged all 173. Hand review of the 44
+  ambiguous ones **overturned 31 — 70% — in both directions.** Line-matching
+  triages; it cannot conclude.
+- 56 of 126 Done cards record no merged-PR reference at all, so for those the
+  citation is the only trail and it is the unreliable kind.
+
+**`1c91acd` must never be cherry-picked.** It is cited on two cards that both
+read as done. It sets, on `deploy/trainvm-hostd.service`:
+
+```ini
+CapabilityBoundingSet=CAP_BPF CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_KILL \
+  CAP_PERFMON CAP_SETGID CAP_SETUID CAP_SYS_ADMIN CAP_SYS_RESOURCE
+AmbientCapabilities=(the same nine)
+```
+
+Main deliberately carries both as **empty**, with `NoNewPrivileges=yes` and the
+comment *"Nothing left needs a privilege transition, and this makes the daemon's
+own guarantee match the one it demands of its workers."* Restoring that commit
+would re-privilege a daemon that was intentionally stripped — and it ships its
+own passing test (`test_hostd_can_drop_worker_credentials_inside_its_capability_bound`)
+which asserts those capabilities are *present*, so the regression arrives green.
+
+That is the general shape to fear: **a superseded commit brings its own tests,
+and those tests encode the old invariant.** A green suite after a port proves
+the port is self-consistent, not that it is wanted. Before porting anything that
+touches privileges, sandboxing, or a security boundary, diff the *current* file
+against the commit and read what main says about why it looks the way it does.
+
+`card-ab464dc6` holds the full do-not-port hazard list; `card-2ae29669` tracks
+making the merged-PR reference structural instead of a prose convention.
 
 ## Running the gates locally
 
