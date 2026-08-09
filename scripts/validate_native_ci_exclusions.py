@@ -13,6 +13,16 @@ as adding one, so both fail until declared.
 
 It also prints the skipped suites and their reasons, so a reader of the CI log
 can see what did not run instead of inferring it from a passing job.
+
+And it prints where the excluded suites last actually ran. The declaration says
+they are covered by `scripts/acceptance.sh` on a real host, but nothing
+schedules that script, so "covered" only ever meant "runnable". Echoing the last
+line of the attestation log puts the answer in the CI log of every run: either a
+commit and a date a reader can compare against `git log`, or a plain statement
+that no run has ever been attested. It is reported, never enforced -- no hosted
+runner can produce a real-host attestation, so a gate here could only ever be
+red, and the whole reason these four are excluded is that a permanently red
+signal is one everybody learns to ignore.
 """
 
 from __future__ import annotations
@@ -92,6 +102,52 @@ def failures(declaration: dict, workflow_text: str) -> list[str]:
     return problems
 
 
+def attestation_report(declaration: dict) -> list[str]:
+    """Say when the excluded suites last ran for real, or that they never have.
+
+    Reported, not enforced -- see the module docstring. The failure modes here
+    are all "cannot tell", and every one of them prints a sentence saying so
+    rather than falling silent, because silence is the state this log exists to
+    end.
+    """
+    relative = declaration.get("attested_by")
+    if not relative:
+        return ["  no attestation log is declared; nothing records whether the "
+                "above have ever run"]
+
+    log = REPOSITORY / relative
+    if not log.is_file():
+        return [f"  MISSING attestation log {relative}: no run is recorded"]
+
+    lines = [line for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not lines:
+        return [
+            f"  {relative} is empty: NO real-host acceptance has ever been "
+            "attested, so the suites above are unverified on every host",
+        ]
+
+    try:
+        last = json.loads(lines[-1])
+    except json.JSONDecodeError:
+        return [f"  {relative} ends in a line that is not JSON; cannot report"]
+
+    report = [
+        f"  last real-host acceptance: {last.get('result', '?')} at "
+        f"{str(last.get('commit', '?'))[:12]} on {last.get('host', '?')} "
+        f"({last.get('ran_at', '?')}), {len(lines)} run(s) attested",
+    ]
+    if last.get("dirty_worktree"):
+        report.append(
+            "  that run was against a DIRTY worktree, so it attests the "
+            "modifications rather than the commit named")
+    for suite, status in (last.get("hosted_ci_excluded_suites") or {}).items():
+        report.append(f"    {suite}: {status}")
+    report.append(
+        "  compare that commit against git log; a distant or absent one means "
+        "the suites above are unchecked right now")
+    return report
+
+
 def main() -> int:
     declaration = json.loads(DECLARATION.read_text(encoding="utf-8"))
     workflow = REPOSITORY / declaration.get("workflow", ".github/workflows/tests.yml")
@@ -104,7 +160,9 @@ def main() -> int:
     if not problems:
         for entry in entries:
             print(f"  NOT RUN in hosted CI: {entry['suite']} — {entry['reason']}")
-        print(f"  all of the above run in {declaration['covered_by']}")
+        print(f"  all of the above are covered by {declaration['covered_by']}")
+        for line in attestation_report(declaration):
+            print(line)
 
     # Last, and after the per-suite listing, so the verdict is the line a
     # reader sees when the log is truncated. Previously the failing path wrote

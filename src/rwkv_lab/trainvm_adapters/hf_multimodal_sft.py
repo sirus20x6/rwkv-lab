@@ -3229,6 +3229,7 @@ def run_hf_multimodal_sft(
         EvalGalleryPublicationRequest,
         FinalEvaluationPublicationRequest,
         GalleryImage,
+        OptimizerMutationSentinel,
         PublishedCheckpoint,
     )
 
@@ -3520,7 +3521,14 @@ def run_hf_multimodal_sft(
         )
 
     checkpoint_sequence = 0
-    attempt_baseline_examples_published = False
+    # A reconnecting worker whose baseline evidence the controller already
+    # replayed from its journal owes nothing further: republishing would mint a
+    # second artifact for evidence that is already durable. Recovering
+    # satisfaction this way never licenses skipping the pre-mutation boundary —
+    # the sentinel below still binds every mutation to one crossing.
+    attempt_baseline_examples_published = bool(
+        controls.step_zero_eval_gate_satisfied
+    )
     def stage_checkpoint_request() -> Any:
         nonlocal checkpoint_sequence
         checkpoint_sequence += 1
@@ -3953,6 +3961,23 @@ def run_hf_multimodal_sft(
         elif not data.test_records:
             baseline_complete = True
 
+    # The controller gates this attempt at an immutable baseline step: zero for
+    # a fresh attempt, the resume checkpoint's step for a replacement one. The
+    # evidence above and below is keyed to `step` — never to a literal zero,
+    # which would leave a resumed attempt owing evidence at a step it can never
+    # reach again while the boundary refuses every mutation until it exists.
+    # Disagreement is a deadlock either way, so say so here rather than stalling
+    # at the first crossing with nothing to read.
+    if (
+        controls.step_zero_eval_gate_required
+        and not attempt_baseline_examples_published
+        and step != controls.attempt_baseline_optimizer_step
+    ):
+        raise HFMultimodalSFTError(
+            "HF operation resumed at a step the controller does not gate: "
+            f"{step} != {controls.attempt_baseline_optimizer_step}"
+        )
+
     if not attempt_baseline_examples_published:
         # A resumed attempt is gated at its OWN baseline: the controller filters
         # the evidence it will accept by attempt id, so the previous attempt's
@@ -4001,155 +4026,175 @@ def run_hf_multimodal_sft(
 
     stack.model.train()
     stack.optimizer.zero_grad(set_to_none=True)
-    while step < maximum_steps:
-        started = time.perf_counter()
-        tokens = 0
-        gradient_units = 0
-        losses: list[tuple[float, int]] = []
-        preference_margins: list[float] = []
-        for _ in stack.accumulation.microbatch_indices():
-            controls.microbatch(step + 1, reject_live_controls)
-            with step_profiler.input_wait():
-                samples = data.next_training_samples()
-            if isinstance(stack.objective, CachedReferenceDPOObjective):
-                preference = codec.encode_preference(
-                    samples, stack.objective.configuration
-                ).to(selected_device)
-                with _autocast(stack.precision, selected_device):
-                    loss, margin, _chosen, _rejected = backward_cached_dpo_pair(
-                        stack.model,
-                        stack.objective,
-                        preference,
-                        ignore_index=codec.collator_configuration.label_pad_token_id,
+    # Installed for the whole loop, so the ordering below is enforced against
+    # every optimizer instance in the process rather than the one this module
+    # constructed. A fused update, a second optimizer, or an edit that moved
+    # the crossing below the mutation all fail closed here instead of
+    # mutating parameters the controller never authorized.
+    mutation_sentinel = OptimizerMutationSentinel()
+    with mutation_sentinel.installed():
+        while step < maximum_steps:
+            started = time.perf_counter()
+            tokens = 0
+            gradient_units = 0
+            losses: list[tuple[float, int]] = []
+            preference_margins: list[float] = []
+            for _ in stack.accumulation.microbatch_indices():
+                controls.microbatch(step + 1, reject_live_controls)
+                with step_profiler.input_wait():
+                    samples = data.next_training_samples()
+                if isinstance(stack.objective, CachedReferenceDPOObjective):
+                    preference = codec.encode_preference(
+                        samples, stack.objective.configuration
+                    ).to(selected_device)
+                    with _autocast(stack.precision, selected_device):
+                        loss, margin, _chosen, _rejected = backward_cached_dpo_pair(
+                            stack.model,
+                            stack.objective,
+                            preference,
+                            ignore_index=codec.collator_configuration.label_pad_token_id,
+                        )
+                    pair_count = preference.pairs
+                    losses.append(
+                        (float(stack.precision.reduce(loss.detach()).cpu()), pair_count)
                     )
-                pair_count = preference.pairs
-                losses.append(
-                    (float(stack.precision.reduce(loss.detach()).cpu()), pair_count)
-                )
-                preference_margins.append(float(margin.float().mean().cpu()))
-                gradient_units += pair_count
-                tokens += preference.supervised_tokens
-            else:
-                batch = codec.encode(samples).to(selected_device)
-                with _autocast(stack.precision, selected_device):
-                    loss = component_causal_loss(
-                        stack.model,
-                        stack.objective,
-                        batch.tensors,
-                        ignore_index=codec.collator_configuration.label_pad_token_id,
+                    preference_margins.append(float(margin.float().mean().cpu()))
+                    gradient_units += pair_count
+                    tokens += preference.supervised_tokens
+                else:
+                    batch = codec.encode(samples).to(selected_device)
+                    with _autocast(stack.precision, selected_device):
+                        loss = component_causal_loss(
+                            stack.model,
+                            stack.objective,
+                            batch.tensors,
+                            ignore_index=codec.collator_configuration.label_pad_token_id,
+                        )
+                    # The registered objective is a token mean. Backpropagating each
+                    # microbatch token sum and normalizing once preserves that exact
+                    # objective when buckets contain unequal supervised-token counts.
+                    (loss * batch.supervised_tokens).backward()
+                    losses.append(
+                        (
+                            float(stack.precision.reduce(loss.detach()).cpu()),
+                            batch.supervised_tokens,
+                        )
                     )
-                # The registered objective is a token mean. Backpropagating each
-                # microbatch token sum and normalizing once preserves that exact
-                # objective when buckets contain unequal supervised-token counts.
-                (loss * batch.supervised_tokens).backward()
-                losses.append(
-                    (
-                        float(stack.precision.reduce(loss.detach()).cpu()),
-                        batch.supervised_tokens,
-                    )
-                )
-                gradient_units += batch.supervised_tokens
-                tokens += batch.supervised_tokens
-        trainable_parameters = tuple(
-            parameter for parameter in stack.model.parameters() if parameter.requires_grad
-        )
-        normalize_token_mean_gradients(trainable_parameters, gradient_units)
-        components.gradient_clipping(
-            trainable_parameters
-        )
-        stack.optimizer.step()
-        step += 1
-        stack.learning_rate_schedule.step()
-        stack.weight_decay_schedule.step(step)
-        stack.optimizer.zero_grad(set_to_none=True)
-        step_profiler.step(step)
-        elapsed = max(time.perf_counter() - started, 1.0e-9)
-        observability.publish_if_declared(
-            "train.loss", weighted_loss(losses), step=step
-        )
-        observability.publish_if_declared(
-            "train.tokens_per_second", tokens / elapsed, step=step
-        )
-        if preference_margins:
+                    gradient_units += batch.supervised_tokens
+                    tokens += batch.supervised_tokens
+            trainable_parameters = tuple(
+                parameter for parameter in stack.model.parameters() if parameter.requires_grad
+            )
+            normalize_token_mean_gradients(trainable_parameters, gradient_units)
+            components.gradient_clipping(
+                trainable_parameters
+            )
+            # The mandatory pre-mutation boundary, immediately before the only
+            # mutation in this loop. The controller refuses this crossing until
+            # the attempt's baseline scalar and eval-examples evidence is
+            # durable, and a refusal leaves the sentinel disarmed, so the
+            # `step()` below raises rather than mutating unguarded. Crossing
+            # here replaces the post-mutation `controls.optimizer_step(step)`
+            # that used to sit after the update: same safe point, same effective
+            # step number, now on the side of the mutation where it can bite.
+            mutation_sentinel.cross(
+                step + 1,
+                lambda next_step: controls.pre_optimizer_step(
+                    next_step, reject_live_controls
+                ),
+            )
+            stack.optimizer.step()
+            step += 1
+            stack.learning_rate_schedule.step()
+            stack.weight_decay_schedule.step(step)
+            stack.optimizer.zero_grad(set_to_none=True)
+            step_profiler.step(step)
+            elapsed = max(time.perf_counter() - started, 1.0e-9)
             observability.publish_if_declared(
-                "train.preference_margin",
-                sum(preference_margins) / len(preference_margins),
-                step=step,
+                "train.loss", weighted_loss(losses), step=step
             )
             observability.publish_if_declared(
-                "train.preference_accuracy",
-                sum(value > 0.0 for value in preference_margins)
-                / len(preference_margins),
-                step=step,
+                "train.tokens_per_second", tokens / elapsed, step=step
             )
-        observability.optimizer_step(step, "train")
-        controls.optimizer_step(step, reject_live_controls)
+            if preference_margins:
+                observability.publish_if_declared(
+                    "train.preference_margin",
+                    sum(preference_margins) / len(preference_margins),
+                    step=step,
+                )
+                observability.publish_if_declared(
+                    "train.preference_accuracy",
+                    sum(value > 0.0 for value in preference_margins)
+                    / len(preference_margins),
+                    step=step,
+                )
+            observability.optimizer_step(step, "train")
 
-        decision = evaluation_cadence.for_step(step, final=step == maximum_steps)
-        if decision.full_scalar or decision.qualitative or decision.probe:
-            controls.evaluation(step, evaluation_cadence.apply)
-            publish_cadence_plan()
-        if decision.probe:
-            # The probe is a bounded read over the same frozen split, published
-            # under its own name so a cheap monitoring point is never mistaken
-            # for a full validation of the split.
-            probe_value = evaluate_hf_scalar_loss(
-                stack=stack,
-                codec=codec,
-                data=data,
-                evaluator=evaluator,
-                device=selected_device,
-                maximum_examples=evaluation_cadence.probe_examples,
-            )
-            observability.publish_if_declared(
-                "eval.probe_loss", probe_value, step=step
-            )
-            observability.publish_if_declared(
-                "eval.probe_examples", evaluation_cadence.probe_examples, step=step
-            )
-        if decision.full_scalar:
-            value = evaluate_hf_scalar_loss(
-                stack=stack,
-                codec=codec,
-                data=data,
-                evaluator=evaluator,
-                device=selected_device,
-                maximum_examples=evaluator.configuration.maximum_examples,
-            )
-            observability.publish_if_declared("eval.loss", value, step=step)
-        policy_due = policy.due(step, final=step == maximum_steps)
-        checkpoint = None
-        request = None
-        if policy_due or decision.qualitative or controls.checkpoint_boundary_requested:
-            controls.checkpoint(step, reject_live_controls)
-        boundary = controls.checkpoint_boundary_requested
-        if policy_due or decision.qualitative or boundary:
-            request = stage_checkpoint_request()
-        if controls.checkpoint_completion_requested:
-            assert request is not None
-            checkpoint = controls.publish_requested_checkpoint(request)
-            if checkpoint is not None:
-                record_published_checkpoint(checkpoint)
-        if (policy_due or decision.qualitative) and checkpoint is None:
-            assert request is not None
-            checkpoint = controls.publish_policy_checkpoint(request)
-            record_published_checkpoint(checkpoint)
-        if step == maximum_steps:
-            if checkpoint is None:
-                raise HFMultimodalSFTError(
-                    "final evaluation lacks its exact checkpoint anchor"
+            decision = evaluation_cadence.for_step(step, final=step == maximum_steps)
+            if decision.full_scalar or decision.qualitative or decision.probe:
+                controls.evaluation(step, evaluation_cadence.apply)
+                publish_cadence_plan()
+            if decision.probe:
+                # The probe is a bounded read over the same frozen split, published
+                # under its own name so a cheap monitoring point is never mistaken
+                # for a full validation of the split.
+                probe_value = evaluate_hf_scalar_loss(
+                    stack=stack,
+                    codec=codec,
+                    data=data,
+                    evaluator=evaluator,
+                    device=selected_device,
+                    maximum_examples=evaluation_cadence.probe_examples,
                 )
-            final_checkpoint = checkpoint
-        elif decision.qualitative:
-            qualitative = generate_hf_captions(
-                stack=stack,
-                codec=codec,
-                samples=data.qualitative_samples(),
-                device=selected_device,
-                maximum_new_tokens=maximum_new_tokens,
-                use_cache=use_generation_cache,
-            )
-            publish_gallery(checkpoint, qualitative)
+                observability.publish_if_declared(
+                    "eval.probe_loss", probe_value, step=step
+                )
+                observability.publish_if_declared(
+                    "eval.probe_examples", evaluation_cadence.probe_examples, step=step
+                )
+            if decision.full_scalar:
+                value = evaluate_hf_scalar_loss(
+                    stack=stack,
+                    codec=codec,
+                    data=data,
+                    evaluator=evaluator,
+                    device=selected_device,
+                    maximum_examples=evaluator.configuration.maximum_examples,
+                )
+                observability.publish_if_declared("eval.loss", value, step=step)
+            policy_due = policy.due(step, final=step == maximum_steps)
+            checkpoint = None
+            request = None
+            if policy_due or decision.qualitative or controls.checkpoint_boundary_requested:
+                controls.checkpoint(step, reject_live_controls)
+            boundary = controls.checkpoint_boundary_requested
+            if policy_due or decision.qualitative or boundary:
+                request = stage_checkpoint_request()
+            if controls.checkpoint_completion_requested:
+                assert request is not None
+                checkpoint = controls.publish_requested_checkpoint(request)
+                if checkpoint is not None:
+                    record_published_checkpoint(checkpoint)
+            if (policy_due or decision.qualitative) and checkpoint is None:
+                assert request is not None
+                checkpoint = controls.publish_policy_checkpoint(request)
+                record_published_checkpoint(checkpoint)
+            if step == maximum_steps:
+                if checkpoint is None:
+                    raise HFMultimodalSFTError(
+                        "final evaluation lacks its exact checkpoint anchor"
+                    )
+                final_checkpoint = checkpoint
+            elif decision.qualitative:
+                qualitative = generate_hf_captions(
+                    stack=stack,
+                    codec=codec,
+                    samples=data.qualitative_samples(),
+                    device=selected_device,
+                    maximum_new_tokens=maximum_new_tokens,
+                    use_cache=use_generation_cache,
+                )
+                publish_gallery(checkpoint, qualitative)
 
     if step != maximum_steps or final_checkpoint is None:
         raise HFMultimodalSFTError("HF operation did not reach finalization")

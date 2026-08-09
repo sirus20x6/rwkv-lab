@@ -307,9 +307,9 @@ def test_cadence_changes_do_not_perturb_the_optimizer_data_or_rng_trajectory(tmp
     ]
     assert sparse_galleries != dense_galleries
 
-    assert len(sparse_controls.trajectory) == len(dense_controls.trajectory) == 6
+    assert len(sparse_observability.trajectory) == len(dense_observability.trajectory) == 6
     for left, right in zip(
-        sparse_controls.trajectory, dense_controls.trajectory, strict=True
+        sparse_observability.trajectory, dense_observability.trajectory, strict=True
     ):
         assert left[0] == right[0], "optimizer steps diverged"
         assert torch.equal(left[1], right[1]), f"head weight diverged at step {left[0]}"
@@ -376,7 +376,9 @@ def test_resume_cannot_relabel_a_trained_checkpoint_as_the_baseline(tmp_path):
     assert trained_state["runtime_state"]["baseline_complete"] is True
     assert trained_state["runtime_state"]["published_steps"] == [0, 1]
 
-    resumed_controls = harness.Controls()
+    # The controller gates a replacement attempt at the step it resumed, not
+    # at zero: the engine owes its baseline evidence there.
+    resumed_controls = harness.Controls(attempt_baseline_optimizer_step=1)
     resumed_observability = harness.Observability()
     step = run_hf_multimodal_sft(
         invocation=SimpleNamespace(
@@ -541,7 +543,11 @@ def test_a_live_cadence_patch_applies_at_an_evaluation_safe_point(tmp_path):
 def test_only_the_evaluation_safe_point_carries_a_live_cadence_patch(tmp_path):
     from rwkv_lab.trainvm_adapters.hf_multimodal_sft import HFMultimodalSFTError
 
-    for phase, at_step in (("optimizer_step", 1), ("microbatch", 1), ("checkpoint", 3)):
+    for phase, at_step in (
+        ("pre_optimizer_step", 1),
+        ("microbatch", 1),
+        ("checkpoint", 3),
+    ):
         with pytest.raises(HFMultimodalSFTError, match="evaluation cadence"):
             _run_with_patch(
                 tmp_path / f"rejected-{phase}",

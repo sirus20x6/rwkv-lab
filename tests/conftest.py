@@ -1,6 +1,15 @@
 """Make the src-layout package importable from tests/ (run: `pytest tests/`).
 
-Also sets the env flags several tests rely on (CPU-only kernels; no torch.compile)."""
+Also makes the session CPU-only unless accelerator access was explicitly
+authorized, and sets the env flags several tests rely on (CPU-only kernels; no
+torch.compile).
+
+The masking is here, in top-level code, rather than in `pytest_configure`: a
+root conftest is imported before any test module, but `pytest_configure` runs
+after, and after is too late. Marker filtering is later still, which is the
+whole bug -- see `scripts/non_gpu_environment.py`, which applies the same mask
+one process earlier for callers that are not already Python.
+"""
 import os
 import sys
 from pathlib import Path
@@ -15,6 +24,19 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # tests/ helpers
 
+from scripts.non_gpu_environment import (  # noqa: E402  (needs the sys.path lines)
+    ACCELERATOR_ACCESS_ENV,
+    NON_GPU_ENVIRONMENT,
+    accelerator_access_enabled,
+)
+
+ACCELERATOR_ACCESS_ENABLED = accelerator_access_enabled()
+if not ACCELERATOR_ACCESS_ENABLED:
+    # Assign rather than setdefault. setdefault would let a training or gaming
+    # shell's own device list leak into a run that calls itself CPU-only, which
+    # is exactly the case this exists to stop.
+    os.environ.update(NON_GPU_ENVIRONMENT)
+
 import trainvm_binary  # noqa: E402  (needs the sys.path line above)
 import ztok_binary  # noqa: E402  (same)
 
@@ -26,6 +48,25 @@ os.environ.setdefault("CODA_NO_COMPILE", "1")     # skip torch.compile in tests
 # one full 4096-wide GPU workload in every worker. The parallel runner invokes
 # them directly and sequentially when RWKV_GPU_STRESS=1.
 collect_ignore = ["test_compile_core.py", "test_dmt_graph.py"]
+
+
+def pytest_collection_modifyitems(items):
+    """Keep GPU tests opt-in even when a caller forgets `-m "not gpu"`.
+
+    Default-deny rather than relying on every invocation to pass the marker
+    expression. `scripts/test_parallel.sh` ran the gpu suite unconditionally
+    until this landed, so "the caller always passes -m" was not true.
+    """
+    if ACCELERATOR_ACCESS_ENABLED:
+        return
+    import pytest
+
+    denied = pytest.mark.skip(
+        reason=f"accelerator tests require {ACCELERATOR_ACCESS_ENV}=1",
+    )
+    for item in items:
+        if item.get_closest_marker("gpu") is not None:
+            item.add_marker(denied)
 
 
 def pytest_report_header():
@@ -44,4 +85,9 @@ def pytest_report_header():
     skip without it, and a skip that does not name what was missing is the same
     silence this header exists to end.
     """
-    return [trainvm_binary.report_line(), *ztok_binary.report_lines()]
+    disposition = "explicitly enabled" if ACCELERATOR_ACCESS_ENABLED else "masked"
+    return [
+        f"accelerator access: {disposition}",
+        trainvm_binary.report_line(),
+        *ztok_binary.report_lines(),
+    ]

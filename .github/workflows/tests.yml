@@ -82,7 +82,11 @@ jobs:
           # real rather than a directory full of skips.
           pip install -e '.[vision,test,trainvm-worker]'
       - name: Every test file is covered or explicitly excluded
-        run: python scripts/ci_coverage_gate.py -m "not gpu"
+        # Masked like every other non-GPU invocation. These runners have no GPU,
+        # so this cannot fail here -- it is kept identical to the local command
+        # on purpose, because a CI recipe that diverges from the one developers
+        # run is the reason the original defect was invisible to CI.
+        run: python scripts/non_gpu_environment.py python scripts/ci_coverage_gate.py -m "not gpu"
 
   python-cpu:
     name: CPU tests (Python ${{ matrix.python }})
@@ -120,7 +124,8 @@ jobs:
       - name: Run the full non-GPU suite
         run: |
           mkdir -p evidence
-          python -m pytest -q -n auto --dist worksteal -m "not gpu" tests \
+          python scripts/non_gpu_environment.py \
+            python -m pytest -q -n auto --dist worksteal -m "not gpu" tests \
             --junitxml=evidence/python-cpu-${{ matrix.python }}.xml
 
       - name: Publish evidence
@@ -167,7 +172,8 @@ jobs:
       - name: The fla-marked assertions run against the installed package
         run: |
           mkdir -p evidence
-          python -m pytest -q -m "fla and not gpu" tests \
+          python scripts/non_gpu_environment.py \
+            python -m pytest -q -m "fla and not gpu" tests \
             --junitxml=evidence/python-fla.xml
 
       - name: Publish evidence
@@ -406,9 +412,31 @@ jobs:
       #   trainvm_dashboard_live_e2e           spawns the live stack
       #   rwkv_lab_worker_artifact             builds a sealed worker artifact
       #
-      # All four run in scripts/acceptance.sh on a real host, which is where
-      # they are meaningful. Excluding them keeps this job a signal: a
-      # permanently red job is one everybody learns to ignore.
+      # All four are covered by scripts/acceptance.sh on a real host, which is
+      # where they are meaningful. Read "covered" as runnable, not running:
+      # nothing schedules that script. No workflow invokes it, there is no
+      # Makefile, and nothing in CMake calls it -- it runs when a person types
+      # the command. This comment used to say the four "run in" acceptance,
+      # which read as a cadence that did not exist.
+      #
+      # scripts/acceptance.sh now appends one line per run to
+      # docs/experiment-vm/acceptance-attestations.v1.jsonl, recording the
+      # commit, the host, the time, and each of these four suites pass or fail.
+      # Failures are appended too, so an absent line means "never run" and
+      # nothing else. To find out whether these four have been checked against
+      # anything close to current main:
+      #
+      #   tail -1 docs/experiment-vm/acceptance-attestations.v1.jsonl
+      #   git log --oneline <that commit>..origin/main | wc -l
+      #
+      # An empty log, or a commit hundreds behind, means these suites are
+      # unchecked right now -- by this job, which excludes them, and by
+      # acceptance, which nobody ran. Nothing fails on a stale attestation
+      # deliberately: no hosted runner can produce one, so the check could only
+      # ever be red, and see below for why that is the outcome to avoid.
+      #
+      # Excluding them still keeps this job a signal: a permanently red job is
+      # one everybody learns to ignore.
       #
       # An exclusion still costs coverage, though, so it is worth checking what
       # rides along inside an excluded test. rwkv_lab_worker_artifact also held
@@ -499,7 +527,9 @@ jobs:
       - name: Run GPU-marked suite
         run: |
           mkdir -p evidence
-          python -m pytest -q -m gpu tests --junitxml=evidence/gpu.xml
+          # The only invocation in this workflow that authorizes a device.
+          TRAINVM_TEST_ACCELERATOR_ACCESS=1 \
+            python -m pytest -q -m gpu tests --junitxml=evidence/gpu.xml
       - name: Publish evidence
         if: always()
         uses: actions/upload-artifact@v4

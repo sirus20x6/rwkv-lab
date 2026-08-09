@@ -165,6 +165,7 @@ def test_conversion_layers_and_seeds_are_paired_campaign_units(tmp_path, monkeyp
     con.close()
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 @pytest.mark.parametrize("schedule", ["cosine", "constant", "powercool"])
 def test_train_eval_accepts_the_auto_warmup_default(schedule):
@@ -180,6 +181,7 @@ def test_train_eval_accepts_the_auto_warmup_default(schedule):
     assert math.isfinite(run["loss"])
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_powercool_tolerates_a_warmup_longer_than_the_budget():
     """A degenerate warmup clamps instead of raising after the model is built."""
