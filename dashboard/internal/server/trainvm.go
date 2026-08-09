@@ -25,6 +25,21 @@ const trainVMDraftLimit = 2 << 20
 const trainVMCommandLimit = 64 << 10
 const trainVMAuthorRunLimit = 5 << 20
 
+// trainVMLifecycleCommandTimeout bounds a lifecycle submission end to end. It is
+// deliberately longer than the five seconds the other TrainVM mutations use: a
+// lifecycle command is journalled by a controller that re-verifies the whole
+// journal hash chain during recovery, and on a long-lived training journal that
+// competes with checkpoint publication for the same disk. A live pause was lost
+// to exactly that, five seconds being shorter than the authority's honest answer.
+const trainVMLifecycleCommandTimeout = 20 * time.Second
+
+// trainVMLifecycleReconcileTimeout and trainVMLifecycleReconcileScan bound the
+// read that recovers a durable command identity once the submission deadline has
+// already expired. The read is indexed and local, so it is budgeted far below
+// the submission it follows.
+const trainVMLifecycleReconcileTimeout = 5 * time.Second
+const trainVMLifecycleReconcileScan = 250
+
 func (s *Server) handleTrainVMHostAuthority(w http.ResponseWriter, r *http.Request) {
 	if s.commander == nil {
 		http.Error(w, "TrainVM authority is not configured", http.StatusServiceUnavailable)
@@ -803,7 +818,14 @@ func (s *Server) handleTrainVMRunAction(w http.ResponseWriter, r *http.Request) 
 	if !decodeTrainVMMutation(w, r, "lifecycle action", trainVMCommandLimit, &input) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	// Lifecycle submission may briefly contend with high-volume checkpoint
+	// publication in the native journal: the controller re-verifies the whole
+	// journal hash chain during recovery, and on a long training journal that is
+	// not a five-second operation. Keep the HTTP mutation bounded while allowing
+	// the authority to return the durable idempotent command receipt on the
+	// normal path, so reconciliation below stays reserved for the pathological
+	// case rather than becoming the routine one.
+	ctx, cancel := context.WithTimeout(r.Context(), trainVMLifecycleCommandTimeout)
 	defer cancel()
 	runID := r.PathValue("run")
 	run, found, err := s.trainvm.Run(ctx, runID)
@@ -828,6 +850,19 @@ func (s *Server) handleTrainVMRunAction(w http.ResponseWriter, r *http.Request) 
 		GracefulTimeoutSeconds: input.GracefulTimeoutSeconds,
 	})
 	if err != nil {
+		// A transport deadline is not an answer about the command. The authority
+		// may have durably journalled lifecycle.requested and still be
+		// reconciling when our context expires, so recover the durable identity
+		// from the journal rather than reporting a failure the authority never
+		// gave. This path never re-submits: it is a read, so a caller that
+		// retries on 504 cannot be induced to mutate the run twice.
+		if reconciled, ok := s.reconcileTrainVMLifecycleCommand(r, runID, input, err); ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(reconciled)
+			return
+		}
 		writeTrainVMAuthorityError(w, err)
 		return
 	}
@@ -854,6 +889,93 @@ func (s *Server) handleTrainVMRunAction(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(httpStatus)
 	_ = json.NewEncoder(w).Encode(result)
+}
+
+// trainVMLifecycleRequestPayload is the durable receipt the native authority
+// writes into the lifecycle.requested event before it acknowledges anything to
+// a caller. It is the record that survives a transport deadline, so it — not the
+// RPC response — is what identifies the command afterwards.
+type trainVMLifecycleRequestPayload struct {
+	CommandID           string `json:"command_id"`
+	IdempotencyKey      string `json:"idempotency_key"`
+	ExpectedRunRevision uint64 `json:"expected_run_revision"`
+	Kind                string `json:"kind"`
+	CheckpointFirst     bool   `json:"checkpoint_first"`
+	ReleaseResources    bool   `json:"release_resources"`
+	Reason              string `json:"reason"`
+}
+
+// reconcileTrainVMLifecycleCommand answers whether a lifecycle submission that
+// failed on a transport deadline nevertheless reached the journal, and returns
+// the durable command identity when it did.
+//
+// It reports a command only on an exact match of idempotency key, action and
+// expected run revision against a lifecycle.requested event for this run. A
+// looser match would let one submission claim another's command, which is the
+// duplicate-mutation hazard this exists to prevent — the caller acts on the
+// returned identity, so attributing the wrong one is worse than failing closed.
+func (s *Server) reconcileTrainVMLifecycleCommand(r *http.Request, runID string,
+	input trainVMRunActionRequest, cause error) (trainvmstore.RunActionResult, bool) {
+	// Match on the key as the authority journalled it. The commander trims before
+	// it sends, so comparing the raw field would miss a padded key and fail
+	// closed on a command that is genuinely this caller's.
+	idempotencyKey := strings.TrimSpace(input.IdempotencyKey)
+	if s.trainvm == nil || idempotencyKey == "" {
+		return trainvmstore.RunActionResult{}, false
+	}
+	if code := status.Code(cause); code != codes.DeadlineExceeded {
+		return trainvmstore.RunActionResult{}, false
+	}
+	// A context derived from the request would already be dead whenever the
+	// expired deadline was the request's own rather than ours, and reconciliation
+	// would then silently never run. Detaching gives the read an honest budget in
+	// both cases. It also discards client disconnection, which costs nothing
+	// here: the read is bounded, indexed, local, and mutates nothing.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()),
+		trainVMLifecycleReconcileTimeout)
+	defer cancel()
+	run, found, err := s.trainvm.Run(ctx, runID)
+	if err != nil || !found || run.LastEventSeq == 0 {
+		return trainvmstore.RunActionResult{}, false
+	}
+	events, err := s.trainvm.Events(ctx, trainvmstore.EventQuery{
+		RunID: runID, Through: run.LastEventSeq, NewestFirst: true,
+		EventTypes: []string{"lifecycle.requested"},
+		Limit:      trainVMLifecycleReconcileScan,
+	})
+	if err != nil {
+		return trainvmstore.RunActionResult{}, false
+	}
+	action := strings.ToLower(strings.TrimSpace(input.Action))
+	for _, event := range events {
+		if event.RunID != runID || event.EventType != "lifecycle.requested" {
+			continue
+		}
+		var payload trainVMLifecycleRequestPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if payload.CommandID == "" || payload.IdempotencyKey != idempotencyKey ||
+			payload.Kind != action || payload.ExpectedRunRevision != input.ExpectedRunRevision {
+			continue
+		}
+		return trainvmstore.RunActionResult{
+			Disposition: "ACCEPTED", Action: payload.Kind, CommandID: payload.CommandID,
+			CommandSequence: event.Sequence, ControllerSequence: event.Sequence,
+			Status:           "REQUESTED",
+			CheckpointFirst:  payload.CheckpointFirst,
+			ReleaseResources: payload.ReleaseResources,
+			Reason:           payload.Reason,
+			Diagnostics: []trainvmstore.ControlDiagnostic{{
+				Severity: "INFO", Code: "lifecycle_command_reconciled", Path: "/",
+				Message: "the lifecycle submission exceeded its transport deadline; " +
+					"this command identity was recovered from the durable journal",
+				Help: "the command is already journalled — poll the run timeline " +
+					"rather than re-submitting under a new idempotency key",
+			}},
+		}, true
+	}
+	return trainvmstore.RunActionResult{}, false
 }
 
 func validateTrainVMMutation(w http.ResponseWriter, r *http.Request, kind string) bool {

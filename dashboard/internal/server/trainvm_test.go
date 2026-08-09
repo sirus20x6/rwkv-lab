@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -24,6 +25,7 @@ type fakeTrainVMCommander struct {
 	result           trainvmstore.ControlResult
 	actionRequest    trainvmstore.RunActionRequest
 	actionResult     trainvmstore.RunActionResult
+	actionCalls      int
 	submission       trainvmstore.SubmissionRequest
 	submissionResult trainvmstore.SubmissionResult
 	planDiff         trainvmstore.PlanDiffRequest
@@ -90,6 +92,7 @@ func (f *fakeTrainVMCommander) RequestControls(_ context.Context,
 func (f *fakeTrainVMCommander) RequestRunAction(_ context.Context,
 	request trainvmstore.RunActionRequest) (trainvmstore.RunActionResult, error) {
 	f.actionRequest = request
+	f.actionCalls++
 	return f.actionResult, f.err
 }
 
@@ -365,6 +368,15 @@ func newTrainVMActionRequest(body string) *http.Request {
 }
 
 func trainVMFixture(t *testing.T) *trainvmstore.Reader {
+	return trainVMFixtureWithJournal(t, "")
+}
+
+// trainVMFixtureWithJournal seeds the standard fixture and then applies extra
+// SQL, so a test can append journal events the base fixture does not carry. A
+// test that appends events must also advance run_projection.last_event_sequence,
+// exactly as the native authority does inside the same transaction — the read
+// model uses that column as the upper fence for a newest-first event scan.
+func trainVMFixtureWithJournal(t *testing.T, journal string) *trainvmstore.Reader {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "trainvm.db")
 	db, err := sql.Open("sqlite", path)
@@ -406,6 +418,11 @@ func trainVMFixture(t *testing.T) *trainvmstore.Reader {
 		INSERT INTO journal_meta VALUES ('journal_id','0123456789abcdef0123456789abcdef');`)
 	if err != nil {
 		t.Fatalf("create TrainVM server fixture: %v", err)
+	}
+	if journal != "" {
+		if _, err := db.Exec(journal); err != nil {
+			t.Fatalf("seed TrainVM fixture journal: %v", err)
+		}
 	}
 	db.Close()
 	reader, err := trainvmstore.Open(path)
@@ -1449,6 +1466,9 @@ func TestTrainVMLifecycleEndpointStatusMapping(t *testing.T) {
 		"replayed":    {commander: &fakeTrainVMCommander{actionResult: trainvmstore.RunActionResult{Disposition: "ALREADY_APPLIED", Action: "resume"}}, expected: http.StatusOK},
 		"conflict":    {commander: &fakeTrainVMCommander{actionResult: trainvmstore.RunActionResult{Disposition: "CONFLICT", Action: "resume"}}, expected: http.StatusConflict},
 		"rejected":    {commander: &fakeTrainVMCommander{actionResult: trainvmstore.RunActionResult{Disposition: "REJECTED", Action: "resume"}}, expected: http.StatusUnprocessableEntity},
+		// A deadline against a journal holding no matching request stays a 504.
+		// Reconciliation may only report a command the journal actually carries.
+		"deadline without durable request": {commander: &fakeTrainVMCommander{err: status.Error(codes.DeadlineExceeded, "context deadline exceeded")}, expected: http.StatusGatewayTimeout},
 	} {
 		t.Run(name, func(t *testing.T) {
 			config := Config{Commander: test.commander}
@@ -1464,6 +1484,147 @@ func TestTrainVMLifecycleEndpointStatusMapping(t *testing.T) {
 				t.Fatalf("status=%d expected=%d body=%s", response.Code, test.expected, response.Body.String())
 			}
 		})
+	}
+}
+
+// trainVMJournalledPause returns SQL appending a lifecycle.requested event in
+// the shape the native authority writes it (journal.cpp builds this payload
+// before it acknowledges anything), and advances the projection fence with it.
+func trainVMJournalledPause(idempotencyKey, kind string, expectedRunRevision int) string {
+	return `INSERT INTO events VALUES
+		  (6,'lifecycle-pause-7:requested','vm-run',2,1,'train','train@1',0,'lifecycle.requested',1,4,4,NULL,
+		   '{"command_id":"lifecycle-pause-7","idempotency_key":"` + idempotencyKey +
+		`","expected_run_revision":` + strconv.Itoa(expectedRunRevision) + `,"kind":"` + kind +
+		`","checkpoint_first":true,"release_resources":true,"author":"dashboard",` +
+		`"reason":"release GPU for interactive work"}');
+		UPDATE run_projection SET last_event_sequence=6 WHERE run_id='vm-run';`
+}
+
+func newTrainVMPauseActionRequest() *http.Request {
+	return newTrainVMPauseActionRequestWithKey("tab-action-intent")
+}
+
+func newTrainVMPauseActionRequestWithKey(idempotencyKey string) *http.Request {
+	request := newTrainVMActionRequest(`{
+		"expected_run_revision":7,
+		"idempotency_key":"` + idempotencyKey + `",
+		"reason":"release GPU for interactive work",
+		"action":"pause",
+		"checkpoint_first":true,
+		"release_resources":true,
+		"graceful_timeout_seconds":0
+	}`)
+	request.Header.Set("Content-Type", "application/json")
+	return request
+}
+
+// A transport deadline is not an answer about the command. When the authority
+// durably journalled the request before our context expired, the submission must
+// report that command's identity rather than a failure the authority never gave.
+func TestTrainVMLifecycleDeadlineReconcilesDurableCommand(t *testing.T) {
+	// The commander trims the key before it sends, so the journal holds the
+	// trimmed form. A padded key is still this caller's command and must match.
+	for name, submitted := range map[string]string{
+		"exact key":  "tab-action-intent",
+		"padded key": "  tab-action-intent  ",
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertTrainVMDeadlineReconciles(t, submitted)
+		})
+	}
+}
+
+func assertTrainVMDeadlineReconciles(t *testing.T, submittedKey string) {
+	t.Helper()
+	commander := &fakeTrainVMCommander{err: status.Error(codes.DeadlineExceeded, "context deadline exceeded")}
+	srv := New(Config{Commander: commander, TrainVM: trainVMFixtureWithJournal(t,
+		trainVMJournalledPause("tab-action-intent", "pause", 7))})
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, newTrainVMPauseActionRequestWithKey(submittedKey))
+
+	body := response.Body.String()
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("a journalled command was reported as a failure: status=%d body=%s", response.Code, body)
+	}
+	for _, want := range []string{
+		`"disposition":"ACCEPTED"`, `"command_id":"lifecycle-pause-7"`,
+		`"controller_sequence":6`, `"command_sequence":6`, `"action":"pause"`,
+		`"status":"REQUESTED"`, `"checkpoint_first":true`, `"release_resources":true`,
+		`"code":"lifecycle_command_reconciled"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("reconciled receipt is missing %s: %s", want, body)
+		}
+	}
+	// The reconciliation is a read. A submission that times out must never turn
+	// into a second mutation, which is the duplicate-command hazard itself.
+	if commander.actionCalls != 1 {
+		t.Fatalf("submission was attempted %d times, want exactly 1", commander.actionCalls)
+	}
+}
+
+// Reconciliation may only report a command the journal proves is this caller's.
+// Every near miss fails closed, because acting on someone else's command
+// identity is worse than reporting an ambiguous outcome.
+func TestTrainVMLifecycleDeadlineFailsClosedOnJournalMismatch(t *testing.T) {
+	for name, journal := range map[string]string{
+		"another caller's idempotency key": trainVMJournalledPause("someone-elses-intent", "pause", 7),
+		"a different lifecycle kind":       trainVMJournalledPause("tab-action-intent", "cancel", 7),
+		"a different run revision":         trainVMJournalledPause("tab-action-intent", "pause", 6),
+		"no lifecycle request at all":      "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			commander := &fakeTrainVMCommander{err: status.Error(codes.DeadlineExceeded, "context deadline exceeded")}
+			srv := New(Config{Commander: commander, TrainVM: trainVMFixtureWithJournal(t, journal)})
+			response := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(response, newTrainVMPauseActionRequest())
+
+			body := response.Body.String()
+			if response.Code != http.StatusGatewayTimeout {
+				t.Fatalf("an unmatched deadline was not reported as ambiguous: status=%d body=%s",
+					response.Code, body)
+			}
+			if strings.Contains(body, "lifecycle-pause-7") {
+				t.Fatalf("a command that is not this caller's was reported back: %s", body)
+			}
+			if commander.actionCalls != 1 {
+				t.Fatalf("submission was attempted %d times, want exactly 1", commander.actionCalls)
+			}
+		})
+	}
+}
+
+// A caller that replays the identical submission after a reconciled deadline
+// must land on the same durable command, not mint a second one.
+func TestTrainVMLifecycleReplayAfterReconciledDeadlineKeepsOneCommand(t *testing.T) {
+	reader := trainVMFixtureWithJournal(t, trainVMJournalledPause("tab-action-intent", "pause", 7))
+	delayed := &fakeTrainVMCommander{err: status.Error(codes.DeadlineExceeded, "context deadline exceeded")}
+	first := httptest.NewRecorder()
+	New(Config{Commander: delayed, TrainVM: reader}).Handler().
+		ServeHTTP(first, newTrainVMPauseActionRequest())
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("delayed submission: status=%d body=%s", first.Code, first.Body.String())
+	}
+
+	// The authority has caught up and now answers the replay itself, recognising
+	// the idempotency key it already journalled.
+	recovered := &fakeTrainVMCommander{actionResult: trainvmstore.RunActionResult{
+		Disposition: "ALREADY_APPLIED", Action: "pause", CommandID: "lifecycle-pause-7",
+		ControllerSequence: 6, Status: "REQUESTED", CheckpointFirst: true, ReleaseResources: true,
+	}}
+	second := httptest.NewRecorder()
+	New(Config{Commander: recovered, TrainVM: reader}).Handler().
+		ServeHTTP(second, newTrainVMPauseActionRequest())
+	if second.Code != http.StatusOK {
+		t.Fatalf("replayed submission: status=%d body=%s", second.Code, second.Body.String())
+	}
+	if recovered.actionRequest.IdempotencyKey != "tab-action-intent" {
+		t.Fatalf("the replay did not carry the original intent: %#v", recovered.actionRequest)
+	}
+	if !strings.Contains(first.Body.String(), `"command_id":"lifecycle-pause-7"`) ||
+		!strings.Contains(second.Body.String(), `"command_id":"lifecycle-pause-7"`) {
+		t.Fatalf("the replay resolved to a different command: first=%s second=%s",
+			first.Body.String(), second.Body.String())
 	}
 }
 
