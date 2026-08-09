@@ -76,3 +76,17 @@ models/cache/
 
 # Local dashboard process state.
 /dashboard/trainboard.pid
+
+# Acceptance and qualification output. `scripts/acceptance.sh` and the CI
+# workflows write receipts, JUnit XML, logs, and whole qualification trees here.
+# It is generated output, not source: CI uploads it as a build artifact, and a
+# receipt committed to git would claim the commit it is checked out at rather
+# than the one it actually ran against.
+#
+# The `*.pt`/`*.safetensors`/`*.bin` rules above already caught the heavy
+# payloads — of the 187 files one GPU qualification run left here, 150 (~4.3MB)
+# were still stageable: receipts, configs, manifests, logs. So the exposure was
+# never mostly about size. It was that `git add -A` would quietly commit 150
+# files of stale run output, and that is worth ruling out by shape rather than
+# relying on extension rules to keep coincidentally covering it.
+/evidence/
