@@ -78,6 +78,10 @@ SCHEMA = "rwkv-lab.image-conditioning-probe.v1"
 #: The variant an evaluation is measured against.
 REFERENCE_VARIANT = "original"
 
+#: The identical-pixels control. Required, not optional -- see
+#: :func:`evaluate_image_conditioning`.
+DETERMINISM_VARIANT = "repeated"
+
 #: Repeating identical pixels must reproduce the reference score.  This is a
 #: determinism control, so the bound is numerical rather than behavioural:
 #: bf16 accumulation over a caption-length sequence lands well inside it, while
@@ -236,6 +240,14 @@ def evaluate_image_conditioning(
         )
     if REFERENCE_VARIANT not in variants:
         raise ValueError(f"variants must include the {REFERENCE_VARIANT!r} reference")
+    if DETERMINISM_VARIANT not in variants:
+        # Without the control, `deterministic` would report True because
+        # nothing contradicted it -- an unmeasured claim indistinguishable in
+        # the evidence from a measured one. The whole verdict rests on it, so
+        # it is required rather than defaulted.
+        raise ValueError(
+            f"variants must include the {DETERMINISM_VARIANT!r} determinism control"
+        )
     if len(set(variants)) != len(variants):
         raise ValueError("variants must be unique")
     identifiers = [example.identifier for example in examples]
@@ -266,7 +278,7 @@ def evaluate_image_conditioning(
         for entry in variant_scores:
             if entry.variant == REFERENCE_VARIANT:
                 continue
-            if entry.variant == "repeated":
+            if entry.variant == DETERMINISM_VARIANT:
                 worst_repeat = max(worst_repeat, entry.delta_from_reference_nats)
                 continue
             minimum_response = min(minimum_response, entry.delta_from_reference_nats)
@@ -289,8 +301,8 @@ def evaluate_image_conditioning(
         )
 
     if minimum_response is math.inf:
-        # Only "original" and "repeated" were requested, so nothing perturbs
-        # the image and responsiveness is unmeasured rather than perfect.
+        # Only the reference and its control were requested, so nothing
+        # perturbs the image and responsiveness is unmeasured, not perfect.
         raise ValueError("variants must include at least one perturbed variant")
 
     margin = sum(report.discrimination_margin_nats for report in reports) / len(reports)
@@ -441,7 +453,7 @@ def build_image_variant(image: Any, variant: str, *, patch: int = 64, seed: int 
     model's own patch size on purpose: the point is to destroy spatial layout
     at a scale the encoder cannot undo, not to align with its tokenisation.
     """
-    if variant in (REFERENCE_VARIANT, "repeated"):
+    if variant in (REFERENCE_VARIANT, DETERMINISM_VARIANT):
         return image.copy()
     if variant == "blank":
         from PIL import Image

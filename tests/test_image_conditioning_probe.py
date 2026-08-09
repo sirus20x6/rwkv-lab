@@ -183,6 +183,10 @@ def test_probe_refuses_inputs_that_cannot_support_a_verdict() -> None:
         _evaluate(_seeing_score, variants=("original", "repeated"))
     with pytest.raises(ValueError, match="must include the 'original' reference"):
         _evaluate(_seeing_score, variants=("blank", "shuffled"))
+    # Omitting the control would report deterministic=True without ever
+    # having measured it, which is the one claim the verdict cannot fake.
+    with pytest.raises(ValueError, match="must include the 'repeated' determinism control"):
+        _evaluate(_seeing_score, variants=("original", "shuffled", "blank"))
 
 
 def test_probe_rejects_a_nonfinite_score() -> None:
