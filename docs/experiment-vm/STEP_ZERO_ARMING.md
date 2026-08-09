@@ -93,6 +93,9 @@ every pull request by the same script without `--write`. Do not hand-edit it.
 - *can arm today?* is recomputed from every composition document under
   `docs/experiment-vm/examples/`, by evaluating the three conjuncts on each
   artifact a node actually publishes. The cell names the documents that arm.
+- The pin naming exactly the routes the worker dispatches is checked by
+  `tests/test_step_zero_arming_gate.py`, in the CPU job — importing the worker
+  registry pulls in torch, which the schema job does not install.
 
 <!-- BEGIN GENERATED ARMING TABLE -->
 

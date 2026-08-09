@@ -316,7 +316,6 @@ def rows(repository: pathlib.Path) -> tuple[list[tuple[str, ...]], list[str]]:
         )
     arming, rejected, document_problems = composition_evidence(repository)
     problems += document_problems
-    problems += registry_parity(pin)
 
     built: list[tuple[str, ...]] = []
     for entry in sorted(pin.get("profiles", []), key=lambda item: item["contract"]):
@@ -345,41 +344,40 @@ def rows(repository: pathlib.Path) -> tuple[list[tuple[str, ...]], list[str]]:
     return built, problems
 
 
-def registry_parity(pin: dict) -> list[str]:
-    """The pin must name exactly the operations the worker dispatches.
+def registry_parity_note() -> str:
+    """Why this gate does not compare the pin against the worker's dispatch table.
 
-    This is what keeps the table honest without a compiler. The pin is
-    regenerated from the *native* registry, and `verify_rwkv_lab_worker_contract.py`
-    already asserts that registry is key-for-key the Python `_HANDLERS` table --
-    so comparing the pin against `_HANDLERS` here detects a route added to the
-    authority and forgotten in this pin, in a job that cannot build trainvm.
+    It would be the obvious check: the pin is regenerated from the native
+    registry, `verify_rwkv_lab_worker_contract.py` asserts that registry is
+    key-for-key `handlers._HANDLERS`, so comparing the pin against `_HANDLERS`
+    would catch a route added to the authority and forgotten in the pin.
 
-    Import failure is a problem, not a skip: the schema job installs the package,
-    and a silently skipped parity check is the whole failure mode this file
-    exists to prevent.
+    It cannot run here. `rwkv_lab.trainvm_adapters.handlers` imports torch
+    transitively and the schema job installs `.[test]` without it; adding torch
+    to a seconds-fast job to read twenty-one strings is the wrong trade. Reading
+    the literal statically does not work either -- `_HANDLERS` ends in a `**`
+    unpacking of a dict comprehension over `PROFILE_ADAPTERS`, so eight of the
+    twenty-one contracts do not exist as string literals at all, and an AST
+    reader silently reports thirteen.
+
+    So the check lives in the two jobs that can answer it, and neither is
+    optional on a pull request:
+
+    - `tests/test_step_zero_arming_gate.py::test_the_pin_names_exactly_the_dispatched_routes`
+      imports the registry in the CPU job, which installs torch and runs on
+      every pull request;
+    - ctest `step_zero_arming_pin` compares the pin field by field against a
+      real build, and adding a route means editing
+      `trainvm/src/rwkv_lab_worker_contract.cpp`, which is exactly what makes
+      `native-change-scope` schedule the native job.
+
+    This function exists so that reasoning is attached to the gate rather than
+    lost in a commit message, and returns the sentence the verdict prints.
     """
-    # CI installs the package, but a fresh worktree usually has not, and a gate
-    # that only works after `pip install -e` is a gate people skip locally and
-    # meet for the first time as a red pull request.
-    source = str(pathlib.Path(__file__).resolve().parent.parent / "src")
-    if source not in sys.path:
-        sys.path.append(source)
-    try:
-        from rwkv_lab.trainvm_adapters.handlers import supported_adapter_keys
-    except ImportError as error:  # pragma: no cover - exercised only when broken
-        return [f"cannot import the worker adapter registry to check the pin: {error}"]
-    dispatched = {key[3] for key in supported_adapter_keys()}
-    pinned = {entry["contract"] for entry in pin.get("profiles", [])}
-    problems = [
-        f"{PIN}: the worker dispatches {contract} and the pin does not name it; "
-        "regenerate with scripts/print_step_zero_arming_pin.py --write"
-        for contract in sorted(dispatched - pinned)
-    ]
-    problems += [
-        f"{PIN}: pins {contract}, which the worker no longer dispatches"
-        for contract in sorted(pinned - dispatched)
-    ]
-    return problems
+    return (
+        "route-set parity is checked by pytest and ctest, not here (see "
+        "registry_parity_note)"
+    )
 
 
 def render(built: list[tuple[str, ...]]) -> str:
@@ -487,7 +485,7 @@ def main() -> int:
             problems,
             f"{len(built)} registered routes ({stateful} stateful), {armed} able "
             "to arm today, checked against the pinned registry and every "
-            f"composition document under {EXAMPLES}",
+            f"composition document under {EXAMPLES}; {registry_parity_note()}",
         )
     )
     return 1 if problems else 0

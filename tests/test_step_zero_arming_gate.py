@@ -185,24 +185,36 @@ def test_a_sibling_recipe_cannot_hide_a_broken_one(repository: pathlib.Path) -> 
     )
 
 
-def test_a_route_added_to_the_worker_registry_reddens_the_pin_check(
-    repository: pathlib.Path,
-) -> None:
-    """The pin must not silently omit a route the worker dispatches.
+def test_the_pin_names_exactly_the_dispatched_routes() -> None:
+    """A route the worker dispatches must have a row, and nothing else may.
 
-    The registry half of the table cannot be recomputed without GCC 16, so the
-    Python job compares the pin against `handlers._HANDLERS` instead. Dropping a
-    profile from the pin simulates a route added to the authority and forgotten
-    here -- the drift that would otherwise leave a route with no row at all.
+    This lives here rather than in the gate because
+    `rwkv_lab.trainvm_adapters.handlers` imports torch transitively and the
+    schema job installs `.[test]` without it. This job installs torch and runs
+    on every pull request, so nothing is skipped by the split; the gate's
+    `registry_parity_note` records the reasoning at the other end.
+
+    Reading the literal statically was tried and rejected: `_HANDLERS` ends in a
+    `**` unpacking of a dict comprehension over `PROFILE_ADAPTERS`, so eight of
+    the twenty-one contracts are not string literals anywhere in the file and an
+    AST reader reports thirteen while looking correct.
+
+    ctest `step_zero_arming_pin` is the other half -- it compares the same pin
+    field by field against a real build, which is the only thing that can check
+    the evaluator/checkpoint/port values themselves.
     """
 
-    pin = json.loads((repository / PIN).read_text(encoding="utf-8"))
-    dropped = pin["profiles"].pop()
-    (repository / PIN).write_text(json.dumps(pin, indent=2), encoding="utf-8")
+    from rwkv_lab.trainvm_adapters.handlers import supported_adapter_keys
 
-    result = _run(repository)
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert dropped["contract"] in result.stdout, result.stdout
+    pin = json.loads((REPOSITORY / PIN).read_text(encoding="utf-8"))
+    pinned = {entry["contract"] for entry in pin["profiles"]}
+    dispatched = {key[3] for key in supported_adapter_keys()}
+    assert pinned == dispatched, (
+        "the pin and the worker dispatch table disagree; regenerate with "
+        "scripts/print_step_zero_arming_pin.py --write. "
+        f"dispatched only: {sorted(dispatched - pinned)}; "
+        f"pinned only: {sorted(pinned - dispatched)}"
+    )
 
 
 def test_a_wrong_schema_constant_in_the_pin_reddens(repository: pathlib.Path) -> None:

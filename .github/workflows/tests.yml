@@ -240,8 +240,10 @@ jobs:
       #
       # The registry half is pinned (ctest step_zero_arming_pin checks the pin
       # against a real build); the composition half is recomputed here from the
-      # documents, and the pin's route set is compared against the worker's
-      # dispatch table, which needs no compiler.
+      # documents, which needs no compiler and no torch. The pin's route set is
+      # compared against the worker's dispatch table in the CPU job instead --
+      # importing that table pulls in torch, which this job deliberately does
+      # not install.
       - name: The step-zero arming table describes the repository
         run: python scripts/ci_step_zero_arming_gate.py
 
