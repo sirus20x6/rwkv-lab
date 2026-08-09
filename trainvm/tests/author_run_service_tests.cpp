@@ -10,10 +10,12 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -462,6 +464,100 @@ int main() {
     if (!rejected_corrupted_manifest)
       throw std::runtime_error(
           "HF native probe accepted a corrupt qualitative manifest identity");
+
+    // card-ea9a42ed. The model-loader gate in run_authoring.cpp is four
+    // conditions ORed into a single throw:
+    //
+    //   1. the model path is absolute,
+    //   2. local_files_only is true,
+    //   3. trust_remote_code is false,
+    //   4. exact_checkpoint is true.
+    //
+    // Any one of them satisfies the throw on its own, so a single negative
+    // case would leave the other three free to be inverted or dropped with the
+    // suite still green. Each condition therefore gets its own case here.
+    //
+    // Conditions 2-4 are read through `value(key, default)`, and every default
+    // is chosen so that an *absent* field trips the gate: `false` for the two
+    // that must be true, `true` for the one that must be false. That is the
+    // fail-closed direction, and it is a one-character change away from the
+    // fail-open one. So those three conditions get a second case that omits
+    // the field entirely, which is what pins the default rather than merely
+    // the explicit-wrong-value path. Condition 1 reads `model_path` through
+    // `at()`, which has no default to pin — its negative case is a relative
+    // path.
+    //
+    // Every case asserts the gate's exact message. The four conditions share
+    // one message, so that does not tell them apart from each other; what it
+    // rules out is a case being absorbed by a *neighbouring* check — the
+    // component-shape check just above or the locked-fingerprint check just
+    // below — which would otherwise let a case pass while proving nothing
+    // about this gate. Telling the four apart is what the mutation table in
+    // the pull request does.
+    const std::string loader_gate_message =
+        "HF model loader must be absolute, local-only, exact, and must not "
+        "trust remote code";
+    const auto loader_configuration = nlohmann::json::json_pointer(
+        "/spec/workflow/nodes/train/invoke/training/components/model_loader/"
+        "configuration");
+    // Failures accumulate instead of throwing, so that breaking one condition
+    // reports every case it affected rather than only the first.
+    std::vector<std::string> loader_gate_failures;
+    const auto loader_gate_refuses =
+        [&](const std::string &case_name,
+            const std::function<void(nlohmann::json &)> &mutate) {
+          auto mutated = passively_resolved.plan;
+          mutate(mutated.canonical_plan[loader_configuration]);
+          try {
+            (void)exact_probe(mutated, "train", profiles().back());
+          } catch (const std::runtime_error &error) {
+            if (std::string(error.what()) != loader_gate_message)
+              loader_gate_failures.push_back(
+                  case_name + " (refused by another check: " + error.what() +
+                  ")");
+            return;
+          }
+          loader_gate_failures.push_back(case_name + " (accepted)");
+        };
+
+    loader_gate_refuses("a relative model path",
+                        [](nlohmann::json &configuration) {
+                          configuration["model_path"] = "model";
+                        });
+    loader_gate_refuses("local_files_only=false",
+                        [](nlohmann::json &configuration) {
+                          configuration["local_files_only"] = false;
+                        });
+    loader_gate_refuses("an absent local_files_only",
+                        [](nlohmann::json &configuration) {
+                          configuration.erase("local_files_only");
+                        });
+    loader_gate_refuses("trust_remote_code=true",
+                        [](nlohmann::json &configuration) {
+                          configuration["trust_remote_code"] = true;
+                        });
+    loader_gate_refuses("an absent trust_remote_code",
+                        [](nlohmann::json &configuration) {
+                          configuration.erase("trust_remote_code");
+                        });
+    loader_gate_refuses("exact_checkpoint=false",
+                        [](nlohmann::json &configuration) {
+                          configuration["exact_checkpoint"] = false;
+                        });
+    loader_gate_refuses("an absent exact_checkpoint",
+                        [](nlohmann::json &configuration) {
+                          configuration.erase("exact_checkpoint");
+                        });
+
+    if (!loader_gate_failures.empty()) {
+      std::string report =
+          "the HF model loader gate did not refuse " +
+          std::to_string(loader_gate_failures.size()) + " of 7 cases:";
+      for (const std::string &failure : loader_gate_failures)
+        report += "\n  - " + failure;
+      throw std::runtime_error(report);
+    }
+
     const auto& compiled_checkpoint =
         passively_resolved.plan.experiment.spec.artifacts.at("checkpoint");
     if (!compiled_checkpoint.required)
