@@ -119,8 +119,24 @@ class TrainVMService final : public v1::TrainVM::Service,
       // Deployments that configure no immutable receipt root hold none, and a
       // WorkerRuntimeEvidence message is then refused rather than accepted
       // and dropped.
-      IWorkerRuntimeEvidenceAuthority* worker_runtime_evidence = nullptr);
+      IWorkerRuntimeEvidenceAuthority* worker_runtime_evidence = nullptr,
+      // The deployment's immutable cache evidence receipt root. Supplying it
+      // is what makes the receipt root a property of the deployment rather
+      // than of a test, and it is attested at construction: a root that is
+      // missing, on another device, not owned by the effective uid, writable
+      // by group or other, or missing its `runtime/` or `qualification/`
+      // subdirectory fails the daemon at startup rather than at the first
+      // worker message.
+      std::optional<std::filesystem::path> cache_evidence_root = std::nullopt);
   ~TrainVMService() override;
+
+  // The attested receipt root configuration, or nullopt when the deployment
+  // configured none. `authority_uid` is always the effective uid: the
+  // publisher refuses any other value, so it is not separately configurable.
+  [[nodiscard]] const std::optional<LinuxCacheEvidenceConfig>&
+  cache_evidence_configuration() const {
+    return cache_evidence_;
+  }
 
   grpc::Status SubmitExperiment(grpc::ServerContext* context,
                                 const v1::SubmitExperimentRequest* request,
@@ -310,7 +326,9 @@ class TrainVMService final : public v1::TrainVM::Service,
                      std::filesystem::path(
                          std::string(kInstalledRecipeProfilePath)),
                  IWorkerRuntimeEvidenceAuthority* worker_runtime_evidence =
-                     nullptr);
+                     nullptr,
+                 std::optional<std::filesystem::path> cache_evidence_root =
+                     std::nullopt);
 
   static constexpr std::size_t kMaximumRetainedLaunches = 32U;
   static constexpr std::uint64_t kMaximumRetainedLaunchBytes = 2ULL << 30U;
@@ -395,6 +413,7 @@ class TrainVMService final : public v1::TrainVM::Service,
   std::jthread reconciliation_thread_;
   std::map<std::string, ResolvedLaunch> resolved_launches_;
   IWorkerRuntimeEvidenceAuthority* worker_runtime_evidence_{};
+  const std::optional<LinuxCacheEvidenceConfig> cache_evidence_;
   std::mutex worker_sessions_mutex_;
   std::mutex author_run_mutex_;
   std::set<std::string> active_worker_attempts_;
@@ -412,6 +431,8 @@ int serve(const std::filesystem::path& journal_path,
               std::nullopt,
           std::optional<std::uint32_t> worker_socket_gid = std::nullopt,
           std::filesystem::path recipe_registry_path =
-              std::filesystem::path(std::string(kInstalledRecipeProfilePath)));
+              std::filesystem::path(std::string(kInstalledRecipeProfilePath)),
+          std::optional<std::filesystem::path> cache_evidence_root =
+              std::nullopt);
 
 }  // namespace trainvm
