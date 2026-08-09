@@ -522,6 +522,34 @@ class WorkerControlRuntime:
             ),
         )
 
+    @property
+    def attempt_baseline_optimizer_step(self) -> int:
+        """The immutable step this attempt is gated at.
+
+        Zero for a fresh attempt, the resume checkpoint's step for a
+        replacement one. A trainer that keys its baseline evidence to a literal
+        zero instead deadlocks every resumed attempt: it owes evidence at a
+        step it will never reach again, while `pre_optimizer_step` refuses
+        every mutation until that evidence exists.
+        """
+
+        return int(getattr(self._session, "attempt_baseline_optimizer_step", 0))
+
+    @property
+    def step_zero_eval_gate_required(self) -> bool:
+        return bool(getattr(self._session, "step_zero_eval_gate_required", False))
+
+    @property
+    def step_zero_eval_gate_satisfied(self) -> bool:
+        """True once durable baseline evidence exists for this exact attempt.
+
+        The controller replays this on reconnect, so a worker that already
+        published does not republish. It never licenses skipping the
+        pre-mutation boundary itself.
+        """
+
+        return bool(getattr(self._session, "step_zero_eval_gate_satisfied", False))
+
     def publish_evaluation_examples(self, request: object) -> object:
         """Publish family-neutral checkpoint-bound examples durably."""
 
@@ -655,17 +683,11 @@ class WorkerControlRuntime:
     def optimizer_step(
         self, step: int, applier: ControlApplier
     ) -> tuple[AppliedControlPatch, ...]:
-        attempt_baseline = getattr(
-            self._session, "attempt_baseline_optimizer_step", 0
-        )
-        if step <= attempt_baseline:
+        if step <= self.attempt_baseline_optimizer_step:
             raise WorkerControlError(
                 "optimizer mutation step must follow the immutable attempt baseline"
             )
-        if (
-            getattr(self._session, "step_zero_eval_gate_required", False)
-            and not getattr(self._session, "step_zero_eval_gate_satisfied", False)
-        ):
+        if self.step_zero_eval_gate_required and not self.step_zero_eval_gate_satisfied:
             raise WorkerControlError(
                 "optimizer mutation is blocked until durable attempt-baseline "
                 "scalar and eval-examples evidence"

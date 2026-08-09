@@ -94,6 +94,10 @@ from .observability import (
     load_observability_declaration,
     observability_from_invocation,
 )
+from .mutation_sentinel import (
+    MutationSentinelError,
+    OptimizerMutationSentinel,
+)
 from .profiling import (
     EXTERNAL_PROFILER_AUTHORITY_DESCRIPTOR,
     EXTERNAL_PROFILER_AUTHORITY_SCHEMA,
@@ -173,6 +177,8 @@ __all__ = [
     "EffectiveWorkerRuntimePolicy",
     "EvalEvidencePart",
     "EvalExample",
+    "MutationSentinelError",
+    "OptimizerMutationSentinel",
     "EvalExamplesError",
     "EvalExamplesPublicationRequest",
     "EvalExamplesPublisher",

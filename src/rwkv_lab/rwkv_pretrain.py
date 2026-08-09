@@ -48,6 +48,7 @@ from rwkv_lab.trainvm_worker import (
     EvalExample,
     EvalExamplesPublicationRequest,
     ExecutionPhase,
+    OptimizerMutationSentinel,
     torch_trajectory_state,
 )
 from rwkv_lab.training_components import (
@@ -933,11 +934,28 @@ def perform_rwkv_optimizer_step(
     *,
     next_step: int,
     control_applier,
+    sentinel: OptimizerMutationSentinel | None = None,
 ) -> None:
-    """Cross the authority gate immediately before mutating optimizer state."""
+    """Cross the authority gate immediately before mutating optimizer state.
 
-    if worker_controls is not None:
-        worker_controls.pre_optimizer_step(next_step, control_applier)
+    Writing the two calls in this order makes the ordering a convention of this
+    function. Passing an installed ``sentinel`` makes it enforceable: the
+    crossing arms a single-use token that *any* optimizer's ``step()``
+    consumes, so an edit that moves the crossing below the mutation, a second
+    optimizer, or a fused update that never reaches this function all fail
+    closed rather than mutating unguarded.
+    """
+
+    boundary = (
+        (lambda step: worker_controls.pre_optimizer_step(step, control_applier))
+        if worker_controls is not None
+        else None
+    )
+    if sentinel is None:
+        if boundary is not None:
+            boundary(next_step)
+    else:
+        sentinel.cross(next_step, boundary)
     optimizer.step()
 
 
@@ -2132,17 +2150,41 @@ def main(
         if assignments:
             raise ValueError("scratch-RWKV controls require a replacement worker")
 
-    step_zero_examples_published = False
+    # The controller gates this attempt at an immutable baseline step: zero for
+    # a fresh attempt, the resume checkpoint's step for a replacement one. It
+    # is deliberately not a literal zero here. Keying publication to `step == 0`
+    # deadlocks every resumed attempt — the evidence would be owed at a step the
+    # attempt will never reach again, while `pre_optimizer_step` refuses every
+    # mutation until it exists.
+    gate_baseline = None
+    if worker_controls is not None and worker_controls.step_zero_eval_gate_required:
+        baseline = worker_controls.attempt_baseline_optimizer_step
+        if worker_controls.step_zero_eval_gate_satisfied:
+            # A reconnect or replacement worker whose evidence the controller
+            # replayed from the journal must not republish it. That never
+            # licenses skipping the pre-mutation boundary itself.
+            print(
+                f"attempt-baseline eval gate: already durable at step {baseline}",
+                flush=True,
+            )
+        elif step != baseline:
+            raise ValueError(
+                "scratch-RWKV resumed at a step the controller does not gate: "
+                f"{step} != {baseline}"
+            )
+        else:
+            gate_baseline = baseline
 
-    def publish_step_zero_examples() -> None:
+    def publish_attempt_baseline_examples(baseline: int) -> None:
         if worker_controls is None or worker_eval_examples is None:
             raise ValueError(
-                "RWKV worker requires controls and text examples for its step-zero gate"
+                "RWKV worker requires controls and text examples for its "
+                "attempt-baseline gate"
             )
-        staging = Path(args.out) / "checkpoint-step-zero"
+        staging = Path(args.out) / f"checkpoint-baseline-{baseline}"
         staging.mkdir(mode=0o750, parents=True, exist_ok=False)
         checkpoint_state = {
-            "step": 0,
+            "step": baseline,
             "config": tag,
             "arch": arch,
             "head_tied": head_tied,
@@ -2163,7 +2205,7 @@ def main(
         published = worker_controls.publish_policy_checkpoint(
             CheckpointPublicationRequest(
                 source_directory=staging,
-                optimizer_step=0,
+                optimizer_step=baseline,
                 resume_grade="terminal_checkpoint",
                 state_components=(
                     "component_composition",
@@ -2180,12 +2222,12 @@ def main(
             model,
             worker_eval_examples,
             device=dev,
-            optimizer_step=0,
+            optimizer_step=baseline,
         )
         worker_controls.publish_evaluation_examples(
             EvalExamplesPublicationRequest(
                 output_name="eval_examples",
-                optimizer_step=0,
+                optimizer_step=baseline,
                 series_id="rwkv-token-predictions",
                 identity_field=worker_eval_examples.identity_field,
                 identities_digest=worker_eval_examples.identities_digest,
@@ -2202,210 +2244,218 @@ def main(
             )
         )
 
-    while True:
-        if args.steps and step >= args.steps: break
-        if not args.steps and (time.time() - t0) / 60.0 >= args.minutes: break
-        if step % args.eval_every == 0:
-            if worker_controls is not None and step > 0:
-                worker_controls.evaluation(step, reject_live_controls)
-            vl = val_loss(); emit({"kind": "eval", "step": step, "loss": vl, "val_loss": vl, "ppl": math.exp(vl)})
-            publish_eval(step, vl)
-            if step == 0 and not step_zero_examples_published:
-                publish_step_zero_examples()
-                step_zero_examples_published = True
-            print(f"[{step}] val {vl:.4f} (ppl {math.exp(vl):.2f})  {(time.time()-t0)/60:.1f}min", flush=True)
-        train_seq_len, train_batch_size = context_curriculum.for_step(
-            step, context_horizon or 1
-        )
-        train_width = train_seq_len + 1 + (heads.extra_tokens if heads else 0)
-        context_shape = (train_seq_len, train_batch_size)
-        if context_shape != last_context_shape:
-            if context_stages:
-                print(f"context stage @ step {step}: seq={train_seq_len} "
-                      f"batch={train_batch_size}", flush=True)
-                emit({"kind": "context_stage", "step": step, "seq_len": train_seq_len,
-                      "batch": train_batch_size})
-            last_context_shape = context_shape
-        if head_tied and step >= split_step:
-            new_head = split_tied_embedding_head(model, opt)
-            if ema is not None:
-                ema["head.weight"] = new_head.detach().float().clone()
-                ema_named.append(("head.weight", new_head))
-                ema_values.append(ema["head.weight"])
-            if tail_ema is not None:
-                tail_ema.add_parameter("head.weight", new_head)
-            head_tied = False
-            named = list(model.named_parameters()) + (
-                list(heads.named_parameters()) if heads else []
+    # Installed for the whole loop so the ordering below is enforced against
+    # every optimizer instance in the process, not just the one this module
+    # constructed. A bypass is exactly what an alternate update path is.
+    mutation_sentinel = OptimizerMutationSentinel()
+    with mutation_sentinel.installed():
+        while True:
+            if args.steps and step >= args.steps: break
+            if not args.steps and (time.time() - t0) / 60.0 >= args.minutes: break
+            # A resumed baseline need not land on the eval cadence, and the
+            # evidence is owed there regardless of what the cadence says.
+            if step % args.eval_every == 0 or step == gate_baseline:
+                if worker_controls is not None and step > 0:
+                    worker_controls.evaluation(step, reject_live_controls)
+                vl = val_loss(); emit({"kind": "eval", "step": step, "loss": vl, "val_loss": vl, "ppl": math.exp(vl)})
+                publish_eval(step, vl)
+                if step == gate_baseline:
+                    publish_attempt_baseline_examples(step)
+                    gate_baseline = None
+                print(f"[{step}] val {vl:.4f} (ppl {math.exp(vl):.2f})  {(time.time()-t0)/60:.1f}min", flush=True)
+            train_seq_len, train_batch_size = context_curriculum.for_step(
+                step, context_horizon or 1
             )
-            print(f"embedding/head untied at step {step}; optimizer moments cloned", flush=True)
-        if heads is not None and args.lmtp_cooldown_fraction:
-            heads.lmtp_weight = args.lmtp_weight * tail_linear_multiplier(
-                step,
-                context_horizon,
-                args.lmtp_cooldown_fraction,
-            )
-        lr = args.lr * min(1.0, (step + 1) / max(args.warmup, 1))       # linear warmup
-        horizon = args.decay_steps or args.steps
-        if args.lr_schedule == "powercool" and horizon:
-            if powercool_schedule is None:
-                raise RuntimeError("PowerCool schedule was not initialized")
-            lr = args.lr * powercool_multiplier(step, powercool_schedule)
-        elif args.lr_schedule == "cosine" and horizon:
-            ratio = args.cosine_min_ratio
-            lr *= ratio + (1.0 - ratio) * 0.5 * (
-                1 + math.cos(math.pi * min(step, horizon) / horizon)
-            )
-        for g in opt.param_groups:
-            g["lr"] = lr * g.get("u_mup_lr_mult", 1.0)
-        if lmb is not None:                  # ramp Engram injection in (gates learn on live recall)
-            lmb.set_warmup(min(1.0, (step + 1) / max(args.engram_warmup, 1)))
-        opt.zero_grad(set_to_none=True)
-        sparse_vocab_rows = []
-        sparse_recalled_rows = []
-        ga = (
-            gradient_accumulation.microbatches_per_optimizer_step
-            if gradient_accumulation is not None
-            else max(args.grad_accum, 1)
-        )
-        microbatch_indices = (
-            gradient_accumulation.microbatch_indices()
-            if gradient_accumulation is not None
-            else range(ga)
-        )
-        for micro_step in microbatch_indices:  # effective batch = batch * ga
-            if worker_controls is not None:
-                worker_controls.microbatch(step + 1, reject_live_controls)
-            input_wait = (
-                worker_step_profiler.input_wait()
-                if worker_step_profiler is not None
-                else nullcontext()
-            )
-            with input_wait:
-                sample = sample_train(train_batch_size, train_width)
-            x, precomputed_recall = sample if isinstance(sample, tuple) else (sample, None)
-            # Mixed-ctx rows are exactly T_bucket wide (pad-masked); flat windows are T+1(+extra).
-            xin, tgt = ((x[:, :-1], x[:, 1:]) if buckets is not None
-                        else (x[:, :train_seq_len], x[:, 1:train_seq_len + 1]))
-            if args.fsdp_sparse_embeddings:
-                sparse_vocab_rows.append(torch.unique(xin))
-                if precomputed_recall is not None:
-                    valid_recalled = precomputed_recall.recalled[
-                        precomputed_recall.valid
-                    ]
-                    if valid_recalled.numel():
-                        sparse_recalled_rows.append(torch.unique(valid_recalled))
-            # The ordinary path skips RWKV7Small's full vocabulary output and lets
-            # fused CE reuse its bf16 logit allocation during backward. Engram's
-            # sparse copy-head mutates logits, so it retains the compatible path.
-            if lmb is None:
-                hidden = fwd(xin, hidden_only=True)
-                if training_objective is not None:
-                    loss = training_objective(
-                        hidden,
-                        model.head,
-                        tgt,
-                        ignore_index=(0 if buckets is not None else None),
-                    )
-                else:
-                    from rwkv_lab.fused_ce import lmhead_cross_entropy
-
-                    loss = lmhead_cross_entropy(
-                        hidden,
-                        model.head,
-                        tgt,
-                        fused=True,
-                        ignore_index=(0 if buckets is not None else None),
-                    )
-                out = (None, hidden) if heads else None
-            else:
-                out = fwd(xin, return_hidden=bool(heads),
-                          precomputed_recall=precomputed_recall)
-                lg = (out[0] if heads else out).float()
-                loss = F.cross_entropy(lg.reshape(-1, lg.size(-1)), tgt.reshape(-1),
-                                       ignore_index=(0 if buckets is not None else -100))
-            if heads:                                        # + weighted aux (latent-prediction) loss
-                loss = loss + heads.compute(out[1], x, model.emb, model.head)["aux_total"]
-            if args.routing_free_moe and not args.init_g1g:
-                root = model.module if hasattr(model, "module") else model
-                loss = loss + args.routing_free_aux_weight * sum(
-                    (block.ffn.aux_loss.to(loss.device) for block in root.blocks),
-                    loss.new_zeros(()))
-            if args.distributed == "fsdp2" and ga > 1:
-                from rwkv_lab.distributed import set_requires_gradient_sync
-                set_requires_gradient_sync(model, micro_step == ga - 1)
-            scaled_loss = (
-                gradient_accumulation.scale_loss(loss)
+            train_width = train_seq_len + 1 + (heads.extra_tokens if heads else 0)
+            context_shape = (train_seq_len, train_batch_size)
+            if context_shape != last_context_shape:
+                if context_stages:
+                    print(f"context stage @ step {step}: seq={train_seq_len} "
+                          f"batch={train_batch_size}", flush=True)
+                    emit({"kind": "context_stage", "step": step, "seq_len": train_seq_len,
+                          "batch": train_batch_size})
+                last_context_shape = context_shape
+            if head_tied and step >= split_step:
+                new_head = split_tied_embedding_head(model, opt)
+                if ema is not None:
+                    ema["head.weight"] = new_head.detach().float().clone()
+                    ema_named.append(("head.weight", new_head))
+                    ema_values.append(ema["head.weight"])
+                if tail_ema is not None:
+                    tail_ema.add_parameter("head.weight", new_head)
+                head_tied = False
+                named = list(model.named_parameters()) + (
+                    list(heads.named_parameters()) if heads else []
+                )
+                print(f"embedding/head untied at step {step}; optimizer moments cloned", flush=True)
+            if heads is not None and args.lmtp_cooldown_fraction:
+                heads.lmtp_weight = args.lmtp_weight * tail_linear_multiplier(
+                    step,
+                    context_horizon,
+                    args.lmtp_cooldown_fraction,
+                )
+            lr = args.lr * min(1.0, (step + 1) / max(args.warmup, 1))       # linear warmup
+            horizon = args.decay_steps or args.steps
+            if args.lr_schedule == "powercool" and horizon:
+                if powercool_schedule is None:
+                    raise RuntimeError("PowerCool schedule was not initialized")
+                lr = args.lr * powercool_multiplier(step, powercool_schedule)
+            elif args.lr_schedule == "cosine" and horizon:
+                ratio = args.cosine_min_ratio
+                lr *= ratio + (1.0 - ratio) * 0.5 * (
+                    1 + math.cos(math.pi * min(step, horizon) / horizon)
+                )
+            for g in opt.param_groups:
+                g["lr"] = lr * g.get("u_mup_lr_mult", 1.0)
+            if lmb is not None:                  # ramp Engram injection in (gates learn on live recall)
+                lmb.set_warmup(min(1.0, (step + 1) / max(args.engram_warmup, 1)))
+            opt.zero_grad(set_to_none=True)
+            sparse_vocab_rows = []
+            sparse_recalled_rows = []
+            ga = (
+                gradient_accumulation.microbatches_per_optimizer_step
                 if gradient_accumulation is not None
-                else (loss / ga if ga > 1 else loss)
+                else max(args.grad_accum, 1)
             )
-            scaled_loss.backward()
-            seen += xin.shape[0] * xin.shape[1]
-        if args.fsdp_sparse_embeddings:
-            from rwkv_lab.distributed import sparse_sync_parameter_rows
+            microbatch_indices = (
+                gradient_accumulation.microbatch_indices()
+                if gradient_accumulation is not None
+                else range(ga)
+            )
+            for micro_step in microbatch_indices:  # effective batch = batch * ga
+                if worker_controls is not None:
+                    worker_controls.microbatch(step + 1, reject_live_controls)
+                input_wait = (
+                    worker_step_profiler.input_wait()
+                    if worker_step_profiler is not None
+                    else nullcontext()
+                )
+                with input_wait:
+                    sample = sample_train(train_batch_size, train_width)
+                x, precomputed_recall = sample if isinstance(sample, tuple) else (sample, None)
+                # Mixed-ctx rows are exactly T_bucket wide (pad-masked); flat windows are T+1(+extra).
+                xin, tgt = ((x[:, :-1], x[:, 1:]) if buckets is not None
+                            else (x[:, :train_seq_len], x[:, 1:train_seq_len + 1]))
+                if args.fsdp_sparse_embeddings:
+                    sparse_vocab_rows.append(torch.unique(xin))
+                    if precomputed_recall is not None:
+                        valid_recalled = precomputed_recall.recalled[
+                            precomputed_recall.valid
+                        ]
+                        if valid_recalled.numel():
+                            sparse_recalled_rows.append(torch.unique(valid_recalled))
+                # The ordinary path skips RWKV7Small's full vocabulary output and lets
+                # fused CE reuse its bf16 logit allocation during backward. Engram's
+                # sparse copy-head mutates logits, so it retains the compatible path.
+                if lmb is None:
+                    hidden = fwd(xin, hidden_only=True)
+                    if training_objective is not None:
+                        loss = training_objective(
+                            hidden,
+                            model.head,
+                            tgt,
+                            ignore_index=(0 if buckets is not None else None),
+                        )
+                    else:
+                        from rwkv_lab.fused_ce import lmhead_cross_entropy
 
-            vocab_rows = (
-                torch.unique(torch.cat(sparse_vocab_rows))
-                if sparse_vocab_rows else torch.empty(0, device=dev, dtype=torch.long)
-            )
-            for parameter in sparse_vocab_params:
-                sparse_sync_parameter_rows(parameter, vocab_rows)
-            if sparse_engram_params:
-                recalled = (
-                    torch.unique(torch.cat(sparse_recalled_rows))
-                    if sparse_recalled_rows
-                    else torch.empty(0, device=dev, dtype=torch.long)
+                        loss = lmhead_cross_entropy(
+                            hidden,
+                            model.head,
+                            tgt,
+                            fused=True,
+                            ignore_index=(0 if buckets is not None else None),
+                        )
+                    out = (None, hidden) if heads else None
+                else:
+                    out = fwd(xin, return_hidden=bool(heads),
+                              precomputed_recall=precomputed_recall)
+                    lg = (out[0] if heads else out).float()
+                    loss = F.cross_entropy(lg.reshape(-1, lg.size(-1)), tgt.reshape(-1),
+                                           ignore_index=(0 if buckets is not None else -100))
+                if heads:                                        # + weighted aux (latent-prediction) loss
+                    loss = loss + heads.compute(out[1], x, model.emb, model.head)["aux_total"]
+                if args.routing_free_moe and not args.init_g1g:
+                    root = model.module if hasattr(model, "module") else model
+                    loss = loss + args.routing_free_aux_weight * sum(
+                        (block.ffn.aux_loss.to(loss.device) for block in root.blocks),
+                        loss.new_zeros(()))
+                if args.distributed == "fsdp2" and ga > 1:
+                    from rwkv_lab.distributed import set_requires_gradient_sync
+                    set_requires_gradient_sync(model, micro_step == ga - 1)
+                scaled_loss = (
+                    gradient_accumulation.scale_loss(loss)
+                    if gradient_accumulation is not None
+                    else (loss / ga if ga > 1 else loss)
                 )
-                physical = (
-                    torch.unique(lmb.table.access_idx[recalled].long())
-                    if recalled.numel()
-                    else recalled
+                scaled_loss.backward()
+                seen += xin.shape[0] * xin.shape[1]
+            if args.fsdp_sparse_embeddings:
+                from rwkv_lab.distributed import sparse_sync_parameter_rows
+
+                vocab_rows = (
+                    torch.unique(torch.cat(sparse_vocab_rows))
+                    if sparse_vocab_rows else torch.empty(0, device=dev, dtype=torch.long)
                 )
-                for parameter in sparse_engram_params:
-                    sparse_sync_parameter_rows(parameter, physical)
-        if args.distributed == "fsdp2":
-            from rwkv_lab.distributed import clip_grad_norm
-            gn = clip_grad_norm(model, args.grad_clip)
-        else:
-            clip_params = list(model.parameters()) + (
-                list(heads.parameters()) if heads else []
+                for parameter in sparse_vocab_params:
+                    sparse_sync_parameter_rows(parameter, vocab_rows)
+                if sparse_engram_params:
+                    recalled = (
+                        torch.unique(torch.cat(sparse_recalled_rows))
+                        if sparse_recalled_rows
+                        else torch.empty(0, device=dev, dtype=torch.long)
+                    )
+                    physical = (
+                        torch.unique(lmb.table.access_idx[recalled].long())
+                        if recalled.numel()
+                        else recalled
+                    )
+                    for parameter in sparse_engram_params:
+                        sparse_sync_parameter_rows(parameter, physical)
+            if args.distributed == "fsdp2":
+                from rwkv_lab.distributed import clip_grad_norm
+                gn = clip_grad_norm(model, args.grad_clip)
+            else:
+                clip_params = list(model.parameters()) + (
+                    list(heads.parameters()) if heads else []
+                )
+                gn = (
+                    worker_components.gradient_clipping(clip_params)
+                    if worker_components is not None
+                    else torch.nn.utils.clip_grad_norm_(clip_params, args.grad_clip)
+                )
+            if weight_decay_schedule is not None:
+                weight_decay_schedule.step(step)
+            perform_rwkv_optimizer_step(
+                opt,
+                worker_controls,
+                next_step=step + 1,
+                control_applier=reject_live_controls,
+                sentinel=mutation_sentinel,
             )
-            gn = (
-                worker_components.gradient_clipping(clip_params)
-                if worker_components is not None
-                else torch.nn.utils.clip_grad_norm_(clip_params, args.grad_clip)
-            )
-        if weight_decay_schedule is not None:
-            weight_decay_schedule.step(step)
-        perform_rwkv_optimizer_step(
-            opt,
-            worker_controls,
-            next_step=step + 1,
-            control_applier=reject_live_controls,
-        )
-        step += 1
-        if worker_step_profiler is not None:
-            worker_step_profiler.step(step)
-        if worker_observability is not None:
-            worker_observability.optimizer_step(step)
-        if args.cached_fp8_up:
-            refresh_channelmix_fp8(model)
-        if ema is not None:
-            ema_update()
-        if tail_ema is not None:
-            tail_ema.update(step)
-        if step % args.log_every == 0:
-            emit({"kind": "train", "step": step, "loss": float(loss.detach()),
-                  "gnorm": float(gn.detach()),
-                  "lr": lr, "tok_per_sec": int(seen / max(time.time() - t0, 1e-6))})
-            publish_metric("train.loss", float(loss.detach()), metric_step=step)
-            publish_metric("gradient_norm", float(gn.detach()), metric_step=step)
-            publish_metric("learning_rate", lr, metric_step=step)
-            publish_metric(
-                "train.tokens_per_second",
-                int(seen / max(time.time() - t0, 1e-6)),
-                metric_step=step,
-            )
+            step += 1
+            if worker_step_profiler is not None:
+                worker_step_profiler.step(step)
+            if worker_observability is not None:
+                worker_observability.optimizer_step(step)
+            if args.cached_fp8_up:
+                refresh_channelmix_fp8(model)
+            if ema is not None:
+                ema_update()
+            if tail_ema is not None:
+                tail_ema.update(step)
+            if step % args.log_every == 0:
+                emit({"kind": "train", "step": step, "loss": float(loss.detach()),
+                      "gnorm": float(gn.detach()),
+                      "lr": lr, "tok_per_sec": int(seen / max(time.time() - t0, 1e-6))})
+                publish_metric("train.loss", float(loss.detach()), metric_step=step)
+                publish_metric("gradient_norm", float(gn.detach()), metric_step=step)
+                publish_metric("learning_rate", lr, metric_step=step)
+                publish_metric(
+                    "train.tokens_per_second",
+                    int(seen / max(time.time() - t0, 1e-6)),
+                    metric_step=step,
+                )
     if worker_controls is not None:
         worker_controls.evaluation(step, reject_live_controls)
     vl = val_loss(); emit({"kind": "eval", "step": step, "loss": vl, "val_loss": vl, "ppl": math.exp(vl)})
