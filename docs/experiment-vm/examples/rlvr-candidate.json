@@ -1,0 +1,340 @@
+{
+  "api_version": "trainvm.rwkv-lab/v1alpha1",
+  "kind": "Experiment",
+  "metadata": {
+    "name": "rlvr-candidate",
+    "description": "Run one bounded RLVR candidate under an authority-owned TrainVM lease, gated on held-out verifier evidence published at the attempt baseline.",
+    "labels": {
+      "family": "rwkv-rlvr",
+      "campaign": "verifier-reward"
+    }
+  },
+  "spec": {
+    "workspace": {
+      "root": "/thearray/git/moe-mla",
+      "run_directory": "/thearray/git/moe-mla/runs/trainvm/rlvr-candidate",
+      "concurrency_key": "rlvr-candidate",
+      "allowed_read_roots": [
+        "/thearray/git/moe-mla"
+      ],
+      "allowed_write_roots": [
+        "/thearray/git/moe-mla/runs/trainvm/rlvr-candidate"
+      ]
+    },
+    "resources": {
+      "accelerators": {
+        "vendor": "nvidia",
+        "count": 1,
+        "minimum_memory_gib": 24,
+        "exclusive": true
+      },
+      "minimum_host_memory_gib": 32,
+      "cpu_threads": 8,
+      "lease_timeout_seconds": 30,
+      "cpu_io_policy": {
+        "cpu_weight": 100,
+        "io_weight": 100,
+        "omp_threads": 4,
+        "preprocessing_workers": 4,
+        "nice": 0
+      }
+    },
+    "parameters": {},
+    "artifacts": {
+      "candidate_checkpoint": {
+        "type": "checkpoint",
+        "schema": "rwkv-lab.rlvr-candidate-checkpoint.v1",
+        "immutability": "immutable",
+        "fingerprint": "manifest_sha256",
+        "required": true
+      },
+      "baseline_eval_examples": {
+        "type": "eval_examples",
+        "schema": "rwkv-lab.eval-examples.v1",
+        "immutability": "append_only",
+        "fingerprint": "manifest_sha256",
+        "required": true
+      }
+    },
+    "components": {
+      "core": {
+        "adapter": "trainvm.core",
+        "version": "1.0.0",
+        "runtime": "builtin",
+        "operations": {
+          "acquire_resources": {
+            "contract": "trainvm.v1.AcquireResources"
+          },
+          "release_resources": {
+            "contract": "trainvm.v1.ReleaseResources"
+          }
+        }
+      },
+      "rlvr": {
+        "adapter": "rwkv-lab.rwkv-rlvr",
+        "version": "1.0.0",
+        "runtime": "python_worker",
+        "operations": {
+          "train": {
+            "contract": "rwkv_lab.rwkv_rlvr.v1.Train"
+          }
+        }
+      }
+    },
+    "workflow": {
+      "entrypoint": "acquire_gpu",
+      "nodes": {
+        "acquire_gpu": {
+          "description": "Take the exclusive accelerator lease this candidate runs under.",
+          "invoke": {
+            "component": "core",
+            "operation": "acquire_resources",
+            "inputs": {
+              "concurrency_key": {
+                "literal": "rlvr-candidate"
+              }
+            }
+          },
+          "idempotency": "receipt_required",
+          "effect": "resource",
+          "transitions": [
+            {
+              "on": "resource.acquired",
+              "target": "rlvr_candidate"
+            },
+            {
+              "on": "operation.failed",
+              "target": "$failed"
+            }
+          ]
+        },
+        "rlvr_candidate": {
+          "description": "One bounded RLVR candidate. Publishes its attempt-baseline held-out verifier evidence before the first optimizer mutation.",
+          "invoke": {
+            "component": "rlvr",
+            "operation": "train",
+            "inputs": {
+              "config": {
+                "literal": {
+                  "checkpoint": "/thearray/git/moe-mla/models/rwkv7-g1h-2.9b-20260710-ctx10240.pth",
+                  "output_dir": "/thearray/git/moe-mla/runs/trainvm/rlvr-candidate",
+                  "vocab": "/thearray/git/moe-mla/src/rwkv_lab/assets/rwkv_vocab_v20230424.txt",
+                  "tasks": "/thearray/git/moe-mla/curated_rlvr/arithmetic_train.jsonl",
+                  "heldout_tasks": "/thearray/git/moe-mla/curated_rlvr/arithmetic_eval.jsonl",
+                  "algorithm": "gspo",
+                  "steps": 100,
+                  "prompts_per_step": 2,
+                  "group_size": 8,
+                  "max_new_tokens": 64,
+                  "learning_rate": 1e-06,
+                  "weight_decay": 0.0,
+                  "warmup_steps": 10,
+                  "max_gradient_norm": 1.0,
+                  "eval_every": 10,
+                  "eval_prompts": 32,
+                  "eval_group_size": 4,
+                  "seed": 20260809
+                }
+              }
+            },
+            "training": {
+              "model_family": "rwkv",
+              "components": {
+                "artifact_renderer": {
+                  "key": {
+                    "category": "artifact_renderer",
+                    "name": "evidence_envelope",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "modality": "text",
+                    "schema": "trainvm.eval-evidence.v1"
+                  }
+                },
+                "evaluation_schedule": {
+                  "key": {
+                    "category": "evaluation_schedule",
+                    "name": "launch_gate_periodic",
+                    "version": "2.0.0"
+                  },
+                  "configuration": {
+                    "full_step_zero": true,
+                    "full_every_steps": 10,
+                    "qualitative_every_steps": 10,
+                    "final": true
+                  }
+                },
+                "evaluator": {
+                  "key": {
+                    "category": "evaluator",
+                    "name": "scalar_loss",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "split_slot": "",
+                    "metrics": [
+                      "eval.pass_at_k",
+                      "eval.reward"
+                    ],
+                    "reduction": "weighted_mean",
+                    "maximum_examples": 0
+                  }
+                },
+                "gradient_clipping": {
+                  "key": {
+                    "category": "gradient_clipping",
+                    "name": "global_norm",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "max_norm": 1.0,
+                    "norm_type": 2.0,
+                    "error_if_nonfinite": false
+                  }
+                },
+                "learning_rate": {
+                  "key": {
+                    "category": "learning_rate_schedule",
+                    "name": "linear_warmup_constant",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "warmup_steps": 10
+                  }
+                },
+                "optimizer": {
+                  "key": {
+                    "category": "optimizer",
+                    "name": "torch_adamw_no_decay",
+                    "version": "2.0.0"
+                  },
+                  "configuration": {
+                    "learning_rate": 1e-06,
+                    "beta1": 0.9,
+                    "beta2": 0.95,
+                    "epsilon": 1e-08,
+                    "foreach": false,
+                    "fused": true
+                  }
+                },
+                "qualitative_samples": {
+                  "key": {
+                    "category": "qualitative_sample",
+                    "name": "fixed_held_out",
+                    "version": "2.0.0"
+                  },
+                  "configuration": {
+                    "identity_field": "id",
+                    "sample_count": 8
+                  }
+                },
+                "weight_decay": {
+                  "key": {
+                    "category": "weight_decay_schedule",
+                    "name": "constant",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "weight_decay": 0.0
+                  }
+                }
+              }
+            }
+          },
+          "publishes": {
+            "checkpoint": "candidate_checkpoint",
+            "eval_examples": "baseline_eval_examples"
+          },
+          "idempotency": "receipt_required",
+          "effect": "process",
+          "timeout_seconds": 604800,
+          "transitions": [
+            {
+              "on": "worker.completed",
+              "target": "release_gpu"
+            },
+            {
+              "on": "operation.failed",
+              "target": "$failed"
+            }
+          ]
+        },
+        "release_gpu": {
+          "description": "Return the accelerator lease however the candidate ended.",
+          "invoke": {
+            "component": "core",
+            "operation": "release_resources",
+            "inputs": {
+              "concurrency_key": {
+                "literal": "rlvr-candidate"
+              }
+            }
+          },
+          "idempotency": "replay_safe",
+          "effect": "resource",
+          "transitions": [
+            {
+              "on": "resource.released",
+              "target": "$completed"
+            },
+            {
+              "on": "operation.failed",
+              "target": "$failed"
+            }
+          ]
+        }
+      }
+    },
+    "controls": {
+      "catalog": {}
+    },
+    "observability": {
+      "heartbeat_seconds": 5,
+      "metrics": [
+        {
+          "name": "train.reward",
+          "type": "gauge",
+          "unit": "ratio",
+          "step_domain": "optimizer_step",
+          "aggregation": "mean"
+        },
+        {
+          "name": "train.loss",
+          "type": "gauge",
+          "unit": "dimensionless",
+          "step_domain": "optimizer_step",
+          "aggregation": "mean"
+        },
+        {
+          "name": "train.gradient_norm",
+          "type": "gauge",
+          "unit": "ratio",
+          "step_domain": "optimizer_step",
+          "aggregation": "last"
+        },
+        {
+          "name": "eval.reward",
+          "type": "gauge",
+          "unit": "ratio",
+          "step_domain": "optimizer_step",
+          "aggregation": "last"
+        },
+        {
+          "name": "eval.pass_at_k",
+          "type": "gauge",
+          "unit": "ratio",
+          "step_domain": "optimizer_step",
+          "aggregation": "last"
+        }
+      ],
+      "retain_raw_metrics_days": 30
+    },
+    "recovery": {
+      "exact_resume": false,
+      "reconcile": "adopt_if_fingerprint_matches",
+      "orphan_policy": "adopt_if_identity_matches",
+      "graceful_stop_seconds": 300,
+      "release_accelerators_when_paused": true
+    }
+  }
+}

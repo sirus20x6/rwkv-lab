@@ -42,7 +42,7 @@ from .mageflow_gallery import completed_mageflow_gallery_request
 from .metric_decision import ScalarMetricDecisionConfig
 from .posttraining import RWKVPostTrainConfig
 from .qwen_controls import lower_initial_qwen_controls
-from .rlvr import RLVRTrainConfig
+from .rlvr import RLVRHeldoutEvalPolicy, RLVRTrainConfig
 from .rwkv_scratch import (
     RWKVScratchTrainConfig,
     RWKVTextEvalPolicy,
@@ -1427,6 +1427,38 @@ def _rlvr(
 
     from rwkv_lab.rlvr_train import run
 
+    # Read from the RESOLVED composition, never from the document: an inherited
+    # slot is invisible to anything that reads the authored text, and
+    # validate_eval_examples_gate_provenance compares the manifest against what
+    # the registry resolved, not against what was written down.
+    evaluator = components.evaluator()
+    eval_policy = RLVRHeldoutEvalPolicy(
+        identity_field=components.qualitative_samples().configuration.identity_field,
+        evaluator_component_digest=components.composition.components[
+            "evaluator"
+        ].descriptor_digest,
+        metric_names=tuple(evaluator.configuration.metrics),
+        artifact_renderer_digest=components.composition.components[
+            "artifact_renderer"
+        ].descriptor_digest,
+        qualitative_sample_digest=components.composition.components[
+            "qualitative_samples"
+        ].descriptor_digest,
+        sample_count=components.qualitative_samples().configuration.sample_count,
+        # This route declares no generation_policy slot, so the decode half of
+        # the frozen evaluation manifest is the evaluation sampling arguments
+        # themselves. They are the things a change to which makes two revisions
+        # incomparable, which is what the digest is for.
+        decode=(
+            ("eval_group_size", config.eval_group_size),
+            ("eval_temperature", config.eval_temperature),
+            ("max_new_tokens", config.max_new_tokens),
+            ("stop_token", config.stop_token),
+            ("top_k", config.top_k),
+            ("top_p", config.top_p),
+        ),
+    )
+
     result = run(
         Namespace(
             ckpt=str(checkpoint),
@@ -1501,6 +1533,7 @@ def _rlvr(
         worker_step_profiler=step_profiler or NullStepProfiler(),
         worker_observability=observability,
         worker_controls=controls,
+        worker_eval_examples=eval_policy,
     )
     if not isinstance(result, Mapping) or result.get("status") != "complete":
         raise AdapterDispatchError("RLVR trainer omitted its terminal result")

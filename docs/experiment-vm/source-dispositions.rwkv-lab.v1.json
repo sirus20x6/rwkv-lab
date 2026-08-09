@@ -2232,7 +2232,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "rlvr.rwkv-train",
-      "source_sha256": "sha256:4b0f278b838892b1f53c1c88467955715c11af48ebeb73b30eced60e91ee4f59",
+      "source_sha256": "sha256:8dee922611c855b4cb3eef384ecf90852126f6cf8115267e2e9e6f2b6ce412f9",
       "family": "rwkv_rlvr",
       "coverage": "direct",
       "consumers": [

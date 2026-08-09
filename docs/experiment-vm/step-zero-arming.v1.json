@@ -88,7 +88,11 @@
       "checkpoint_outputs": [
         "checkpoint"
       ],
-      "eval_examples_output": null
+      "eval_examples_output": {
+        "output_name": "eval_examples",
+        "required": true,
+        "artifact_schema": "rwkv-lab.eval-examples.v1"
+      }
     },
     {
       "contract": "rwkv_lab.rwkv_scratch.v1.Train",

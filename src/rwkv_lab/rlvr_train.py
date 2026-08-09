@@ -64,9 +64,17 @@ from rwkv_lab.rlvr_evaluation import (
     stratified_tasks,
     task_reward_summary,
 )
-from rwkv_lab.trainvm_worker import OptimizerMutationSentinel
+from rwkv_lab.trainvm_worker import (
+    CheckpointPublicationRequest,
+    EvalEvidencePart,
+    EvalExample,
+    EvalExamplesPublicationRequest,
+    OptimizerMutationSentinel,
+)
 
 TASK_SCHEMA = "rwkv-lab.rlvr-task.v1"
+HELDOUT_TARGET_SCHEMA = "rwkv-lab.rlvr-heldout-target.v1"
+HELDOUT_PREDICTION_SCHEMA = "rwkv-lab.rlvr-heldout-prediction.v1"
 VERIFY_REQUEST_SCHEMA = "rwkv-lab.rlvr-verify-request.v1"
 VERIFY_RESPONSE_SCHEMA = "rwkv-lab.rlvr-verify-response.v1"
 RESULT_SCHEMA = "rwkv-lab.rlvr-result.v1"
@@ -742,6 +750,123 @@ def evaluate_policy(model, tokenizer, tasks: Sequence[RLVRTask], *, group_size: 
             "generation": generation}, rollouts
 
 
+# One held-out task carries `group_size` rollouts, and the publisher refuses a
+# duplicate `heldout_item_id`, so the group must be collapsed to one example.
+# The first rollout of the group is taken rather than the best-scoring one: the
+# best is a function of the reward the evidence is meant to let a reader check,
+# so selecting on it would make every published prediction look better than the
+# policy is. The seeded generator makes "first" reproducible.
+MAXIMUM_EVIDENCE_CHARACTERS = 2048
+
+
+def _selection_digest(value: object) -> str:
+    """Digest a JSON-serialisable description of a frozen selection."""
+
+    return "sha256:" + hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"),
+                   allow_nan=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _evidence_text(value: object, label: str, task_id: str) -> str:
+    """Bound one text part, refusing rather than truncating.
+
+    A truncated prompt or response is evidence that disagrees with what the
+    policy was actually asked and actually answered, which is precisely the
+    class of artifact the step-zero gate exists to refuse. Failing closed here
+    costs a run; publishing a silently shortened rollout costs the meaning of
+    every comparison made against it afterwards.
+    """
+
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"RLVR held-out {label} for task {task_id} is empty")
+    if len(value) > MAXIMUM_EVIDENCE_CHARACTERS:
+        raise ValueError(
+            f"RLVR held-out {label} for task {task_id} is longer than "
+            f"{MAXIMUM_EVIDENCE_CHARACTERS} characters"
+        )
+    return value
+
+
+def build_rlvr_heldout_eval_examples(
+    policy,
+    tasks: Sequence[RLVRTask],
+    rollouts: Sequence[Rollout],
+    task_rewards: dict[str, float],
+    *,
+    group_size: int,
+    optimizer_step: int,
+) -> tuple[EvalExample, ...]:
+    """Render the frozen held-out selection as typed step-zero evidence.
+
+    Modality-appropriate for a verifier-rewarded route: the input is the task
+    prompt the policy was given, the target is the verifier that scores it, and
+    the prediction is what the policy actually emitted together with the reward
+    that verifier returned. Nothing here is generated for the artifact's sake --
+    every field is read out of the baseline evaluation the trainer already ran.
+    """
+
+    if (
+        isinstance(optimizer_step, bool)
+        or not isinstance(optimizer_step, int)
+        or optimizer_step < 0
+    ):
+        raise ValueError("RLVR held-out optimizer step is invalid")
+    if group_size < 1 or len(rollouts) != len(tasks) * group_size:
+        raise ValueError("RLVR held-out rollout count does not match tasks × group")
+    examples: list[EvalExample] = []
+    for index, task in enumerate(tasks[: policy.sample_count]):
+        rollout = rollouts[index * group_size]
+        if rollout.task.id != task.id:
+            raise ValueError("RLVR held-out rollouts are not task-ordered")
+        if task.id not in task_rewards:
+            raise ValueError(f"RLVR held-out task {task.id} has no verifier reward")
+        expected = supervised_answer(task)
+        target: dict[str, Any] = {"verifier_kind": str(task.verifier.get("kind"))}
+        if expected is not None:
+            target["expected"] = expected
+        examples.append(
+            EvalExample(
+                example_id=f"{task.id}:step:{optimizer_step}",
+                heldout_item_id=task.id,
+                heldout_item_digest="sha256:"
+                + hashlib.sha256(
+                    json.dumps(asdict(task), sort_keys=True).encode("utf-8")
+                ).hexdigest(),
+                input=(
+                    EvalEvidencePart(
+                        kind="text",
+                        text=_evidence_text(task.prompt, "prompt", task.id),
+                    ),
+                ),
+                target=(
+                    EvalEvidencePart(
+                        kind="structured",
+                        schema=HELDOUT_TARGET_SCHEMA,
+                        value=target,
+                    ),
+                ),
+                prediction=(
+                    EvalEvidencePart(
+                        kind="text",
+                        text=_evidence_text(rollout.response, "response", task.id),
+                    ),
+                    EvalEvidencePart(
+                        kind="structured",
+                        schema=HELDOUT_PREDICTION_SCHEMA,
+                        value={
+                            "reward": float(task_rewards[task.id]),
+                            "group_size": int(group_size),
+                        },
+                    ),
+                ),
+            )
+        )
+    if not examples:
+        raise ValueError("RLVR held-out selection produced no evidence")
+    return tuple(examples)
+
+
 def run(
     args,
     *,
@@ -749,6 +874,7 @@ def run(
     worker_step_profiler=None,
     worker_observability=None,
     worker_controls=None,
+    worker_eval_examples=None,
 ) -> dict[str, Any]:
     from rwkv_lab.generate import WorldVocab, build_from_ckpt
     from rwkv_lab.rwkv_pretrain import build_optimizer
@@ -932,6 +1058,7 @@ def run(
     # a literal `0` deadlocks every resumed attempt -- the first crossing would
     # name a step the controller does not gate and be refused forever, which is
     # the bug 8f0da3e fixed in mage_flow_pretrain.py (PR #94/#115).
+    gate_baseline = None
     if worker_controls is not None:
         baseline = worker_controls.attempt_baseline_optimizer_step
         if start_step != baseline:
@@ -939,23 +1066,28 @@ def run(
                 "RLVR resumed at a step the controller does not gate: "
                 f"{start_step} != {baseline}"
             )
-        if (
-            worker_controls.step_zero_eval_gate_required
-            and not worker_controls.step_zero_eval_gate_satisfied
-        ):
-            # Fail closed here rather than at the first crossing, so the
-            # diagnosis is the missing evidence rather than a refused step
-            # thousands of rollout tokens later. RLVR cannot satisfy this gate
-            # today: its authority profile declares no `eval_examples` output,
-            # so EvalExamplesPublisher refuses the publication that would
-            # satisfy it. That is an authority-side gap, tracked separately;
-            # the honest behaviour until it closes is to refuse rather than to
-            # mutate unguarded.
-            raise ValueError(
-                "RLVR cannot mutate: the controller requires durable "
-                f"attempt-baseline evidence at step {baseline} and none is "
-                "recorded for this attempt"
-            )
+        if worker_controls.step_zero_eval_gate_required:
+            if worker_controls.step_zero_eval_gate_satisfied:
+                # A reconnecting worker whose evidence the controller replayed
+                # from the journal must not republish it. That never licenses
+                # skipping the pre-mutation boundary itself.
+                print(
+                    "attempt-baseline eval gate: already durable at step "
+                    f"{baseline}",
+                    flush=True,
+                )
+            elif worker_eval_examples is None:
+                # Fail closed here rather than at the first crossing, so the
+                # diagnosis is the missing publication authority rather than a
+                # refused step thousands of rollout tokens later.
+                raise ValueError(
+                    "RLVR cannot mutate: the controller requires durable "
+                    f"attempt-baseline evidence at step {baseline} and this "
+                    "worker was given no held-out evaluation policy to publish "
+                    "it with"
+                )
+            else:
+                gate_baseline = baseline
     if args.steps < start_step:
         raise ValueError(f"--steps {args.steps} precedes resumed RLVR step {start_step}")
     if args.resume and source_blob.get("rlvr_optimizer"):
@@ -1050,12 +1182,13 @@ def run(
             if args.max_rollout_tokens > 0 and final_eval_reserve > args.max_rollout_tokens:
                 raise ValueError("rollout budget is smaller than one fixed held-out evaluation")
             stored_baseline = (source_blob.get("rlvr") or {}).get("baseline_heldout") if args.resume else None
+            baseline_rollouts = None
             if stored_baseline and stored_baseline.get("task_rewards"):
                 baseline_eval = dict(stored_baseline)
             elif args.resume:
                 raise ValueError("resumed checkpoint predates paired held-out evidence; start a fresh RLVR run")
             else:
-                baseline_eval, _ = evaluate_policy(
+                baseline_eval, baseline_rollouts = evaluate_policy(
                     model, vocab, fixed_eval, group_size=args.eval_group_size,
                     max_new=args.max_new, temperature=args.eval_temperature, top_p=args.top_p,
                     top_k=args.top_k, stop_token=args.stop_token, device=args.device,
@@ -1065,6 +1198,86 @@ def run(
             _atomic_json(out_dir / "manifest.json", manifest)
             emit({"kind": "eval", "step": start_step, "split": "heldout",
                   "phase": "baseline", **baseline_eval})
+            if gate_baseline is not None:
+                # Ordering, not decoration. `emit` above published the declared
+                # `eval.*` scalars at this step, and
+                # validate_eval_examples_gate_provenance requires both a prior
+                # durable declared scalar AND a prior durable checkpoint
+                # artifact at the manifest's own step before it will accept the
+                # examples. So: scalars, then checkpoint, then examples -- and
+                # all three before the loop below can reach a mutation.
+                if baseline_rollouts is None:
+                    raise ValueError(
+                        "RLVR cannot publish attempt-baseline evidence from a "
+                        "stored held-out summary: it carries no rollouts"
+                    )
+                staging = out_dir / f"checkpoint-baseline-{gate_baseline}"
+                staging.mkdir(mode=0o750, parents=False, exist_ok=False)
+                save_checkpoint(
+                    staging / "state.pt", model, optimizer, source_blob,
+                    step=gate_baseline, manifest=manifest, rng=rng)
+                published = worker_controls.publish_policy_checkpoint(
+                    CheckpointPublicationRequest(
+                        source_directory=staging,
+                        optimizer_step=gate_baseline,
+                        resume_grade="terminal_checkpoint",
+                        state_components=(
+                            "component_composition",
+                            "model",
+                            "optimizer",
+                            "rng_python",
+                            "rng_torch",
+                        ),
+                    )
+                )
+                worker_controls.publish_evaluation_examples(
+                    EvalExamplesPublicationRequest(
+                        output_name="eval_examples",
+                        optimizer_step=gate_baseline,
+                        series_id="rlvr-heldout-verifier",
+                        identity_field=worker_eval_examples.identity_field,
+                        identities_digest=_selection_digest(
+                            [task.id for task in
+                             fixed_eval[:worker_eval_examples.sample_count]]),
+                        selector_digest=_selection_digest({
+                            "eval_group_size": args.eval_group_size,
+                            "eval_prompts": args.eval_prompts,
+                            "seed": args.seed,
+                            "split_audit": split_audit,
+                            "task_sha256": task_hash,
+                        }),
+                        evaluator_component_digest=(
+                            worker_eval_examples.evaluator_component_digest),
+                        metric_names=worker_eval_examples.metric_names,
+                        checkpoint_artifact_id=published.artifact_id,
+                        checkpoint_manifest_digest=published.manifest_sha256,
+                        # No generation_policy slot exists on this route's
+                        # composition contract, so the decode half of the frozen
+                        # evaluation manifest is composed from the arguments that
+                        # actually determine the rollouts. Cadence is absent on
+                        # purpose: a schedule change must leave this digest where
+                        # it was, or revisions stop being comparable.
+                        policy_digest=_selection_digest({
+                            "artifact_renderer":
+                                worker_eval_examples.artifact_renderer_digest,
+                            "decode": list(worker_eval_examples.decode),
+                            "evaluator":
+                                worker_eval_examples.evaluator_component_digest,
+                            "qualitative_sample":
+                                worker_eval_examples.qualitative_sample_digest,
+                        }),
+                        examples=build_rlvr_heldout_eval_examples(
+                            worker_eval_examples,
+                            fixed_eval,
+                            baseline_rollouts,
+                            baseline_eval["task_rewards"],
+                            group_size=args.eval_group_size,
+                            optimizer_step=gate_baseline,
+                        ),
+                        parent_artifact_ids=(published.artifact_id,),
+                    )
+                )
+                gate_baseline = None
             prior_manifest = source_blob.get("rlvr") or {}
             prior_elapsed = float(prior_manifest.get("elapsed_seconds", 0)) if args.resume else 0.0
             prior_rollout_tokens = int(prior_manifest.get("total_rollout_tokens", 0)) if args.resume else 0

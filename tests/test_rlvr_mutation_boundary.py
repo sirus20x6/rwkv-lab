@@ -24,12 +24,14 @@ the fake controller appends its crossings to, so what is asserted is an
 interleaving rather than two independent counts.
 
 What is deliberately NOT asserted here: that attempt-baseline eval evidence
-precedes the first mutation. RLVR cannot publish that evidence at all today --
-its authority profile declares no ``eval_examples`` output, so
-``EvalExamplesPublisher`` refuses the publication -- and a test written against
-evidence the route cannot emit would assert the harness rather than the
-trainer. What ``run()`` does instead is refuse to mutate when the controller
-requires evidence it has none of, and that refusal is asserted below.
+precedes the first mutation. That property now holds -- RLVR's profile declares
+an ``eval_examples`` output and its producer publishes at the attempt baseline
+-- but it belongs to ``tests/test_rlvr_step_zero_arming.py``, which drives the
+real ``WorkerSession``, ``WorkerControlRuntime`` and ``EvalExamplesPublisher``.
+The ``FakeControls`` below cannot bind it: a double that latches its own gate
+proves only that the double latches. What is asserted here is the ordering
+property, plus the refusal ``run()`` performs when the controller requires
+evidence this worker has no way to produce.
 """
 
 from __future__ import annotations
@@ -303,8 +305,10 @@ def test_a_required_gate_with_no_durable_evidence_refuses_before_it_generates(
 ):
     """Fail closed when the controller requires evidence this attempt lacks.
 
-    RLVR cannot publish attempt-baseline eval examples today, so the only
-    correct behaviour under a required gate is refusal.
+    This harness passes no held-out evaluation policy, so this worker has
+    nothing to publish with even though the route can now publish. Refusal is
+    the only correct behaviour, and it is the trainer's own refusal rather than
+    the boundary's -- see the generation assertion below.
 
     What is asserted is *where* the refusal happens, not merely that one does.
     ``pre_optimizer_step`` would refuse this attempt anyway, at the first

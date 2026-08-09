@@ -424,6 +424,30 @@ OperationAuthoringDeclaration rlvr_authoring() {
   checkpoint.artifact_schema = "rwkv-lab.rlvr-candidate-checkpoint.v1";
   checkpoint.description =
       "Required terminal RLVR candidate checkpoint and promotion lineage.";
+  // The universal pre-mutation gate. Declaring the port is what makes the
+  // publication reachable at all — adapter_registry.cpp rejects a node that
+  // publishes an undeclared operation output, so without this the trainer's
+  // baseline held-out evidence could not be published no matter how it was
+  // authored, and rlvr_train.py refused to mutate rather than proceed
+  // unguarded.
+  //
+  // Declaring it is necessary and NOT sufficient. This port's `required`
+  // forces the invoking node to publish something; what arms
+  // `invocation_requires_step_zero_eval_gate` is the *artifact's* own
+  // `required` in the composition document, a different field that
+  // `require_artifact_contract` does not tie to this one. The HF family sat
+  // inert in exactly that half-state.
+  authoring.outputs.emplace(
+      "eval_examples",
+      OperationPortDescriptor{
+          .type = OperationPortType::artifact,
+          .required = true,
+          .artifact_type = ArtifactType::eval_examples,
+          .artifact_schema = "rwkv-lab.eval-examples.v1",
+          .description =
+              "Required same-attempt checkpoint-bound held-out verifier "
+              "evidence over the frozen evaluation task selection.",
+      });
   return authoring;
 }
 
