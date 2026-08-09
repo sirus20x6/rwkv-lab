@@ -69,6 +69,10 @@ namespace {
 
 int failures = 0;
 
+// Name of the case currently running, so that both an assertion failure and
+// an uncaught exception can say which one it was.
+std::string_view current_case = "<none>";
+
 constexpr const char* kTestBootId =
     "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 
@@ -95,7 +99,7 @@ trainvm::AuthorityTimeSample test_time_on_boot(
 
 void check(bool condition, std::string_view message) {
   if (!condition) {
-    std::cerr << "FAIL: " << message << '\n';
+    std::cerr << "FAIL [" << current_case << "]: " << message << '\n';
     ++failures;
   }
 }
@@ -14685,58 +14689,82 @@ void test_universal_step_zero_gate_orders_controller_mutation() {
 }  // namespace
 
 int main() {
-  try {
-    test_reflection_and_compiler();
-    test_wire_contract();
-    test_fsm();
-    test_control_validation();
-    test_journal();
-    test_controller_and_fake_worker();
-    test_compiled_plan_persistence();
-    test_resource_leases();
-    test_lease_renewal_authority();
-    test_authority_clock_integration();
-    test_authority_lock_file_identity();
-    test_read_only_journal_observer();
-    test_control_command_journal();
-    test_command_service();
-    test_submission_and_queue_boundary();
-    test_atomic_queue_acquisition_boundary();
-    test_worker_launch_and_readiness_boundary();
-    test_worker_control_service_boundary();
-    test_service_blocks_674_failed_final_members();
-    test_worker_control_grpc_stream();
-    test_graceful_cancel_lifecycle();
-    test_resource_releasing_pause_lifecycle();
-    test_adversarial_control_idempotency_and_replay();
-    test_topology_selection_compiles_and_refuses_invalid_combinations();
-  test_post_training_arm_is_gated_at_compile_time();
-    test_checked_in_topology_example_compiles();
-    test_typed_managed_resource_release();
-    test_typed_cache_qualification_executor();
-    test_concurrent_worker_launch_and_readiness_replay();
-    test_concurrent_fenced_result_content_conflict();
-    test_concurrent_queue_acquisition_replay();
-    test_acquiring_recovery_ignores_mutable_lease_lifecycle();
-    test_acquiring_rejects_fabricated_running_transition();
-    test_host_launch_registry_contract();
-    test_host_launch_resolution_and_binding();
-    test_service_host_launch_binding();
-    test_service_host_grant_reconciliation();
-    test_adapter_registry_file_contract();
-    test_service_registry_and_reconciliation();
-    test_adapter_registry_and_reconciler();
-    test_host_grant_saga();
-    test_service_reconciliation_supervisor();
-    test_service_supervisor_settles_after_terminal_worker();
-    test_service_supervisor_idle_soak();
-    test_service_orders_physical_before_logical_release();
-    test_legacy_journal_migration_policy();
-    test_universal_step_zero_gate_orders_controller_mutation();
-  } catch (const std::exception& exception) {
-    std::cerr << "UNCAUGHT: " << exception.what() << '\n';
-    return 1;
+  // Each case runs inside its own try so that a throw is attributable. The
+  // aggregate previously wrapped all 46 calls in one try, so an uncaught
+  // exception printed its message with no indication of which case was in
+  // flight -- see the CI run on PR #125, where the only output was
+  // "UNCAUGHT: training component configuration path is unavailable".
+  struct NamedCase {
+    std::string_view name;
+    void (*run)();
+  };
+  static constexpr NamedCase kCases[] = {
+      {"reflection_and_compiler", test_reflection_and_compiler},
+      {"wire_contract", test_wire_contract},
+      {"fsm", test_fsm},
+      {"control_validation", test_control_validation},
+      {"journal", test_journal},
+      {"controller_and_fake_worker", test_controller_and_fake_worker},
+      {"compiled_plan_persistence", test_compiled_plan_persistence},
+      {"resource_leases", test_resource_leases},
+      {"lease_renewal_authority", test_lease_renewal_authority},
+      {"authority_clock_integration", test_authority_clock_integration},
+      {"authority_lock_file_identity", test_authority_lock_file_identity},
+      {"read_only_journal_observer", test_read_only_journal_observer},
+      {"control_command_journal", test_control_command_journal},
+      {"command_service", test_command_service},
+      {"submission_and_queue_boundary", test_submission_and_queue_boundary},
+      {"atomic_queue_acquisition_boundary", test_atomic_queue_acquisition_boundary},
+      {"worker_launch_and_readiness_boundary", test_worker_launch_and_readiness_boundary},
+      {"worker_control_service_boundary", test_worker_control_service_boundary},
+      {"service_blocks_674_failed_final_members", test_service_blocks_674_failed_final_members},
+      {"worker_control_grpc_stream", test_worker_control_grpc_stream},
+      {"graceful_cancel_lifecycle", test_graceful_cancel_lifecycle},
+      {"resource_releasing_pause_lifecycle", test_resource_releasing_pause_lifecycle},
+      {"adversarial_control_idempotency_and_replay", test_adversarial_control_idempotency_and_replay},
+      {"topology_selection_compiles_and_refuses_invalid_combinations", test_topology_selection_compiles_and_refuses_invalid_combinations},
+      {"post_training_arm_is_gated_at_compile_time", test_post_training_arm_is_gated_at_compile_time},
+      {"checked_in_topology_example_compiles", test_checked_in_topology_example_compiles},
+      {"typed_managed_resource_release", test_typed_managed_resource_release},
+      {"typed_cache_qualification_executor", test_typed_cache_qualification_executor},
+      {"concurrent_worker_launch_and_readiness_replay", test_concurrent_worker_launch_and_readiness_replay},
+      {"concurrent_fenced_result_content_conflict", test_concurrent_fenced_result_content_conflict},
+      {"concurrent_queue_acquisition_replay", test_concurrent_queue_acquisition_replay},
+      {"acquiring_recovery_ignores_mutable_lease_lifecycle", test_acquiring_recovery_ignores_mutable_lease_lifecycle},
+      {"acquiring_rejects_fabricated_running_transition", test_acquiring_rejects_fabricated_running_transition},
+      {"host_launch_registry_contract", test_host_launch_registry_contract},
+      {"host_launch_resolution_and_binding", test_host_launch_resolution_and_binding},
+      {"service_host_launch_binding", test_service_host_launch_binding},
+      {"service_host_grant_reconciliation", test_service_host_grant_reconciliation},
+      {"adapter_registry_file_contract", test_adapter_registry_file_contract},
+      {"service_registry_and_reconciliation", test_service_registry_and_reconciliation},
+      {"adapter_registry_and_reconciler", test_adapter_registry_and_reconciler},
+      {"host_grant_saga", test_host_grant_saga},
+      {"service_reconciliation_supervisor", test_service_reconciliation_supervisor},
+      {"service_supervisor_settles_after_terminal_worker", test_service_supervisor_settles_after_terminal_worker},
+      {"service_supervisor_idle_soak", test_service_supervisor_idle_soak},
+      {"service_orders_physical_before_logical_release", test_service_orders_physical_before_logical_release},
+      {"legacy_journal_migration_policy", test_legacy_journal_migration_policy},
+      {"universal_step_zero_gate_orders_controller_mutation",
+       test_universal_step_zero_gate_orders_controller_mutation},
+  };
+
+  for (const NamedCase& test_case : kCases) {
+    current_case = test_case.name;
+    try {
+      test_case.run();
+    } catch (const std::exception& exception) {
+      std::cerr << "UNCAUGHT std::exception in case '" << test_case.name
+                << "': " << exception.what() << '\n';
+      return 1;
+    } catch (...) {
+      std::cerr << "UNCAUGHT non-std exception in case '" << test_case.name
+                << "'\n";
+      return 1;
+    }
   }
+  current_case = "<none>";
+
   if (failures != 0) {
     std::cerr << failures << " test(s) failed\n";
     return 1;
