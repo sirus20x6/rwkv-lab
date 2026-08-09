@@ -26,6 +26,9 @@ class DataSourceImplementation(str, Enum):
         "rwkv_lab.data_source.jsonl_frozen_image_splits.v1"
     )
     JSONL_TOKEN_CORPUS_V1 = "rwkv_lab.data_source.jsonl_token_corpus.v1"
+    JSONL_FROZEN_TOKEN_SPLITS_V1 = (
+        "rwkv_lab.data_source.jsonl_frozen_token_splits.v1"
+    )
 
 
 class SampleProcessorImplementation(str, Enum):
@@ -46,6 +49,7 @@ class SampleMapperImplementation(str, Enum):
 
 class CollatorImplementation(str, Enum):
     PADDED_V1 = "rwkv_lab.collator.padded.v1"
+    PACKED_TOKENS_V1 = "rwkv_lab.collator.packed_tokens.v1"
 
 
 class SamplerImplementation(str, Enum):
@@ -294,10 +298,70 @@ class JsonlFrozenImageSplitsConfiguration:
         return str(Path(self.dataset_root) / "manifest.json")
 
 
+@dataclass(frozen=True, slots=True)
+class JsonlFrozenTokenSplitsConfiguration:
+    dataset_root: str
+    content_fingerprint: str
+    declared_columns: tuple[str, ...]
+    token_column: str
+    id_column: str
+
+    def __post_init__(self) -> None:
+        root = _require_path(self.dataset_root, "dataset_root", directory=True)
+        _require_digest(self.content_fingerprint, "content_fingerprint")
+        for name in ("manifest.json", "train.jsonl", "validation.jsonl", "test.jsonl"):
+            _require_path(str(root / name), name)
+        declared = _columns(self.declared_columns, "declared_columns")
+        token = _column(self.token_column, "token_column")
+        identifier = _column(self.id_column, "id_column")
+        if not {identifier, token}.issubset(declared):
+            raise DataPipelineError(
+                "frozen token-split columns are absent from declared_columns"
+            )
+
+    @classmethod
+    def from_resolved(
+        cls, value: Mapping[str, Any]
+    ) -> JsonlFrozenTokenSplitsConfiguration:
+        value = _exact(
+            value,
+            {
+                "dataset_root",
+                "content_fingerprint",
+                "declared_columns",
+                "token_column",
+                "id_column",
+            },
+            "JSONL frozen token-splits source",
+        )
+        return cls(
+            **{
+                **value,
+                "declared_columns": _columns(
+                    value["declared_columns"], "declared_columns"
+                ),
+            }
+        )
+
+    @property
+    def manifest_path(self) -> str:
+        return str(Path(self.dataset_root) / "train.jsonl")
+
+    @property
+    def split_manifest(self) -> str:
+        return str(Path(self.dataset_root) / "manifest.json")
+
+
 DataSourceConfiguration: TypeAlias = (
     JsonlFrozenImageSplitsConfiguration
+    | JsonlFrozenTokenSplitsConfiguration
     | JsonlImageCaptionConfiguration
     | JsonlTokenCorpusConfiguration
+)
+
+
+FrozenSplitConfiguration: TypeAlias = (
+    JsonlFrozenImageSplitsConfiguration | JsonlFrozenTokenSplitsConfiguration
 )
 
 
@@ -321,7 +385,7 @@ class RegisteredDataSource:
     def verify_content(
         self, *, authority_content_fingerprint: str | None = None
     ) -> None:
-        if isinstance(self.configuration, JsonlFrozenImageSplitsConfiguration):
+        if isinstance(self.configuration, FrozenSplitConfiguration):
             configuration = self.configuration
             if authority_content_fingerprint != configuration.content_fingerprint:
                 raise DataPipelineError(
@@ -368,8 +432,6 @@ class RegisteredDataSource:
                                 f"frozen {split} row has wrong split identity"
                             )
                         sample_id = row.get(configuration.id_column)
-                        caption = row.get(configuration.caption_columns[0])
-                        image_value = row.get(configuration.image_column)
                         if (
                             not isinstance(sample_id, str)
                             or not sample_id
@@ -378,27 +440,45 @@ class RegisteredDataSource:
                             raise DataPipelineError(
                                 "frozen manifests contain an empty or duplicate ID"
                             )
-                        if not isinstance(caption, str) or not caption.strip():
-                            raise DataPipelineError(
-                                "frozen manifest contains an empty caption"
-                            )
-                        if not isinstance(image_value, str) or not image_value:
-                            raise DataPipelineError(
-                                "frozen manifest contains an invalid image path"
-                            )
-                        image = Path(image_value)
-                        if not image.is_absolute():
-                            image = Path(configuration.dataset_root) / image
-                        try:
-                            image.resolve(strict=True).relative_to(
-                                Path(configuration.dataset_root).resolve(strict=True)
-                            )
-                        except (OSError, ValueError) as error:
-                            raise DataPipelineError(
-                                "frozen manifest image is absent or outside dataset root"
-                            ) from error
-                        if not image.is_file():
-                            raise DataPipelineError("frozen manifest image is not a file")
+                        if isinstance(
+                            configuration, JsonlFrozenImageSplitsConfiguration
+                        ):
+                            caption = row.get(configuration.caption_columns[0])
+                            image_value = row.get(configuration.image_column)
+                            if not isinstance(caption, str) or not caption.strip():
+                                raise DataPipelineError(
+                                    "frozen manifest contains an empty caption"
+                                )
+                            if not isinstance(image_value, str) or not image_value:
+                                raise DataPipelineError(
+                                    "frozen manifest contains an invalid image path"
+                                )
+                            image = Path(image_value)
+                            if not image.is_absolute():
+                                image = Path(configuration.dataset_root) / image
+                            try:
+                                image.resolve(strict=True).relative_to(
+                                    Path(configuration.dataset_root).resolve(strict=True)
+                                )
+                            except (OSError, ValueError) as error:
+                                raise DataPipelineError(
+                                    "frozen manifest image is absent or outside dataset root"
+                                ) from error
+                            if not image.is_file():
+                                raise DataPipelineError(
+                                    "frozen manifest image is not a file"
+                                )
+                        else:
+                            tokens = row.get(configuration.token_column)
+                            if not isinstance(tokens, list) or not tokens or any(
+                                not isinstance(token, int)
+                                or isinstance(token, bool)
+                                or token < 0
+                                for token in tokens
+                            ):
+                                raise DataPipelineError(
+                                    "frozen manifest contains invalid token IDs"
+                                )
                         seen_ids.add(sample_id)
                         rows += 1
                 if rows != counts[split] or rows != entry["rows"]:
@@ -419,7 +499,7 @@ class RegisteredDataSource:
 
     def _split_paths(self) -> Mapping[str, Path]:
         configuration = self.configuration
-        if not isinstance(configuration, JsonlFrozenImageSplitsConfiguration):
+        if not isinstance(configuration, FrozenSplitConfiguration):
             raise DataPipelineError("data source has no frozen named splits")
         return MappingProxyType(
             {
@@ -443,7 +523,7 @@ class RegisteredDataSource:
         configuration = self.configuration
         path = (
             self._split_paths().get(split)
-            if isinstance(configuration, JsonlFrozenImageSplitsConfiguration)
+            if isinstance(configuration, FrozenSplitConfiguration)
             else Path(configuration.manifest_path)
         )
         if path is None:
@@ -475,9 +555,9 @@ class RegisteredDataSource:
                 sample_id = str(value[id_column]) if id_column else f"line:{ordinal}"
                 if not sample_id:
                     raise DataPipelineError("data source produced an empty sample id")
-                if isinstance(
-                    configuration, JsonlFrozenImageSplitsConfiguration
-                ) and value.get("split") != split:
+                if isinstance(configuration, FrozenSplitConfiguration) and value.get(
+                    "split"
+                ) != split:
                     raise DataPipelineError(
                         f"frozen {split} manifest contains a cross-split row"
                     )
@@ -489,7 +569,7 @@ class RegisteredDataSource:
                 emitted += 1
 
     def records_for_split(self, split: str) -> tuple[RawSample, ...]:
-        if not isinstance(self.configuration, JsonlFrozenImageSplitsConfiguration):
+        if not isinstance(self.configuration, FrozenSplitConfiguration):
             raise DataPipelineError("data source has no frozen named splits")
         return tuple(self.records(split=split))
 
@@ -1077,15 +1157,62 @@ class PaddedCollatorConfiguration:
 
 
 @dataclass(frozen=True, slots=True)
+class PackedTokenCollatorConfiguration:
+    pad_token_id: int
+    label_pad_token_id: int
+    pad_to_multiple: int
+    maximum_sequence_length: int
+    separator_token_id: int
+
+    def __post_init__(self) -> None:
+        PaddedCollatorConfiguration(
+            self.pad_token_id,
+            self.label_pad_token_id,
+            self.pad_to_multiple,
+            self.maximum_sequence_length,
+        )
+        if not 0 <= self.separator_token_id <= 16_777_215:
+            raise DataPipelineError("separator_token_id is invalid")
+
+    @classmethod
+    def from_resolved(
+        cls, value: Mapping[str, Any]
+    ) -> PackedTokenCollatorConfiguration:
+        return cls(
+            **_exact(
+                value,
+                {
+                    "pad_token_id",
+                    "label_pad_token_id",
+                    "pad_to_multiple",
+                    "maximum_sequence_length",
+                    "separator_token_id",
+                },
+                "packed-token collator",
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RegisteredCollator:
     implementation: CollatorImplementation
-    configuration: PaddedCollatorConfiguration
+    configuration: PaddedCollatorConfiguration | PackedTokenCollatorConfiguration
+
+    def __post_init__(self) -> None:
+        if (
+            self.implementation is CollatorImplementation.PADDED_V1
+        ) != isinstance(self.configuration, PaddedCollatorConfiguration):
+            raise DataPipelineError(
+                "collator implementation and configuration disagree"
+            )
 
     def collate(
         self, samples: Sequence[MappedSample], *, tensor_output: bool = True
     ) -> Mapping[str, Any]:
         if not samples:
             raise DataPipelineError("cannot collate an empty batch")
+        if self.implementation is CollatorImplementation.PACKED_TOKENS_V1:
+            return self._collate_packed_tokens(samples, tensor_output=tensor_output)
         maximum = min(
             max(sample.token_length for sample in samples),
             self.configuration.maximum_sequence_length,
@@ -1117,6 +1244,69 @@ class RegisteredCollator:
                     "a batch cannot mix image and non-image samples"
                 )
             result["images"] = [sample.image for sample in samples]
+        if tensor_output:
+            import torch
+
+            for key in ("input_ids", "labels", "attention_mask"):
+                result[key] = torch.tensor(result[key], dtype=torch.long)
+        return MappingProxyType(result)
+
+    def _collate_packed_tokens(
+        self, samples: Sequence[MappedSample], *, tensor_output: bool
+    ) -> Mapping[str, Any]:
+        configuration = self.configuration
+        if not isinstance(configuration, PackedTokenCollatorConfiguration):
+            raise DataPipelineError("packed-token collator configuration is invalid")
+        if any(sample.image is not None for sample in samples):
+            raise DataPipelineError("packed-token collation does not accept images")
+        maximum = configuration.maximum_sequence_length
+        rows: list[tuple[list[int], list[int], list[str]]] = []
+        row_ids: list[int] = []
+        row_labels: list[int] = []
+        row_samples: list[str] = []
+
+        def flush() -> None:
+            nonlocal row_ids, row_labels, row_samples
+            if row_ids:
+                rows.append((row_ids, row_labels, row_samples))
+                row_ids, row_labels, row_samples = [], [], []
+
+        for sample in samples:
+            ids = list(sample.input_ids)
+            labels = list(sample.labels)
+            if len(ids) != len(labels) or not ids:
+                raise DataPipelineError("packed-token sample shape is invalid")
+            if len(ids) > maximum:
+                raise DataPipelineError(
+                    "packed-token sample exceeds maximum_sequence_length"
+                )
+            required = len(ids) + (1 if row_ids else 0)
+            if row_ids and len(row_ids) + required > maximum:
+                flush()
+            if row_ids:
+                row_ids.append(configuration.separator_token_id)
+                row_labels.append(configuration.separator_token_id)
+            row_ids.extend(ids)
+            row_labels.extend(labels)
+            row_samples.append(sample.sample_id)
+        flush()
+        input_ids: list[list[int]] = []
+        labels: list[list[int]] = []
+        attention: list[list[int]] = []
+        packed_sample_ids: list[str] = []
+        for ids, target, members in rows:
+            padding = maximum - len(ids)
+            input_ids.append(ids + [configuration.pad_token_id] * padding)
+            labels.append(target + [configuration.label_pad_token_id] * padding)
+            attention.append([1] * len(ids) + [0] * padding)
+            packed_sample_ids.append(_canonical_digest(members))
+        result: dict[str, Any] = {
+            "sample_ids": tuple(packed_sample_ids),
+            "packed_sample_members": tuple(tuple(row[2]) for row in rows),
+            "input_ids": input_ids,
+            "labels": labels,
+            "attention_mask": attention,
+        }
         if tensor_output:
             import torch
 
@@ -1786,8 +1976,10 @@ def data_source_from_resolved_component(
         configuration = JsonlImageCaptionConfiguration.from_resolved(value)
     elif implementation is DataSourceImplementation.JSONL_TOKEN_CORPUS_V1:
         configuration = JsonlTokenCorpusConfiguration.from_resolved(value)
-    else:
+    elif implementation is DataSourceImplementation.JSONL_FROZEN_IMAGE_SPLITS_V1:
         configuration = JsonlFrozenImageSplitsConfiguration.from_resolved(value)
+    else:
+        configuration = JsonlFrozenTokenSplitsConfiguration.from_resolved(value)
     return RegisteredDataSource(implementation, configuration)
 
 
@@ -1832,9 +2024,12 @@ def collator_from_resolved_component(
 ) -> RegisteredCollator:
     implementation_value, value = _resolved(component, "collator")
     implementation = CollatorImplementation(implementation_value)
-    return RegisteredCollator(
-        implementation, PaddedCollatorConfiguration.from_resolved(value)
-    )
+    configuration: PaddedCollatorConfiguration | PackedTokenCollatorConfiguration
+    if implementation is CollatorImplementation.PADDED_V1:
+        configuration = PaddedCollatorConfiguration.from_resolved(value)
+    else:
+        configuration = PackedTokenCollatorConfiguration.from_resolved(value)
+    return RegisteredCollator(implementation, configuration)
 
 
 def sampler_from_resolved_component(component: Mapping[str, Any]) -> RegisteredSampler:

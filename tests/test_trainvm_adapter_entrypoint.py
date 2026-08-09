@@ -558,35 +558,248 @@ def test_appearance_handler_returns_declared_immutable_checkpoint_request(
 def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoint(
     tmp_path, monkeypatch
 ) -> None:
+    import hashlib
+    from pathlib import Path
+
     from rwkv_lab import rwkv_pretrain
+    from rwkv_lab.training_components import (
+        CausalTokensMapperConfiguration,
+        CollatorImplementation,
+        DataSourceImplementation,
+        DeclarativeDataPipeline,
+        DerivedFixedHeldOutConfiguration,
+        DerivedFixedHeldOutSamples,
+        DeterministicSamplerConfiguration,
+        FixedBatchingConfiguration,
+        FixedGradientAccumulation,
+        FixedGradientAccumulationConfiguration,
+        FrozenNamedSplitConfiguration,
+        FullTrainabilityConfiguration,
+        JsonlFrozenTokenSplitsConfiguration,
+        ModelLoaderImplementation,
+        PaddedCollatorConfiguration,
+        PowerCoolConfiguration,
+        RegisteredBatching,
+        RegisteredCollator,
+        RegisteredDataSource,
+        RegisteredSampleMapper,
+        RegisteredSampleProcessor,
+        RegisteredSampler,
+        RegisteredSplitSelector,
+        RegisteredTrainability,
+        RWKVModelFactory,
+        RWKVModelFactoryConfiguration,
+        SampleMapperImplementation,
+        SampleProcessorImplementation,
+        SamplerImplementation,
+        ScheduleImplementation,
+        SplitSelectorImplementation,
+        TokenIdsProcessorConfiguration,
+        TrainabilityImplementation,
+    )
 
     read_root = tmp_path / "read"
     run_directory = tmp_path / "write" / "run"
     read_root.mkdir()
     run_directory.parent.mkdir()
-    corpus = read_root / "tokens.bin"
-    corpus.write_bytes(b"\x00\x00" * 1024)
+    checkpoint_root = tmp_path / "checkpoint-input"
+    checkpoint_root.mkdir()
+    initial_checkpoint = checkpoint_root / "scratch-state.pt"
+    initial_checkpoint.write_bytes(b"sealed checkpoint fixture")
+    rows = {
+        "train": [
+            {"id": "train-a", "split": "train", "tokens": list(range(1, 17))},
+            {"id": "train-b", "split": "train", "tokens": list(range(17, 33))},
+        ],
+        "validation": [
+            {"id": "val-a", "split": "validation", "tokens": list(range(33, 49))},
+            {"id": "val-b", "split": "validation", "tokens": list(range(49, 65))},
+        ],
+        "test": [{"id": "test-a", "split": "test", "tokens": [65, 66]}],
+    }
+    files = {}
+    counts = {}
+    for split, values in rows.items():
+        path = read_root / f"{split}.jsonl"
+        path.write_text(
+            "".join(json.dumps(value) + "\n" for value in values), encoding="utf-8"
+        )
+        encoded = path.read_bytes()
+        counts[split] = len(values)
+        files[path.name] = {
+            "rows": len(values),
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+        }
+    (read_root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "fixture.manifested-token-splits.v1",
+                "dataset_digest": "fixture",
+                "counts": counts,
+                "files": files,
+                "unique_content_hashes": sum(counts.values()),
+            }
+        ),
+        encoding="utf-8",
+    )
+    data_fingerprint = measure_input_content_root(read_root).tree_sha256
+    source = RegisteredDataSource(
+        DataSourceImplementation.JSONL_FROZEN_TOKEN_SPLITS_V1,
+        JsonlFrozenTokenSplitsConfiguration(
+            dataset_root=str(read_root),
+            content_fingerprint=data_fingerprint,
+            declared_columns=("id", "split", "tokens"),
+            token_column="tokens",
+            id_column="id",
+        ),
+    )
+
+    def pipeline(selection):
+        return DeclarativeDataPipeline(
+            source=source,
+            processor=RegisteredSampleProcessor(
+                SampleProcessorImplementation.TOKEN_IDS_V1,
+                TokenIdsProcessorConfiguration(
+                    token_column="tokens",
+                    vocabulary_size=65_536,
+                    minimum_tokens=2,
+                    maximum_tokens=128,
+                ),
+            ),
+            mapper=RegisteredSampleMapper(
+                SampleMapperImplementation.CAUSAL_TOKENS_V1,
+                CausalTokensMapperConfiguration(
+                    token_column="tokens", maximum_tokens=128
+                ),
+            ),
+            collator=RegisteredCollator(
+                CollatorImplementation.PADDED_V1,
+                PaddedCollatorConfiguration(
+                    pad_token_id=0,
+                    label_pad_token_id=-100,
+                    pad_to_multiple=1,
+                    maximum_sequence_length=4,
+                ),
+            ),
+            sampler=RegisteredSampler(
+                SamplerImplementation.DETERMINISTIC_V1,
+                DeterministicSamplerConfiguration(seed=7, shuffle=True),
+            ),
+            batching=RegisteredBatching(
+                implementation="rwkv_lab.batching.fixed.v1",
+                configuration=FixedBatchingConfiguration(
+                    batch_size=2, drop_last=False, prefetch_workers=0
+                ),
+            ),
+            split_selector=RegisteredSplitSelector(
+                SplitSelectorImplementation.FROZEN_NAMED_V1,
+                FrozenNamedSplitConfiguration(selection=selection),
+            ),
+        )
+
+    class Components:
+        composition = SimpleNamespace(
+            components={
+                "evaluator": SimpleNamespace(descriptor_digest="sha256:" + "e" * 64)
+            }
+        )
+
+        def model_loader(self):
+            return RWKVModelFactory(
+                implementation="rwkv_lab.model_loader.rwkv_scratch.v1",
+                configuration=RWKVModelFactoryConfiguration(65_536, 64, 1, 16, 7),
+            )
+
+        def trainability(self):
+            return RegisteredTrainability(
+                TrainabilityImplementation.FULL_V1,
+                FullTrainabilityConfiguration(),
+            )
+
+        def learning_rate_configuration(self):
+            return ScheduleImplementation.POWERCOOL_V1, PowerCoolConfiguration(
+                warmup_steps=2,
+                max_steps=120,
+                minimum_ratio=0.1,
+                cooldown_fraction=0.2,
+                power=2.0,
+            )
+
+        def configuration(self, slot, *, category):
+            del category
+            return {
+                "optimizer": {"learning_rate": 3.0e-4},
+                "weight_decay": {"weight_decay": 0.1},
+                "gradient_clipping": {"max_norm": 1.0},
+                "sampler": {"seed": 7},
+                "batching": {"batch_size": 2},
+                "collation": {"maximum_sequence_length": 4},
+                "processor": {"vocabulary_size": 65_536},
+            }[slot]
+
+        def gradient_accumulation(self):
+            return FixedGradientAccumulation(
+                FixedGradientAccumulationConfiguration(1)
+            )
+
+        def curriculum(self):
+            return SimpleNamespace(
+                configuration=SimpleNamespace(
+                    maximum_sequence_length=4, base_batch_size=2
+                )
+            )
+
+        def evaluator(self):
+            return SimpleNamespace(
+                configuration=SimpleNamespace(
+                    maximum_examples=2,
+                    metrics=("perplexity", "validation_loss"),
+                )
+            )
+
+        def evaluation_schedule(self):
+            return SimpleNamespace(
+                configuration=SimpleNamespace(
+                    full_every_steps=20,
+                    qualitative_every_steps=20,
+                )
+            )
+
+        def artifact_renderer(self):
+            return SimpleNamespace(configuration=SimpleNamespace(modality="text"))
+
+        def generation_policy(self):
+            return SimpleNamespace(digest="sha256:" + "a" * 64)
+
+        def checkpoint_policy(self):
+            return SimpleNamespace(
+                configuration=SimpleNamespace(publish_final=True),
+                due=lambda step, final=False: final and step >= 0,
+            )
+
+        def data_pipeline(self, *, split_slot):
+            return pipeline("train" if split_slot == "split" else "validation")
+
+        def qualitative_samples(self):
+            return DerivedFixedHeldOutSamples(
+                DerivedFixedHeldOutConfiguration("id", 2)
+            )
+
+    components = Components()
     observed = []
 
     def train(arguments, **kwargs):
         observed.append((arguments, kwargs))
-        checkpoint = run_directory / "checkpoint-final" / "state.pt"
+        checkpoint = Path(arguments[arguments.index("--save") + 1])
         checkpoint.write_bytes(b"checkpoint")
         return {"checkpoint": str(checkpoint), "step": 120}
 
     monkeypatch.setattr(rwkv_pretrain, "main", train)
     invocation = SimpleNamespace(
-        inputs={
-            "config": {
-                "data": str(corpus),
-                "output_dir": str(run_directory),
-                "steps": 120,
-            }
-        },
+        inputs={"config": {}},
         workspace=_sealed_workspace(read_root, run_directory),
         publishes={"checkpoint": {}},
     )
-    components = SimpleNamespace()
     profiler = SimpleNamespace()
     observability = SimpleNamespace()
     controls = SimpleNamespace()
@@ -601,11 +814,16 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
         execution_phases=execution_phases,
     )
     arguments, keyword_arguments = observed[0]
-    assert arguments[arguments.index("--data") + 1] == str(corpus.resolve())
+    assert arguments[arguments.index("--data") + 1] == str(
+        run_directory / "registered-corpus.uint16"
+    )
     assert arguments[arguments.index("--out") + 1] == str(run_directory.resolve())
     assert arguments[arguments.index("--optimizer") + 1] == "adamw"
     assert arguments[arguments.index("--lr-schedule") + 1] == "powercool"
     assert "--compile" not in arguments
+    eval_policy = keyword_arguments.pop("worker_eval_examples")
+    assert tuple(eval_policy.heldout_tokens) == ("val-a", "val-b")
+    assert eval_policy.identity_field == "id"
     assert keyword_arguments == {
         "worker_components": components,
         "worker_step_profiler": profiler,
@@ -618,6 +836,50 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
     request = result.checkpoint_requests[0]
     assert request.source_directory == run_directory / "checkpoint-final"
     assert request.resume_grade == "terminal_checkpoint"
+
+    class ContinuationComponents(Components):
+        def model_loader(self):
+            return RWKVModelFactory(
+                implementation=ModelLoaderImplementation.RWKV_CHECKPOINT_V1,
+                configuration=RWKVModelFactoryConfiguration(
+                    65_536,
+                    64,
+                    1,
+                    16,
+                    7,
+                    str(initial_checkpoint),
+                    measure_input_content_root(initial_checkpoint).tree_sha256,
+                ),
+            )
+
+    continuation_run_directory = tmp_path / "write" / "continued"
+    continuation_workspace = _sealed_workspace(
+        read_root, continuation_run_directory
+    )
+    continuation_workspace["allowed_read_roots"].append(str(checkpoint_root))
+    continuation_workspace["allowed_read_roots"].sort()
+    continuation_workspace["input_content_roots"].append(
+        asdict(measure_input_content_root(initial_checkpoint))
+    )
+    continuation_workspace["input_content_roots"].sort(key=lambda item: item["path"])
+    continuation = _rwkv_scratch(
+        SimpleNamespace(
+            inputs={"config": {}},
+            workspace=continuation_workspace,
+            publishes={"checkpoint": {}},
+        ),
+        ContinuationComponents(),
+        step_profiler=profiler,
+        observability=observability,
+        controls=controls,
+        execution_phases=execution_phases,
+    )
+    continuation_arguments = observed[1][0]
+    assert continuation_arguments[
+        continuation_arguments.index("--init-checkpoint") + 1
+    ] == str(initial_checkpoint.resolve())
+    assert "--resume" not in continuation_arguments
+    assert continuation.optimizer_step == 120
 
 
 def test_rwkv_posttraining_handler_seals_inputs_and_publishes_adapter_bundle(

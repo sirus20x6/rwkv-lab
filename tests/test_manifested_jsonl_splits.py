@@ -10,6 +10,7 @@ from rwkv_lab.training_components import (
     DataPipelineError,
     DataSourceImplementation,
     JsonlFrozenImageSplitsConfiguration,
+    JsonlFrozenTokenSplitsConfiguration,
     RegisteredDataSource,
 )
 
@@ -109,4 +110,64 @@ def test_manifested_splits_fail_closed_on_bad_membership(tmp_path, fault) -> Non
     with pytest.raises(DataPipelineError):
         _source(tmp_path).verify_content(
             authority_content_fingerprint="sha256:" + "f" * 64
+        )
+
+
+def _write_token_dataset(root) -> None:
+    rows = {
+        "train": [
+            {"id": "a", "split": "train", "tokens": [1, 2, 3]},
+            {"id": "b", "split": "train", "tokens": [4, 5, 6]},
+        ],
+        "validation": [
+            {"id": "c", "split": "validation", "tokens": [7, 8, 9]}
+        ],
+        "test": [{"id": "d", "split": "test", "tokens": [10, 11, 12]}],
+    }
+    for split, values in rows.items():
+        (root / f"{split}.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in values), encoding="utf-8"
+        )
+    _refresh_receipt(root)
+
+
+def _token_source(root):
+    return RegisteredDataSource(
+        DataSourceImplementation.JSONL_FROZEN_TOKEN_SPLITS_V1,
+        JsonlFrozenTokenSplitsConfiguration(
+            dataset_root=str(root),
+            content_fingerprint="sha256:" + "a" * 64,
+            declared_columns=("id", "split", "tokens"),
+            token_column="tokens",
+            id_column="id",
+        ),
+    )
+
+
+def test_manifested_token_splits_validate_all_three_frozen_partitions(
+    tmp_path,
+) -> None:
+    _write_token_dataset(tmp_path)
+    source = _token_source(tmp_path)
+    source.verify_content(authority_content_fingerprint="sha256:" + "a" * 64)
+    assert [
+        tuple(sample.sample_id for sample in source.records_for_split(name))
+        for name in ("train", "validation", "test")
+    ] == [("a", "b"), ("c",), ("d",)]
+
+
+@pytest.mark.parametrize(
+    "tokens",
+    [[], [1, -1], [1, True], [1, "2"]],
+)
+def test_manifested_token_splits_reject_invalid_token_rows(tmp_path, tokens) -> None:
+    _write_token_dataset(tmp_path)
+    train = tmp_path / "train.jsonl"
+    rows = [json.loads(line) for line in train.read_text().splitlines()]
+    rows[0]["tokens"] = tokens
+    train.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    _refresh_receipt(tmp_path)
+    with pytest.raises(DataPipelineError, match="invalid token IDs"):
+        _token_source(tmp_path).verify_content(
+            authority_content_fingerprint="sha256:" + "a" * 64
         )

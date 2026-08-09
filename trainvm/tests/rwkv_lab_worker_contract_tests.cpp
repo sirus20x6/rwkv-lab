@@ -187,7 +187,30 @@ int main() {
                 hf.training_composition->slots.size() == 25U &&
                 rwkv.training_composition &&
                 rwkv.training_composition->model_family == "rwkv" &&
-                rwkv.training_composition->slots.size() == 10U &&
+                rwkv.training_composition->slots.size() == 27U &&
+                rwkv.training_composition->allowed_components->at("data")
+                        .front()
+                        .name == "manifested_jsonl_token_splits" &&
+                rwkv.training_composition->allowed_components
+                        ->at("model_loader")
+                        .size() == 2U &&
+                rwkv.training_composition->allowed_components
+                        ->at("activation")
+                        .size() == 2U &&
+                rwkv.training_composition->allowed_components
+                        ->at("learning_rate")
+                        .size() == 2U &&
+                rwkv.training_composition->allowed_components
+                        ->at("optimizer")
+                        .size() == 2U &&
+                rwkv.training_composition->allowed_components
+                        ->at("normalization")
+                        .front()
+                        .name == "layer_norm" &&
+                rwkv.training_composition->allowed_components
+                        ->at("trainability")
+                        .front()
+                        .name == "full" &&
                 posttraining.training_composition &&
                 posttraining.training_composition->model_family == "rwkv" &&
                 posttraining.training_composition->slots.size() == 4U &&
@@ -537,6 +560,14 @@ int main() {
                 !appearance.authoring->outputs.contains("log") &&
                 !appearance.authoring->outputs.contains("metrics"),
             "MageFlow must advertise only its protocol-published checkpoint and eval gallery outputs");
+    require(rwkv.authoring && rwkv.authoring->outputs.size() == 2U &&
+                rwkv.authoring->outputs.contains("checkpoint") &&
+                rwkv.authoring->outputs.at("eval_examples").required &&
+                rwkv.authoring->outputs.at("eval_examples").artifact_type ==
+                    trainvm::ArtifactType::eval_examples &&
+                rwkv.authoring->outputs.at("eval_examples").artifact_schema ==
+                    "rwkv-lab.eval-examples.v1",
+            "RWKV scratch must require checkpoint-bound text eval examples");
     require(hf.authoring && hf.authoring->outputs.size() == 3U &&
                 hf.authoring->outputs.at("test_eval").required &&
                 hf.authoring->outputs.at("test_eval").artifact_type ==

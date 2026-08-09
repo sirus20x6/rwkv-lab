@@ -1,0 +1,15 @@
+{
+  "api_version": "trainvm.recipe-instance/v1",
+  "recipe": {"name": "rwkv_lm_scratch", "version": "1"},
+  "run_identity": "rwkv-lm-scratch-example",
+  "overrides": {
+    "data.root": "/thearray/git/moe-mla",
+    "model.activation": "squared_relu@1.0.0",
+    "model.normalization": "layer_norm@1.0.0",
+    "hyperparameters.optimizer": "torch_adamw@1.0.0",
+    "hyperparameters.learning_rate_schedule": "powercool@1.0.0",
+    "hyperparameters.learning_rate": 0.0006,
+    "hyperparameters.maximum_steps": 10000,
+    "evaluation.qualitative_sample_count": 8
+  }
+}

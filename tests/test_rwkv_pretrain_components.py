@@ -204,5 +204,5 @@ def test_rwkv_worker_components_drive_powercool_and_optimizer() -> None:
     assert isinstance(optimizer, torch.optim.AdamW)
 
     args.lr_schedule = "cosine"
-    with pytest.raises(ValueError, match="requires PowerCool"):
+    with pytest.raises(ValueError, match="LR-schedule composition disagrees"):
         resolved_worker_component_contract(args, schedule, components)
