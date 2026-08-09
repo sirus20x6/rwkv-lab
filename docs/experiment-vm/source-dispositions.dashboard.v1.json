@@ -10,7 +10,6 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:6c5624acf1b3aa0c0558cbdd166dcc9ae1acf285f0530f2214aa0714546cc923",
   "entries": [
     {
       "source_path": "dashboard/instrumented/train_mla.py",

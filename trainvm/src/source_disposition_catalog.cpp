@@ -330,6 +330,8 @@ std::set<std::string> enumerate_scope(const std::filesystem::path& root,
   return result;
 }
 
+}  // namespace
+
 std::string source_tree_digest(const std::vector<SourceDispositionEntry>& entries) {
   std::string material = "trainvm.source-disposition-tree/v1";
   for (const auto& entry : entries) {
@@ -341,8 +343,6 @@ std::string source_tree_digest(const std::vector<SourceDispositionEntry>& entrie
   return "sha256:" + sha256_bytes(material);
 }
 
-}  // namespace
-
 SourceDispositionCatalog SourceDispositionCatalog::load_file(
     const std::filesystem::path& catalog_path,
     const std::optional<std::filesystem::path>& repository_root,
@@ -353,8 +353,14 @@ SourceDispositionCatalog SourceDispositionCatalog::load_file(
   const auto bytes = read_bounded_regular_file(catalog_path, kMaximumCatalogBytes,
                                                "source disposition catalog");
   const auto root = parse_json_strict(bytes);
+  // source_tree_digest is deliberately absent from this set. It is a pure
+  // function of entries, so storing it added no information and cost every
+  // concurrent change to the scope a guaranteed conflict on one line. Because
+  // require_keys compares the key set exactly, a document that still declares
+  // one is refused here rather than silently ignored -- a stale stored pin
+  // must not be able to sit in a catalog looking authoritative.
   require_keys(root, {"api_version", "authority", "source_repository",
-                      "source_revision", "source_scope", "source_tree_digest", "entries"},
+                      "source_revision", "source_scope", "entries"},
                "source disposition catalog");
   SourceDispositionCatalog catalog;
   auto& document = catalog.document_;
@@ -362,14 +368,12 @@ SourceDispositionCatalog SourceDispositionCatalog::load_file(
   document.authority = require_string(root, "authority");
   document.source_repository = require_string(root, "source_repository");
   document.source_revision = require_string(root, "source_revision");
-  document.source_tree_digest = require_string(root, "source_tree_digest");
   if (document.api_version != "trainvm.source-dispositions/v1" ||
       document.authority != "compatibility_evidence_only") {
     throw std::invalid_argument("unsupported or authority-bearing source disposition catalog");
   }
   if (!stable_identifier(document.source_repository) ||
-      !git_sha1_revision(document.source_revision) ||
-      !lowercase_sha256(document.source_tree_digest)) {
+      !git_sha1_revision(document.source_revision)) {
     throw std::invalid_argument("invalid source disposition provenance");
   }
 
@@ -487,9 +491,7 @@ SourceDispositionCatalog SourceDispositionCatalog::load_file(
   if (!std::ranges::is_sorted(document.entries, {}, &SourceDispositionEntry::source_path)) {
     throw std::invalid_argument("source disposition entries must be sorted by source_path");
   }
-  if (source_tree_digest(document.entries) != document.source_tree_digest) {
-    throw std::invalid_argument("source_tree_digest does not match catalog entries");
-  }
+  document.source_tree_digest = source_tree_digest(document.entries);
 
   if (repository_root) {
     if (!repository_root->is_absolute()) {
@@ -517,7 +519,17 @@ SourceDispositionCatalog SourceDispositionCatalog::load_file(
         std::to_string(static_cast<std::uintmax_t>(status.st_dev)) + ",ino=" +
         std::to_string(static_cast<std::uintmax_t>(status.st_ino)) + "]";
   }
-  catalog.catalog_digest_ = "sha256:" + sha256_bytes(root.dump());
+  // Digest the classification, not the file bytes it classifies. Erasing the
+  // per-entry source_sha256 leaves a value that moves when a review decision
+  // moves and stays still when a classified source is merely edited, so the
+  // constant pinning it stops being a line every concurrent change rewrites.
+  // Nothing is lost: source bytes are pinned by those same per-entry digests,
+  // which merge cleanly because two changes touch two different entries.
+  auto reviewed = root;
+  for (auto& entry : reviewed.at("entries")) {
+    entry.erase("source_sha256");
+  }
+  catalog.reviewed_classification_digest_ = "sha256:" + sha256_bytes(reviewed.dump());
   return catalog;
 }
 
@@ -527,8 +539,8 @@ const SourceDispositionDocument& SourceDispositionCatalog::document() const {
 const std::vector<SourceDispositionEntry>& SourceDispositionCatalog::entries() const {
   return document_.entries;
 }
-const std::string& SourceDispositionCatalog::catalog_digest() const {
-  return catalog_digest_;
+const std::string& SourceDispositionCatalog::reviewed_classification_digest() const {
+  return reviewed_classification_digest_;
 }
 const std::optional<std::string>&
 SourceDispositionCatalog::repository_root_identity_display() const {

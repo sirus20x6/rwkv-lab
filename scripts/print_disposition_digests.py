@@ -12,9 +12,18 @@ checked-in values disagree -- that is the point of running it. `--check` turns
 the same comparison into an exit code for CI.
 
 The algorithm is the one in trainvm/src/source_disposition_catalog.cpp. This is
-a replication, which is a thing that can silently drift from what it replicates,
-so `--check` against an unmodified checkout is the guard: if this file ever
-stops agreeing with the C++, that command fails and says so.
+a replication, which is a thing that can silently drift from what it replicates.
+The guard used to be indirect -- both implementations were compared against a
+`source_tree_digest` stored in each catalog, so they were only cross-checked
+through that value, and only at the moment somebody regenerated it. That stored
+line was also the one line every concurrent change to a scope had to rewrite,
+which conflicted four pull requests in a single evening.
+
+The line is gone and the guard is now direct: `--tree-digest` drives this
+implementation over entries handed to it from outside, and
+trainvm/tests/source_disposition_catalog_tests.cpp runs both implementations
+over the same entries and compares the answers with no stored value between
+them.
 """
 
 from __future__ import annotations
@@ -37,10 +46,14 @@ def source_sha256(path: pathlib.Path) -> str:
 
 
 def tree_digest(entries: list[dict]) -> str:
-    """Mirror of source_tree_digest() in source_disposition_catalog.cpp.
+    """Mirror of trainvm::source_tree_digest() in source_disposition_catalog.cpp.
 
     Entry order is significant and is the catalog's own order, not sorted here:
     the C++ folds entries in the order the document lists them.
+
+    Kept honest by source_disposition_catalog_tests.cpp, which drives this
+    function and the C++ one over the same entries via `--tree-digest` and
+    requires the two answers to be equal.
     """
     material = bytearray(TREE_DOMAIN)
     for entry in entries:
@@ -69,7 +82,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "catalog", type=pathlib.Path,
-        help="a docs/experiment-vm/source-dispositions.*.v1.json document")
+        help="a docs/experiment-vm/source-dispositions.*.v1.json document, or "
+             "with --tree-digest a JSON array of entry objects ('-' for stdin)")
+    parser.add_argument(
+        "--tree-digest", action="store_true",
+        help="read a bare JSON array of {source_path, source_sha256} objects "
+             "and print the tree digest of exactly those entries. This is how "
+             "the native suite drives this implementation over the same "
+             "entries it drives the C++ one over, so the two are compared "
+             "directly rather than through a stored value")
     parser.add_argument(
         "--root", type=pathlib.Path, default=REPOSITORY,
         help="repository root the source_path entries are relative to")
@@ -82,19 +103,34 @@ def main() -> int:
         help="rewrite the catalog in place with the recomputed pins")
     arguments = parser.parse_args()
 
+    if arguments.tree_digest:
+        text = (sys.stdin.read() if str(arguments.catalog) == "-"
+                else arguments.catalog.read_text(encoding="utf-8"))
+        entries = json.loads(text)
+        if not isinstance(entries, list):
+            raise SystemExit("--tree-digest expects a JSON array of entries")
+        print(tree_digest(entries))
+        return 0
+
     document = json.loads(arguments.catalog.read_text(encoding="utf-8"))
     drifted, refreshed = recompute(document, arguments.root)
     computed = tree_digest(refreshed["entries"])
-    declared = document.get("source_tree_digest", "")
-    refreshed["source_tree_digest"] = computed
+    # A catalog must not store this. It is derivable from entries, so a stored
+    # copy carries no information, and it is the one line two independent
+    # changes to the same scope are both forced to rewrite. Refusing a document
+    # that still has one keeps a stale value from sitting there looking
+    # authoritative -- the C++ loader refuses it too, for the same reason.
+    stored = document.get("source_tree_digest")
+    refreshed.pop("source_tree_digest", None)
 
     for path in drifted:
         print(f"DRIFTED: {path}")
-    if declared and computed != declared:
-        print(f"TREE DIGEST: declared {declared}")
-        print(f"TREE DIGEST: computed {computed}")
+    if stored is not None:
+        print(f"STORED TREE DIGEST: {stored}")
+        print("STORED TREE DIGEST: catalogs must not store one; it is derived "
+              "from entries at validation time")
 
-    problems = list(drifted) + ([] if computed == declared else ["tree digest"])
+    problems = list(drifted) + ([] if stored is None else ["stored tree digest"])
 
     if arguments.write:
         arguments.catalog.write_text(
