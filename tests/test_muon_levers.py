@@ -122,7 +122,7 @@ def test_foreach_adam_fallback_resumes_exactly():
 @pytest.mark.gpu
 def test_compiled_aro_matches_eager_when_cuda_available():
     if not torch.cuda.is_available():
-        return
+        pytest.skip("CUDA is not available")
     torch.manual_seed(29)
     eager_p = torch.nn.Parameter(torch.randn(12, 12, device="cuda"))
     compiled_p = torch.nn.Parameter(eager_p.detach().clone())
