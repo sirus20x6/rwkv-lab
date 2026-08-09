@@ -141,6 +141,32 @@ documentation too.
 - File a card whenever you notice something worth fixing. A finding that is not
   on the board is lost when the session ends.
 
+### Done means merged to main, and a Done card must cite the PR that merged it
+
+The board's Done column is not a private note about how far you got. Other
+cards are written against it: `card-5020d5ca` instructed its reader to model a
+new cache on "the safe owner-only inode digest cache the runtime-closure
+materializer already has", because the card for that cache sat in Done. It was
+not on main. It was on `integration/parity-candidate` and a handful of card
+branches, and the reader spent an investigation discovering there was nothing to
+read. So:
+
+- **Move a card to Done only when its work is on `origin/main`.** Green CI on an
+  open PR is not Done. Merged into an integration branch is not Done. Working
+  perfectly in your worktree is certainly not Done.
+- **Record `result_pr_url` when you complete it.** Under squash merging that PR
+  number is the only decisive evidence the work landed — see the ancestry
+  section above for why every git-native check silently fails here. A completion
+  comment citing a branch-local sha is not evidence and will mislead the next
+  reader exactly as it did this time.
+- If the work is real but stopped short of main, say where it lives — in a
+  comment, naming the branch and the commits — and leave the card out of Done.
+  "Implemented at `<sha>`" is a true sentence that reads as completion; it is
+  the specific phrasing that caused this.
+
+A card in Done is a promise that `git grep` against `origin/main` will find the
+thing. Anything weaker belongs in a comment.
+
 ### Check mergeability BEFORE you read the checks
 
 ```bash

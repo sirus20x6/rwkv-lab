@@ -54,6 +54,16 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
 SCHEMA = "trainvm.python-bootstrap-runtime-closure/v4"
+
+# A separate schema from the closure itself: the cache is an accelerator whose
+# document never reaches a worker, and it must be rejected outright rather than
+# read leniently if its shape ever changes.
+DIGEST_CACHE_SCHEMA = "trainvm.runtime-closure-digest-cache/v1"
+
+# Bounds the load, not the semantics. A cache of this tree runs to a few tens of
+# megabytes; anything past this is a file that should not be parsed at all.
+MAXIMUM_DIGEST_CACHE_BYTES = 128 * 1024 * 1024
+
 DEFAULT_ROOT_DISTRIBUTIONS = (
     "grpcio",
     "pillow",
@@ -115,15 +125,97 @@ def _digest(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
-def _sha256(path: Path) -> str:
+def _descriptor_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    """The identity a cached digest is bound to.
+
+    ``st_ctime_ns`` is in this tuple deliberately, and it is the field that
+    makes the cache safe rather than merely fast. ``st_mtime_ns`` alone is
+    forgeable by the file's own owner: ``utimensat`` sets it to any value with
+    no privilege at all, so an mtime-keyed cache can be made to serve a stale
+    digest for changed bytes. ``st_ctime_ns`` is maintained by the kernel and
+    cannot be set from userspace, so it moves on every write regardless of what
+    the writer does to mtime afterwards.
+
+    It is also what makes an inode-reuse fence unnecessary. ``st_ino`` is
+    recycled after deletion, so (dev, ino) alone would let a cache entry
+    describe a different file across a reboot -- but a recycled inode carries
+    the new file's creation-time ``st_ctime_ns``, which would have to collide
+    to the nanosecond with the deleted file's for the key to match. That is an
+    argument, not a test: inode reuse is not arrangeable on the filesystems
+    this runs on, so it cannot be exercised in CI.
+    """
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _cache_key(metadata: os.stat_result) -> str:
+    return ":".join(str(value) for value in _descriptor_identity(metadata))
+
+
+def _hash_descriptor(descriptor: int) -> str:
     value = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1 << 20), b""):
-            value.update(block)
+    while block := os.read(descriptor, 1 << 20):
+        value.update(block)
     return "sha256:" + value.hexdigest()
 
 
-def _entry(path: Path) -> dict[str, Any]:
+def _sha256(
+    path: Path,
+    digest_cache: dict[str, str] | None = None,
+    expected: os.stat_result | None = None,
+) -> str:
+    """Digest a regular file, reattesting the descriptor around the read.
+
+    The file is opened once and every decision -- the identity that keys the
+    cache and the check that nothing moved underneath -- is made from
+    ``fstat`` on that descriptor rather than from a second ``stat`` of the
+    name, so a path swapped between the two cannot be pinned as the digest of
+    the file that was there first.
+
+    ``expected`` is the ``lstat`` a caller has already vetted. When it is
+    supplied the open refuses to traverse a symlink and the descriptor must
+    still be that exact inode, which closes the window between the caller's
+    check and this open. The kernel-registry fallback passes nothing, because
+    there the name may legitimately be a symlink to the object being pinned.
+    """
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if expected is not None and hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"runtime closure path is not regular: {path}")
+        if expected is not None and _descriptor_identity(
+            before
+        ) != _descriptor_identity(expected):
+            raise ValueError(f"runtime closure path changed before hashing: {path}")
+        key = _cache_key(before)
+        digest = None if digest_cache is None else digest_cache.get(key)
+        if digest is None:
+            digest = _hash_descriptor(descriptor)
+            if digest_cache is not None:
+                digest_cache[key] = digest
+        # A cache hit skips the read but never skips this: the file is
+        # reattested after the digest is settled either way, so a hit is only
+        # honoured for an inode that is still exactly the one it described.
+        after = os.fstat(descriptor)
+        if _descriptor_identity(after) != _descriptor_identity(before):
+            raise ValueError(f"runtime closure path changed while hashing: {path}")
+    finally:
+        os.close(descriptor)
+    return digest
+
+
+def _entry(path: Path, digest_cache: dict[str, str] | None = None) -> dict[str, Any]:
     path = Path(os.path.abspath(path))
     metadata = path.lstat()
     mode = stat.S_IMODE(metadata.st_mode)
@@ -142,22 +234,26 @@ def _entry(path: Path) -> dict[str, Any]:
         "kind": "regular",
         "mode": mode,
         "path": str(path),
-        "sha256": _sha256(path),
+        "sha256": _sha256(path, digest_cache, metadata),
         "size": metadata.st_size,
     }
 
 
-def _add_path(paths: dict[str, dict[str, Any]], path: Path) -> None:
+def _add_path(
+    paths: dict[str, dict[str, Any]],
+    path: Path,
+    digest_cache: dict[str, str] | None = None,
+) -> None:
     path = Path(os.path.abspath(path))
     if path.is_dir():
         return
-    entry = _entry(path)
+    entry = _entry(path, digest_cache)
     previous = paths.setdefault(str(path), entry)
     if previous != entry:
         raise ValueError(f"runtime closure path changed while scanning: {path}")
     if entry["kind"] == "symlink":
         target = path.resolve(strict=True)
-        _add_path(paths, target)
+        _add_path(paths, target, digest_cache)
 
 
 def _distribution_closure(
@@ -646,7 +742,9 @@ def elf_dynamic_path(path: Path) -> dict[str, Any] | None:
 
 
 def _scan_native(
-    paths: dict[str, dict[str, Any]], seeds: list[str]
+    paths: dict[str, dict[str, Any]],
+    seeds: list[str],
+    digest_cache: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     ld_library_path = tuple(
         entry
@@ -656,7 +754,7 @@ def _scan_native(
     directories, configurations = _system_search()
     system = tuple(directories)
     for configuration in configurations:
-        _add_path(paths, Path(configuration))
+        _add_path(paths, Path(configuration), digest_cache)
     roots = _native_roots()
     registry = native_objects(roots)
     pending = deque(os.path.abspath(seed) for seed in [*seeds, *registry])
@@ -683,10 +781,10 @@ def _scan_native(
                 # differ whenever a search directory is itself a symlink
                 # (/lib64 -> usr/lib), where lstat sees a regular file under
                 # the un-resolved name and no link entry records the hop.
-                _add_path(paths, Path(resolved))
+                _add_path(paths, Path(resolved), digest_cache)
                 target = os.path.realpath(resolved)
                 if target != os.path.abspath(resolved):
-                    _add_path(paths, Path(target))
+                    _add_path(paths, Path(target), digest_cache)
                 pending.append(target)
         objects[key] = {
             "dependencies": dependencies,
@@ -703,7 +801,9 @@ def _scan_native(
             # Not claimed by any closure distribution, and importable anyway.
             # Pinned here rather than merely listed, so its bytes are as
             # answerable as a distribution's own.
-            extensions.append({"path": item, "sha256": _sha256(Path(item))})
+            extensions.append(
+                {"path": item, "sha256": _sha256(Path(item), digest_cache)}
+            )
         else:
             # A dangling symlink, or a link to a directory. It is on the import
             # path and it loads nothing today; a null digest pins exactly that,
@@ -729,11 +829,14 @@ def _scan_native(
     }
 
 
-def build(root_distributions: tuple[str, ...]) -> dict[str, Any]:
+def build(
+    root_distributions: tuple[str, ...],
+    digest_cache: dict[str, str] | None = None,
+) -> dict[str, Any]:
     paths: dict[str, dict[str, Any]] = {}
     distributions = _distribution_closure(root_distributions)
     for path in _stdlib_files():
-        _add_path(paths, path)
+        _add_path(paths, path, digest_cache)
     identities = []
     for distribution in distributions:
         name = canonicalize_name(distribution.metadata["Name"])
@@ -744,12 +847,12 @@ def build(root_distributions: tuple[str, ...]) -> dict[str, Any]:
         for relative in files:
             path = Path(distribution.locate_file(relative))
             if path.exists() or path.is_symlink():
-                _add_path(paths, path)
+                _add_path(paths, path, digest_cache)
     # The interpreter is the object that loads every other one, so it belongs in
     # the closure rather than only in the deployment's separate
     # executable_fingerprint. Adding it here also pins the venv symlink chain
     # that reaches it.
-    _add_path(paths, Path(sys.executable))
+    _add_path(paths, Path(sys.executable), digest_cache)
     # The ELF graph is walked after the Python file closure is complete, and it
     # adds to it: a resolved DT_NEEDED target outside any distribution becomes a
     # pinned file like any other. Seeded from what the closure already holds, so
@@ -764,6 +867,7 @@ def build(root_distributions: tuple[str, ...]) -> dict[str, Any]:
             ],
             os.path.realpath(sys.executable),
         ],
+        digest_cache,
     )
     body = {
         "api_version": SCHEMA,
@@ -803,9 +907,69 @@ def _publish(output: Path, data: bytes) -> None:
         raise
 
 
+def _load_digest_cache(path: Path | None) -> dict[str, str]:
+    """Read a persisted digest cache, refusing anything another user can write.
+
+    The cache is an input to a build whose output decides whether a host may
+    run a sealed worker, so every property that would let a second party seed
+    it is checked before a single entry is read: it must be a regular file
+    owned by this effective user, not group- or world-writable, bounded, and
+    carrying exactly this schema. Missing is fine and means cold.
+    """
+    if path is None or not path.exists():
+        return {}
+    metadata = path.lstat()
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) & (stat.S_IWGRP | stat.S_IWOTH)
+        or metadata.st_size > MAXIMUM_DIGEST_CACHE_BYTES
+    ):
+        raise ValueError(
+            "runtime digest cache is not an owner-only bounded regular file"
+        )
+    document = json.loads(path.read_bytes())
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"api_version", "entries"}
+        or document.get("api_version") != DIGEST_CACHE_SCHEMA
+        or not isinstance(document.get("entries"), dict)
+    ):
+        raise ValueError("runtime digest cache has an invalid schema")
+    entries = document["entries"]
+    if any(
+        not isinstance(key, str)
+        or not key
+        or not isinstance(value, str)
+        or len(value) != 71
+        or not value.startswith("sha256:")
+        or any(character not in "0123456789abcdef" for character in value[7:])
+        for key, value in entries.items()
+    ):
+        raise ValueError("runtime digest cache has an invalid entry")
+    return dict(entries)
+
+
+def _publish_digest_cache(path: Path | None, entries: dict[str, str]) -> None:
+    if path is None:
+        return
+    _publish(
+        path,
+        _canonical({"api_version": DIGEST_CACHE_SCHEMA, "entries": entries}) + b"\n",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--digest-cache",
+        type=Path,
+        help=(
+            "owner-only inode digest cache, read before and rewritten after the "
+            "build; affects build latency only"
+        ),
+    )
     parser.add_argument(
         "--distribution",
         action="append",
@@ -819,9 +983,11 @@ def main() -> int:
     )
     if not root_distributions or any(not name for name in root_distributions):
         raise ValueError("runtime closure roots must be nonempty distributions")
-    document = build(root_distributions)
+    digest_cache = _load_digest_cache(arguments.digest_cache)
+    document = build(root_distributions, digest_cache)
     data = _canonical(document) + b"\n"
     _publish(arguments.output, data)
+    _publish_digest_cache(arguments.digest_cache, digest_cache)
     print(
         json.dumps(
             {

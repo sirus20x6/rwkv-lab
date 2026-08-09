@@ -144,6 +144,14 @@ def main() -> int:
     parser.add_argument("--output-directory", required=True, type=Path)
     parser.add_argument("--working-directory", required=True, type=Path)
     parser.add_argument("--trusted-root", action="append", required=True, type=Path)
+    parser.add_argument(
+        "--runtime-digest-cache",
+        type=Path,
+        help=(
+            "owner-only persistent inode digest cache shared across runtime "
+            "groups and repeated materializations"
+        ),
+    )
     parser.add_argument("--replace", action="store_true")
     arguments = parser.parse_args()
 
@@ -196,6 +204,15 @@ def main() -> int:
         prefix=".trainvm-worker-build-", dir=output_directory
     ) as raw:
         temporary_directory = Path(raw)
+        # Without --runtime-digest-cache the cache still exists, scoped to this
+        # build: several runtime groups share a stdlib and most of a package
+        # closure, so the second group onwards is already a hit. The flag only
+        # changes how long it survives.
+        digest_cache = (
+            arguments.runtime_digest_cache.absolute()
+            if arguments.runtime_digest_cache is not None
+            else temporary_directory / "runtime-digests.json"
+        )
         for (python_path, distributions), adapters in sorted(
             group_members.items(), key=lambda item: item[1]
         ):
@@ -218,6 +235,7 @@ def main() -> int:
                 "--output",
                 str(temporary_closure),
             ]
+            closure_command.extend(("--digest-cache", str(digest_cache)))
             for distribution in distributions:
                 closure_command.extend(("--distribution", distribution))
             runtime_receipt = json.loads(

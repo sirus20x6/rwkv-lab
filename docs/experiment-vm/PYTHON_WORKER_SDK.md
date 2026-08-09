@@ -497,6 +497,7 @@ scripts/materialize_trainvm_worker_deployment.py \
   --source-root /src/rwkv-lab/src \
   --output-directory /opt/trainvm/workers/rwkv-lab-v1 \
   --working-directory /srv/trainvm/work \
+  --runtime-digest-cache /opt/trainvm/cache/runtime-digests.json \
   --trusted-root /opt/trainvm \
   --trusted-root /srv/trainvm
 ```
@@ -507,6 +508,27 @@ publishes contract-grouped worker zipapps and closure manifests plus `adapters.j
 share one runtime group; Qwen and RWKV remain separate. `--python` remains a shared-root fixture and
 compatibility mode. Materialization is byte-idempotent and refuses to replace changed outputs
 unless the operator explicitly supplies `--replace`.
+
+`--runtime-digest-cache` stops the builder re-reading an unchanged multi-gigabyte package closure
+on every deployment; it is passed straight through to the closure builder's own `--digest-cache`.
+A cached digest is bound to the open descriptor's device, inode, mode, ownership, size, mtime **and
+ctime**, and the descriptor is reattested after the digest is settled whether it came from the
+cache or from a read. `st_ctime_ns` is the field that makes this safe rather than merely fast:
+`st_mtime_ns` is forgeable with no privilege by the file's own owner via `utimensat`, so an
+mtime-keyed cache can be made to serve a stale digest for changed bytes, while `st_ctime_ns` is
+kernel-maintained and moves on every write regardless. It is also why no boot fence is needed
+against `st_ino` reuse — a recycled inode carries its own creation ctime, which would have to
+collide to the nanosecond.
+
+The cache file itself must be a bounded, owner-only, non-group-or-world-writable regular file
+carrying the `trainvm.runtime-closure-digest-cache/v1` schema; anything else is rejected rather
+than read leniently. Without the flag the cache still exists for the duration of one
+materialization, so runtime groups sharing a stdlib hit it. Measured on this host's live
+torch/grpcio/pillow/protobuf closure — 19,969 files, 8.14 GB pinned — a cold build hashes 10.18 GB
+across 20,129 opened descriptors and a warm one hashes 4.05 MB across 234, for a byte-identical
+closure manifest. The cache affects build latency only and is never part of worker launch
+authority: `rwkv_lab.trainvm_runtime_guard` re-reads every pinned byte at worker start and has no
+cache, deliberately.
 
 The interpreter path must be a regular executable, not the usual symlink created by many virtual
 environment tools. Hostd refuses symlink traversal for launch artifacts, and silently resolving a
