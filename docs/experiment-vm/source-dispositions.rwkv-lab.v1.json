@@ -2559,7 +2559,7 @@
       ],
       "resume_relevance": "consumer_owned",
       "compatibility_workflow_id": null,
-      "source_sha256": "sha256:46ac2f7da9d7118d11db2233ae39d4a9934a14de8a8b84300fa20284476d7cf6",
+      "source_sha256": "sha256:a1a2e29e28f499e7c9ee06cf2c7da038aafc228fbd89f0fcc772ac7b632697fb",
       "family": "rwkv",
       "coverage": "transitive",
       "consumers": [
