@@ -1871,7 +1871,7 @@
       ],
       "resume_relevance": "restart_only",
       "compatibility_workflow_id": "posttraining.rwkv-adapter",
-      "source_sha256": "sha256:8809c5648a5a354264b5657cdc14223b667fe2a098f1e9d46ec8424accdbfdcc",
+      "source_sha256": "sha256:2df54c652e2dc1fac7b5900da6ab637edbb16ae3e5c5a0a36d9d0b97e843c683",
       "family": "rwkv_posttraining",
       "coverage": "direct",
       "compatibility_workflow_ids": [
@@ -1983,7 +1983,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "transformer.qwen-ao3-cpt",
-      "source_sha256": "sha256:443efdedd607923b4d7145520ad8e7a11311b5f423d24b482e5568d4ffb3f61a",
+      "source_sha256": "sha256:2f1f495c4c57d171ff244221a8f9a5ec603c7a36f2fc0af7f754943b4d4d741c",
       "family": "transformer",
       "coverage": "direct",
       "consumers": [
