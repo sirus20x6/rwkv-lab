@@ -27,6 +27,30 @@ nlohmann::json read_json(const std::filesystem::path& path) {
   return nlohmann::json::parse(input);
 }
 
+// The checked-in instances are deployment examples: they name the repository
+// and dataset of the host they were authored on. Component validation calls
+// filesystem::exists on every field of type `path`, so leaving those values in
+// place makes the suite assert the contents of whichever machine runs it -- it
+// passed on the deployment host and aborted in CI with "training component
+// configuration path is unavailable". The graph, the component selection and
+// the parity diffs are what this suite is about, and none of them depend on
+// which directory the paths name, so every path-typed override is pointed at
+// this checkout before expansion. That keeps the assertions identical on every
+// host instead of silently testing something different on each.
+void localize_paths(nlohmann::json& instance,
+                    const std::filesystem::path& root) {
+  const std::string directory = std::filesystem::canonical(root).string();
+  const std::string file =
+      std::filesystem::canonical(root / "README.md").string();
+  auto& overrides = instance.at("overrides");
+  for (const char* name : {"model.path", "data.root"}) {
+    if (overrides.contains(name)) overrides[name] = directory;
+  }
+  for (const char* name : {"model.checkpoint_path", "model.target_manifest"}) {
+    if (overrides.contains(name)) overrides[name] = file;
+  }
+}
+
 const nlohmann::json& training_components(
     const trainvm::ExpandedRecipe& expanded) {
   return expanded.plan.canonical_plan.at("spec")
@@ -83,8 +107,9 @@ int main() {
             .lifecycle.pause_release_resources,
         "HF trainer registry supports resource-releasing pause");
   const auto expand = [&](std::string_view name) {
-    const auto instance = read_json(root / "docs/experiment-vm/examples" /
-                                    std::string(name));
+    auto instance = read_json(root / "docs/experiment-vm/examples" /
+                              std::string(name));
+    localize_paths(instance, root);
     auto result = registry.expand_json(instance);
     components.validate_plan(result.plan);
     adapters.validate_plan(result.plan);
@@ -162,8 +187,9 @@ int main() {
   const auto rwkv_registry = trainvm::RecipeProfileRegistry::load_file(
       root / "docs/experiment-vm/examples/rwkv-lm.recipe-profiles.v1.json");
   const auto expand_rwkv = [&](std::string_view name) {
-    const auto instance = read_json(root / "docs/experiment-vm/examples" /
-                                    std::string(name));
+    auto instance = read_json(root / "docs/experiment-vm/examples" /
+                              std::string(name));
+    localize_paths(instance, root);
     auto result = rwkv_registry.expand_json(instance);
     components.validate_plan(result.plan);
     adapters.validate_plan(result.plan);
@@ -173,10 +199,11 @@ int main() {
       expand_rwkv("rwkv-lm-scratch.recipe-instance.v1.json");
   auto continuation_instance = read_json(
       root / "docs/experiment-vm/examples/rwkv-lm-scratch.recipe-instance.v1.json");
+  localize_paths(continuation_instance, root);
   continuation_instance["recipe"]["name"] = "rwkv_lm_continuation";
   continuation_instance["run_identity"] = "rwkv-lm-continuation-test";
   continuation_instance["overrides"]["model.checkpoint_path"] =
-      "/thearray/git/moe-mla/README.md";
+      std::filesystem::canonical(root / "README.md").string();
   continuation_instance["overrides"]["model.activation"] = "silu@1.0.0";
   continuation_instance["overrides"]["hyperparameters.optimizer"] =
       "torch_adamw_no_decay@2.0.0";
