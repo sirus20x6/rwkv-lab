@@ -272,7 +272,11 @@ def test_installed_adapter_uses_the_base_attention_device():
             self.config = type("Config", (), {"hidden_size": 8, "num_heads": 2})()
             self.model = nn.Module()
             self.model.layers = nn.ModuleList([Layer()])
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # A portable placement assertion, not a CUDA qualification: it checks that
+    # the wrapper follows the base attention's device, which is as true on CPU.
+    # Selecting whatever device happened to be visible made this unmarked test
+    # initialize the display driver during the non-GPU suite.
+    device = torch.device("cpu")
     model = Model().to(device)
     model.requires_grad_(False)
     wrappers = install_factored_timemix(model, n_loops=2, loop_index=True)

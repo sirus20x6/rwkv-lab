@@ -1214,7 +1214,7 @@ reproducibility machinery, not third-party artifacts.
 | [`live_controls.py`](src/rwkv_lab/live_controls.py) | Trainer-side consumer of the dashboard's live-tuning panel. |
 | [`safe_torch.py`](src/rwkv_lab/safe_torch.py) | Safer torch-serialization load wrappers. |
 | [`build_qwen35_data.py`](src/rwkv_lab/build_qwen35_data.py) | Build Qwen3.5-tokenized DCLM + FineWeb-Edu caches. |
-| [`tests/`](tests/) | CPU/GPU invariant + feature tests (loops, lookahead, Engram, ROSA, the SOTA levers). Run `scripts/test_parallel.sh` for process-parallel CPU tests with bounded native thread pools plus serialized CUDA tests (`PYTEST_WORKERS` and `PYTEST_NATIVE_THREADS` tune the split). Set `RWKV_GPU_STRESS=1` to append the idle-GPU compile-core and DMT graph programs. |
+| [`tests/`](tests/) | CPU/GPU invariant + feature tests (loops, lookahead, Engram, ROSA, the SOTA levers). Run `scripts/test_parallel.sh` for process-parallel CPU tests with bounded native thread pools (`PYTEST_WORKERS` and `PYTEST_NATIVE_THREADS` tune the split); add `--gpu` for the serialized CUDA phase, which is opt-in because the device is usually shared with a display or a training run. `RWKV_GPU_STRESS=1` appends the idle-GPU compile-core and DMT graph programs and also requires `--gpu`. The non-GPU phase runs behind `scripts/non_gpu_environment.py` so no accelerator is even visible to it — see [ACCEPTANCE_CI.md](docs/experiment-vm/ACCEPTANCE_CI.md#local-acceptance). |
 | [`scripts/`](scripts/) | Overnight sweep / A-B drivers (`gate_ab.sh`, `gdn_sweep.sh`, `rel_sweep.sh`, `supervisor_night.sh`). |
 
 ---
