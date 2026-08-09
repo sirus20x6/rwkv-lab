@@ -36,6 +36,9 @@ import torch.nn.functional as F
 from PIL import Image
 from torch import nn
 
+from rwkv_lab.trainvm_worker.mutation_sentinel import (
+    OptimizerMutationSentinel,
+)
 from rwkv_lab.activation_checkpointing import selective_activation_checkpointing
 from rwkv_lab.deep_vision import DeepVisionInjector, LayerMatchedVisionInjector
 from rwkv_lab.engram_lmb import (
@@ -6513,380 +6516,412 @@ def train(
     # an unexpected failure can preserve an exact recovery point.
     checkpoint_state_valid = True
     try:
-        while step < args.steps or resume_eval_work is not None:
-            # The disk/fsync half of a periodic checkpoint overlaps subsequent
-            # GPU work. Surface errors and advertise the checkpoint from the
-            # training thread only after its atomic publication has completed.
-            finish_async_last_checkpoint(wait_for_write=False)
-            if resume_eval_work is not None:
-                phase, prior_eval = resume_eval_work
-                print({"kind": "eval_resume", "step": step, "phase": phase},
-                      flush=True)
-                run_evaluation(
-                    step, prior_eval=prior_eval, recurrent_context_fresh=True)
-                resume_eval_work = None
-                prefetched_indices, prefetch_future = (
-                    schedule_next_batch_prefetch(step + 1))
-                continue
-            next_step = step + 1
-            if worker_controls is not None:
-                worker_controls.microbatch(next_step, reject_live_controls)
-            desired_loop = next_step >= args.loop_start_step and args.loop_count > 1
-            if desired_loop != loop_enabled:
-                # Save the exact last warmup state before exercising a delayed
-                # architecture path for the first time. Keep a named rollback
-                # copy: periodic last.pt checkpoints must never overwrite it.
-                pre_loop_path = out / "pre_loop.pt"
-                _sync_log(log)
-                _save_checkpoint(pre_loop_path, step=step, projector=projector,
-                                 nextlat=nextlat, engram=engram,
-                                 deep_vision=deep_vision, layer_vision=layer_vision,
-                                 grounding=grounding,
-                                 structured_head=structured_head,
-                                 wrappers=wrappers,
-                                 optimizer=optimizer,
-                                 sampler=sampler, args=args,
-                                 vision_fusion=vision_fusion)
-                log.write(json.dumps({"kind": "checkpoint", "step": step,
-                                      "reason": "before_loop_activation",
-                                      "path": str(pre_loop_path)}) + "\n")
-                loop_enabled = desired_loop
-                set_loop_enabled(wrappers, loop_enabled)
-                log.write(json.dumps({"kind": "loop_enabled", "step": next_step,
-                                      "enabled": loop_enabled}) + "\n")
-            loop_scale = (_loop_runtime_scale(
-                next_step, start_step=args.loop_start_step, ramp_steps=args.loop_ramp_steps)
-                if loop_enabled else 0.0)
-            set_loop_scale(wrappers, loop_scale)
-            engram_scale = 0.0
-            if engram is not None:
-                engram_scale = min(1.0, next_step / max(args.engram_warmup_steps, 1))
-                engram.set_warmup(engram_scale)
-            profile = next_step <= profile_until_step
-            if profile:
-                torch.cuda.synchronize()
-                torch.cuda.reset_peak_memory_stats()
-            t0 = time.perf_counter()
-            target_tokens = args.target_batch_tokens
-            if loop_enabled:
-                target_tokens = int(target_tokens * args.loop_token_budget_scale)
-            sampler.ensure_epoch()
-            indices = sampler.peek_budget_batch(
-                token_costs, target_tokens=target_tokens,
-                min_items=(args.min_batch or args.batch), max_items=args.max_batch)
-            prefetch_wait_s = 0.0
-            prefetch_ready = 0
-            prefetch_resident_hits = 0
-            prefetch_disk_hits = 0
-            prefetch_generated = 0
-            prefetch_elapsed_s = 0.0
-            prefetched_recall = None
-            prefetched_native_features = None
-            prefetched_text_batch = None
-            prefetched_positions = None
-            if prefetch_future is not None and prefetched_indices == indices:
-                wait_started = time.perf_counter()
-                try:
-                    with (
-                        worker_step_profiler.input_wait()
-                        if worker_step_profiler is not None
-                        else contextlib.nullcontext()
-                    ):
-                        prefetch_result = prefetch_future.result()
-                    prefetch_ready = prefetch_result.ready
-                    prefetched_recall = prefetch_result.recall
-                    prefetched_native_features = prefetch_result.native_features
-                    prefetched_text_batch = prefetch_result.text_batch
-                    prefetched_positions = prefetch_result.positions
-                    prefetch_resident_hits = prefetch_result.resident_hits
-                    prefetch_disk_hits = prefetch_result.disk_hits
-                    prefetch_generated = prefetch_result.generated
-                    prefetch_elapsed_s = prefetch_result.elapsed_s
-                except Exception as error:
-                    print({"kind": "next_batch_prefetch_failed",
-                           "error": repr(error)}, flush=True)
-                prefetch_wait_s = time.perf_counter() - wait_started
-            elif prefetch_future is not None:
-                prefetch_future.cancel()
-            prefetched_indices, prefetch_future = schedule_next_batch_prefetch(
-                next_step + 1, position_offset=len(indices))
-            batch_rows = [rows[i] for i in indices]
-            if prefetched_text_batch is None:
-                ids, labels, text_mask = make_batch(
-                    batch_rows, device="cuda")
-            else:
-                ids, labels, text_mask = (
-                    value.to("cuda", non_blocking=True)
-                    for value in prefetched_text_batch)
-            positions = (
-                supervised_positions(
-                    batch_rows, visual_prefix_width(batch_rows, projector),
-                    device="cuda")
-                if prefetched_positions is None else
-                prefetched_positions.to("cuda", non_blocking=True))
-            if profile:
-                torch.cuda.synchronize()
-            t_data = time.perf_counter()
-            features = (
-                runtime_cached_features(
-                    batch_rows, vision, projector, cache_dir)
-                if prefetched_native_features is None else
-                prefetched_native_features)
-            fusion_features = (cached_fusion_features(
-                batch_rows, fusion_tower,
-                fusion_feature_tokens(fusion_tower, projector), fusion_cache_dir)
-                if fusion_tower is not None and (vision_fusion is not None
-                                                 or vision_compressor is not None)
-                and fusion_cache_dir is not None else None)
-            if profile:
-                torch.cuda.synchronize()
-            t_features = time.perf_counter()
-            operator_profile = None
-            if next_step <= operator_profile_until_step:
-                operator_profile = torch.profiler.profile(activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-                ])
-                operator_profile.start()
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                loss, metrics = multimodal_loss(
-                    rwkv, projector, vision, (), ids, labels, text_mask,
-                    nextlat=nextlat, nextlat_weight=args.nextlat_weight,
-                    nextlat_kl_weight=args.nextlat_kl_weight,
-                    engram=engram, features=features,
-                    selected_positions=positions,
-                    engram_recall=prefetched_recall,
-                    deep_vision=deep_vision, layer_vision=layer_vision,
-                    visual_starts=visual_insert_positions(batch_rows),
-                    fusion_adapter=vision_fusion,
-                    fusion_features=fusion_features,
-                    vision_compressor=vision_compressor,
-                    grounding=grounding,
-                    grounding_contrastive_weight=args.grounding_contrastive_weight,
-                    grounding_early_tokens=args.grounding_early_tokens,
-                    grounding_early_weight=args.grounding_early_weight,
-                    structured_head=structured_head,
-                    structured_rows=batch_rows,
-                    structured_weight=args.structured_weight,
-                    structured_coordinate_weight=args.structured_coordinate_weight,
-                    structured_invalid_box_weight=args.structured_invalid_box_weight,
-                    structured_invalid_box_margin=args.structured_invalid_box_margin,
-                    activation_checkpoint_min_tokens=(
-                        args.activation_checkpoint_min_tokens),
-                    activation_checkpoint_max_layers=(
-                        args.activation_checkpoint_max_layers),
-                    image_aspect=image_aspect_tensor(batch_rows, "cuda"))
-            if profile:
-                torch.cuda.synchronize()
-            t_forward = time.perf_counter()
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            # Loop gates can have very large raw gradients even while their
-            # effective, ramped contribution is tiny. A single global clip made
-            # those gradients scale projector/NextLat updates almost to zero.
-            # Clip the bridge and recurrent adapters independently.
-            clip = (
-                worker_components.gradient_clipping
-                if worker_components is not None
-                else lambda parameters: torch.nn.utils.clip_grad_norm_(
-                    parameters, args.grad_clip, error_if_nonfinite=False
-                )
-            )
-            grad_norm = clip(bridge_trainable)
-            loop_grad_norm = clip(loop_trainable)
-            engram_grad_norm = clip(engram_trainable)
-            metric_names = list(metrics)
-            # Gradient clipping already requires one safety barrier before the
-            # optimizer. Materialize loss and auxiliary scalars in that same
-            # transfer so a non-finite objective can never be discovered only
-            # after weights and sampler state have been committed.
-            safety_values = torch.stack((
-                loss.detach(), grad_norm.to(loss.device),
-                loop_grad_norm.to(loss.device), engram_grad_norm.to(loss.device),
-                *(metrics[name] for name in metric_names),
-            )).float().tolist()
-            if not all(math.isfinite(value) for value in safety_values):
-                raise FloatingPointError(
-                    f"non-finite loss/gradient/auxiliary metrics: {safety_values}")
-            loss_value = safety_values[0]
-            norm_values = safety_values[1:4]
-            metrics = dict(zip(metric_names, safety_values[4:]))
-            # Treat the optimizer update, sampler advance, and public step as
-            # one commit. SIGINT remains pending until all three agree, so an
-            # interrupt checkpoint either repeats an unfinished batch or
-            # resumes strictly after a completed one—never skips it.
-            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
-            eval_checkpoint_saved = False
-            checkpoint_state_valid = False
-            try:
-                optimizer.step()
-                sampler.commit_batch(indices)
-                step = next_step
-                checkpoint_state_valid = True
-                if worker_step_profiler is not None:
-                    worker_step_profiler.step(step)
-                if worker_observability is not None:
-                    worker_observability.optimizer_step(step)
+        # Installed for the whole loop, so the ordering below is enforced
+        # against every optimizer instance in the process rather than the one
+        # this trainer constructed. A fused update, a second optimizer, or a
+        # later edit that moves the crossing below the mutation all fail closed
+        # here instead of mutating parameters the controller never authorized.
+        # The controller-facing call the sentinel crosses. It is None when this
+        # trainer runs outside TrainVM authority; the sentinel still binds every
+        # mutation to one crossing, so the ordering discipline is identical and a
+        # standalone run cannot silently acquire a second update path either.
+        pre_optimizer_step = (
+            (lambda next_step: worker_controls.pre_optimizer_step(
+                next_step, reject_live_controls
+            ))
+            if worker_controls is not None
+            else None
+        )
+        mutation_sentinel = OptimizerMutationSentinel()
+        with mutation_sentinel.installed():
+            while step < args.steps or resume_eval_work is not None:
+                # The disk/fsync half of a periodic checkpoint overlaps subsequent
+                # GPU work. Surface errors and advertise the checkpoint from the
+                # training thread only after its atomic publication has completed.
+                finish_async_last_checkpoint(wait_for_write=False)
+                if resume_eval_work is not None:
+                    phase, prior_eval = resume_eval_work
+                    print({"kind": "eval_resume", "step": step, "phase": phase},
+                          flush=True)
+                    run_evaluation(
+                        step, prior_eval=prior_eval, recurrent_context_fresh=True)
+                    resume_eval_work = None
+                    prefetched_indices, prefetch_future = (
+                        schedule_next_batch_prefetch(step + 1))
+                    continue
+                next_step = step + 1
                 if worker_controls is not None:
-                    worker_controls.optimizer_step(step, reject_live_controls)
+                    worker_controls.microbatch(next_step, reject_live_controls)
+                desired_loop = next_step >= args.loop_start_step and args.loop_count > 1
+                if desired_loop != loop_enabled:
+                    # Save the exact last warmup state before exercising a delayed
+                    # architecture path for the first time. Keep a named rollback
+                    # copy: periodic last.pt checkpoints must never overwrite it.
+                    pre_loop_path = out / "pre_loop.pt"
+                    _sync_log(log)
+                    _save_checkpoint(pre_loop_path, step=step, projector=projector,
+                                     nextlat=nextlat, engram=engram,
+                                     deep_vision=deep_vision, layer_vision=layer_vision,
+                                     grounding=grounding,
+                                     structured_head=structured_head,
+                                     wrappers=wrappers,
+                                     optimizer=optimizer,
+                                     sampler=sampler, args=args,
+                                     vision_fusion=vision_fusion)
+                    log.write(json.dumps({"kind": "checkpoint", "step": step,
+                                          "reason": "before_loop_activation",
+                                          "path": str(pre_loop_path)}) + "\n")
+                    loop_enabled = desired_loop
+                    set_loop_enabled(wrappers, loop_enabled)
+                    log.write(json.dumps({"kind": "loop_enabled", "step": next_step,
+                                          "enabled": loop_enabled}) + "\n")
+                loop_scale = (_loop_runtime_scale(
+                    next_step, start_step=args.loop_start_step, ramp_steps=args.loop_ramp_steps)
+                    if loop_enabled else 0.0)
+                set_loop_scale(wrappers, loop_scale)
+                engram_scale = 0.0
+                if engram is not None:
+                    engram_scale = min(1.0, next_step / max(args.engram_warmup_steps, 1))
+                    engram.set_warmup(engram_scale)
+                profile = next_step <= profile_until_step
                 if profile:
                     torch.cuda.synchronize()
-                if operator_profile is not None:
-                    operator_profile.stop()
-                t_backward = time.perf_counter()
-                loss_value = _require_finite_metric("training loss", loss_value)
-                metrics = {name: _require_finite_metric(name, value)
-                           for name, value in metrics.items()}
-                record = {
-                    "kind": "train", "step": step, "loss": loss_value,
-                    "grad_norm": norm_values[0], "loop_grad_norm": norm_values[1],
-                    "engram_grad_norm": norm_values[2],
-                    "elapsed_s": round(time.time() - started, 1),
-                    "batch_captions": len(indices),
-                    "text_tokens": sum(len(row["tokens"]) for row in batch_rows),
-                    "max_text_tokens": ids.shape[1], "sampler_epoch": sampler.epoch,
-                    "sampler_position": sampler.position, "loop_enabled": loop_enabled,
-                    "loop_count": args.loop_count, "loop_gate": "factored",
-                    "loop_index": args.loop_index, "loop_scale": loop_scale,
-                    "engram_scale": engram_scale, **metrics,
-                    "batch_prefetch_ready": prefetch_ready,
-                    "batch_prefetch_wait_s": round(prefetch_wait_s, 4),
-                    "batch_prefetch_resident_hits": prefetch_resident_hits,
-                    "batch_prefetch_disk_hits": prefetch_disk_hits,
-                    "batch_prefetch_generated": prefetch_generated,
-                    "batch_prefetch_elapsed_s": round(prefetch_elapsed_s, 4),
-                }
-                record.update(_render_adapter_training_metrics(
-                    wrappers, engram))
-                if "aux_loss" in metrics:
-                    weighted = args.nextlat_weight * metrics["aux_loss"]
-                    record["nextlat_weighted_loss"] = weighted
-                    record["nextlat_to_ce_ratio"] = weighted / max(
-                        metrics["ce_loss"], 1e-12)
-                record["source_counts"] = dict(sorted(Counter(
-                    str(row.get("stage1_source") or row.get("source") or "unknown")
-                    for row in batch_rows).items()))
+                    torch.cuda.reset_peak_memory_stats()
+                t0 = time.perf_counter()
+                target_tokens = args.target_batch_tokens
+                if loop_enabled:
+                    target_tokens = int(target_tokens * args.loop_token_budget_scale)
+                sampler.ensure_epoch()
+                indices = sampler.peek_budget_batch(
+                    token_costs, target_tokens=target_tokens,
+                    min_items=(args.min_batch or args.batch), max_items=args.max_batch)
+                prefetch_wait_s = 0.0
+                prefetch_ready = 0
+                prefetch_resident_hits = 0
+                prefetch_disk_hits = 0
+                prefetch_generated = 0
+                prefetch_elapsed_s = 0.0
+                prefetched_recall = None
+                prefetched_native_features = None
+                prefetched_text_batch = None
+                prefetched_positions = None
+                if prefetch_future is not None and prefetched_indices == indices:
+                    wait_started = time.perf_counter()
+                    try:
+                        with (
+                            worker_step_profiler.input_wait()
+                            if worker_step_profiler is not None
+                            else contextlib.nullcontext()
+                        ):
+                            prefetch_result = prefetch_future.result()
+                        prefetch_ready = prefetch_result.ready
+                        prefetched_recall = prefetch_result.recall
+                        prefetched_native_features = prefetch_result.native_features
+                        prefetched_text_batch = prefetch_result.text_batch
+                        prefetched_positions = prefetch_result.positions
+                        prefetch_resident_hits = prefetch_result.resident_hits
+                        prefetch_disk_hits = prefetch_result.disk_hits
+                        prefetch_generated = prefetch_result.generated
+                        prefetch_elapsed_s = prefetch_result.elapsed_s
+                    except Exception as error:
+                        print({"kind": "next_batch_prefetch_failed",
+                               "error": repr(error)}, flush=True)
+                    prefetch_wait_s = time.perf_counter() - wait_started
+                elif prefetch_future is not None:
+                    prefetch_future.cancel()
+                prefetched_indices, prefetch_future = schedule_next_batch_prefetch(
+                    next_step + 1, position_offset=len(indices))
+                batch_rows = [rows[i] for i in indices]
+                if prefetched_text_batch is None:
+                    ids, labels, text_mask = make_batch(
+                        batch_rows, device="cuda")
+                else:
+                    ids, labels, text_mask = (
+                        value.to("cuda", non_blocking=True)
+                        for value in prefetched_text_batch)
+                positions = (
+                    supervised_positions(
+                        batch_rows, visual_prefix_width(batch_rows, projector),
+                        device="cuda")
+                    if prefetched_positions is None else
+                    prefetched_positions.to("cuda", non_blocking=True))
                 if profile:
-                    record.update(data_s=round(t_data - t0, 4),
-                                  feature_s=round(t_features - t_data, 4),
-                                  forward_s=round(t_forward - t_features, 4),
-                                  backward_s=round(t_backward - t_forward, 4),
-                                  step_s=round(t_backward - t0, 4),
-                                  peak_allocated_gib=round(
-                                      torch.cuda.max_memory_allocated()
-                                      / (1024 ** 3), 3),
-                                  peak_reserved_gib=round(
-                                      torch.cuda.max_memory_reserved()
-                                      / (1024 ** 3), 3))
-                if worker_observability is not None:
-                    for name, value in (
-                        ("train.loss", record["loss"]),
-                        ("train.gradient_norm", record["grad_norm"]),
-                        ("train.loop_gradient_norm", record["loop_grad_norm"]),
-                        ("train.engram_gradient_norm", record["engram_grad_norm"]),
-                        ("train.batch_captions", record["batch_captions"]),
-                        ("train.text_tokens", record["text_tokens"]),
-                    ):
-                        worker_observability.publish_if_declared(
-                            name, value, step=step
-                        )
-                    if "step_s" in record:
-                        worker_observability.publish_if_declared(
-                            "train.step_seconds", record["step_s"], step=step
-                        )
-                train_record = record if step % args.log_every == 0 else None
-                if args.eval_every and step % args.eval_every == 0:
-                    # Evaluation is a scheduled side effect of this committed
-                    # model state. Publish its visible train row first, then the
-                    # exact checkpoint, then the obligation. On recovery, the
-                    # checkpoint step also implies the obligation if a host
-                    # failure landed before the final log sync.
-                    _publish_eval_due(
-                        log, step=step, checkpoint_path=checkpoint_path,
-                        train_record=train_record,
-                        save_checkpoint=lambda: save_last_checkpoint(step),
-                    )
-                    eval_checkpoint_saved = True
-                elif train_record is not None:
-                    # The dashboard-visible step belongs to the same commit as
-                    # weights and sampler state. A pending pause cannot save N
-                    # while leaving the visible training series at N-1.
-                    log.write(json.dumps(train_record) + "\n")
-            finally:
-                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
-            if operator_profile is not None:
-                trace = out / f"operator_step_{next_step:06d}.json.gz"
-                operator_profile.export_chrome_trace(str(trace))
-                table = operator_profile.key_averages().table(
-                    sort_by="self_cuda_time_total", row_limit=30)
-                (out / f"operator_step_{next_step:06d}.txt").write_text(table + "\n")
-                print(table, flush=True)
-            if step % 10 == 0:
-                queue_loop_telemetry(step)
-                _atomic_json(out / "status.json", {"state": "training", "step": step,
-                                                   "updated": time.time()})
-            if step <= profile_until_step or step % 10 == 0:
-                print(record, flush=True)
-
-            checkpoint_saved = eval_checkpoint_saved
-            if args.eval_every and step % args.eval_every == 0:
-                # Release the completed training step before changing to eval
-                # sequence geometry. Retained gradients plus allocator
-                # fragmentation pushed the largest RADIO buckets into an OOM
-                # fallback, after which the asynchronous CUDA failure surfaced
-                # misleadingly in the structured matcher.
+                    torch.cuda.synchronize()
+                t_data = time.perf_counter()
+                features = (
+                    runtime_cached_features(
+                        batch_rows, vision, projector, cache_dir)
+                    if prefetched_native_features is None else
+                    prefetched_native_features)
+                fusion_features = (cached_fusion_features(
+                    batch_rows, fusion_tower,
+                    fusion_feature_tokens(fusion_tower, projector), fusion_cache_dir)
+                    if fusion_tower is not None and (vision_fusion is not None
+                                                     or vision_compressor is not None)
+                    and fusion_cache_dir is not None else None)
+                if profile:
+                    torch.cuda.synchronize()
+                t_features = time.perf_counter()
+                operator_profile = None
+                if next_step <= operator_profile_until_step:
+                    operator_profile = torch.profiler.profile(activities=[
+                        torch.profiler.ProfilerActivity.CPU,
+                        torch.profiler.ProfilerActivity.CUDA,
+                    ])
+                    operator_profile.start()
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    loss, metrics = multimodal_loss(
+                        rwkv, projector, vision, (), ids, labels, text_mask,
+                        nextlat=nextlat, nextlat_weight=args.nextlat_weight,
+                        nextlat_kl_weight=args.nextlat_kl_weight,
+                        engram=engram, features=features,
+                        selected_positions=positions,
+                        engram_recall=prefetched_recall,
+                        deep_vision=deep_vision, layer_vision=layer_vision,
+                        visual_starts=visual_insert_positions(batch_rows),
+                        fusion_adapter=vision_fusion,
+                        fusion_features=fusion_features,
+                        vision_compressor=vision_compressor,
+                        grounding=grounding,
+                        grounding_contrastive_weight=args.grounding_contrastive_weight,
+                        grounding_early_tokens=args.grounding_early_tokens,
+                        grounding_early_weight=args.grounding_early_weight,
+                        structured_head=structured_head,
+                        structured_rows=batch_rows,
+                        structured_weight=args.structured_weight,
+                        structured_coordinate_weight=args.structured_coordinate_weight,
+                        structured_invalid_box_weight=args.structured_invalid_box_weight,
+                        structured_invalid_box_margin=args.structured_invalid_box_margin,
+                        activation_checkpoint_min_tokens=(
+                            args.activation_checkpoint_min_tokens),
+                        activation_checkpoint_max_layers=(
+                            args.activation_checkpoint_max_layers),
+                        image_aspect=image_aspect_tensor(batch_rows, "cuda"))
+                if profile:
+                    torch.cuda.synchronize()
+                t_forward = time.perf_counter()
                 optimizer.zero_grad(set_to_none=True)
-                del (loss, grad_norm, loop_grad_norm, engram_grad_norm,
-                     features, fusion_features, ids, labels, text_mask,
-                     positions, prefetched_recall)
-                gc.collect()
-                torch.cuda.empty_cache()
-                checkpoint_saved = run_evaluation(
-                    step, checkpoint_saved=checkpoint_saved,
-                    recurrent_context_fresh=False)
-
-            if (args.checkpoint_every and step % args.checkpoint_every == 0
-                    and not checkpoint_saved):
-                _atomic_json(out / "status.json", {
-                    "state": "checkpoint_staging", "step": step,
-                    "updated": time.time(),
-                })
-                _sync_log(log)
-                # Only the immutable CPU snapshot blocks this thread. ZIP
-                # serialization, fsync, and atomic publication overlap the
-                # following optimizer steps.
-                finish_async_last_checkpoint(wait_for_write=True)
-                checkpoint_writer.submit(step, checkpoint_snapshot(step))
-                _atomic_json(out / "status.json", {"state": "training", "step": step,
-                                                   "updated": time.time()})
-            checkpoint_requested = bool(
-                worker_controls is not None
-                and worker_controls.checkpoint_boundary_requested
-            )
-            if checkpoint_requested:
-                worker_controls.checkpoint(step, reject_live_controls)
-                with (
-                    worker_observability.keepalive(step, "checkpointing")
-                    if worker_observability is not None
-                    else contextlib.nullcontext()
-                ):
-                    stage_current_checkpoint(step)
-                if worker_controls.checkpoint_completion_requested:
-                    worker_controls.publish_requested_checkpoint_directory(
-                        str(checkpoint_directory),
-                        optimizer_step=step,
-                        resume_grade="compatible",
-                        state_components=(
-                            "component_composition",
-                            "control_revision",
-                            "data_cursor",
-                            "model",
-                            "optimizer",
-                            "rng_accelerator",
-                            "rng_python",
-                            "rng_torch",
-                        ),
+                loss.backward()
+                # Loop gates can have very large raw gradients even while their
+                # effective, ramped contribution is tiny. A single global clip made
+                # those gradients scale projector/NextLat updates almost to zero.
+                # Clip the bridge and recurrent adapters independently.
+                clip = (
+                    worker_components.gradient_clipping
+                    if worker_components is not None
+                    else lambda parameters: torch.nn.utils.clip_grad_norm_(
+                        parameters, args.grad_clip, error_if_nonfinite=False
                     )
+                )
+                grad_norm = clip(bridge_trainable)
+                loop_grad_norm = clip(loop_trainable)
+                engram_grad_norm = clip(engram_trainable)
+                metric_names = list(metrics)
+                # Gradient clipping already requires one safety barrier before the
+                # optimizer. Materialize loss and auxiliary scalars in that same
+                # transfer so a non-finite objective can never be discovered only
+                # after weights and sampler state have been committed.
+                safety_values = torch.stack((
+                    loss.detach(), grad_norm.to(loss.device),
+                    loop_grad_norm.to(loss.device), engram_grad_norm.to(loss.device),
+                    *(metrics[name] for name in metric_names),
+                )).float().tolist()
+                if not all(math.isfinite(value) for value in safety_values):
+                    raise FloatingPointError(
+                        f"non-finite loss/gradient/auxiliary metrics: {safety_values}")
+                loss_value = safety_values[0]
+                norm_values = safety_values[1:4]
+                metrics = dict(zip(metric_names, safety_values[4:]))
+                # The mandatory pre-mutation boundary, immediately before the
+                # only optimizer mutation in this loop. A controller refusal
+                # leaves the sentinel disarmed, so the `step()` below raises
+                # rather than mutating unguarded. This replaces the
+                # post-mutation `worker_controls.optimizer_step` that used to
+                # sit inside the commit region: same safe point, same effective
+                # step number, now on the side of the mutation where a refusal
+                # can still prevent it.
+                #
+                # It is crossed just *outside* the SIGINT-blocked commit region
+                # below rather than inside it. The boundary can block — a
+                # control application or a pause barrier — and a region whose
+                # whole purpose is to be short and uninterruptible is the wrong
+                # place to wait in. Nothing mutates between the crossing and
+                # the mask, so the ordering the sentinel enforces is unchanged.
+                mutation_sentinel.cross(next_step, pre_optimizer_step)
+                # Treat the optimizer update, sampler advance, and public step as
+                # one commit. SIGINT remains pending until all three agree, so an
+                # interrupt checkpoint either repeats an unfinished batch or
+                # resumes strictly after a completed one—never skips it.
+                previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+                eval_checkpoint_saved = False
+                checkpoint_state_valid = False
+                try:
+                    optimizer.step()
+                    sampler.commit_batch(indices)
+                    step = next_step
+                    checkpoint_state_valid = True
+                    if worker_step_profiler is not None:
+                        worker_step_profiler.step(step)
+                    if worker_observability is not None:
+                        worker_observability.optimizer_step(step)
+                    if profile:
+                        torch.cuda.synchronize()
+                    if operator_profile is not None:
+                        operator_profile.stop()
+                    t_backward = time.perf_counter()
+                    loss_value = _require_finite_metric("training loss", loss_value)
+                    metrics = {name: _require_finite_metric(name, value)
+                               for name, value in metrics.items()}
+                    record = {
+                        "kind": "train", "step": step, "loss": loss_value,
+                        "grad_norm": norm_values[0], "loop_grad_norm": norm_values[1],
+                        "engram_grad_norm": norm_values[2],
+                        "elapsed_s": round(time.time() - started, 1),
+                        "batch_captions": len(indices),
+                        "text_tokens": sum(len(row["tokens"]) for row in batch_rows),
+                        "max_text_tokens": ids.shape[1], "sampler_epoch": sampler.epoch,
+                        "sampler_position": sampler.position, "loop_enabled": loop_enabled,
+                        "loop_count": args.loop_count, "loop_gate": "factored",
+                        "loop_index": args.loop_index, "loop_scale": loop_scale,
+                        "engram_scale": engram_scale, **metrics,
+                        "batch_prefetch_ready": prefetch_ready,
+                        "batch_prefetch_wait_s": round(prefetch_wait_s, 4),
+                        "batch_prefetch_resident_hits": prefetch_resident_hits,
+                        "batch_prefetch_disk_hits": prefetch_disk_hits,
+                        "batch_prefetch_generated": prefetch_generated,
+                        "batch_prefetch_elapsed_s": round(prefetch_elapsed_s, 4),
+                    }
+                    record.update(_render_adapter_training_metrics(
+                        wrappers, engram))
+                    if "aux_loss" in metrics:
+                        weighted = args.nextlat_weight * metrics["aux_loss"]
+                        record["nextlat_weighted_loss"] = weighted
+                        record["nextlat_to_ce_ratio"] = weighted / max(
+                            metrics["ce_loss"], 1e-12)
+                    record["source_counts"] = dict(sorted(Counter(
+                        str(row.get("stage1_source") or row.get("source") or "unknown")
+                        for row in batch_rows).items()))
+                    if profile:
+                        record.update(data_s=round(t_data - t0, 4),
+                                      feature_s=round(t_features - t_data, 4),
+                                      forward_s=round(t_forward - t_features, 4),
+                                      backward_s=round(t_backward - t_forward, 4),
+                                      step_s=round(t_backward - t0, 4),
+                                      peak_allocated_gib=round(
+                                          torch.cuda.max_memory_allocated()
+                                          / (1024 ** 3), 3),
+                                      peak_reserved_gib=round(
+                                          torch.cuda.max_memory_reserved()
+                                          / (1024 ** 3), 3))
+                    if worker_observability is not None:
+                        for name, value in (
+                            ("train.loss", record["loss"]),
+                            ("train.gradient_norm", record["grad_norm"]),
+                            ("train.loop_gradient_norm", record["loop_grad_norm"]),
+                            ("train.engram_gradient_norm", record["engram_grad_norm"]),
+                            ("train.batch_captions", record["batch_captions"]),
+                            ("train.text_tokens", record["text_tokens"]),
+                        ):
+                            worker_observability.publish_if_declared(
+                                name, value, step=step
+                            )
+                        if "step_s" in record:
+                            worker_observability.publish_if_declared(
+                                "train.step_seconds", record["step_s"], step=step
+                            )
+                    train_record = record if step % args.log_every == 0 else None
+                    if args.eval_every and step % args.eval_every == 0:
+                        # Evaluation is a scheduled side effect of this committed
+                        # model state. Publish its visible train row first, then the
+                        # exact checkpoint, then the obligation. On recovery, the
+                        # checkpoint step also implies the obligation if a host
+                        # failure landed before the final log sync.
+                        _publish_eval_due(
+                            log, step=step, checkpoint_path=checkpoint_path,
+                            train_record=train_record,
+                            save_checkpoint=lambda: save_last_checkpoint(step),
+                        )
+                        eval_checkpoint_saved = True
+                    elif train_record is not None:
+                        # The dashboard-visible step belongs to the same commit as
+                        # weights and sampler state. A pending pause cannot save N
+                        # while leaving the visible training series at N-1.
+                        log.write(json.dumps(train_record) + "\n")
+                finally:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+                if operator_profile is not None:
+                    trace = out / f"operator_step_{next_step:06d}.json.gz"
+                    operator_profile.export_chrome_trace(str(trace))
+                    table = operator_profile.key_averages().table(
+                        sort_by="self_cuda_time_total", row_limit=30)
+                    (out / f"operator_step_{next_step:06d}.txt").write_text(table + "\n")
+                    print(table, flush=True)
+                if step % 10 == 0:
+                    queue_loop_telemetry(step)
+                    _atomic_json(out / "status.json", {"state": "training", "step": step,
+                                                       "updated": time.time()})
+                if step <= profile_until_step or step % 10 == 0:
+                    print(record, flush=True)
+
+                checkpoint_saved = eval_checkpoint_saved
+                if args.eval_every and step % args.eval_every == 0:
+                    # Release the completed training step before changing to eval
+                    # sequence geometry. Retained gradients plus allocator
+                    # fragmentation pushed the largest RADIO buckets into an OOM
+                    # fallback, after which the asynchronous CUDA failure surfaced
+                    # misleadingly in the structured matcher.
+                    optimizer.zero_grad(set_to_none=True)
+                    del (loss, grad_norm, loop_grad_norm, engram_grad_norm,
+                         features, fusion_features, ids, labels, text_mask,
+                         positions, prefetched_recall)
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    checkpoint_saved = run_evaluation(
+                        step, checkpoint_saved=checkpoint_saved,
+                        recurrent_context_fresh=False)
+
+                if (args.checkpoint_every and step % args.checkpoint_every == 0
+                        and not checkpoint_saved):
+                    _atomic_json(out / "status.json", {
+                        "state": "checkpoint_staging", "step": step,
+                        "updated": time.time(),
+                    })
+                    _sync_log(log)
+                    # Only the immutable CPU snapshot blocks this thread. ZIP
+                    # serialization, fsync, and atomic publication overlap the
+                    # following optimizer steps.
+                    finish_async_last_checkpoint(wait_for_write=True)
+                    checkpoint_writer.submit(step, checkpoint_snapshot(step))
+                    _atomic_json(out / "status.json", {"state": "training", "step": step,
+                                                       "updated": time.time()})
+                checkpoint_requested = bool(
+                    worker_controls is not None
+                    and worker_controls.checkpoint_boundary_requested
+                )
+                if checkpoint_requested:
+                    worker_controls.checkpoint(step, reject_live_controls)
+                    with (
+                        worker_observability.keepalive(step, "checkpointing")
+                        if worker_observability is not None
+                        else contextlib.nullcontext()
+                    ):
+                        stage_current_checkpoint(step)
+                    if worker_controls.checkpoint_completion_requested:
+                        worker_controls.publish_requested_checkpoint_directory(
+                            str(checkpoint_directory),
+                            optimizer_step=step,
+                            resume_grade="compatible",
+                            state_components=(
+                                "component_composition",
+                                "control_revision",
+                                "data_cursor",
+                                "model",
+                                "optimizer",
+                                "rng_accelerator",
+                                "rng_python",
+                                "rng_torch",
+                            ),
+                        )
     except KeyboardInterrupt:
         # A dashboard/operator pause must be an exact, recoverable stop rather
         # than losing every completed update since the periodic checkpoint.

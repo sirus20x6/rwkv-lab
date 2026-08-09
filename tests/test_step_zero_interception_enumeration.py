@@ -102,9 +102,11 @@ MUTATION_RECEIVERS = frozenset({"optimizer", "optimizers", "opt", "optim"})
 # removal is a visible commit. A reporting-only test would be wallpaper within
 # a week; an entry here is a named debt with an owner.
 #
-# It starts at nineteen of twenty stateful profiles, which is worth stating
-# plainly rather than burying: scratch-RWKV is the only route that reaches the
-# boundary today. An allowlist that begins by covering almost everything is a
+# It started at nineteen of twenty stateful profiles, which is worth stating
+# plainly rather than burying: scratch-RWKV was the only route that reached the
+# boundary when this file landed. It is fourteen now -- scratch-RWKV, HF
+# multimodal SFT and the four vision routes cross it. An allowlist that begins
+# by covering almost everything is a
 # weak instrument -- it cannot fail until someone removes an entry -- and the
 # argument for keeping it anyway is that the alternative fails *every* run from
 # day one, which teaches people to ignore the suite rather than to fix it. The
@@ -124,14 +126,6 @@ UNMAPPED_INTERCEPTION: dict[str, str] = {
         "posttrain_train.py mutates without reaching the boundary",
     "rwkv_lab.rwkv_rlvr.v1.Train":
         "rlvr_train.py has two optimizer mutations, neither guarded",
-    "rwkv_lab.vision_teacher_compressor.v1.Train":
-        "vision_teacher_compressor.py mutates without reaching the boundary",
-    "rwkv_lab.vision_frozen_adapter.v1.Train":
-        "vision_train.py mutates without reaching the boundary",
-    "rwkv_lab.vision_native_head.v1.Train":
-        "vision_native_train.py mutates without reaching the boundary",
-    "rwkv_lab.vision_rwkv_student.v1.Train":
-        "vision_rwkv_student_train.py mutates without reaching the boundary",
     "rwkv_lab.transformer_mla.v1.Train":
         "train_mla.py mutates without reaching the boundary",
     "rwkv_lab.transformer_mla_mtp.v1.Train":
