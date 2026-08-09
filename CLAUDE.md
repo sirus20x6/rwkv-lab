@@ -76,6 +76,32 @@ identifies the agent — every agent pushes as the same GitHub user, so PR autho
 does not work either. This is genuinely unsolved here; do not paper over it with
 a path filter and a hopeful comment.
 
+## Before you start a card: read its comments, and read the docs it names
+
+Two failures cost real work on 2026-08-09, both the same shape — acting on a
+description of the world instead of the world.
+
+**A card body is a snapshot; its comments are the current state.** `card-4f3f56a2`
+was dispatched against its full five-item scope while roughly 80% of it had
+already merged. The body still described the original problem, three days stale.
+The comments recorded that two PRs had landed and that the card's own disposition
+had been *retracted*. Everything needed to avoid the wasted start was on the card
+— just not in the part that gets read first. Read the comments, oldest to newest,
+before claiming or delegating.
+
+**Read the document you are about to add to.** Three cards were filed proposing to
+write down rules that were already written down: two claimed this file did not
+state the base branch for new worktrees (it did, and had for some time), and one
+raised a question `docs/experiment-vm/SOURCE_DISPOSITIONS.md` already answered in
+its first paragraph. Each cost a full investigation to discover that nothing was
+wrong. Grep the docs for the thing you are about to assert is missing.
+
+The general form: **a finding is not real until it is checked against the thing
+itself.** That is the same rule the repository already applies to its own
+artifacts — a receipt names the commit it ran against, a catalog pins per-file
+hashes rather than trusting a revision string — and it applies to cards and
+documentation too.
+
 ## Finishing a card
 
 - Claim before working. The board's claim state lags reality, so also check
