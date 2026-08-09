@@ -92,8 +92,25 @@ def training_composition() -> dict[str, object]:
 
 
 def invocation_document(
-    *, training: object = None, resume: object = None, execution: object = None
+    *,
+    training: object = None,
+    resume: object = None,
+    execution: object = None,
+    run_id: str = "run-1",
+    node_id: str = "train",
+    attempt_id: str = "attempt-1",
+    workspace: object = None,
 ) -> bytes:
+    """Build a canonical worker-invocation document.
+
+    The identity and workspace overrides exist so tests that need a *real*
+    `WorkerInvocation` — one carrying the `deep_freeze` that
+    `load_worker_invocation` applies — can get one from this builder instead of
+    hand-rolling a `SimpleNamespace`. A hand-built stand-in disagrees with
+    production about the exact types the worker compares on, which is how the
+    resume-lineage `list == tuple` defect stayed invisible to a green suite.
+    """
+
     body = {
         "adapter": {
             "adapter": "rwkv-lab.mageflow",
@@ -107,23 +124,23 @@ def invocation_document(
             if resume is not None
             else "trainvm.worker-invocation/v1"
         ),
-        "attempt_id": "attempt-1",
+        "attempt_id": attempt_id,
         "controls": {"learning_rate": 2e-6},
         "dispatch_id": "dispatch-1",
         "effective_control_revision": 2,
         "execution": execution,
         "host_id": "sha256:" + "b" * 64,
         "inputs": {"caption": "雪"},
-        "node_id": "train",
+        "node_id": node_id,
         "observability": {},
         "plan_hash": "c" * 64,
         "plan_revision": 3,
         "publishes": {},
         "resources": {},
         **({"resume": resume} if resume is not None else {}),
-        "run_id": "run-1",
+        "run_id": run_id,
         "training": training,
-        "workspace": {},
+        "workspace": {} if workspace is None else workspace,
     }
     return canonical({**body, "invocation_digest": digest(canonical(body))})
 
