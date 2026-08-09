@@ -30,10 +30,13 @@ Honest scope: the ELF fixtures are synthetic, and no real ``flash_attn``,
 ``bitsandbytes``, ``deepspeed`` or ``fla`` wheel is installed on any machine
 this runs on. What is asserted is the mechanism that covers them — they are
 ordinary compiled extensions with ordinary DT_NEEDED lists, and they enter the
-closure through the same two doors these fixtures use. The end-to-end test
-against a real interpreter is ``rwkv_lab_worker_artifact`` in the native suite,
-which is excluded from hosted CI; that is exactly why the discrimination is
-asserted here instead.
+closure through the same two doors these fixtures use. A whole document does go
+out of ``build()`` and back through ``verify_embedded_runtime_closure()`` here,
+but over a substituted runtime: a hosted runner's Python tool cache is
+group-writable and the builder refuses — correctly — to seal it. The pass over
+a real interpreter is ``rwkv_lab_worker_artifact`` in the native suite, which is
+excluded from hosted CI; that is exactly why the discrimination is asserted here
+instead.
 """
 
 from __future__ import annotations
@@ -44,6 +47,7 @@ import os
 import pathlib
 import struct
 import sys
+import zipfile
 
 import pytest
 
@@ -553,30 +557,144 @@ def test_every_manifest_validator_agrees_on_the_field_set():
     assert '"native",' in source, "the artifact builder must require the native section"
 
 
+class _FakeDistribution:
+    """Just enough of `importlib.metadata.Distribution` for `build()`."""
+
+    def __init__(self, name: str, version: str, root: pathlib.Path, names) -> None:
+        self.metadata = {"Name": name}
+        self.version = version
+        self.files = [pathlib.PurePath(item) for item in names]
+        self._root = root
+
+    def locate_file(self, relative):
+        return self._root / relative
+
+
+def _sealed_document(tmp_path, monkeypatch) -> dict:
+    """A whole closure document over a tree this test owns end to end.
+
+    The real interpreter cannot be used for this: a GitHub hosted runner's
+    Python tool cache is group-writable, and the builder refuses — correctly —
+    to seal a runtime that another member of the group can rewrite. Substituting
+    the inputs keeps the assertion runnable on every machine while `build()`,
+    the digest derivation, the ELF scan, and the guard all stay real.
+    """
+
+    runtime = tmp_path / "runtime"
+    write_elf(runtime / "libsupport.so.1", soname="libsupport.so.1")
+    write_elf(
+        runtime / "python-fake",
+        soname="python-fake",
+        needed=("libsupport.so.1",),
+        runpath=(str(runtime),),
+    )
+    (runtime / "module.py").write_text("VALUE = 1\n")
+    os.chmod(runtime / "module.py", 0o644)
+    roots = tmp_path / "empty-site-packages"
+    roots.mkdir()
+    monkeypatch.setattr(sys, "executable", str(runtime / "python-fake"))
+    monkeypatch.setattr(
+        builder, "_stdlib_files", lambda: [runtime / "module.py"]
+    )
+    monkeypatch.setattr(
+        builder,
+        "_distribution_closure",
+        lambda roots_: [
+            _FakeDistribution("demo", "1.0", runtime, ["libsupport.so.1"])
+        ],
+    )
+    monkeypatch.setattr(builder, "_native_roots", lambda: [str(roots)])
+    monkeypatch.setattr(guard, "native_roots", lambda: [str(roots)])
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+    return builder.build(("demo",))
+
+
+def test_a_built_document_verifies_through_the_real_guard(tmp_path, monkeypatch):
+    """`build()` out, `verify_embedded_runtime_closure()` in, over a zip.
+
+    This is the assertion that fails if a native field is added to one side
+    only: the guard compares the manifest's field set exactly, so a builder that
+    emits a key the guard does not list — or the reverse — is rejected here.
+    """
+
+    document = _sealed_document(tmp_path, monkeypatch)
+    archive = tmp_path / "worker.pyz"
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr(
+            guard.RUNTIME_CLOSURE_MEMBER, builder._canonical(document) + b"\n"
+        )
+    assert (
+        guard.verify_embedded_runtime_closure(str(archive))
+        == document["closure_digest"]
+    )
+
+
+def test_a_built_document_has_the_field_set_every_validator_demands(
+    tmp_path, monkeypatch
+):
+    document = _sealed_document(tmp_path, monkeypatch)
+    assert set(document) == {
+        "api_version",
+        "closure_digest",
+        "distributions",
+        "files",
+        "native",
+        "python",
+        "root_distributions",
+    }
+    assert document["api_version"] == guard.RUNTIME_CLOSURE_SCHEMA
+    body = dict(document)
+    body.pop("closure_digest")
+    assert document["closure_digest"] == builder._digest(builder._canonical(body))
+    assert set(document["native"]) == {
+        "cuda",
+        "kernel_registry",
+        "ld_library_path",
+        "loader_configuration",
+        "objects",
+        "system_search",
+    }
+    # The interpreter is an object in its own closure, and its dependency is a
+    # pinned file rather than a name.
+    index = {entry["path"]: entry for entry in document["files"]}
+    interpreter = os.path.realpath(sys.executable)
+    objects = {item["path"]: item for item in document["native"]["objects"]}
+    assert interpreter in objects and interpreter in index
+    assert objects[interpreter]["dependencies"] == [
+        {
+            "needed": "libsupport.so.1",
+            "resolved": str(tmp_path / "runtime" / "libsupport.so.1"),
+        }
+    ]
+    assert objects[interpreter]["dependencies"][0]["resolved"] in index
+    # Canonical JSON, because that is the form the digest is taken over.
+    assert json.loads(builder._canonical(document).decode("utf-8")) == document
+
+
 @pytest.mark.skipif(
     sys.platform != "linux", reason="the runtime closure is a Linux deployment artifact"
 )
 def test_the_builder_emits_a_verifiable_document_for_this_interpreter(tmp_path):
-    """One end-to-end pass over the real interpreter, not a fixture tree.
+    """The same pass over the REAL interpreter, where it can be sealed at all.
 
-    Everything above drives `_scan_native` and `_verify_native` directly. This
-    one runs `build()` over the running Python and checks the document it emits
-    is the shape the guard's field-set literals demand — which is the assertion
-    that fails if a native field is added to one side only.
+    Skips rather than fails where the running Python's own runtime is group- or
+    world-writable — a hosted runner's tool cache is, and refusing to seal it is
+    the builder behaving correctly, not a defect in this test. The two tests
+    above carry the shape assertions on every machine; this one is what
+    exercises the actual stdlib, the actual loader configuration, and the actual
+    CUDA driver on a host where the closure is meaningful.
     """
 
-    # The import-path inventory is pointed at an empty directory here. Walking
-    # and digesting a development site-packages costs minutes and asserts
-    # nothing this test is about; the tree fixtures above cover the registry.
-    # Everything else — the stdlib closure, the interpreter's own ELF graph,
-    # DT_NEEDED resolution against the real loader configuration, the CUDA
-    # driver identity — runs against this machine as it is.
     roots = tmp_path / "empty-site-packages"
     roots.mkdir()
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(builder, "_native_roots", lambda: [str(roots)])
     try:
         document = builder.build(("packaging",))
+    except ValueError as error:
+        if "group/world writable" not in str(error):
+            raise
+        pytest.skip(f"this interpreter's runtime cannot be sealed: {error}")
     finally:
         monkeypatch.undo()
     assert set(document) == {
