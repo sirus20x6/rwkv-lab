@@ -112,6 +112,57 @@ def test_importing_a_cuda_marked_module_opens_no_device(tmp_path):
     assert completed.stdout.strip().splitlines()[-1] == "[]"
 
 
+@pytest.mark.gpu
+@pytest.mark.slow
+def test_the_portable_benchmark_receipt_reports_the_devices_it_opened():
+    """The portable benchmark's own device-file field, proved to be measured.
+
+    `scripts/benchmark_workloads/portable_lm_step.py` publishes
+    `open_accelerator_device_files` in its receipt so a portable measurement
+    carries physical evidence that it stayed on the CPU path. Every other test
+    of that field expects an empty list, which a hardcoded `[]` would satisfy
+    just as well. This one runs the workload WITHOUT the mask on a host that
+    has devices, where the honest answer is non-empty, so it is the assertion
+    that fails if the field stops being read from /proc.
+
+    The non-empty answer is itself worth knowing: importing torch unmasked on
+    this repository's workstation opens /dev/nvidiactl, /dev/nvidia0 and
+    /dev/nvidia-uvm before a single step runs, so an unmasked portable run is
+    a CPU measurement whose peak RSS was taken in a process that initialized a
+    GPU. The receipt's `accelerator` field stays False throughout, because no
+    tensor ever left the CPU -- reachable and used are different claims and
+    the receipt keeps them apart.
+    """
+    if not accelerator_access_enabled():
+        pytest.skip(
+            f"needs {ACCELERATOR_ACCESS_ENV}=1; this test deliberately runs a "
+            "child WITHOUT the accelerator mask, which the rest of this "
+            "module exists to forbid")
+    if not list(Path("/dev").glob("nvidia*")):
+        pytest.skip("no NVIDIA device files on this host")
+
+    workload = ROOT / "scripts/benchmark_workloads/portable_lm_step.py"
+    environment = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
+    for name in NON_GPU_ENVIRONMENT:
+        environment.pop(name, None)
+    completed = subprocess.run(
+        [sys.executable, str(workload), "--phase", "timed",
+         "--bucket", "seq64xbatch2", "--steps", "1"],
+        cwd=ROOT, env=environment, capture_output=True, text=True,
+        check=False, timeout=600,
+    )
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    report = json.loads(completed.stdout)
+
+    opened = report["open_accelerator_device_files"]
+    assert opened, (
+        "an unmasked portable run on a device host reported no open device "
+        "files, so the receipt field is not being read from this process")
+    assert all(name.startswith("/dev/") for name in opened)
+    assert report["accelerator"] is False
+    assert report["execution_device"] == "cpu"
+
+
 _COLLECTION_CACHE: dict[str, list[str]] = {}
 
 
