@@ -148,6 +148,29 @@ can never be attributed to source it did not run against. Skips are recorded
 with their reason rather than omitted, because a silently missing suite is the
 failure this whole document is about.
 
+`evidence/` is generated output and is git-ignored in full. Nothing under it
+belongs in a commit, and that follows directly from the stamping rule above: a
+receipt records the commit it *ran against*, but a committed receipt is served
+to every reader at whatever commit they have checked out. The two diverge the
+moment anyone commits again, and the receipt then makes a confident, precise,
+wrong claim — which is worse than having no receipt, because it reads as
+evidence. This was not hypothetical: `evidence/acceptance.json` and
+`evidence/python-cpu.xml` were committed by accident in #43/#44 and sat in the
+tree for six days describing a 2026-08-03 run of a *dirty* worktree. They have
+been removed. The same rule covers whole qualification trees: one GPU
+qualification run left 187 files in the working tree for three days. The
+existing `*.pt`/`*.safetensors`/`*.bin` rules happened to cover its checkpoint
+payloads, but 150 files — receipts, configs, manifests, logs — were still
+stageable by any `git add -A`. Ignoring the directory by shape is what makes
+that independent of whether extension rules keep coincidentally covering it.
+
+Durable evidence therefore lives in three places, none of them the source tree:
+CI build artifacts for the raw run output; the pull request body for what a
+reviewer needs to judge the change; and the kanban card for anything a later
+reader must be able to find without knowing which PR to look in. When a
+qualification receipt proves something a card is blocked on, quote its decisive
+fields onto the card rather than committing the file.
+
 The portable `authoring-matrix` suite validates
 `no-code-authoring-matrix.v1.json`. That document is a coverage declaration,
 not evidence that the recipes already run: it freezes the required Qwen
