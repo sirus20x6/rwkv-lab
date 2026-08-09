@@ -4236,7 +4236,7 @@ grpc::Status TrainVMService::record_worker_runtime_evidence(
   }
   // Decoding is the only place the proto arm and the C++ struct meet, so it
   // is a plain field-for-field copy with nothing derived, defaulted, or
-  // repaired. `worker_runtime_evidence_wire_field_names` asserts the two
+  // repaired. `worker_runtime_evidence_wire_hop` asserts the two
   // literals still describe the same document.
   WorkerRuntimeEvidenceReport report{
       .api_version = evidence.api_version(),

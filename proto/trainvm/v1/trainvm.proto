@@ -507,7 +507,7 @@ message WorkerRuntimeVersionIdentity {
 // There is deliberately no worker_sequence either.  Runtime evidence is not an
 // observation in the worker's ordered stream; it is published as its own
 // immutable receipt, so the transport stays the report and nothing else.
-// `worker_runtime_evidence_wire_field_names` in the native suite asserts this
+// `worker_runtime_evidence_wire_hop` in the native suite asserts this
 // message and the C++ struct agree exactly, because they are two literals
 // nothing else keeps in step.
 message WorkerRuntimeEvidence {
