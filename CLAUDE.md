@@ -267,6 +267,17 @@ Use instead, in order of strength:
    optimistically: one commit had all five of its files on main and none of its
    mechanism.
 
+Before porting anything the second check says is missing, ask a third question:
+**is that file still the right place?** `git log origin/main --oneline -- <path>`
+returning nothing means the path has **never existed on main in its entire
+history** — not that it was deleted, which is the natural reading and the wrong
+one. `card-88d6b252` cited a commit touching three files; two were a Python
+qualification runner that main never carried, because main serves that path from
+a Go handler instead. Its one real change was already on main in stronger form,
+under a named constant. A file that was never there cannot be where the fix
+belongs, and a commit can be simultaneously absent, unportable, and already
+done.
+
 The cost of not having this written down was five days: three cards recorded
 work as complete, citing shas, that had never reached main, and nobody noticed
 because the obvious check silently does not work here.
