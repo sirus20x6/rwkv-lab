@@ -90,8 +90,6 @@ struct RunProjectionQuery final {
 struct SequencedEvent final {
   std::uint64_t journal_sequence{};
   Event event;
-
-  bool operator==(const SequencedEvent&) const = default;
 };
 
 struct EventScanQuery final {
@@ -121,8 +119,6 @@ public:
 struct RunCreationResult {
   RunCreationDisposition disposition{};
   Event created_event;
-
-  bool operator==(const RunCreationResult&) const = default;
 };
 
 // Expected Linux identity for the already-authority-locked main database.
