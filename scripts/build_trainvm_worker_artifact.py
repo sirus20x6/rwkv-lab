@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA = "trainvm.python-worker-artifact/v2"
-RUNTIME_CLOSURE_SCHEMA = "trainvm.python-bootstrap-runtime-closure/v2"
+RUNTIME_CLOSURE_SCHEMA = "trainvm.python-bootstrap-runtime-closure/v3"
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 ENTRYPOINT = (
     b"import sys\n"
@@ -72,6 +72,7 @@ def _runtime_closure(path: Path) -> tuple[bytes, str]:
         "closure_digest",
         "distributions",
         "files",
+        "native",
         "python",
         "root_distributions",
     }:
