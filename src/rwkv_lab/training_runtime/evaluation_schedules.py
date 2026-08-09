@@ -4,6 +4,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from enum import Enum
+from functools import lru_cache
 from typing import Any
 
 from .resolved import resolved_component_parts
@@ -42,6 +43,7 @@ EVALUATION_CADENCE_CONTROLS: tuple[str, ...] = (
 
 _MAXIMUM_MILESTONES = 256
 _MAXIMUM_STEP = 1_000_000_000
+_MAXIMUM_PLANNED_MILESTONES = 100_000
 
 
 def _milestone_steps(values: Iterable[Any], label: str) -> tuple[int, ...]:
@@ -357,7 +359,7 @@ class EvaluationSchedule:
             raise ValueError(
                 "fractional evaluation milestones need a declared run length"
             )
-        resolved = self._resolved_milestones(max(total_steps, step))
+        resolved = _resolved_milestones(configuration, max(total_steps, step))
         qualitative = (
             self._periodic(step, configuration.qualitative_every_steps)
             or step in resolved[EvaluationKind.QUALITATIVE]
@@ -387,36 +389,6 @@ class EvaluationSchedule:
             final_audit=final_audit,
         )
 
-    def _resolved_milestones(
-        self, total_steps: int
-    ) -> Mapping[EvaluationKind, frozenset[int]]:
-        configuration = self.configuration
-        declared = {
-            EvaluationKind.SCALAR_FULL: (
-                configuration.full_milestone_steps,
-                configuration.full_milestone_fractions,
-            ),
-            EvaluationKind.SCALAR_PROBE: (
-                configuration.probe_milestone_steps,
-                configuration.probe_milestone_fractions,
-            ),
-            EvaluationKind.QUALITATIVE: (
-                configuration.qualitative_milestone_steps,
-                configuration.qualitative_milestone_fractions,
-            ),
-        }
-        resolved: dict[EvaluationKind, frozenset[int]] = {}
-        for kind, (steps, fractions) in declared.items():
-            selected = {step for step in steps if step <= total_steps}
-            if fractions:
-                if total_steps <= 0:
-                    raise ValueError(
-                        "fractional evaluation milestones need a declared run length"
-                    )
-                selected.update(_resolved_steps(fractions, total_steps))
-            resolved[kind] = frozenset(selected)
-        return resolved
-
     def plan(self, total_steps: int) -> EvaluationPlan:
         if (
             not isinstance(total_steps, int)
@@ -424,8 +396,27 @@ class EvaluationSchedule:
             or total_steps < 1
         ):
             raise ValueError("an evaluation plan needs a positive run length")
+        configuration = self.configuration
+        # Enumerate the declared milestones directly rather than walking every
+        # optimizer step: a long run has far more steps than milestones, and
+        # the plan is rebuilt from scratch on every applied cadence patch.
+        candidates = {0, total_steps}
+        for interval in (
+            configuration.full_every_steps,
+            configuration.probe_every_steps,
+            configuration.qualitative_every_steps,
+        ):
+            if interval > 0:
+                if total_steps // interval > _MAXIMUM_PLANNED_MILESTONES:
+                    raise ValueError(
+                        "the declared evaluation cadence plans more milestones "
+                        "than a run may carry"
+                    )
+                candidates.update(range(interval, total_steps + 1, interval))
+        for steps in _resolved_milestones(configuration, total_steps).values():
+            candidates.update(steps)
         milestones: list[EvaluationMilestone] = []
-        for step in range(0, total_steps + 1):
+        for step in sorted(candidates):
             decision = self.for_step(
                 step, final=step == total_steps, total_steps=total_steps
             )
@@ -439,7 +430,7 @@ class EvaluationSchedule:
         return EvaluationPlan(
             total_steps=total_steps,
             milestones=tuple(milestones),
-            probe_examples=self.configuration.probe_examples,
+            probe_examples=configuration.probe_examples,
         )
 
     def with_cadence_assignments(
@@ -448,6 +439,44 @@ class EvaluationSchedule:
         return EvaluationSchedule(
             self.configuration.with_cadence_assignments(assignments)
         )
+
+
+@lru_cache(maxsize=256)
+def _resolved_milestones(
+    configuration: EvaluationScheduleConfiguration, total_steps: int
+) -> Mapping[EvaluationKind, frozenset[int]]:
+    """Explicit and fractional milestones resolved against one run length.
+
+    Cached because `for_step` is called once per candidate step while a plan is
+    being built, and the resolution depends only on the frozen configuration
+    and the run length.
+    """
+
+    declared = {
+        EvaluationKind.SCALAR_FULL: (
+            configuration.full_milestone_steps,
+            configuration.full_milestone_fractions,
+        ),
+        EvaluationKind.SCALAR_PROBE: (
+            configuration.probe_milestone_steps,
+            configuration.probe_milestone_fractions,
+        ),
+        EvaluationKind.QUALITATIVE: (
+            configuration.qualitative_milestone_steps,
+            configuration.qualitative_milestone_fractions,
+        ),
+    }
+    resolved: dict[EvaluationKind, frozenset[int]] = {}
+    for kind, (steps, fractions) in declared.items():
+        selected = {step for step in steps if step <= total_steps}
+        if fractions:
+            if total_steps <= 0:
+                raise ValueError(
+                    "fractional evaluation milestones need a declared run length"
+                )
+            selected.update(_resolved_steps(fractions, total_steps))
+        resolved[kind] = frozenset(selected)
+    return resolved
 
 
 def evaluation_schedule_from_resolved_component(

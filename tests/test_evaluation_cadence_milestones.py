@@ -187,6 +187,24 @@ def test_a_cadence_patch_cannot_move_which_examples_are_evaluated():
     }
 
 
+def test_a_cadence_that_would_plan_absurd_milestone_counts_is_refused():
+    """The plan is resolved up front, so an absurd cadence fails there.
+
+    A per-step probe is a legitimate choice on a short run and a mistake on a
+    long one. Refusing it while the plan is being built keeps the failure at
+    authoring time instead of after the run has already begun paying for it.
+    """
+
+    schedule = EvaluationSchedule(
+        EvaluationScheduleConfiguration(
+            defer_full_scalar=False, probe_every_steps=1, probe_examples=1
+        )
+    )
+    assert len(schedule.plan(1_000).milestones) == 1_001
+    with pytest.raises(ValueError, match="more milestones than a run may carry"):
+        schedule.plan(1_000_000)
+
+
 def test_an_immutable_schedule_refuses_every_live_cadence_patch():
     configuration = EvaluationScheduleConfiguration(
         defer_full_scalar=False, full_every_steps=250
