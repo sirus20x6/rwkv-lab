@@ -1,7 +1,7 @@
 {
   "api_version": "trainvm.compatibility-workflows/v1",
   "authority": "compatibility_evidence_only",
-  "classification_surface_digest": "sha256:b5a227b757b872c4b8a5a00a62a9653c69aae14b89967a8b274f1ce2f21bb621",
+  "classification_surface_digest": "sha256:d17ea6adcefc11e12f5e9f7ccee6a32f0cfd6bfde400996d290090f6c480a2bc",
   "source_digests": [
     {
       "source_path": "dashboard/internal/server/alerts_handlers.go",
@@ -513,7 +513,7 @@
     },
     {
       "source_path": "src/rwkv_lab/rlvr_train.py",
-      "source_sha256": "sha256:75dfbf2e6911dd4b2d98c16512eb9c2c4ddcfe8e7860e8cb28fd8584ee446bd1"
+      "source_sha256": "sha256:4b0f278b838892b1f53c1c88467955715c11af48ebeb73b30eced60e91ee4f59"
     },
     {
       "source_path": "src/rwkv_lab/rosa.py",

@@ -120,8 +120,6 @@ UNMAPPED_INTERCEPTION: dict[str, str] = {
         "baseline work but never calls the boundary before mutating",
     "rwkv_lab.mageflow_terminal_expert.v1.Train":
         "mage_flow_terminal_train.py mutates without reaching the boundary",
-    "rwkv_lab.rwkv_rlvr.v1.Train":
-        "rlvr_train.py has two optimizer mutations, neither guarded",
     "rwkv_lab.transformer_mla.v1.Train":
         "train_mla.py mutates without reaching the boundary",
     "rwkv_lab.transformer_mla_mtp.v1.Train":
