@@ -329,7 +329,20 @@ CacheQualificationEvidence qualification_evidence() {
       .gradient_parity = true,
       .optimizer_update_parity = true,
       .state_parity = true,
-      .resumed_trajectory_parity = true,
+      .optimizer_state_device_policy =
+          OptimizerStateDevicePolicy::normalized_on_load,
+      .resumed_trajectory_parity =
+          {
+              .verdict = TrajectoryParityVerdict::equivalent,
+              .criterion = TrajectoryEquivalenceCriterion::bit_identical,
+              .effect_class = TrajectoryEffectClass::optimizer_update,
+              .candidate_divergence = {{.step = 1U, .relative_deviation = 0.0},
+                                       {.step = 2U, .relative_deviation = 0.0},
+                                       {.step = 5U, .relative_deviation = 0.0}},
+              .reference_divergence = {},
+              .checkpoint_quality = {},
+              .analysis_seed = 0U,
+          },
       .determinism_parity = true,
       .content_parity = false,
       .ordering_parity = false,

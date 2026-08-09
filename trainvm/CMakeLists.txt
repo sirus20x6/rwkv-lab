@@ -145,6 +145,7 @@ add_library(trainvm_core
   src/recipe_profile.cpp
   src/rwkv_scratch_profiles.cpp
   src/sqlite_authority_vfs.cpp
+  src/trajectory_parity.cpp
   src/training_component_registry.cpp
   src/training_preflight.cpp
   src/worker_bootstrap.cpp
@@ -153,7 +154,10 @@ target_include_directories(trainvm_core PUBLIC include)
 target_compile_options(trainvm_core PUBLIC -freflection)
 target_compile_options(trainvm_core PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
 target_link_libraries(trainvm_core
-  PUBLIC nlohmann_json::nlohmann_json
+  # The trajectory gate is a statistical one. It reuses the paired bootstrap
+  # and sign-flip permutation test that already exist rather than growing a
+  # second statistics implementation beside them.
+  PUBLIC nlohmann_json::nlohmann_json trainvm_experiment_analysis
   PRIVATE OpenSSL::Crypto SQLite3::SQLite3 yaml-cpp::yaml-cpp ${CMAKE_DL_LIBS}
 )
 
@@ -428,6 +432,12 @@ target_link_libraries(source_disposition_catalog_tests PRIVATE
 add_test(NAME source_disposition_catalog_tests
   COMMAND source_disposition_catalog_tests
 )
+add_executable(trajectory_parity_tests tests/trajectory_parity_tests.cpp)
+target_compile_options(trajectory_parity_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(trajectory_parity_tests PRIVATE trainvm_core)
+add_test(NAME trajectory_parity_tests COMMAND trajectory_parity_tests)
 add_executable(experiment_analysis_tests tests/experiment_analysis_tests.cpp)
 target_compile_options(experiment_analysis_tests PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror

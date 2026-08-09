@@ -430,6 +430,55 @@ def compare_scalar(baseline: float, candidate: float) -> dict:
     }
 
 
+def trajectory_evidence(completed: list) -> dict:
+    """Report the trajectory claim this runner can actually support.
+
+    `resumed_trajectory_parity` is a verdict, not a boolean, because a fused
+    or compiled kernel agrees with its reference to float32 epsilon on one
+    step and then separates as the trajectory amplifies that agreement-level
+    difference. Two of the three verdicts need a measurement this runner does
+    not make: it compares arms per shape bucket rather than stepping a
+    trajectory, so it has no divergence rate and no paired checkpoint metric.
+
+    What it does have is the measured deviation per bucket. When every one of
+    them is exactly zero the arms are bit-identical and `equivalent` is honest.
+    Otherwise the honest answer is `diverged` -- not because the candidate is
+    bad, but because nothing here has shown it is not. Qualifying such a
+    candidate needs a run that measures a rate or a checkpoint-quality pair.
+    """
+    def bounded(value: float) -> float:
+        # A non-finite fingerprint means total disagreement, not an
+        # unrepresentable number. The evidence schema requires finite
+        # deviations, so record it as a fully separated one rather than
+        # emitting a document the gate cannot parse at all.
+        return value if math.isfinite(value) else 1.0
+
+    samples = [
+        {
+            "step": index + 1,
+            "relative_deviation": bounded(max(
+                cell["output_relative_deviation"],
+                cell["gradient_relative_deviation"],
+            )),
+        }
+        for index, cell in enumerate(completed)
+    ]
+    identical = all(
+        cell["output_absolute_deviation"] == 0.0
+        and cell["gradient_absolute_deviation"] == 0.0
+        for cell in completed
+    )
+    return {
+        "verdict": "equivalent" if identical else "diverged",
+        "criterion": "bit_identical",
+        "effect_class": "optimizer_update",
+        "candidate_divergence": samples,
+        "reference_divergence": [],
+        "checkpoint_quality": [],
+        "analysis_seed": 0,
+    }
+
+
 def compare_batch_identity(baseline: dict, candidate: dict) -> dict:
     """Derive ordering and content parity from what each arm actually loaded.
 
@@ -747,15 +796,16 @@ def main() -> int:
             str(arguments.input_workers),
             str(arguments.input_prefetch_depth),
             fixture["id"], coverage)
+    workload_class = (
+        "training" if fixture["effect_class"] == "training_kernel"
+        else "serving" if fixture["effect_class"] == "serving_kernel"
+        else "preprocessing")
     evidence = {
         "api_version": "trainvm.cache-qualification-evidence/v1",
         "authority_receipt_digest": digest("authority", fixture["id"]),
         "namespace_digest": digest("namespace", fixture["id"]),
         "artifact_tree_digest": digest("artifact", fixture["id"]),
-        "workload_class": (
-            "training" if fixture["effect_class"] == "training_kernel"
-            else "serving" if fixture["effect_class"] == "serving_kernel"
-            else "preprocessing"),
+        "workload_class": workload_class,
         "baseline_run_digest": digest("baseline", fixture["id"], coverage),
         "candidate_run_digest": candidate_digest,
         "shape_coverage_digest": coverage,
@@ -773,7 +823,20 @@ def main() -> int:
         "gradient_parity": report["parity"]["gradient_parity"],
         "optimizer_update_parity": True,
         "state_parity": True,
-        "resumed_trajectory_parity": True,
+        # torch's fused AdamW keeps `step` on the parameter's device and the
+        # foreach reference keeps it on the host, so a state round trip between
+        # them is only comparable after Optimizer.load_state_dict has
+        # normalized it. Both arms here go through that path.
+        "optimizer_state_device_policy": (
+            "normalized_on_load" if workload_class == "training"
+            else "not_applicable"),
+        # Measured, not asserted. This runner compares arms per shape bucket
+        # rather than stepping a trajectory, so the only claim it can support
+        # is bit-identity, and only when every measured deviation is exactly
+        # zero. A candidate that separates at all -- a compiled one will --
+        # is reported as diverged here and must be qualified by a run that
+        # actually measures a divergence rate or a checkpoint-quality pair.
+        "resumed_trajectory_parity": trajectory_evidence(completed),
         "determinism_parity": True,
         # Measured from the per-step batch digests published by both arms, not
         # asserted. A loader that reorders batches, or resumes on the wrong

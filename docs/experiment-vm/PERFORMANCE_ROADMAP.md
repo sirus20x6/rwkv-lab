@@ -144,7 +144,8 @@ requires an exact fingerprint match.
 Evidence is selected by operation effect class rather than assuming every operation has gradients or
 an optimizer:
 
-- training kernels require output, gradient, optimizer-update, state, and resumed-trajectory parity;
+- training kernels require output, gradient, optimizer-update, state, and resumed-trajectory
+  parity, the last as a three-state verdict rather than a boolean (see below);
 - serving kernels require output/state/determinism parity but no invented backward requirement;
 - cache builders and preprocessors require content, shape, ordering, and manifest parity;
 - schedulers/resource policies require ownership, trajectory, resume, and end-to-end throughput
@@ -157,6 +158,90 @@ an optimizer:
 
 Algorithmic changes additionally require paired seeds and a quality/non-regression decision.
 Single-run speedrun results are hypotheses, not production defaults.
+
+### What "resumed trajectory parity" means, and why it is not a boolean
+
+Measured, not inferred. torch fused AdamW against the foreach reference, 8x2048 linear stack,
+batch 64, RTX PRO 6000:
+
+| after | max abs delta | relative | |
+| --- | --- | --- | --- |
+| 1 step | 3.7e-09 | 1.6e-07 | float32 epsilon: the kernels agree |
+| 2 steps | 4.0e-08 | 1.7e-06 | |
+| 5 steps | 3.4e-05 | 1.3e-03 | |
+| 25 steps | 4.9e-03 | 1.4e-01 | saturated |
+
+Speed over the same comparison: 11.202 ms/step reference against 1.389 ms/step fused, 8.07x.
+
+The kernels agree to float32 epsilon on a single step. The divergence is the trajectory amplifying
+that agreement-level difference, and no kernel change removes it: any implementation that is not
+bit-identical does the same. Read as bit-identity, the single-step gates pass and the trajectory
+gate can never pass, so every fused candidate is rejected for a reason unrelated to its quality.
+Read loosely, a candidate that genuinely damages training passes because nobody said what "same
+trajectory" means.
+
+So `resumed_trajectory_parity` is a verdict with the statistics that produced it, not a boolean:
+
+- **`equivalent`** — bit-identical. Exactly what the old boolean `true` meant, and nothing below
+  widens it.
+- **`diverged_within_tolerance`** — the trajectories differ and the difference is bounded by the
+  criterion below. This is the state a boolean could not express, which forced whoever set it to
+  either lie or reject.
+- **`diverged`** — neither was shown.
+
+The primary criterion is the **divergence rate**. The measurements above are near-perfectly
+geometric before saturation: fitting `ln(relative deviation) = a + lambda*step` over the first
+three points gives r^2 = 1.000 and lambda = 2.24/step, while including the saturated fourth point
+drops the fit to r^2 = 0.766. The reference is then run against *itself* under a different seed and
+its own rate estimated identically. A candidate that diverges no faster than the reference diverges
+from itself is equivalent in the only sense that matters, because the seed is already free. A fit
+below r^2 = 0.90 is not a geometric divergence, so its slope is not a rate and the gate refuses to
+compare it rather than passing on a number that describes nothing.
+
+The fallback, for when a rate cannot be estimated, is **checkpoint quality**: the declared eval
+metric at a checkpoint over at least five paired seeds, graded with the existing paired bootstrap
+and sign-flip permutation test in `trainvm/src/experiment_analysis.cpp`. The *whole* interval on
+the paired delta must lie inside the tolerance band. That is an equivalence claim; a wide interval
+straddling zero fails, which is exactly the case a p-value gate would wave through.
+
+Tolerance is stated per effect class rather than globally, because these classes do not have the
+same right to drift:
+
+| effect class | max rate ratio to the reference's own seed noise | max relative quality deviation |
+| --- | --- | --- |
+| `optimizer_update` | 1.25 | 0.010 |
+| `gradient_policy` | 1.50 | 0.010 |
+| `precision_scaling` | 2.00 | 0.020 |
+| `schedule_state` | 0 | 0 |
+| `curriculum_phase` | 0 | 0 |
+
+A schedule value is computed from the step index rather than accumulated, and curriculum membership
+and order are discrete, so "within tolerance" is not a meaningful statement about either. Their
+zero tolerance says so in the receipt instead of leaving a reader to infer it.
+
+The declared verdict is checked against the one the recorded statistics support, and the derived
+`trajectory_assessment` — rates, fit qualities, ratio, interval, seed count and the tolerance that
+applied — is carried in the qualification receipt. A candidate is therefore qualified or rejected
+on its merits rather than on bit-identity it can never achieve, and a later reader can tell which.
+
+### Optimizer state that is device-placed by one implementation and host-placed by another
+
+From the same investigation: torch's fused AdamW keeps `step` as a CUDA tensor on the parameter's
+device, while the foreach reference keeps it on the host. Same key, same value, different device,
+so a naive state-dict comparison reports a difference that is not one.
+
+The round trip is **accepted**, not rejected, because it works — but for a reason worth writing
+down. `Optimizer.load_state_dict` normalizes `step` to the parameter's device when the *receiving*
+implementation is fused or capturable, and otherwise leaves it where the load placed it. A
+host-written checkpoint resumed by a fused optimizer is normalized for you; a device-written one
+resumed by the foreach path keeps a device-resident `step`, which is numerically correct and costs
+a host synchronization per step. Neither is a correctness failure and neither is bit-comparable as
+raw state.
+
+`CacheQualificationEvidence.optimizer_state_device_policy` therefore makes the state round-trip
+gate say which it is: `normalized_on_load` (required for training), or `device_bound`, which is
+rejected because it makes a resume depend on which implementation wrote the checkpoint.
+Non-training workloads must declare `not_applicable`.
 
 ### Throughput basis, and why an input-pipeline candidate needs a different one
 

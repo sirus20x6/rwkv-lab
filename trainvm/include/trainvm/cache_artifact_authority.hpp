@@ -10,6 +10,7 @@
 
 #include "trainvm/cache_namespace_authority.hpp"
 #include "trainvm/lease.hpp"
+#include "trainvm/trajectory_parity.hpp"
 
 namespace trainvm {
 
@@ -17,6 +18,33 @@ enum class CacheWorkloadClass {
   training,
   serving,
   preprocessing,
+};
+
+// torch's fused AdamW keeps `step` as a CUDA tensor on the parameter's device;
+// the foreach reference keeps it on the host. Same key, same value, different
+// device. The round trip was measured and is ACCEPTED rather than rejected,
+// but only under a stated condition, because it works for a reason a naive
+// state-dict comparison hides:
+//
+// `Optimizer.load_state_dict` normalizes `step` to the parameter's device when
+// the receiving implementation is fused or capturable, and otherwise leaves it
+// where the load put it. So a fused-written checkpoint resumed by a foreach
+// optimizer keeps a device-resident `step`, which is numerically correct and
+// costs a host synchronization on every step; the reverse direction is
+// normalized for you. Both are fine; neither is bit-comparable as raw state.
+//
+// The gate therefore requires the round trip to be graded after that
+// normalization, and requires the candidate to say which it is, so
+// `state_parity` cannot be satisfied by an accidental device match nor failed
+// by a difference that is not one.
+enum class OptimizerStateDevicePolicy {
+  // No optimizer state to round-trip. Serving and preprocessing only.
+  not_applicable,
+  // The round trip was compared after device normalization, and agreed.
+  normalized_on_load,
+  // State placement is load-bearing and is not normalized. Rejected for
+  // training: it makes a resume depend on which implementation wrote it.
+  device_bound,
 };
 
 // Unprofiled baseline/candidate evidence. Raw profiler timing is deliberately
@@ -38,7 +66,10 @@ struct CacheQualificationEvidence {
   bool gradient_parity{};
   bool optimizer_update_parity{};
   bool state_parity{};
-  bool resumed_trajectory_parity{};
+  OptimizerStateDevicePolicy optimizer_state_device_policy{};
+  // Not a boolean. See trainvm/trajectory_parity.hpp for why a boolean cannot
+  // express the only honest answer a non-bit-identical kernel can give.
+  TrajectoryParityEvidence resumed_trajectory_parity;
   bool determinism_parity{};
   bool content_parity{};
   bool ordering_parity{};
@@ -57,6 +88,10 @@ struct CacheQualificationEvidence {
 struct CacheQualificationReceipt {
   std::string api_version;
   CacheQualificationEvidence evidence;
+  // Present exactly when the workload has a trajectory to judge. It carries
+  // the statistics the verdict was derived from, so a later reader can tell
+  // why a candidate was admitted rather than only that it was.
+  std::optional<TrajectoryParityAssessment> trajectory_assessment;
   bool qualified{};
   std::vector<std::string> rejection_reasons;
   std::string receipt_digest;

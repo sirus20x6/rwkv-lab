@@ -14,7 +14,42 @@
   "gradient_parity": true,
   "optimizer_update_parity": true,
   "state_parity": true,
-  "resumed_trajectory_parity": false,
+  "optimizer_state_device_policy": "normalized_on_load",
+  "resumed_trajectory_parity": {
+    "verdict": "diverged",
+    "criterion": "divergence_rate",
+    "effect_class": "optimizer_update",
+    "candidate_divergence": [
+      {
+        "step": 1,
+        "relative_deviation": 1.6e-07
+      },
+      {
+        "step": 2,
+        "relative_deviation": 1.7e-06
+      },
+      {
+        "step": 5,
+        "relative_deviation": 0.0013
+      }
+    ],
+    "reference_divergence": [
+      {
+        "step": 1,
+        "relative_deviation": 2e-07
+      },
+      {
+        "step": 2,
+        "relative_deviation": 3.3e-07
+      },
+      {
+        "step": 5,
+        "relative_deviation": 1.5e-06
+      }
+    ],
+    "checkpoint_quality": [],
+    "analysis_seed": 7
+  },
   "determinism_parity": true,
   "content_parity": true,
   "ordering_parity": true,
