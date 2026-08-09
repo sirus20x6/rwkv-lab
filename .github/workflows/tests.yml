@@ -1,6 +1,20 @@
 name: tests
 
 on:
+  # Manual trigger, so a commit can be validated on demand rather than only as a
+  # side effect of pushing. Without this a run that was cancelled could never be
+  # re-run: twelve commits merged on 2026-08-09 lost their runs to concurrency
+  # displacement and are still UNKNOWN rather than known-bad, because the only
+  # way to ask for another run was to push again — which for merged history
+  # means an empty commit. It also means a flake cannot be re-run against the
+  # same tree to establish its rate; the ~34-42%-under-load race in
+  # hostd_transport_tests had to be measured with a standalone probe for exactly
+  # this reason.
+  #
+  # Note this trigger only appears in the Actions UI once the workflow file
+  # containing it is on the default branch, so it cannot be exercised from the
+  # pull request that adds it. Its absence before merge is expected.
+  workflow_dispatch:
   push:
     branches: [main, dashboard/declarative-vm-fsm]
   pull_request:
