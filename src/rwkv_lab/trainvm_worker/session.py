@@ -252,6 +252,13 @@ class WorkerSession:
             )
 
     @property
+    def attempt_baseline_optimizer_step(self) -> int:
+        with self._condition:
+            if self._welcome is None:
+                raise WorkerSessionError("worker session has no Welcome baseline")
+            return int(self._welcome.attempt_baseline_optimizer_step)
+
+    @property
     def execution_phase_requests(self) -> tuple[ExecutionPhaseRequest, ...]:
         with self._condition:
             if self._welcome is None:
@@ -381,6 +388,15 @@ class WorkerSession:
                 or invocation.adapter["operation"] != welcome.operation
             ):
                 raise WorkerSessionError("WorkerWelcome invocation binding disagrees")
+            expected_baseline = (
+                0
+                if invocation.resume is None
+                else int(invocation.resume["optimizer_step"])
+            )
+            if welcome.attempt_baseline_optimizer_step != expected_baseline:
+                raise WorkerSessionError(
+                    "WorkerWelcome attempt baseline disagrees with invocation"
+                )
             try:
                 phase_requests = decode_execution_phase_requests(
                     welcome.execution_phase_requests, invocation
@@ -614,8 +630,10 @@ class WorkerSession:
                 wait
                 and kind == wire.ARTIFACT_KIND_EVAL_EXAMPLES
                 and schema == "rwkv-lab.eval-examples.v1"
-                and optimizer_step == 0
                 and self._welcome is not None
+                and self._welcome.step_zero_eval_gate_required
+                and optimizer_step
+                == self._welcome.attempt_baseline_optimizer_step
             ):
                 # The controller ACK is emitted only after semantic validation
                 # and durable journal commit, so this local transition cannot

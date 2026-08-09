@@ -400,26 +400,28 @@ bool invocation_requires_step_zero_eval_gate(const nlohmann::json &publishes) {
   });
 }
 
-bool durable_step_zero_eval_gate_satisfied(const std::vector<Event> &events,
-                                           std::string_view run_id,
-                                           std::string_view node_id,
-                                           std::string_view attempt_id) {
-  std::set<std::string> step_zero_metrics;
-  std::set<std::pair<std::string, std::string>> step_zero_checkpoints;
+bool durable_attempt_baseline_eval_gate_satisfied(
+    const std::vector<Event> &events, std::string_view run_id,
+    std::string_view node_id, std::string_view attempt_id,
+    std::uint64_t baseline_optimizer_step) {
+  std::set<std::string> baseline_metrics;
+  std::set<std::pair<std::string, std::string>> baseline_checkpoints;
   for (const Event &event : events) {
     if (event.run_id != run_id || event.node_id != node_id ||
         event.attempt_id != attempt_id)
       continue;
-    if (event.event_type == "metric.sampled" && event.optimizer_step == 0U &&
+    if (event.event_type == "metric.sampled" &&
+        event.optimizer_step == baseline_optimizer_step &&
         event.payload.is_object() &&
         event.payload.value("step_domain", std::string{}) == "optimizer_step") {
       const std::string name = event.payload.value("name", std::string{});
       if (!name.empty())
-        step_zero_metrics.insert(name);
+        baseline_metrics.insert(name);
       continue;
     }
     if (event.event_type == "artifact.published" &&
-        event.optimizer_step == 0U && event.payload.is_object() &&
+        event.optimizer_step == baseline_optimizer_step &&
+        event.payload.is_object() &&
         event.payload.value("kind", std::string{}) == "checkpoint" &&
         event.payload.value("complete", false) &&
         event.payload.value("fingerprint_algorithm", std::string{}) ==
@@ -429,11 +431,12 @@ bool durable_step_zero_eval_gate_satisfied(const std::vector<Event> &events,
       const std::string manifest_digest =
           event.payload.value("fingerprint", std::string{});
       if (!artifact_id.empty() && !manifest_digest.empty())
-        step_zero_checkpoints.emplace(artifact_id, manifest_digest);
+        baseline_checkpoints.emplace(artifact_id, manifest_digest);
       continue;
     }
     if (event.event_type != "artifact.published" ||
-        event.optimizer_step != 0U || !event.payload.is_object() ||
+        event.optimizer_step != baseline_optimizer_step ||
+        !event.payload.is_object() ||
         event.payload.value("kind", std::string{}) != "eval_examples" ||
         event.payload.value("schema", std::string{}) != kEvalExamplesSchema ||
         !event.payload.value("complete", false) ||
@@ -444,14 +447,15 @@ bool durable_step_zero_eval_gate_satisfied(const std::vector<Event> &events,
       const EvalExamplesManifest manifest = validate_eval_examples_manifest(
           event.payload.at("eval_examples_manifest"));
       if (manifest.run_id != run_id || manifest.node_id != node_id ||
-          manifest.attempt_id != attempt_id || manifest.optimizer_step != 0U ||
-          !step_zero_checkpoints.contains(
+          manifest.attempt_id != attempt_id ||
+          manifest.optimizer_step != baseline_optimizer_step ||
+          !baseline_checkpoints.contains(
               {manifest.checkpoint.artifact_id,
                manifest.checkpoint.manifest_digest}))
         continue;
       if (std::ranges::any_of(manifest.evaluator.metric_names,
                               [&](const std::string &name) {
-                                return step_zero_metrics.contains(name);
+                                return baseline_metrics.contains(name);
                               }))
         return true;
     } catch (const std::invalid_argument &) {

@@ -6,7 +6,6 @@ import time
 from collections.abc import Iterable
 
 import pytest
-
 from test_trainvm_worker_documents import bootstrap_document, invocation_document
 
 from rwkv_lab.trainvm_worker import (
@@ -16,6 +15,8 @@ from rwkv_lab.trainvm_worker import (
     ExecutionPhase,
     ExecutionPhaseDisposition,
     LifecycleDisposition,
+    WorkerControlError,
+    WorkerControlRuntime,
     WorkerSession,
     WorkerSessionError,
     load_worker_bootstrap,
@@ -23,6 +24,30 @@ from rwkv_lab.trainvm_worker import (
 )
 from rwkv_lab.trainvm_worker._canonical import canonical_dumps, sha256_digest
 from rwkv_lab.trainvm_worker.session import wire
+
+
+def resume_authority(optimizer_step: int) -> dict[str, object]:
+    return {
+        "api_version": "trainvm.resume-checkpoint/v1",
+        "checkpoint": {
+            "artifact_id": "checkpoint-resume",
+            "logical_name": "checkpoint",
+            "kind": "checkpoint",
+            "schema": "test.checkpoint.v1",
+            "uri": "file:///run/checkpoint-resume/manifest.json",
+            "size_bytes": 4096,
+            "fingerprint_algorithm": "manifest_sha256",
+            "fingerprint": "sha256:" + "d" * 64,
+            "complete": True,
+            "producer_node_id": "train",
+            "producer_attempt_id": "attempt-0",
+            "parent_artifact_ids": [],
+            "published_at_ns": 1234,
+        },
+        "optimizer_step": optimizer_step,
+        "pause_command_id": "pause-1",
+        "resume_command_id": "resume-1",
+    }
 
 
 class FakeController:
@@ -33,12 +58,18 @@ class FakeController:
         send_checkpoint: bool = False,
         send_cancel: bool = False,
         execution: object = None,
+        step_zero_eval_gate_required: bool = False,
+        step_zero_eval_gate_satisfied: bool = False,
+        attempt_baseline_optimizer_step: int = 0,
     ) -> None:
         self.received: list[wire.WorkerToController] = []
         self.send_control = send_control
         self.send_checkpoint = send_checkpoint
         self.send_cancel = send_cancel
         self.execution = execution
+        self.step_zero_eval_gate_required = step_zero_eval_gate_required
+        self.step_zero_eval_gate_satisfied = step_zero_eval_gate_satisfied
+        self.attempt_baseline_optimizer_step = attempt_baseline_optimizer_step
         self.control_sent = threading.Event()
 
     def __call__(
@@ -48,7 +79,14 @@ class FakeController:
         hello_message = next(iterator)
         self.received.append(hello_message)
         hello = hello_message.hello
-        raw_invocation = invocation_document(execution=self.execution)
+        raw_invocation = invocation_document(
+            execution=self.execution,
+            resume=(
+                resume_authority(self.attempt_baseline_optimizer_step)
+                if self.attempt_baseline_optimizer_step
+                else None
+            ),
+        )
         invocation = json.loads(raw_invocation)
         phase_requests: list[wire.WorkerExecutionPhaseRequest] = []
         for phase_name, phase_value in (
@@ -94,6 +132,11 @@ class FakeController:
                 canonical_invocation_json=raw_invocation,
                 invocation_digest=invocation["invocation_digest"],
                 execution_phase_requests=phase_requests,
+                step_zero_eval_gate_required=self.step_zero_eval_gate_required,
+                step_zero_eval_gate_satisfied=self.step_zero_eval_gate_satisfied,
+                attempt_baseline_optimizer_step=(
+                    self.attempt_baseline_optimizer_step
+                ),
             )
         )
         if self.send_control:
@@ -365,4 +408,44 @@ def test_checkpoint_artifact_requires_authoritative_optimizer_step() -> None:
     with pytest.raises(WorkerSessionError, match="require an optimizer step"):
         session.artifact(**values)
     session.finish("node.completed", {"ok": True}, optimizer_step=0)
+    session.close()
+
+
+def test_resumed_eval_examples_ack_latches_exact_attempt_baseline() -> None:
+    controller = FakeController(
+        step_zero_eval_gate_required=True,
+        attempt_baseline_optimizer_step=7,
+    )
+    session = WorkerSession(
+        load_worker_bootstrap(bootstrap_document()), connector=controller
+    )
+    session.start()
+    assert session.attempt_baseline_optimizer_step == 7
+    assert session.step_zero_eval_gate_required
+    assert not session.step_zero_eval_gate_satisfied
+    controls = WorkerControlRuntime(session, {}, 0)
+    with pytest.raises(WorkerControlError, match="optimizer mutation is blocked"):
+        controls.pre_optimizer_step(8, lambda *_: None)
+
+    def publish(artifact_id: str, optimizer_step: int) -> int:
+        return session.artifact(
+            artifact_id=artifact_id,
+            logical_name="eval_examples",
+            kind=wire.ARTIFACT_KIND_EVAL_EXAMPLES,
+            schema="rwkv-lab.eval-examples.v1",
+            uri=f"file:///run/{artifact_id}",
+            size_bytes=2,
+            fingerprint_algorithm="manifest_sha256",
+            fingerprint="a" * 64,
+            optimizer_step=optimizer_step,
+            canonical_manifest_json=b"{}",
+            wait=True,
+        )
+
+    assert publish("wrong-baseline", 0) == 1
+    assert not session.step_zero_eval_gate_satisfied
+    assert publish("resumed-baseline", 7) == 2
+    assert session.step_zero_eval_gate_satisfied
+    assert controls.pre_optimizer_step(8, lambda *_: None) == ()
+    session.finish("node.completed", {"ok": True}, optimizer_step=7)
     session.close()

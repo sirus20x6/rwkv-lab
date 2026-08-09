@@ -594,6 +594,9 @@ message WorkerWelcome {
   // this only as a pre-mutation defense; the controller remains authoritative.
   bool step_zero_eval_gate_required = 20;
   bool step_zero_eval_gate_satisfied = 21;
+  // Controller-derived immutable baseline for this attempt: zero for a fresh
+  // launch, or the exact resume checkpoint optimizer step for a replacement.
+  uint64 attempt_baseline_optimizer_step = 22;
 }
 
 message WorkerReceipt {
