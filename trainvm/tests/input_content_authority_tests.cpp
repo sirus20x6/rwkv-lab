@@ -788,6 +788,106 @@ void changed_bytes_cannot_reuse_a_digest_under_a_forged_mtime() {
           "changed bytes must be read again rather than served from the store");
 }
 
+// A store record outlives the file it describes: deleting a file does not
+// remove its record, so the next lock loads a key naming an inode that the
+// filesystem is free to hand to something else. That is the case an in-memory
+// cache never has -- it dies with the process -- and the reason the store is
+// fenced to the boot identity, since a device/inode pair only means one thing
+// for the life of one mount incarnation.
+//
+// Inode reuse cannot be demanded of a test. tmpfs allocates inode numbers from
+// a monotonic counter and never recycles them, and ZFS did not recycle one in
+// 2000 delete/create cycles, so asserting `st_ino` equality would make this
+// flaky everywhere it is actually run. It cannot be arranged around either: the
+// cache bypasses itself on any filesystem outside its allowlist, so a FUSE
+// filesystem written to recycle inodes on demand would be bypassed rather than
+// exercised. The test therefore forces every other field a recreated file could
+// plausibly share -- same path, same size, same mode, link count and ownership,
+// and the sealed file's mtime restored to the nanosecond -- attempts inode
+// equality as well, reports whether it was reached, and requires a miss either
+// way.
+//
+// **Read this before trusting the case is covered here.** On a filesystem that
+// does not recycle inodes the miss is over-determined: the recreated file
+// differs from the sealed record in both `st_ino` and `st_ctim`, so either
+// field alone forces it. Mutation-tested on ZFS/tmpfs at the time of writing --
+// zeroing `.inode` in `file_cache_key` and zeroing `.changed_*` each left this
+// case GREEN (the ctime removal was caught downstream by `warm-cache-mutation`,
+// and the inode removal by `cache-transaction-lru-corruption`). So on this host
+// it proves the store-lifecycle half only: that a record outlives the file it
+// describes, is still admitted afterwards, and is not served to a replacement
+// at the same path. It gets teeth for the inode half on a recycling filesystem
+// such as ext4, which is why the loop is here and why it prints which it got.
+//
+// ctime is what carries the property on any filesystem. An unprivileged owner
+// can set mtime with `utimensat` and cannot set ctime by any interface at all,
+// so a file created after the record was sealed always presents a ctime the
+// record does not name -- and that implication, not this test, is the argument
+// that the recycled-inode case is safe.
+void a_recreated_file_cannot_inherit_a_dead_records_digest() {
+  TemporaryDirectory temporary;
+  const auto root = temporary.path() / "root";
+  const auto store = temporary.path() / "digests.store";
+  std::filesystem::create_directories(root);
+  const auto victim = root / "payload.bin";
+  write_file(victim, "aaaaaaaa");
+  wait_for_timestamps_to_settle();
+
+  InputContentRootIdentity cold;
+  {
+    InputContentMeasurementCache cache;
+    InputContentMeasurementStats cold_stats;
+    cold = measure_cached(cache, root, cold_stats);
+    const auto published = cache.publish_persistent_digests(store);
+    require(published.accepted && published.offered_entries == 1U,
+            "the sealed measurement reaches the store");
+  }
+  const struct stat sealed = stat_of(victim);
+
+  // Delete the record's subject, then try to land a different payload of the
+  // same length on the same inode number. Bounded, because on a filesystem that
+  // never recycles an inode this loop would otherwise not terminate.
+  std::filesystem::remove(victim);
+  bool inode_was_reused = false;
+  for (int attempt = 0; attempt < 256 && !inode_was_reused; ++attempt) {
+    write_file(victim, "bbbbbbbb");
+    if (stat_of(victim).st_ino == sealed.st_ino) {
+      inode_was_reused = true;
+      break;
+    }
+    if (attempt + 1 < 256) std::filesystem::remove(victim);
+  }
+  forge_modification_time(victim, sealed);
+  const struct stat recreated = stat_of(victim);
+  require(recreated.st_size == sealed.st_size &&
+              recreated.st_mode == sealed.st_mode &&
+              recreated.st_nlink == sealed.st_nlink &&
+              recreated.st_uid == sealed.st_uid &&
+              recreated.st_gid == sealed.st_gid &&
+              recreated.st_mtim.tv_sec == sealed.st_mtim.tv_sec &&
+              recreated.st_mtim.tv_nsec == sealed.st_mtim.tv_nsec,
+          "the recreated file reproduces every forgeable field of the record");
+  require(recreated.st_ctim.tv_sec != sealed.st_ctim.tv_sec ||
+              recreated.st_ctim.tv_nsec != sealed.st_ctim.tv_nsec,
+          "a recreated file cannot present the sealed record's ctime");
+  std::cout << "      inode reuse " << (inode_was_reused ? "reached" : "not "
+                                        "reproducible on this filesystem")
+            << '\n';
+
+  InputContentMeasurementCache cache;
+  const auto admitted = cache.admit_persistent_digests(store);
+  require(admitted.present && admitted.accepted &&
+              admitted.admitted_entries == 1U,
+          "deleting a file does not remove its record from the store");
+  InputContentMeasurementStats stats;
+  const InputContentRootIdentity warm = measure_cached(cache, root, stats);
+  require(warm.tree_sha256 != cold.tree_sha256,
+          "a recreated file must produce a different content identity");
+  require(stats.cache_hits == 0U && stats.bytes_hashed == 8U,
+          "a recreated file must be read again rather than served a dead "
+          "record's digest");
+}
+
 // A store record is only as trustworthy as the window it was sealed in. A file
 // whose timestamps are younger than the settling window could still be
 // rewritten inside the tick they name, so it is never persisted.
@@ -1023,6 +1123,8 @@ int main() {
     std::cout << "PASS store-warm-reuse\n";
     changed_bytes_cannot_reuse_a_digest_under_a_forged_mtime();
     std::cout << "PASS store-forged-mtime\n";
+    a_recreated_file_cannot_inherit_a_dead_records_digest();
+    std::cout << "PASS store-recreated-inode\n";
     racily_recent_measurements_are_withheld();
     std::cout << "PASS store-racily-recent\n";
     hardlink_and_rename_games_do_not_reuse_an_identity();
