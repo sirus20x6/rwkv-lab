@@ -448,6 +448,31 @@ func TestTrainVMDescriptorComposerRoundTripsInBrowser(t *testing.T) {
 	}
 }
 
+// The execution-phase panel's diagnostics render is asserted against a real
+// DOM rather than by grepping app.js: what matters is the HTML an operator
+// reads, and a substring check on the source cannot see that a warning was
+// painted with the error colour or that the second diagnostic never appeared.
+// app.js is one IIFE with no exports, so the browser is how the render is
+// reachable at all.
+//
+// Playwright is not installed on the hosted runner, so this skips there. It is
+// meaningful on a real host and in scripts/acceptance.sh, exactly like the
+// composer contract above.
+func TestTrainVMExecutionPhaseDiagnosticsRenderInBrowser(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is not installed")
+	}
+	command := exec.Command(python, "testdata/trainvm_execution_phases_browser.py")
+	output, err := command.CombinedOutput()
+	if exitError, ok := err.(*exec.ExitError); ok && exitError.ExitCode() == 77 {
+		t.Skip("Playwright is not installed")
+	}
+	if err != nil {
+		t.Fatalf("execution-phase diagnostics browser contract failed: %v\n%s", err, output)
+	}
+}
+
 func TestTrainVMRecipeComposerUsesCanonicalAuthorRunContract(t *testing.T) {
 	assets := Static()
 	index, err := fs.ReadFile(assets, "index.html")

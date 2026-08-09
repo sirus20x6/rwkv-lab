@@ -49,6 +49,19 @@
       "resume_relevance": "none_or_self_test_only",
       "compatibility_workflow_id": null,
       "source_sha256": "sha256:3a4ee12591719bd7514b46c7545abf68352210bf031225e69f47f5625d29873b"
+    },
+    {
+      "source_path": "dashboard/web/testdata/trainvm_execution_phases_browser.py",
+      "language": "python",
+      "class": "test_fixture",
+      "canonical_entry_point": "python dashboard/web/testdata/trainvm_execution_phases_browser.py",
+      "effects": [
+        "read_source",
+        "serve_http"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:f5fc670f2241ea1a1d9a4c7d01170e0415b633be9cdd71c42ad283ea307c6274"
     }
   ]
 }
