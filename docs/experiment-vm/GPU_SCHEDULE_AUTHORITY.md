@@ -435,13 +435,15 @@ Rules:
 1. **Every rejection names a path.** A JSON pointer into the schedule document —
    `/tasks/417/waits/2/threshold`, `/buffers/9/shape/1` — not a task label and not a sentence.
 
-   These are unambiguous for free, which is worth noting because it is not generally true here.
-   `child_path` performs no RFC 6901 escaping — `~` does not become `~0`, `/` does not become `~1` —
-   and it interpolates map keys raw, so a document with an exotic key can produce a pointer that
-   does not resolve to what it names. The schedule IR indexes every entity by integer position and
-   has exactly one map-typed field, `meta`, whose contents are excluded from every proof. So every
-   pointer a *proof* emits is built from array indices and fixed field names and needs no escaping.
-   A decode-phase `field.unknown` on a `meta` key is the one place the general caveat still applies.
+   Most of these are unambiguous for free, and the exception needs stating. `child_path` performs no
+   RFC 6901 escaping — `~` does not become `~0`, `/` does not become `~1` — and it interpolates map
+   keys raw, so an exotic key produces a pointer that does not resolve to what it names. Because the
+   schedule IR indexes every entity by integer position, every pointer emitted by a *proof* is built
+   from array indices and fixed field names, and needs no escaping. The map-typed fields are `meta`,
+   `params`, and `config.tiling`; a diagnostic naming a key in one of them — `schedule.param.unknown`
+   is the realistic case — is the place where the caveat still bites, and the implementer must either
+   escape those two characters there or reject a key containing them outright. Rejecting is cheaper
+   and is the recommendation: no legitimate parameter or label name contains `/` or `~`.
 2. **Every rejection names a code** from the tables above. Codes are stable identifiers; message
    text is not, and nothing may match on it.
 
