@@ -481,15 +481,19 @@ Rules:
 Separating 2 from 3 matters because they mean different things to an automated author loop: 2 is
 "you produced something that is not a schedule", 3 is "you produced a schedule that is unsafe, and
 here are the invariant IDs that failed". A search loop can act on 3 and must stop on 2. The 3 is
-taken from `qualify-evidence`, which documents the same reasoning at `trainvm/src/main.cpp:297` —
-"a rejection is a normal, reportable outcome and must be distinguishable from a broken document".
+taken from `qualify-evidence`, which documents the same reasoning above
+`qualify_evidence_command` in `trainvm/src/main.cpp` — "a rejection is a normal, reportable outcome
+and must be distinguishable from a broken document".
 
-The 2 is taken from `trainvm validate` (`main.cpp:104`), and it is worth saying why rather than
-inheriting it silently: `qualify-evidence` uses **1** for a malformed input, not 2, so the two
-existing commands disagree about how a broken document exits. Since a schedule is a document that
-this authority compiles, `validate`'s 2 is the closer precedent and is what a wrapper distinguishing
-"unreadable" from "unsafe" should key on. The disagreement itself is a real inconsistency in the
-CLI and is filed separately rather than being resolved here by fiat.
+These are no longer this authority's own choices. When this section was written the two existing
+commands disagreed — `validate` exited 2 for a malformed document and `qualify-evidence` exited 1 —
+and this document picked `validate`'s 2 on the grounds that a schedule is a document this authority
+compiles. That disagreement was filed rather than resolved here, and has since been resolved the
+same way: the vocabulary is named in `trainvm/include/trainvm/exit_status.hpp`, malformed input is
+`kExitMalformedInput` (2) in every command including `qualify-evidence`, `kExitUncaughtException`
+(1) is reserved for the top-level catch, and `trainvm_cli_exit_status_vocabulary` pins all six codes.
+So the table above now restates the CLI-wide vocabulary instead of choosing between two conventions,
+and a schedule authority added later should take its codes from that header.
 
 ## Compatibility and version rules
 

@@ -1,6 +1,7 @@
 #include "trainvm/cache_artifact_authority.hpp"
 #include "trainvm/compatibility_catalog.hpp"
 #include "trainvm/document.hpp"
+#include "trainvm/exit_status.hpp"
 #include "trainvm/experiment_analysis.hpp"
 #include "trainvm/fsm.hpp"
 #include "trainvm/journal.hpp"
@@ -86,7 +87,21 @@ void usage() {
       << "\nif a documented subcommand is missing above, this binary predates"
          " it. trainvm/build/ is gitignored and is not refreshed by git pull;"
          " rebuild with:\n"
-         "  cmake --build trainvm/build -j \"$(nproc)\" --target trainvm\n";
+         "  cmake --build trainvm/build -j \"$(nproc)\" --target trainvm\n"
+      // Printed here because a caller that needs the vocabulary is usually a
+      // wrapper script, and a wrapper script's author reads the usage dump
+      // before it reads a header. The authority is
+      // trainvm/include/trainvm/exit_status.hpp; this restates it.
+      << "\nexit status, with the same meaning for every subcommand:\n"
+         "  0   success\n"
+         "  1   uncaught exception; trainvm broke, and this says nothing"
+         " about the input\n"
+         "  2   malformed input; the document could not be read as what it"
+         " claims to be\n"
+         "  3   negative verdict; the document was read and the answer is no\n"
+         "  4   not found; the document was read and what it named does not"
+         " exist\n"
+         "  64  usage; the argument vector itself was wrong\n";
 }
 
 nlohmann::json read_stdin_json() {
@@ -106,26 +121,26 @@ int validate_command(const std::filesystem::path& path) {
   auto result = trainvm::compile_document_file(path);
   if (!result.valid()) {
     print_diagnostics(result);
-    return 2;
+    return trainvm::kExitMalformedInput;
   }
   nlohmann::json output{{"valid", true},
                         {"experiment", result.plan->experiment.metadata.name},
                         {"plan_hash", result.plan->plan_hash},
                         {"warnings", trainvm::diagnostics_json(result.diagnostics)}};
   std::cout << output.dump(2) << '\n';
-  return 0;
+  return trainvm::kExitSuccess;
 }
 
 int plan_command(int argc, char** argv) {
   auto result = trainvm::compile_document_file(argv[2]);
   if (!result.valid()) {
     print_diagnostics(result);
-    return 2;
+    return trainvm::kExitMalformedInput;
   }
   const bool canonical = argc == 4 && std::string_view(argv[3]) == "--canonical";
   if (argc > 3 && !canonical) {
     usage();
-    return 64;
+    return trainvm::kExitUsage;
   }
   nlohmann::json output = trainvm::plan_summary(*result.plan);
   if (canonical) {
@@ -135,7 +150,7 @@ int plan_command(int argc, char** argv) {
     output["diagnostics"] = trainvm::diagnostics_json(result.diagnostics);
   }
   std::cout << output.dump(2) << '\n';
-  return 0;
+  return trainvm::kExitSuccess;
 }
 
 int preflight_command(const std::filesystem::path& experiment_path,
@@ -143,14 +158,14 @@ int preflight_command(const std::filesystem::path& experiment_path,
   const auto compiled = trainvm::compile_document_file(experiment_path);
   if (!compiled.valid() || !compiled.plan) {
     print_diagnostics(compiled);
-    return 2;
+    return trainvm::kExitMalformedInput;
   }
   const auto environment =
       trainvm::load_training_preflight_environment(environment_path);
   const auto receipt =
       trainvm::run_training_preflight(*compiled.plan, environment);
   std::cout << trainvm::encode_json(receipt).dump(2) << '\n';
-  return receipt.passed ? 0 : 3;
+  return receipt.passed ? trainvm::kExitSuccess : trainvm::kExitNegativeVerdict;
 }
 
 std::string read_bounded_author_run(const std::filesystem::path& path) {
@@ -183,7 +198,7 @@ int author_run_command(int argc, char** argv) {
   const bool dry_run = argc == 4 && std::string_view(argv[3]) == "--dry-run";
   if ((argc != 3 && argc != 4) || (argc == 4 && !dry_run)) {
     usage();
-    return 64;
+    return trainvm::kExitUsage;
   }
   const std::filesystem::path path(argv[2]);
   const trainvm::AuthoringClientConfiguration configuration =
@@ -224,14 +239,14 @@ int author_run_command(int argc, char** argv) {
   request.set_dry_run(true);
   const trainvm::AuthorRunStreamSummary preview = invoke(request);
   if (preview.failed)
-    return 3;
+    return trainvm::kExitNegativeVerdict;
   if (dry_run)
-    return 0;
+    return trainvm::kExitSuccess;
 
   request.set_dry_run(false);
   request.set_expected_plan_hash(preview.plan_hash);
   const trainvm::AuthorRunStreamSummary launch = invoke(request);
-  return launch.failed ? 3 : 0;
+  return launch.failed ? trainvm::kExitNegativeVerdict : trainvm::kExitSuccess;
 }
 
 int compile_command() {
@@ -240,21 +255,43 @@ int compile_command() {
     std::cout << nlohmann::json({{"valid", false},
                                  {"diagnostics", trainvm::diagnostics_json(result.diagnostics)}}).dump(2)
               << '\n';
-    return 2;
+    return trainvm::kExitMalformedInput;
   }
   nlohmann::json output = trainvm::plan_summary(*result.plan);
   output["valid"] = true;
   output["canonical_plan"] = result.plan->canonical_plan;
   output["diagnostics"] = trainvm::diagnostics_json(result.diagnostics);
   std::cout << output.dump(2) << '\n';
-  return 0;
+  return trainvm::kExitSuccess;
+}
+
+// Every way a catalog can be wrong -- unreadable file, unparseable JSON, a
+// schema the reflected decoder rejects, an entry that does not match the tree,
+// and a catalog digest that differs from the compiled reviewed mapping --
+// arrives as std::invalid_argument. Catching it here rather than letting it
+// reach main is what separates "the catalog is wrong" from "trainvm crashed";
+// they were the same code before, both 1 via the top-level catch.
+//
+// The message is still written to stderr in the same form main would have used,
+// because CLAUDE.md's pin-refresh procedure runs `validate-catalog` expressly to
+// read the value to pin out of that message. This changes the status it exits
+// with, not whether it fails or what it prints.
+int report_invalid_catalog(const std::invalid_argument& error) {
+  std::cerr << "trainvm: " << error.what() << '\n';
+  return trainvm::kExitMalformedInput;
 }
 
 int validate_catalog_command(const std::filesystem::path& catalog_path,
                              const std::filesystem::path& repository_root) {
-  const auto catalog = trainvm::CompatibilityCatalog::load_file(
-      std::filesystem::absolute(catalog_path).lexically_normal(),
-      std::filesystem::absolute(repository_root).lexically_normal());
+  std::optional<trainvm::CompatibilityCatalog> loaded;
+  try {
+    loaded.emplace(trainvm::CompatibilityCatalog::load_file(
+        std::filesystem::absolute(catalog_path).lexically_normal(),
+        std::filesystem::absolute(repository_root).lexically_normal()));
+  } catch (const std::invalid_argument& error) {
+    return report_invalid_catalog(error);
+  }
+  const trainvm::CompatibilityCatalog& catalog = *loaded;
   std::cout << nlohmann::json{
                    {"valid", true},
                    {"authority", trainvm::enum_to_string(catalog.authority())},
@@ -268,7 +305,7 @@ int validate_catalog_command(const std::filesystem::path& catalog_path,
                }
                    .dump(2)
             << '\n';
-  return 0;
+  return trainvm::kExitSuccess;
 }
 
 // The generator the catalog never had. Both pinned digests were maintained by
@@ -278,9 +315,14 @@ int validate_catalog_command(const std::filesystem::path& catalog_path,
 int print_catalog_digests_command(
     const std::filesystem::path& catalog_path,
     const std::filesystem::path& repository_root) {
-  const auto computed = trainvm::CompatibilityCatalog::compute_digests(
-      std::filesystem::absolute(catalog_path).lexically_normal(),
-      std::filesystem::absolute(repository_root).lexically_normal());
+  trainvm::CompatibilityCatalogComputedDigests computed;
+  try {
+    computed = trainvm::CompatibilityCatalog::compute_digests(
+        std::filesystem::absolute(catalog_path).lexically_normal(),
+        std::filesystem::absolute(repository_root).lexically_normal());
+  } catch (const std::invalid_argument& error) {
+    return report_invalid_catalog(error);
+  }
   std::cout << nlohmann::json{
                    {"source_tree_digest", computed.source_tree_digest},
                    {"classification_surface_digest",
@@ -290,7 +332,7 @@ int print_catalog_digests_command(
                }
                    .dump(2)
             << '\n';
-  return 0;
+  return trainvm::kExitSuccess;
 }
 
 // Runs the implemented qualification gate over caller-supplied evidence and
@@ -299,9 +341,17 @@ int print_catalog_digests_command(
 // reimplementing the thresholds and quietly disagreeing with the qualify_cache
 // node that actually admits an optimization.
 //
-// Exit status is the verdict: 0 qualified, 3 rejected with reasons, 1 for
-// malformed evidence. A rejection is a normal, reportable outcome and must be
-// distinguishable from a broken document.
+// Exit status is the verdict: kExitSuccess qualified, kExitNegativeVerdict
+// rejected with reasons, kExitMalformedInput for evidence that is not a
+// readable trainvm.cache-qualification-evidence/v1 document. A rejection is a
+// normal, reportable outcome and must be distinguishable from a broken
+// document.
+//
+// Malformed evidence used to answer 1, which is also what main returns for an
+// uncaught exception -- so the one case this comment insists must be
+// distinguishable was, for the malformed half, indistinguishable from a crash.
+// It is 2 now, matching `validate` and every other command that rejects a
+// document it could not read.
 int qualify_evidence_command(std::istream& input) {
   nlohmann::json document;
   try {
@@ -309,7 +359,7 @@ int qualify_evidence_command(std::istream& input) {
   } catch (const std::exception& error) {
     std::cerr << "qualification evidence is not valid JSON: " << error.what()
               << '\n';
-    return 1;
+    return trainvm::kExitMalformedInput;
   }
   trainvm::CacheQualificationEvidence evidence{};
   std::vector<trainvm::Diagnostic> diagnostics;
@@ -321,13 +371,13 @@ int qualify_evidence_command(std::istream& input) {
       std::cerr << "  " << diagnostic.code << " " << diagnostic.path << " "
                 << diagnostic.message << '\n';
     }
-    return 1;
+    return trainvm::kExitMalformedInput;
   }
   const trainvm::CacheQualificationReceipt receipt =
       trainvm::qualify_cache_artifact(std::move(evidence));
   std::cout << trainvm::cache_qualification_receipt_json(receipt).dump(2)
             << '\n';
-  return receipt.qualified ? 0 : 3;
+  return receipt.qualified ? trainvm::kExitSuccess : trainvm::kExitNegativeVerdict;
 }
 
 int inspect_training_components_command(
@@ -344,7 +394,7 @@ int inspect_training_components_command(
                }
                    .dump(2)
             << '\n';
-  return 0;
+  return trainvm::kExitSuccess;
 }
 
 int inspect_hostd_client_command(const std::filesystem::path& path) {
@@ -358,19 +408,19 @@ int inspect_hostd_client_command(const std::filesystem::path& path) {
                }
                    .dump(2)
             << '\n';
-  return 0;
+  return trainvm::kExitSuccess;
 }
 
 int inspect_input_content_root_command(int argc, char** argv) {
   if (argc != 3) {
     usage();
-    return 64;
+    return trainvm::kExitUsage;
   }
   std::cout << trainvm::encode_json(
                    trainvm::measure_input_content_root(argv[2]))
                    .dump(2)
             << '\n';
-  return 0;
+  return trainvm::kExitSuccess;
 }
 
 nlohmann::json read_bounded_json_file(const std::filesystem::path& path,
@@ -397,7 +447,7 @@ nlohmann::json read_bounded_json_file(const std::filesystem::path& path,
 int recipe_command(int argc, char** argv) {
   if (argc < 4) {
     usage();
-    return 64;
+    return trainvm::kExitUsage;
   }
   const trainvm::RecipeProfileRegistry registry =
       trainvm::RecipeProfileRegistry::load_file(
@@ -413,13 +463,13 @@ int recipe_command(int argc, char** argv) {
                  }
                      .dump(2)
               << '\n';
-    return 0;
+    return trainvm::kExitSuccess;
   }
   if (action == "expand" && argc == 5) {
     const auto expanded = registry.expand_json(
         read_bounded_json_file(argv[4], "recipe instance"));
     std::cout << trainvm::expanded_recipe_json(expanded).dump(2) << '\n';
-    return 0;
+    return trainvm::kExitSuccess;
   }
   if (action == "diff" && argc == 6) {
     const auto left = registry.expand_json(
@@ -437,10 +487,10 @@ int recipe_command(int argc, char** argv) {
                  }
                      .dump(2)
               << '\n';
-    return 0;
+    return trainvm::kExitSuccess;
   }
   usage();
-  return 64;
+  return trainvm::kExitUsage;
 }
 
 int lock_input_content_command(
@@ -480,14 +530,14 @@ int lock_input_content_command(
   const auto compiled = trainvm::compile_document(experiment);
   if (!compiled.valid()) {
     print_diagnostics(compiled);
-    return 2;
+    return trainvm::kExitMalformedInput;
   }
   if (content_cache) {
     (void)transaction->commit();
     (void)content_cache->publish_persistent_digests(*content_cache_path);
   }
   std::cout << experiment.dump(2) << '\n';
-  return 0;
+  return trainvm::kExitSuccess;
 }
 
 int inspect_registry_command(int argc, char** argv) {
@@ -495,7 +545,7 @@ int inspect_registry_command(int argc, char** argv) {
   for (int index = 3; index < argc; index += 2) {
     if (index + 1 >= argc) {
       usage();
-      return 64;
+      return trainvm::kExitUsage;
     }
     const std::string_view option(argv[index]);
     if (option == "--task") {
@@ -511,28 +561,28 @@ int inspect_registry_command(int argc, char** argv) {
           std::from_chars(text.data(), text.data() + text.size(), value);
       if (error != std::errc{} || end != text.data() + text.size()) {
         usage();
-        return 64;
+        return trainvm::kExitUsage;
       }
       query.campaign_limit = value;
     } else {
       usage();
-      return 64;
+      return trainvm::kExitUsage;
     }
   }
   const auto snapshot = trainvm::read_experiment_registry(argv[2], query);
   std::cout << trainvm::encode_json(snapshot).dump(2) << '\n';
-  return 0;
+  return trainvm::kExitSuccess;
 }
 
 int simulate_command(int argc, char** argv) {
   if (argc != 4 && argc != 5) {
     usage();
-    return 64;
+    return trainvm::kExitUsage;
   }
   auto compiled = trainvm::compile_document_file(argv[2]);
   if (!compiled.valid()) {
     print_diagnostics(compiled);
-    return 2;
+    return trainvm::kExitMalformedInput;
   }
   std::ifstream input(argv[3]);
   if (!input) {
@@ -565,13 +615,13 @@ int simulate_command(int argc, char** argv) {
                                {"state", trainvm::execution_state_json(state)},
                                {"trace", std::move(trace)}}).dump(2)
             << '\n';
-  return 0;
+  return trainvm::kExitSuccess;
 }
 
 int journal_command(int argc, char** argv) {
   if (argc < 4) {
     usage();
-    return 64;
+    return trainvm::kExitUsage;
   }
   const std::string_view operation(argv[2]);
   const bool valid_operation =
@@ -581,7 +631,7 @@ int journal_command(int argc, char** argv) {
       (operation == "show" && argc == 5);
   if (!valid_operation) {
     usage();
-    return 64;
+    return trainvm::kExitUsage;
   }
   trainvm::AuthorityLock authority_lock(argv[3]);
   trainvm::Journal journal(authority_lock.journal_path(),
@@ -589,28 +639,28 @@ int journal_command(int argc, char** argv) {
   if (operation == "init" && argc == 4) {
     std::cout << nlohmann::json({{"initialized", true}, {"events", journal.event_count()}}).dump(2)
               << '\n';
-    return 0;
+    return trainvm::kExitSuccess;
   }
   if (operation == "verify" && argc == 4) {
     std::string reason;
     const bool valid = journal.verify_chain(&reason);
     std::cout << nlohmann::json({{"valid", valid}, {"events", journal.event_count()}, {"reason", reason}}).dump(2)
               << '\n';
-    return valid ? 0 : 3;
+    return valid ? trainvm::kExitSuccess : trainvm::kExitNegativeVerdict;
   }
   if (operation == "replay" && argc == 4) {
     const auto replayed = journal.rebuild_projections();
     std::cout << nlohmann::json({{"replayed", replayed}, {"valid", true}}).dump(2) << '\n';
-    return 0;
+    return trainvm::kExitSuccess;
   }
   if (operation == "show" && argc == 5) {
     const auto projection = journal.projection(argv[4]);
     if (!projection) {
       std::cerr << "run not found: " << argv[4] << '\n';
-      return 4;
+      return trainvm::kExitNotFound;
     }
     std::cout << trainvm::projection_json(*projection).dump(2) << '\n';
-    return 0;
+    return trainvm::kExitSuccess;
   }
   throw std::logic_error("validated journal operation was not dispatched");
 }
@@ -629,7 +679,7 @@ int serve_command(int argc, char** argv) {
       "--worker-socket-gid"};
   if (argc % 2 != 0) {
     usage();
-    return 64;
+    return trainvm::kExitUsage;
   }
   for (int index = 2; index + 1 < argc; index += 2) {
     const std::string_view flag(argv[index]);
@@ -638,14 +688,14 @@ int serve_command(int argc, char** argv) {
         std::ranges::find(optional, flag) != optional.end();
     if (!known || !options.emplace(flag, argv[index + 1]).second) {
       usage();
-      return 64;
+      return trainvm::kExitUsage;
     }
   }
   if (std::ranges::any_of(required, [&](std::string_view flag) {
         return !options.contains(flag);
       })) {
     usage();
-    return 64;
+    return trainvm::kExitUsage;
   }
 
   std::optional<trainvm::HostdClientConfiguration> hostd;
@@ -695,32 +745,32 @@ int inspect_rwkv_lab_worker_command(std::string code_fingerprint) {
                }
                    .dump(2)
             << '\n';
-  return 0;
+  return trainvm::kExitSuccess;
 }
 
 int inspect_rwkv_lab_runtime_requirements_command(int argc) {
   if (argc != 2) {
     usage();
-    return 64;
+    return trainvm::kExitUsage;
   }
   std::cout << trainvm::encode_json(
                    trainvm::rwkv_lab_worker_runtime_requirements())
                    .dump(2)
             << '\n';
-  return 0;
+  return trainvm::kExitSuccess;
 }
 
 int inspect_rwkv_lab_deployment_command(int argc, char** argv) {
   (void)argv;
   if (argc != 2) {
     usage();
-    return 64;
+    return trainvm::kExitUsage;
   }
   trainvm::RwkvLabWorkerDeploymentSpec spec;
   std::vector<trainvm::Diagnostic> diagnostics;
   if (!trainvm::decode_json(read_stdin_json(), spec, "", diagnostics)) {
     std::cerr << trainvm::diagnostics_json(diagnostics).dump(2) << '\n';
-    return 2;
+    return trainvm::kExitMalformedInput;
   }
   const trainvm::RwkvLabWorkerDeploymentContract deployment =
       trainvm::rwkv_lab_worker_deployment(std::move(spec));
@@ -742,13 +792,13 @@ int inspect_rwkv_lab_deployment_command(int argc, char** argv) {
                }
                    .dump(2)
             << '\n';
-  return 0;
+  return trainvm::kExitSuccess;
 }
 
 int inspect_training_schedule_command(int argc, char** argv) {
   if (argc != 5) {
     usage();
-    return 64;
+    return trainvm::kExitUsage;
   }
 
   const std::string_view max_step_text(argv[4]);
@@ -774,7 +824,7 @@ int inspect_training_schedule_command(int argc, char** argv) {
     trainvm::LinearWarmupCosineSchedule schedule;
     if (!trainvm::decode_json(configuration, schedule, "", diagnostics)) {
       std::cerr << trainvm::diagnostics_json(diagnostics).dump(2) << '\n';
-      return 2;
+      return trainvm::kExitMalformedInput;
     }
     for (std::int64_t step = 0; step <= max_step; ++step) {
       multipliers.push_back(
@@ -784,7 +834,7 @@ int inspect_training_schedule_command(int argc, char** argv) {
     trainvm::PowerCoolSchedule schedule;
     if (!trainvm::decode_json(configuration, schedule, "", diagnostics)) {
       std::cerr << trainvm::diagnostics_json(diagnostics).dump(2) << '\n';
-      return 2;
+      return trainvm::kExitMalformedInput;
     }
     for (std::int64_t step = 0; step <= max_step; ++step) {
       multipliers.push_back(trainvm::powercool_multiplier(step, schedule));
@@ -802,7 +852,7 @@ int inspect_training_schedule_command(int argc, char** argv) {
                }
                    .dump(2)
             << '\n';
-  return 0;
+  return trainvm::kExitSuccess;
 }
 
 }  // namespace
@@ -854,7 +904,7 @@ int main(int argc, char** argv) {
       if (argc == 6) {
         if (std::string_view(argv[4]) != "--content-cache") {
           usage();
-          return 64;
+          return trainvm::kExitUsage;
         }
         content_cache = std::filesystem::path(argv[5]);
       }
@@ -889,9 +939,13 @@ int main(int argc, char** argv) {
       return journal_command(argc, argv);
     }
     usage();
-    return 64;
+    return trainvm::kExitUsage;
   } catch (const std::exception& exception) {
+    // Nothing below this line decided anything: an exception reached the top,
+    // so trainvm has no verdict to report. kExitUncaughtException is reserved
+    // for exactly this, which is why a subcommand that *can* recognize a bad
+    // document catches it locally and answers kExitMalformedInput instead.
     std::cerr << "trainvm: " << exception.what() << '\n';
-    return 1;
+    return trainvm::kExitUncaughtException;
   }
 }

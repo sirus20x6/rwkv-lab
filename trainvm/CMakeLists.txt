@@ -990,6 +990,18 @@ add_test(
 set_tests_properties(trainvm_cli_qualify_evidence_rejected PROPERTIES
   PASS_REGULAR_EXPRESSION "throughput_gate_failed"
 )
+# The vocabulary itself, not any one command's use of it. The two tests above
+# pin qualify-evidence's 0 and 3; this pins all six codes across every command
+# that can reach them, which is what stops the next command from inventing its
+# own meaning for one. See trainvm/include/trainvm/exit_status.hpp.
+add_test(
+  NAME trainvm_cli_exit_status_vocabulary
+  COMMAND ${CMAKE_COMMAND}
+    -DTRAINVM_BINARY=$<TARGET_FILE:trainvm>
+    -DTRAINVM_SOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}/..
+    -DTRAINVM_SCRATCH_DIR=${CMAKE_CURRENT_BINARY_DIR}/exit-status-vocabulary
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_exit_status_vocabulary.cmake"
+)
 add_test(
   NAME trainvm_cli_inspect_training_components
   COMMAND trainvm inspect-training-components
