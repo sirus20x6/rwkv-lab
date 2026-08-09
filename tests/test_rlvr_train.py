@@ -86,7 +86,8 @@ def test_response_scoring_and_rlvr_update_are_differentiable():
     before = model.head.weight.detach().clone()
     stats = optimize_rollouts(model, optimizer, rollouts, torch.tensor([1., 0., 1., 0.]),
                               group_size=2, algorithm="gspo", epochs=1,
-                              clip_low=.2, clip_high=.2, kl_coef=.01, grad_clip=1.0)
+                              clip_low=.2, clip_high=.2, kl_coef=.01, grad_clip=1.0,
+                              pre_mutation=lambda: None)
     assert stats["update_applied"] == 1
     assert not torch.equal(before, model.head.weight)
 
@@ -214,7 +215,8 @@ def test_supervised_warm_start_batches_examples_into_one_forward():
              for i in range(4)]
     result = supervised_warm_start(
         model, Tokenizer(), tasks, optimizer, steps=1, batch_size=4,
-        learning_rate=1e-3, grad_clip=1, stop_token=1, device="cpu", seed=3)
+        learning_rate=1e-3, grad_clip=1, stop_token=1, device="cpu", seed=3,
+        pre_mutation=lambda: None)
     assert result["updates"] == 1 and model.calls == 1
 
 

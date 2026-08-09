@@ -122,8 +122,6 @@ UNMAPPED_INTERCEPTION: dict[str, str] = {
         "qwen_ao3_cpt.py mutates without reaching the boundary",
     "rwkv_lab.rwkv_posttraining.v1.Train":
         "posttrain_train.py mutates without reaching the boundary",
-    "rwkv_lab.rwkv_rlvr.v1.Train":
-        "rlvr_train.py has two optimizer mutations, neither guarded",
     "rwkv_lab.vision_teacher_compressor.v1.Train":
         "vision_teacher_compressor.py mutates without reaching the boundary",
     "rwkv_lab.vision_frozen_adapter.v1.Train":
