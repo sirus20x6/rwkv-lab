@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # tests/ helpers
 
 import trainvm_binary  # noqa: E402  (needs the sys.path line above)
+import ztok_binary  # noqa: E402  (same)
 
 os.environ.setdefault("RWKV8_FORCE_PYREF", "1")   # CPU wkv7 reference (no fla/GPU)
 os.environ.setdefault("CODA_NO_COMPILE", "1")     # skip torch.compile in tests
@@ -28,12 +29,19 @@ collect_ignore = ["test_compile_core.py", "test_dmt_graph.py"]
 
 
 def pytest_report_header():
-    """State which trainvm binary would grade the qualification tests.
+    """State which foreign tools this run can see, before any of them is used.
 
     These tests hand evidence to the native authority and believe its verdict,
     so the binary is part of the result. It used to be resolved from PATH in
     preference to the build tree and never recorded, which let a stale global
     install grade a fresh checkout invisibly. Reporting it unconditionally --
     including "none" -- means no run leaves the question open.
+
+    ztok is here for the same reason and is reported the same way. It no longer
+    decides anything (test_world_vocab.py grades against committed expectations
+    now), but its presence still changes which tests run: the cross-check in
+    test_world_vocab.py and the AO3 fixture in test_benchmark_runner.py both
+    skip without it, and a skip that does not name what was missing is the same
+    silence this header exists to end.
     """
-    return trainvm_binary.report_line()
+    return [trainvm_binary.report_line(), *ztok_binary.report_lines()]

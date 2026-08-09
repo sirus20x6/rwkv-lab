@@ -1,0 +1,95 @@
+{
+  "description": "Committed RWKV World tokenizer parity expectations. The assertion in tests/test_world_vocab.py is graded against this file, not against a live run of another repository's ztok binary. Regenerate with: cd tests && python -m ztok_binary --write",
+  "vocabulary": {
+    "path": "src/rwkv_lab/assets/rwkv_vocab_v20230424.txt",
+    "sha256": "e6dee3d4e31b4d5c40ac99508ac6c701ceef4bed681bf2167ce9a908552bca89"
+  },
+  "generated_by": {
+    "tool": "ztok",
+    "version": "ztok 1.28.0",
+    "binary": "/thearray/git/ztok/zig-out/bin/ztok",
+    "cross_checked_against": "rwkv_lab.generate.WorldVocab"
+  },
+  "samples": [
+    {
+      "text": "Describe this image:\n",
+      "ids": [
+        23563,
+        8605,
+        102,
+        32234,
+        38744,
+        59,
+        11
+      ]
+    },
+    {
+      "text": "a red fox, standing in grass",
+      "ids": [
+        98,
+        22368,
+        21704,
+        45,
+        57292,
+        4596,
+        38626
+      ]
+    },
+    {
+      "text": "猫と犬 — café",
+      "ids": [
+        14398,
+        10133,
+        14345,
+        22898,
+        37946
+      ]
+    },
+    {
+      "text": "def encode(self, text: str) -> list[int]:",
+      "ids": [
+        7334,
+        45854,
+        41,
+        26999,
+        45,
+        32224,
+        59,
+        22522,
+        42,
+        3463,
+        31307,
+        92,
+        7865,
+        1689
+      ]
+    },
+    {
+      "text": "🦊🌿 emoji and \t tabs \r\n",
+      "ids": [
+        3319,
+        167,
+        139,
+        3319,
+        141,
+        192,
+        38362,
+        21265,
+        264,
+        32182,
+        3338
+      ]
+    },
+    {
+      "text": "  leading and trailing spaces  ",
+      "ids": [
+        267,
+        49366,
+        21265,
+        57451,
+        47345,
+        267
+      ]
+    }
+  ]
+}
