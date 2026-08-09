@@ -5282,6 +5282,209 @@ void test_worker_control_service_boundary() {
   }
 
   {
+    // Cancellation and the typed heartbeat phase. Compile is disabled here and
+    // warmup is enabled, so one connection exercises both halves of the
+    // capability question: a phase the authority requested may be heartbeat
+    // against and cancelled, and one it did not may be neither.
+    nlohmann::json cancellation_fixture = load_fixture();
+    cancellation_fixture["spec"]["execution"]["compile"]["enabled"] = false;
+    const auto cancellation_compiled =
+        trainvm::compile_document(cancellation_fixture);
+    check(cancellation_compiled.valid(),
+          "phase-cancellation WorkerControl fixture compiles");
+    if (!cancellation_compiled.valid()) {
+      std::filesystem::remove_all(directory);
+      return;
+    }
+    const nlohmann::json cancellation_submission_identity =
+        fixture_adapter_locked_submission(*cancellation_compiled.plan);
+    const auto database_path = directory / "phase-cancellation.db";
+    const std::string run_id = "worker-control-phase-cancellation-run";
+    trainvm::WorkerLaunchTicket launch;
+    {
+      trainvm::Journal journal(
+          database_path, std::nullopt,
+          trainvm::HostGrantEnforcement::legacy_process_free_test);
+      trainvm::Controller controller(*cancellation_compiled.plan, journal,
+                                     run_id);
+      controller.create_queued(cancellation_submission_identity);
+      (void)controller.begin_acquisition(test_time(2'600));
+      launch =
+          controller.prepare_worker_launch(launch_request, test_time(2'700));
+      (void)bind_test_worker_launch(controller, launch, 2'750);
+    }
+    trainvm::TrainVMService service(
+        database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        fixture_test_host_launch_registry(*cancellation_compiled.plan, launch),
+        fixture_test_host_identity(), [] { return test_time(2'800); },
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
+    prime_test_service_launch(service, launch);
+    trainvm::TrainVMService::WorkerConnection connection;
+    const grpc::Status open =
+        service.open_worker_connection(wire_hello(launch), connection);
+
+    const auto request_for =
+        [&](trainvm::v1::WorkerExecutionPhaseRequest::Phase phase) {
+          return std::ranges::find_if(
+              connection.welcome.execution_phase_requests(),
+              [&](const trainvm::v1::WorkerExecutionPhaseRequest& request) {
+                return request.phase() == phase;
+              });
+        };
+    const auto warmup_request =
+        request_for(trainvm::v1::WorkerExecutionPhaseRequest::PHASE_WARMUP);
+    const auto compile_request =
+        request_for(trainvm::v1::WorkerExecutionPhaseRequest::PHASE_COMPILE);
+    const bool requests_present =
+        warmup_request != connection.welcome.execution_phase_requests().end() &&
+        compile_request != connection.welcome.execution_phase_requests().end() &&
+        warmup_request->enabled() && !compile_request->enabled() &&
+        warmup_request->steps() == 8U;
+
+    trainvm::v1::WorkerHeartbeat heartbeat;
+    heartbeat.set_worker_sequence(1);
+    heartbeat.set_optimizer_step(0);
+    heartbeat.set_phase("warmup");
+    heartbeat.set_execution_phase(
+        trainvm::v1::WorkerExecutionPhaseRequest::PHASE_WARMUP);
+    heartbeat.mutable_observed_at()->set_seconds(1);
+    std::uint64_t heartbeat_acknowledgement = 0;
+    const grpc::Status typed_heartbeat_status = service.record_worker_heartbeat(
+        heartbeat, connection, heartbeat_acknowledgement);
+
+    std::uint64_t rejected_heartbeat_acknowledgement = 0;
+    // A label alone cannot claim a phase.
+    auto impersonating_heartbeat = heartbeat;
+    impersonating_heartbeat.set_worker_sequence(2);
+    impersonating_heartbeat.clear_execution_phase();
+    const grpc::Status impersonating_heartbeat_status =
+        service.record_worker_heartbeat(impersonating_heartbeat, connection,
+                                        rejected_heartbeat_acknowledgement);
+    // Nor can a typed field name a phase this attempt never requested: compile
+    // is declared but disabled, so the worker was never asked to compile.
+    auto unrequested_heartbeat = heartbeat;
+    unrequested_heartbeat.set_worker_sequence(2);
+    unrequested_heartbeat.set_phase("compile");
+    unrequested_heartbeat.set_execution_phase(
+        trainvm::v1::WorkerExecutionPhaseRequest::PHASE_COMPILE);
+    const grpc::Status unrequested_heartbeat_status =
+        service.record_worker_heartbeat(unrequested_heartbeat, connection,
+                                        rejected_heartbeat_acknowledgement);
+
+    trainvm::v1::WorkerExecutionPhaseReceipt cancelled;
+    cancelled.set_phase(trainvm::v1::WorkerExecutionPhaseRequest::PHASE_WARMUP);
+    cancelled.set_disposition(
+        trainvm::v1::WorkerExecutionPhaseReceipt::DISPOSITION_CANCELLED);
+    if (requests_present) {
+      cancelled.set_request_digest(warmup_request->request_digest());
+    }
+    cancelled.set_steps_executed(3U);
+    cancelled.set_state_fingerprint_before("sha256:" + std::string(64U, 'c'));
+    cancelled.set_state_fingerprint_after("sha256:" + std::string(64U, 'c'));
+    auto* diagnostic = cancelled.add_diagnostics();
+    diagnostic->set_severity(trainvm::v1::Diagnostic::SEVERITY_WARNING);
+    diagnostic->set_code("execution.phase_cancelled");
+    diagnostic->set_document_path("/spec/execution/warmup");
+    diagnostic->set_message("the controller cancelled this attempt");
+    cancelled.set_concurrency_key(connection.identity.concurrency_key);
+    cancelled.set_lease_id(connection.identity.lease_id);
+    cancelled.set_fencing_token(connection.identity.fencing_token);
+    cancelled.set_worker_sequence(2U);
+    cancelled.mutable_started_at()->set_seconds(2);
+    cancelled.mutable_completed_at()->set_seconds(3);
+
+    std::uint64_t rejected_phase_acknowledgement = 0;
+    // A cancellation is still bounded by the declared step count.
+    auto overrun = cancelled;
+    overrun.set_steps_executed(9U);
+    const grpc::Status overrun_status =
+        service.record_worker_execution_phase_receipt(
+            overrun, connection, rejected_phase_acknowledgement);
+    // It has to say what stopped it.
+    auto silent = cancelled;
+    silent.clear_diagnostics();
+    const grpc::Status silent_status =
+        service.record_worker_execution_phase_receipt(
+            silent, connection, rejected_phase_acknowledgement);
+    // And it is as disposable as a completion: the trajectory must be intact.
+    auto moved = cancelled;
+    moved.set_state_fingerprint_after("sha256:" + std::string(64U, 'f'));
+    const grpc::Status moved_status =
+        service.record_worker_execution_phase_receipt(
+            moved, connection, rejected_phase_acknowledgement);
+    // A phase that was never enabled was never running, so nothing about it
+    // can be cancelled — only skipped.
+    auto disabled = cancelled;
+    if (requests_present) {
+      disabled.set_phase(
+          trainvm::v1::WorkerExecutionPhaseRequest::PHASE_COMPILE);
+      disabled.set_request_digest(compile_request->request_digest());
+    }
+    disabled.set_steps_executed(0U);
+    const grpc::Status disabled_status =
+        service.record_worker_execution_phase_receipt(
+            disabled, connection, rejected_phase_acknowledgement);
+
+    std::uint64_t cancelled_acknowledgement = 0;
+    const grpc::Status cancelled_status =
+        service.record_worker_execution_phase_receipt(
+            cancelled, connection, cancelled_acknowledgement);
+    // Replay is idempotent, not a second commit.
+    std::uint64_t replayed_acknowledgement = 0;
+    const grpc::Status cancelled_replay =
+        service.record_worker_execution_phase_receipt(
+            cancelled, connection, replayed_acknowledgement);
+
+    {
+      trainvm::Journal observer(database_path);
+      const auto durable_heartbeat =
+          observer.event(connection.dispatch.dispatch_id + ":heartbeat:1");
+      const auto durable_cancellation = observer.event(
+          connection.dispatch.dispatch_id + ":phase:warmup:2");
+      // Recovery re-validates every journaled observation, so a cancelled
+      // receipt and a typed heartbeat both have to survive replay.
+      trainvm::Controller recovered(*cancellation_compiled.plan,
+                                    service.journal_, run_id);
+      bool recovers = true;
+      try {
+        recovered.recover();
+      } catch (const std::exception&) {
+        recovers = false;
+      }
+      check(open.ok() && requests_present && typed_heartbeat_status.ok() &&
+                heartbeat_acknowledgement == 1U &&
+                impersonating_heartbeat_status.error_code() ==
+                    grpc::StatusCode::INVALID_ARGUMENT &&
+                unrequested_heartbeat_status.error_code() ==
+                    grpc::StatusCode::PERMISSION_DENIED &&
+                rejected_heartbeat_acknowledgement == 0U &&
+                overrun_status.error_code() ==
+                    grpc::StatusCode::INVALID_ARGUMENT &&
+                silent_status.error_code() ==
+                    grpc::StatusCode::INVALID_ARGUMENT &&
+                moved_status.error_code() ==
+                    grpc::StatusCode::INVALID_ARGUMENT &&
+                disabled_status.error_code() ==
+                    grpc::StatusCode::INVALID_ARGUMENT &&
+                rejected_phase_acknowledgement == 0U &&
+                cancelled_status.ok() && cancelled_acknowledgement == 2U &&
+                cancelled_replay.ok() && replayed_acknowledgement == 2U &&
+                durable_heartbeat &&
+                durable_heartbeat->payload.value("execution_phase",
+                                                 std::string{}) == "warmup" &&
+                durable_cancellation &&
+                durable_cancellation->payload.value(
+                    "disposition", std::string{}) == "cancelled" &&
+                durable_cancellation->payload.value(
+                    "steps_executed", std::uint64_t{}) == 3U &&
+                durable_cancellation->payload.value(
+                    "requested_steps", std::uint64_t{}) == 8U &&
+                recovers,
+            "a worker execution phase is cancellable mid-flight, bounded by its request, and replays from the journal");
+    }
+  }
+
+  {
     auto domain_fixture = load_fixture();
     for (auto& metric : domain_fixture["spec"]["observability"]["metrics"]) {
       if (metric.value("name", std::string{}) ==

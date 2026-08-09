@@ -90,6 +90,29 @@ and effective controls; adapters cannot substitute a model-weights-only checksum
 phase after a lost connection creates another independently fenced receipt, so recovery never has
 to guess whether an unacknowledged phase ran.
 
+A phase is cancellable while it runs. `WorkerSession` records a `CancelCommand` as a sticky
+`execution_phase_cancellation` reason at the moment the receive thread decodes it, *and* still
+queues the command for the adapter — the phase must be able to see a cancellation while the adapter
+is inside a blocking phase and has not reached its next poll point, without stealing the command
+the adapter owes a lifecycle acknowledgement for. The runtime consults that reason before starting
+and after each bounded step, so cancellation always lands on a completed step boundary. It then
+publishes a `DISPOSITION_CANCELLED` receipt naming how far the phase got, and raises
+`WorkerExecutionPhaseCancelled`, which is deliberately not a `WorkerExecutionPhaseError`: nothing
+was violated, so an adapter catching phase errors to report a defect must not swallow it. The
+authority holds a cancelled receipt to the same bounds as a completed one — never more steps than
+the request declared, always a restored trajectory — and additionally requires diagnostics, because
+a partial step count in the journal is otherwise unattributable. A disabled phase can only ever be
+skipped; there is nothing running to cancel.
+
+Heartbeats carry two phase fields for two different jobs. `phase` stays a free-text operator label
+(`"train"`, `"checkpointing"`, `"verifying_inputs"`). `execution_phase` is the typed one: pass it
+while inside an authority-requested compile or warmup and the journal binds the heartbeat to that
+request. The authority refuses a typed phase this attempt did not request or that is declared but
+disabled, and refuses a `phase` label of `"compile"` or `"warmup"` that the typed field does not
+agree with — without that second rule a worker could report progress on a compile the authority
+never authorized, and every downstream reader of the journal would show it. `WorkerObservability`
+threads `execution_phase` through `optimizer_step` and `keepalive`.
+
 `WorkerExecutionPhases` is the one-shot adapter coordinator. It fails the operation if any declared
 phase is omitted or receipted twice. The scratch-RWKV adapter is the first production consumer: its
 compile phase triggers Torch's lazy compiler with a disposable forward/backward, and its warmup

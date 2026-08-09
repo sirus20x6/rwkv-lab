@@ -76,7 +76,10 @@ def test_heartbeat_cadence_and_metric_declaration_own_wire_semantics() -> None:
     assert observer.publish_if_declared(
         "train.loss", 1.25, step=3, sample_weight=8, labels={"route": "photo"}
     ) == 1
-    assert session.heartbeats == [(1, "train", {"wait": False}), (3, "train", {"wait": False})]
+    assert session.heartbeats == [
+        (1, "train", {"execution_phase": None, "wait": False}),
+        (3, "train", {"execution_phase": None, "wait": False}),
+    ]
     assert session.metrics == [
         (
             ("train.loss", 1.25),

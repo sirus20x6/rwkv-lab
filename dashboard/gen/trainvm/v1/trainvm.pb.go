@@ -242,6 +242,7 @@ const (
 	ArtifactKind_ARTIFACT_KIND_METRICS       ArtifactKind = 5
 	ArtifactKind_ARTIFACT_KIND_REPORT        ArtifactKind = 6
 	ArtifactKind_ARTIFACT_KIND_OPAQUE        ArtifactKind = 7
+	ArtifactKind_ARTIFACT_KIND_EVAL_EXAMPLES ArtifactKind = 8
 )
 
 // Enum value maps for ArtifactKind.
@@ -255,6 +256,7 @@ var (
 		5: "ARTIFACT_KIND_METRICS",
 		6: "ARTIFACT_KIND_REPORT",
 		7: "ARTIFACT_KIND_OPAQUE",
+		8: "ARTIFACT_KIND_EVAL_EXAMPLES",
 	}
 	ArtifactKind_value = map[string]int32{
 		"ARTIFACT_KIND_UNSPECIFIED":   0,
@@ -265,6 +267,7 @@ var (
 		"ARTIFACT_KIND_METRICS":       5,
 		"ARTIFACT_KIND_REPORT":        6,
 		"ARTIFACT_KIND_OPAQUE":        7,
+		"ARTIFACT_KIND_EVAL_EXAMPLES": 8,
 	}
 )
 
@@ -1069,6 +1072,12 @@ const (
 	WorkerExecutionPhaseReceipt_DISPOSITION_COMPLETED   WorkerExecutionPhaseReceipt_Disposition = 1
 	WorkerExecutionPhaseReceipt_DISPOSITION_SKIPPED     WorkerExecutionPhaseReceipt_Disposition = 2
 	WorkerExecutionPhaseReceipt_DISPOSITION_FAILED      WorkerExecutionPhaseReceipt_Disposition = 3
+	// The worker observed a controller cancellation part-way through an
+	// enabled phase and stopped at a step boundary.  Distinct from FAILED
+	// because nothing went wrong: the trajectory is still restored, so the
+	// before/after fingerprints must still match, and steps_executed records
+	// how far the bounded phase actually got.
+	WorkerExecutionPhaseReceipt_DISPOSITION_CANCELLED WorkerExecutionPhaseReceipt_Disposition = 4
 )
 
 // Enum value maps for WorkerExecutionPhaseReceipt_Disposition.
@@ -1078,12 +1087,14 @@ var (
 		1: "DISPOSITION_COMPLETED",
 		2: "DISPOSITION_SKIPPED",
 		3: "DISPOSITION_FAILED",
+		4: "DISPOSITION_CANCELLED",
 	}
 	WorkerExecutionPhaseReceipt_Disposition_value = map[string]int32{
 		"DISPOSITION_UNSPECIFIED": 0,
 		"DISPOSITION_COMPLETED":   1,
 		"DISPOSITION_SKIPPED":     2,
 		"DISPOSITION_FAILED":      3,
+		"DISPOSITION_CANCELLED":   4,
 	}
 )
 
@@ -3404,8 +3415,16 @@ type ArtifactManifest struct {
 	// controller durably acknowledges this sequence only after the manifest is
 	// committed to the journal.
 	WorkerSequence uint64 `protobuf:"varint,14,opt,name=worker_sequence,json=workerSequence,proto3" json:"worker_sequence,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// The optimizer-step revision represented by this artifact. This is
+	// mandatory for checkpoints and eval-examples and absent for unstepped
+	// artifacts.
+	OptimizerStep *uint64 `protobuf:"varint,15,opt,name=optimizer_step,json=optimizerStep,proto3,oneof" json:"optimizer_step,omitempty"`
+	// Exact bounded canonical JSON bytes for controller-validated semantic
+	// artifacts. rwkv-lab.eval-examples.v1 requires these bytes and binds them
+	// to fingerprint; ordinary directory artifacts leave the field empty.
+	CanonicalManifestJson []byte `protobuf:"bytes,16,opt,name=canonical_manifest_json,json=canonicalManifestJson,proto3" json:"canonical_manifest_json,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *ArtifactManifest) Reset() {
@@ -3534,6 +3553,20 @@ func (x *ArtifactManifest) GetWorkerSequence() uint64 {
 		return x.WorkerSequence
 	}
 	return 0
+}
+
+func (x *ArtifactManifest) GetOptimizerStep() uint64 {
+	if x != nil && x.OptimizerStep != nil {
+		return *x.OptimizerStep
+	}
+	return 0
+}
+
+func (x *ArtifactManifest) GetCanonicalManifestJson() []byte {
+	if x != nil {
+		return x.CanonicalManifestJson
+	}
+	return nil
 }
 
 type EventEnvelope struct {
@@ -3940,8 +3973,16 @@ type WorkerHeartbeat struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	WorkerSequence uint64                 `protobuf:"varint,1,opt,name=worker_sequence,json=workerSequence,proto3" json:"worker_sequence,omitempty"`
 	OptimizerStep  uint64                 `protobuf:"varint,2,opt,name=optimizer_step,json=optimizerStep,proto3" json:"optimizer_step,omitempty"`
-	Phase          string                 `protobuf:"bytes,3,opt,name=phase,proto3" json:"phase,omitempty"`
-	ObservedAt     *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
+	// Free-text progress label for operators.  It is descriptive only: the
+	// authority never routes on it, and it may not impersonate one of the typed
+	// execution phases below.
+	Phase      string                 `protobuf:"bytes,3,opt,name=phase,proto3" json:"phase,omitempty"`
+	ObservedAt *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
+	// Which authority-issued execution phase this heartbeat belongs to, or
+	// PHASE_UNSPECIFIED outside a phase.  The authority accepts a typed value
+	// only when the active attempt's immutable requests carry that phase and it
+	// is enabled, so a worker cannot claim work the authority never requested.
+	ExecutionPhase WorkerExecutionPhaseRequest_Phase `protobuf:"varint,5,opt,name=execution_phase,json=executionPhase,proto3,enum=trainvm.v1.WorkerExecutionPhaseRequest_Phase" json:"execution_phase,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -4002,6 +4043,13 @@ func (x *WorkerHeartbeat) GetObservedAt() *timestamppb.Timestamp {
 		return x.ObservedAt
 	}
 	return nil
+}
+
+func (x *WorkerHeartbeat) GetExecutionPhase() WorkerExecutionPhaseRequest_Phase {
+	if x != nil {
+		return x.ExecutionPhase
+	}
+	return WorkerExecutionPhaseRequest_PHASE_UNSPECIFIED
 }
 
 // One immutable execution phase selected by the authority from the compiled
@@ -4952,8 +5000,15 @@ type WorkerWelcome struct {
 	CanonicalInvocationJson    []byte                         `protobuf:"bytes,17,opt,name=canonical_invocation_json,json=canonicalInvocationJson,proto3" json:"canonical_invocation_json,omitempty"`
 	InvocationDigest           string                         `protobuf:"bytes,18,opt,name=invocation_digest,json=invocationDigest,proto3" json:"invocation_digest,omitempty"`
 	ExecutionPhaseRequests     []*WorkerExecutionPhaseRequest `protobuf:"bytes,19,rep,name=execution_phase_requests,json=executionPhaseRequests,proto3" json:"execution_phase_requests,omitempty"`
-	unknownFields              protoimpl.UnknownFields
-	sizeCache                  protoimpl.SizeCache
+	// Durable launch-gate state recovered from the journal. The worker uses
+	// this only as a pre-mutation defense; the controller remains authoritative.
+	StepZeroEvalGateRequired  bool `protobuf:"varint,20,opt,name=step_zero_eval_gate_required,json=stepZeroEvalGateRequired,proto3" json:"step_zero_eval_gate_required,omitempty"`
+	StepZeroEvalGateSatisfied bool `protobuf:"varint,21,opt,name=step_zero_eval_gate_satisfied,json=stepZeroEvalGateSatisfied,proto3" json:"step_zero_eval_gate_satisfied,omitempty"`
+	// Controller-derived immutable baseline for this attempt: zero for a fresh
+	// launch, or the exact resume checkpoint optimizer step for a replacement.
+	AttemptBaselineOptimizerStep uint64 `protobuf:"varint,22,opt,name=attempt_baseline_optimizer_step,json=attemptBaselineOptimizerStep,proto3" json:"attempt_baseline_optimizer_step,omitempty"`
+	unknownFields                protoimpl.UnknownFields
+	sizeCache                    protoimpl.SizeCache
 }
 
 func (x *WorkerWelcome) Reset() {
@@ -5117,6 +5172,27 @@ func (x *WorkerWelcome) GetExecutionPhaseRequests() []*WorkerExecutionPhaseReque
 		return x.ExecutionPhaseRequests
 	}
 	return nil
+}
+
+func (x *WorkerWelcome) GetStepZeroEvalGateRequired() bool {
+	if x != nil {
+		return x.StepZeroEvalGateRequired
+	}
+	return false
+}
+
+func (x *WorkerWelcome) GetStepZeroEvalGateSatisfied() bool {
+	if x != nil {
+		return x.StepZeroEvalGateSatisfied
+	}
+	return false
+}
+
+func (x *WorkerWelcome) GetAttemptBaselineOptimizerStep() uint64 {
+	if x != nil {
+		return x.AttemptBaselineOptimizerStep
+	}
+	return 0
 }
 
 type WorkerReceipt struct {
@@ -6936,6 +7012,280 @@ func (x *GetHostAuthorityStatusResponse) GetResourceInventoryObservationAgeNs() 
 	return 0
 }
 
+type GetReconciliationStatusRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetReconciliationStatusRequest) Reset() {
+	*x = GetReconciliationStatusRequest{}
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[54]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetReconciliationStatusRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetReconciliationStatusRequest) ProtoMessage() {}
+
+func (x *GetReconciliationStatusRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[54]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetReconciliationStatusRequest.ProtoReflect.Descriptor instead.
+func (*GetReconciliationStatusRequest) Descriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{54}
+}
+
+// Why a run is not being reconciled right now. Read this before reaching for
+// `top`: a supervisor burning CPU shows up here as reconcile_steps climbing
+// while the runs it is stepping report no progress.
+type ReconciliationRunWait struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	RunId      string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	WaitReason string                 `protobuf:"bytes,2,opt,name=wait_reason,json=waitReason,proto3" json:"wait_reason,omitempty"`
+	// Consecutive passes that ended in the same wait without the run's journal
+	// state moving.
+	IdlePasses uint64 `protobuf:"varint,3,opt,name=idle_passes,json=idlePasses,proto3" json:"idle_passes,omitempty"`
+	Retries    uint64 `protobuf:"varint,4,opt,name=retries,proto3" json:"retries,omitempty"`
+	// Current backoff interval, and the authority boot-time deadline it implies.
+	BackoffNs         int64  `protobuf:"varint,5,opt,name=backoff_ns,json=backoffNs,proto3" json:"backoff_ns,omitempty"`
+	NextDueBoottimeNs int64  `protobuf:"varint,6,opt,name=next_due_boottime_ns,json=nextDueBoottimeNs,proto3" json:"next_due_boottime_ns,omitempty"`
+	LastEventSequence uint64 `protobuf:"varint,7,opt,name=last_event_sequence,json=lastEventSequence,proto3" json:"last_event_sequence,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *ReconciliationRunWait) Reset() {
+	*x = ReconciliationRunWait{}
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[55]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReconciliationRunWait) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReconciliationRunWait) ProtoMessage() {}
+
+func (x *ReconciliationRunWait) ProtoReflect() protoreflect.Message {
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[55]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReconciliationRunWait.ProtoReflect.Descriptor instead.
+func (*ReconciliationRunWait) Descriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{55}
+}
+
+func (x *ReconciliationRunWait) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *ReconciliationRunWait) GetWaitReason() string {
+	if x != nil {
+		return x.WaitReason
+	}
+	return ""
+}
+
+func (x *ReconciliationRunWait) GetIdlePasses() uint64 {
+	if x != nil {
+		return x.IdlePasses
+	}
+	return 0
+}
+
+func (x *ReconciliationRunWait) GetRetries() uint64 {
+	if x != nil {
+		return x.Retries
+	}
+	return 0
+}
+
+func (x *ReconciliationRunWait) GetBackoffNs() int64 {
+	if x != nil {
+		return x.BackoffNs
+	}
+	return 0
+}
+
+func (x *ReconciliationRunWait) GetNextDueBoottimeNs() int64 {
+	if x != nil {
+		return x.NextDueBoottimeNs
+	}
+	return 0
+}
+
+func (x *ReconciliationRunWait) GetLastEventSequence() uint64 {
+	if x != nil {
+		return x.LastEventSequence
+	}
+	return 0
+}
+
+type GetReconciliationStatusResponse struct {
+	state             protoimpl.MessageState   `protogen:"open.v1"`
+	SupervisorRunning bool                     `protobuf:"varint,1,opt,name=supervisor_running,json=supervisorRunning,proto3" json:"supervisor_running,omitempty"`
+	Wakes             uint64                   `protobuf:"varint,2,opt,name=wakes,proto3" json:"wakes,omitempty"`
+	ExplicitWakes     uint64                   `protobuf:"varint,3,opt,name=explicit_wakes,json=explicitWakes,proto3" json:"explicit_wakes,omitempty"`
+	CadenceWakes      uint64                   `protobuf:"varint,4,opt,name=cadence_wakes,json=cadenceWakes,proto3" json:"cadence_wakes,omitempty"`
+	Scans             uint64                   `protobuf:"varint,5,opt,name=scans,proto3" json:"scans,omitempty"`
+	ReconcilePasses   uint64                   `protobuf:"varint,6,opt,name=reconcile_passes,json=reconcilePasses,proto3" json:"reconcile_passes,omitempty"`
+	ReconcileSteps    uint64                   `protobuf:"varint,7,opt,name=reconcile_steps,json=reconcileSteps,proto3" json:"reconcile_steps,omitempty"`
+	SkippedIdleRuns   uint64                   `protobuf:"varint,8,opt,name=skipped_idle_runs,json=skippedIdleRuns,proto3" json:"skipped_idle_runs,omitempty"`
+	BudgetRequeues    uint64                   `protobuf:"varint,9,opt,name=budget_requeues,json=budgetRequeues,proto3" json:"budget_requeues,omitempty"`
+	Failures          uint64                   `protobuf:"varint,10,opt,name=failures,proto3" json:"failures,omitempty"`
+	TrackedRuns       uint64                   `protobuf:"varint,11,opt,name=tracked_runs,json=trackedRuns,proto3" json:"tracked_runs,omitempty"`
+	Waits             []*ReconciliationRunWait `protobuf:"bytes,12,rep,name=waits,proto3" json:"waits,omitempty"`
+	WaitsTruncated    bool                     `protobuf:"varint,13,opt,name=waits_truncated,json=waitsTruncated,proto3" json:"waits_truncated,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *GetReconciliationStatusResponse) Reset() {
+	*x = GetReconciliationStatusResponse{}
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[56]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetReconciliationStatusResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetReconciliationStatusResponse) ProtoMessage() {}
+
+func (x *GetReconciliationStatusResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[56]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetReconciliationStatusResponse.ProtoReflect.Descriptor instead.
+func (*GetReconciliationStatusResponse) Descriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{56}
+}
+
+func (x *GetReconciliationStatusResponse) GetSupervisorRunning() bool {
+	if x != nil {
+		return x.SupervisorRunning
+	}
+	return false
+}
+
+func (x *GetReconciliationStatusResponse) GetWakes() uint64 {
+	if x != nil {
+		return x.Wakes
+	}
+	return 0
+}
+
+func (x *GetReconciliationStatusResponse) GetExplicitWakes() uint64 {
+	if x != nil {
+		return x.ExplicitWakes
+	}
+	return 0
+}
+
+func (x *GetReconciliationStatusResponse) GetCadenceWakes() uint64 {
+	if x != nil {
+		return x.CadenceWakes
+	}
+	return 0
+}
+
+func (x *GetReconciliationStatusResponse) GetScans() uint64 {
+	if x != nil {
+		return x.Scans
+	}
+	return 0
+}
+
+func (x *GetReconciliationStatusResponse) GetReconcilePasses() uint64 {
+	if x != nil {
+		return x.ReconcilePasses
+	}
+	return 0
+}
+
+func (x *GetReconciliationStatusResponse) GetReconcileSteps() uint64 {
+	if x != nil {
+		return x.ReconcileSteps
+	}
+	return 0
+}
+
+func (x *GetReconciliationStatusResponse) GetSkippedIdleRuns() uint64 {
+	if x != nil {
+		return x.SkippedIdleRuns
+	}
+	return 0
+}
+
+func (x *GetReconciliationStatusResponse) GetBudgetRequeues() uint64 {
+	if x != nil {
+		return x.BudgetRequeues
+	}
+	return 0
+}
+
+func (x *GetReconciliationStatusResponse) GetFailures() uint64 {
+	if x != nil {
+		return x.Failures
+	}
+	return 0
+}
+
+func (x *GetReconciliationStatusResponse) GetTrackedRuns() uint64 {
+	if x != nil {
+		return x.TrackedRuns
+	}
+	return 0
+}
+
+func (x *GetReconciliationStatusResponse) GetWaits() []*ReconciliationRunWait {
+	if x != nil {
+		return x.Waits
+	}
+	return nil
+}
+
+func (x *GetReconciliationStatusResponse) GetWaitsTruncated() bool {
+	if x != nil {
+		return x.WaitsTruncated
+	}
+	return false
+}
+
 var File_trainvm_v1_trainvm_proto protoreflect.FileDescriptor
 
 const file_trainvm_v1_trainvm_proto_rawDesc = "" +
@@ -7159,7 +7509,7 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x14DISPOSITION_ACCEPTED\x10\x01\x12\x1f\n" +
 	"\x1bDISPOSITION_ALREADY_APPLIED\x10\x02\x12\x18\n" +
 	"\x14DISPOSITION_REJECTED\x10\x03\x12\x18\n" +
-	"\x14DISPOSITION_CONFLICT\x10\x04\"\xb2\x04\n" +
+	"\x14DISPOSITION_CONFLICT\x10\x04\"\xa9\x05\n" +
 	"\x10ArtifactManifest\x12\x1f\n" +
 	"\vartifact_id\x18\x01 \x01(\tR\n" +
 	"artifactId\x12!\n" +
@@ -7177,7 +7527,10 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x13producer_attempt_id\x18\v \x01(\tR\x11producerAttemptId\x12.\n" +
 	"\x13parent_artifact_ids\x18\f \x03(\tR\x11parentArtifactIds\x12=\n" +
 	"\fpublished_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\vpublishedAt\x12'\n" +
-	"\x0fworker_sequence\x18\x0e \x01(\x04R\x0eworkerSequence\"\xe3\x04\n" +
+	"\x0fworker_sequence\x18\x0e \x01(\x04R\x0eworkerSequence\x12*\n" +
+	"\x0eoptimizer_step\x18\x0f \x01(\x04H\x00R\roptimizerStep\x88\x01\x01\x126\n" +
+	"\x17canonical_manifest_json\x18\x10 \x01(\fR\x15canonicalManifestJsonB\x11\n" +
+	"\x0f_optimizer_step\"\xe3\x04\n" +
 	"\rEventEnvelope\x12)\n" +
 	"\x10journal_sequence\x18\x01 \x01(\x04R\x0fjournalSequence\x12\x19\n" +
 	"\bevent_id\x18\x02 \x01(\tR\aeventId\x12\x15\n" +
@@ -7227,13 +7580,14 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x0fconcurrency_key\x18\n" +
 	" \x01(\tR\x0econcurrencyKey\x12\x19\n" +
 	"\blease_id\x18\v \x01(\tR\aleaseId\x12#\n" +
-	"\rfencing_token\x18\f \x01(\x04R\ffencingToken\"\xb4\x01\n" +
+	"\rfencing_token\x18\f \x01(\x04R\ffencingToken\"\x8c\x02\n" +
 	"\x0fWorkerHeartbeat\x12'\n" +
 	"\x0fworker_sequence\x18\x01 \x01(\x04R\x0eworkerSequence\x12%\n" +
 	"\x0eoptimizer_step\x18\x02 \x01(\x04R\roptimizerStep\x12\x14\n" +
 	"\x05phase\x18\x03 \x01(\tR\x05phase\x12;\n" +
 	"\vobserved_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"observedAt\"\x8d\x02\n" +
+	"observedAt\x12V\n" +
+	"\x0fexecution_phase\x18\x05 \x01(\x0e2-.trainvm.v1.WorkerExecutionPhaseRequest.PhaseR\x0eexecutionPhase\"\x8d\x02\n" +
 	"\x1bWorkerExecutionPhaseRequest\x12C\n" +
 	"\x05phase\x18\x01 \x01(\x0e2-.trainvm.v1.WorkerExecutionPhaseRequest.PhaseR\x05phase\x12\x18\n" +
 	"\aenabled\x18\x02 \x01(\bR\aenabled\x12\x19\n" +
@@ -7243,7 +7597,7 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x11PHASE_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rPHASE_COMPILE\x10\x01\x12\x10\n" +
 	"\fPHASE_WARMUP\x10\x02B\b\n" +
-	"\x06_steps\"\xb7\x06\n" +
+	"\x06_steps\"\xd3\x06\n" +
 	"\x1bWorkerExecutionPhaseReceipt\x12C\n" +
 	"\x05phase\x18\x01 \x01(\x0e2-.trainvm.v1.WorkerExecutionPhaseRequest.PhaseR\x05phase\x12U\n" +
 	"\vdisposition\x18\x02 \x01(\x0e23.trainvm.v1.WorkerExecutionPhaseReceipt.DispositionR\vdisposition\x12%\n" +
@@ -7259,12 +7613,13 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x0fworker_sequence\x18\v \x01(\x04R\x0eworkerSequence\x129\n" +
 	"\n" +
 	"started_at\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x12=\n" +
-	"\fcompleted_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAt\"v\n" +
+	"\fcompleted_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAt\"\x91\x01\n" +
 	"\vDisposition\x12\x1b\n" +
 	"\x17DISPOSITION_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15DISPOSITION_COMPLETED\x10\x01\x12\x17\n" +
 	"\x13DISPOSITION_SKIPPED\x10\x02\x12\x16\n" +
-	"\x12DISPOSITION_FAILED\x10\x03\"\xfa\x05\n" +
+	"\x12DISPOSITION_FAILED\x10\x03\x12\x19\n" +
+	"\x15DISPOSITION_CANCELLED\x10\x04\"\xfa\x05\n" +
 	"\x1bControlPatchAcknowledgement\x12)\n" +
 	"\x10control_revision\x18\x01 \x01(\x04R\x0fcontrolRevision\x12U\n" +
 	"\vdisposition\x18\x02 \x01(\x0e23.trainvm.v1.ControlPatchAcknowledgement.DispositionR\vdisposition\x127\n" +
@@ -7353,7 +7708,7 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"checkpoint\x123\n" +
 	"\x06cancel\x18\r \x01(\v2\x19.trainvm.v1.CancelCommandH\x00R\x06cancel\x12=\n" +
 	"\bcontrols\x18\x0e \x01(\v2\x1f.trainvm.v1.ControlPatchCommandH\x00R\bcontrolsB\t\n" +
-	"\acommand\"\xa6\a\n" +
+	"\acommand\"\xef\b\n" +
 	"\rWorkerWelcome\x12G\n" +
 	"\vdisposition\x18\x01 \x01(\x0e2%.trainvm.v1.WorkerWelcome.DispositionR\vdisposition\x12\x1d\n" +
 	"\n" +
@@ -7377,7 +7732,10 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x1cacknowledged_worker_sequence\x18\x10 \x01(\x04R\x1aacknowledgedWorkerSequence\x12:\n" +
 	"\x19canonical_invocation_json\x18\x11 \x01(\fR\x17canonicalInvocationJson\x12+\n" +
 	"\x11invocation_digest\x18\x12 \x01(\tR\x10invocationDigest\x12a\n" +
-	"\x18execution_phase_requests\x18\x13 \x03(\v2'.trainvm.v1.WorkerExecutionPhaseRequestR\x16executionPhaseRequests\"\x81\x01\n" +
+	"\x18execution_phase_requests\x18\x13 \x03(\v2'.trainvm.v1.WorkerExecutionPhaseRequestR\x16executionPhaseRequests\x12>\n" +
+	"\x1cstep_zero_eval_gate_required\x18\x14 \x01(\bR\x18stepZeroEvalGateRequired\x12@\n" +
+	"\x1dstep_zero_eval_gate_satisfied\x18\x15 \x01(\bR\x19stepZeroEvalGateSatisfied\x12E\n" +
+	"\x1fattempt_baseline_optimizer_step\x18\x16 \x01(\x04R\x1cattemptBaselineOptimizerStep\"\x81\x01\n" +
 	"\vDisposition\x12\x1b\n" +
 	"\x17DISPOSITION_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14DISPOSITION_ACCEPTED\x10\x01\x12\x18\n" +
@@ -7572,7 +7930,34 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	" current_inventory_receipt_digest\x18\x1c \x01(\tR\x1dcurrentInventoryReceiptDigest\x126\n" +
 	"\x17degraded_resource_count\x18\x1d \x01(\x04R\x15degradedResourceCount\x12>\n" +
 	"\x1bresource_degradation_reason\x18\x1e \x01(\tR\x19resourceDegradationReason\x12P\n" +
-	"%resource_inventory_observation_age_ns\x18\x1f \x01(\x04R!resourceInventoryObservationAgeNs*\xb6\x01\n" +
+	"%resource_inventory_observation_age_ns\x18\x1f \x01(\x04R!resourceInventoryObservationAgeNs\" \n" +
+	"\x1eGetReconciliationStatusRequest\"\x8a\x02\n" +
+	"\x15ReconciliationRunWait\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1f\n" +
+	"\vwait_reason\x18\x02 \x01(\tR\n" +
+	"waitReason\x12\x1f\n" +
+	"\vidle_passes\x18\x03 \x01(\x04R\n" +
+	"idlePasses\x12\x18\n" +
+	"\aretries\x18\x04 \x01(\x04R\aretries\x12\x1d\n" +
+	"\n" +
+	"backoff_ns\x18\x05 \x01(\x03R\tbackoffNs\x12/\n" +
+	"\x14next_due_boottime_ns\x18\x06 \x01(\x03R\x11nextDueBoottimeNs\x12.\n" +
+	"\x13last_event_sequence\x18\a \x01(\x04R\x11lastEventSequence\"\x92\x04\n" +
+	"\x1fGetReconciliationStatusResponse\x12-\n" +
+	"\x12supervisor_running\x18\x01 \x01(\bR\x11supervisorRunning\x12\x14\n" +
+	"\x05wakes\x18\x02 \x01(\x04R\x05wakes\x12%\n" +
+	"\x0eexplicit_wakes\x18\x03 \x01(\x04R\rexplicitWakes\x12#\n" +
+	"\rcadence_wakes\x18\x04 \x01(\x04R\fcadenceWakes\x12\x14\n" +
+	"\x05scans\x18\x05 \x01(\x04R\x05scans\x12)\n" +
+	"\x10reconcile_passes\x18\x06 \x01(\x04R\x0freconcilePasses\x12'\n" +
+	"\x0freconcile_steps\x18\a \x01(\x04R\x0ereconcileSteps\x12*\n" +
+	"\x11skipped_idle_runs\x18\b \x01(\x04R\x0fskippedIdleRuns\x12'\n" +
+	"\x0fbudget_requeues\x18\t \x01(\x04R\x0ebudgetRequeues\x12\x1a\n" +
+	"\bfailures\x18\n" +
+	" \x01(\x04R\bfailures\x12!\n" +
+	"\ftracked_runs\x18\v \x01(\x04R\vtrackedRuns\x127\n" +
+	"\x05waits\x18\f \x03(\v2!.trainvm.v1.ReconciliationRunWaitR\x05waits\x12'\n" +
+	"\x0fwaits_truncated\x18\r \x01(\bR\x0ewaitsTruncated*\xb6\x01\n" +
 	"\fDesiredState\x12\x1d\n" +
 	"\x19DESIRED_STATE_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14DESIRED_STATE_QUEUED\x10\x01\x12\x19\n" +
@@ -7606,7 +7991,7 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x1fAPPLY_POINT_NEXT_OPTIMIZER_STEP\x10\x03\x12\x19\n" +
 	"\x15APPLY_POINT_NEXT_EVAL\x10\x04\x12\x1f\n" +
 	"\x1bAPPLY_POINT_NEXT_CHECKPOINT\x10\x05\x12\x17\n" +
-	"\x13APPLY_POINT_RESTART\x10\x06*\xee\x01\n" +
+	"\x13APPLY_POINT_RESTART\x10\x06*\x8f\x02\n" +
 	"\fArtifactKind\x12\x1d\n" +
 	"\x19ARTIFACT_KIND_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12ARTIFACT_KIND_PATH\x10\x01\x12\x1c\n" +
@@ -7615,7 +8000,8 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x1bARTIFACT_KIND_IMAGE_GALLERY\x10\x04\x12\x19\n" +
 	"\x15ARTIFACT_KIND_METRICS\x10\x05\x12\x18\n" +
 	"\x14ARTIFACT_KIND_REPORT\x10\x06\x12\x18\n" +
-	"\x14ARTIFACT_KIND_OPAQUE\x10\a*\xaf\x01\n" +
+	"\x14ARTIFACT_KIND_OPAQUE\x10\a\x12\x1f\n" +
+	"\x1bARTIFACT_KIND_EVAL_EXAMPLES\x10\b*\xaf\x01\n" +
 	"\vControlType\x12\x1c\n" +
 	"\x18CONTROL_TYPE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13CONTROL_TYPE_NUMBER\x10\x01\x12\x18\n" +
@@ -7662,7 +8048,7 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x1eHOST_ACCELERATOR_VENDOR_NVIDIA\x10\x01\x12\x1f\n" +
 	"\x1bHOST_ACCELERATOR_VENDOR_AMD\x10\x02\x12!\n" +
 	"\x1dHOST_ACCELERATOR_VENDOR_INTEL\x10\x03\x12!\n" +
-	"\x1dHOST_ACCELERATOR_VENDOR_OTHER\x10\x042\x8c\a\n" +
+	"\x1dHOST_ACCELERATOR_VENDOR_OTHER\x10\x042\x80\b\n" +
 	"\aTrainVM\x12]\n" +
 	"\x10SubmitExperiment\x12#.trainvm.v1.SubmitExperimentRequest\x1a$.trainvm.v1.SubmitExperimentResponse\x12H\n" +
 	"\tAuthorRun\x12\x1c.trainvm.v1.AuthorRunRequest\x1a\x1b.trainvm.v1.AuthorRunUpdate0\x01\x12E\n" +
@@ -7675,7 +8061,8 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\vWatchEvents\x12\x1e.trainvm.v1.WatchEventsRequest\x1a\x19.trainvm.v1.EventEnvelope0\x01\x12W\n" +
 	"\x0eGetControlView\x12!.trainvm.v1.GetControlViewRequest\x1a\".trainvm.v1.GetControlViewResponse\x12N\n" +
 	"\rGetDescriptor\x12\x1d.trainvm.v1.DescriptorRequest\x1a\x1e.trainvm.v1.DescriptorResponse\x12o\n" +
-	"\x16GetHostAuthorityStatus\x12).trainvm.v1.GetHostAuthorityStatusRequest\x1a*.trainvm.v1.GetHostAuthorityStatusResponse2^\n" +
+	"\x16GetHostAuthorityStatus\x12).trainvm.v1.GetHostAuthorityStatusRequest\x1a*.trainvm.v1.GetHostAuthorityStatusResponse\x12r\n" +
+	"\x17GetReconciliationStatus\x12*.trainvm.v1.GetReconciliationStatusRequest\x1a+.trainvm.v1.GetReconciliationStatusResponse2^\n" +
 	"\rWorkerControl\x12M\n" +
 	"\aConnect\x12\x1e.trainvm.v1.WorkerToController\x1a\x1e.trainvm.v1.ControllerToWorker(\x010\x01B%Z#trainboard/gen/trainvm/v1;trainvmv1b\x06proto3"
 
@@ -7692,7 +8079,7 @@ func file_trainvm_v1_trainvm_proto_rawDescGZIP() []byte {
 }
 
 var file_trainvm_v1_trainvm_proto_enumTypes = make([]protoimpl.EnumInfo, 24)
-var file_trainvm_v1_trainvm_proto_msgTypes = make([]protoimpl.MessageInfo, 57)
+var file_trainvm_v1_trainvm_proto_msgTypes = make([]protoimpl.MessageInfo, 60)
 var file_trainvm_v1_trainvm_proto_goTypes = []any{
 	(DesiredState)(0),                            // 0: trainvm.v1.DesiredState
 	(ObservedState)(0),                           // 1: trainvm.v1.ObservedState
@@ -7772,28 +8159,31 @@ var file_trainvm_v1_trainvm_proto_goTypes = []any{
 	(*HostdProcessAuthorityStatus)(nil),          // 75: trainvm.v1.HostdProcessAuthorityStatus
 	(*GetHostAuthorityStatusRequest)(nil),        // 76: trainvm.v1.GetHostAuthorityStatusRequest
 	(*GetHostAuthorityStatusResponse)(nil),       // 77: trainvm.v1.GetHostAuthorityStatusResponse
-	nil,                                          // 78: trainvm.v1.MetricSample.LabelsEntry
-	nil,                                          // 79: trainvm.v1.ListRunsRequest.LabelsEntry
-	nil,                                          // 80: trainvm.v1.GetControlViewResponse.CatalogEntry
-	(*timestamppb.Timestamp)(nil),                // 81: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),                  // 82: google.protobuf.Duration
-	(*anypb.Any)(nil),                            // 83: google.protobuf.Any
+	(*GetReconciliationStatusRequest)(nil),       // 78: trainvm.v1.GetReconciliationStatusRequest
+	(*ReconciliationRunWait)(nil),                // 79: trainvm.v1.ReconciliationRunWait
+	(*GetReconciliationStatusResponse)(nil),      // 80: trainvm.v1.GetReconciliationStatusResponse
+	nil,                                          // 81: trainvm.v1.MetricSample.LabelsEntry
+	nil,                                          // 82: trainvm.v1.ListRunsRequest.LabelsEntry
+	nil,                                          // 83: trainvm.v1.GetControlViewResponse.CatalogEntry
+	(*timestamppb.Timestamp)(nil),                // 84: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),                  // 85: google.protobuf.Duration
+	(*anypb.Any)(nil),                            // 86: google.protobuf.Any
 }
 var file_trainvm_v1_trainvm_proto_depIdxs = []int32{
 	11,  // 0: trainvm.v1.Diagnostic.severity:type_name -> trainvm.v1.Diagnostic.Severity
 	26,  // 1: trainvm.v1.RunSummary.identity:type_name -> trainvm.v1.RunIdentity
 	0,   // 2: trainvm.v1.RunSummary.desired_state:type_name -> trainvm.v1.DesiredState
 	1,   // 3: trainvm.v1.RunSummary.observed_state:type_name -> trainvm.v1.ObservedState
-	81,  // 4: trainvm.v1.RunSummary.created_at:type_name -> google.protobuf.Timestamp
-	81,  // 5: trainvm.v1.RunSummary.updated_at:type_name -> google.protobuf.Timestamp
-	81,  // 6: trainvm.v1.RunSummary.last_heartbeat_at:type_name -> google.protobuf.Timestamp
+	84,  // 4: trainvm.v1.RunSummary.created_at:type_name -> google.protobuf.Timestamp
+	84,  // 5: trainvm.v1.RunSummary.updated_at:type_name -> google.protobuf.Timestamp
+	84,  // 6: trainvm.v1.RunSummary.last_heartbeat_at:type_name -> google.protobuf.Timestamp
 	24,  // 7: trainvm.v1.SubmitExperimentResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
 	26,  // 8: trainvm.v1.SubmitExperimentResponse.run:type_name -> trainvm.v1.RunIdentity
 	5,   // 9: trainvm.v1.AuthorRunUpdate.stage:type_name -> trainvm.v1.AuthorRunStage
 	24,  // 10: trainvm.v1.AuthorRunUpdate.diagnostics:type_name -> trainvm.v1.Diagnostic
 	26,  // 11: trainvm.v1.AuthorRunUpdate.run:type_name -> trainvm.v1.RunIdentity
 	24,  // 12: trainvm.v1.PlanDiffResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
-	82,  // 13: trainvm.v1.CancelCommand.graceful_timeout:type_name -> google.protobuf.Duration
+	85,  // 13: trainvm.v1.CancelCommand.graceful_timeout:type_name -> google.protobuf.Duration
 	25,  // 14: trainvm.v1.ControlAssignment.value:type_name -> trainvm.v1.ScalarValue
 	38,  // 15: trainvm.v1.ControlPatchCommand.assignments:type_name -> trainvm.v1.ControlAssignment
 	2,   // 16: trainvm.v1.ControlPatchCommand.apply_point:type_name -> trainvm.v1.ApplyPoint
@@ -7809,7 +8199,7 @@ var file_trainvm_v1_trainvm_proto_depIdxs = []int32{
 	13,  // 26: trainvm.v1.CheckpointCommandResult.status:type_name -> trainvm.v1.CheckpointCommandResult.Status
 	14,  // 27: trainvm.v1.LifecycleCommandResult.kind:type_name -> trainvm.v1.LifecycleCommandResult.Kind
 	15,  // 28: trainvm.v1.LifecycleCommandResult.status:type_name -> trainvm.v1.LifecycleCommandResult.Status
-	82,  // 29: trainvm.v1.LifecycleCommandResult.graceful_timeout:type_name -> google.protobuf.Duration
+	85,  // 29: trainvm.v1.LifecycleCommandResult.graceful_timeout:type_name -> google.protobuf.Duration
 	16,  // 30: trainvm.v1.RunCommandResponse.disposition:type_name -> trainvm.v1.RunCommandResponse.Disposition
 	27,  // 31: trainvm.v1.RunCommandResponse.run:type_name -> trainvm.v1.RunSummary
 	24,  // 32: trainvm.v1.RunCommandResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
@@ -7817,105 +8207,109 @@ var file_trainvm_v1_trainvm_proto_depIdxs = []int32{
 	43,  // 34: trainvm.v1.RunCommandResponse.checkpoint:type_name -> trainvm.v1.CheckpointCommandResult
 	44,  // 35: trainvm.v1.RunCommandResponse.lifecycle:type_name -> trainvm.v1.LifecycleCommandResult
 	3,   // 36: trainvm.v1.ArtifactManifest.kind:type_name -> trainvm.v1.ArtifactKind
-	81,  // 37: trainvm.v1.ArtifactManifest.published_at:type_name -> google.protobuf.Timestamp
-	81,  // 38: trainvm.v1.EventEnvelope.wall_time:type_name -> google.protobuf.Timestamp
-	83,  // 39: trainvm.v1.EventEnvelope.payload:type_name -> google.protobuf.Any
+	84,  // 37: trainvm.v1.ArtifactManifest.published_at:type_name -> google.protobuf.Timestamp
+	84,  // 38: trainvm.v1.EventEnvelope.wall_time:type_name -> google.protobuf.Timestamp
+	86,  // 39: trainvm.v1.EventEnvelope.payload:type_name -> google.protobuf.Any
 	25,  // 40: trainvm.v1.MetricSample.value:type_name -> trainvm.v1.ScalarValue
-	78,  // 41: trainvm.v1.MetricSample.labels:type_name -> trainvm.v1.MetricSample.LabelsEntry
-	81,  // 42: trainvm.v1.MetricSample.observed_at:type_name -> google.protobuf.Timestamp
-	81,  // 43: trainvm.v1.WorkerHeartbeat.observed_at:type_name -> google.protobuf.Timestamp
-	17,  // 44: trainvm.v1.WorkerExecutionPhaseRequest.phase:type_name -> trainvm.v1.WorkerExecutionPhaseRequest.Phase
-	17,  // 45: trainvm.v1.WorkerExecutionPhaseReceipt.phase:type_name -> trainvm.v1.WorkerExecutionPhaseRequest.Phase
-	18,  // 46: trainvm.v1.WorkerExecutionPhaseReceipt.disposition:type_name -> trainvm.v1.WorkerExecutionPhaseReceipt.Disposition
-	24,  // 47: trainvm.v1.WorkerExecutionPhaseReceipt.diagnostics:type_name -> trainvm.v1.Diagnostic
-	81,  // 48: trainvm.v1.WorkerExecutionPhaseReceipt.started_at:type_name -> google.protobuf.Timestamp
-	81,  // 49: trainvm.v1.WorkerExecutionPhaseReceipt.completed_at:type_name -> google.protobuf.Timestamp
-	19,  // 50: trainvm.v1.ControlPatchAcknowledgement.disposition:type_name -> trainvm.v1.ControlPatchAcknowledgement.Disposition
-	2,   // 51: trainvm.v1.ControlPatchAcknowledgement.apply_point:type_name -> trainvm.v1.ApplyPoint
-	38,  // 52: trainvm.v1.ControlPatchAcknowledgement.effective_values:type_name -> trainvm.v1.ControlAssignment
-	24,  // 53: trainvm.v1.ControlPatchAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
-	81,  // 54: trainvm.v1.ControlPatchAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
-	20,  // 55: trainvm.v1.CheckpointAcknowledgement.disposition:type_name -> trainvm.v1.CheckpointAcknowledgement.Disposition
-	24,  // 56: trainvm.v1.CheckpointAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
-	81,  // 57: trainvm.v1.CheckpointAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
-	21,  // 58: trainvm.v1.LifecycleAcknowledgement.kind:type_name -> trainvm.v1.LifecycleAcknowledgement.Kind
-	22,  // 59: trainvm.v1.LifecycleAcknowledgement.disposition:type_name -> trainvm.v1.LifecycleAcknowledgement.Disposition
-	24,  // 60: trainvm.v1.LifecycleAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
-	81,  // 61: trainvm.v1.LifecycleAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
-	49,  // 62: trainvm.v1.WorkerToController.hello:type_name -> trainvm.v1.WorkerHello
-	50,  // 63: trainvm.v1.WorkerToController.heartbeat:type_name -> trainvm.v1.WorkerHeartbeat
-	47,  // 64: trainvm.v1.WorkerToController.event:type_name -> trainvm.v1.EventEnvelope
-	48,  // 65: trainvm.v1.WorkerToController.metric:type_name -> trainvm.v1.MetricSample
-	46,  // 66: trainvm.v1.WorkerToController.artifact:type_name -> trainvm.v1.ArtifactManifest
-	53,  // 67: trainvm.v1.WorkerToController.control_ack:type_name -> trainvm.v1.ControlPatchAcknowledgement
-	54,  // 68: trainvm.v1.WorkerToController.checkpoint_ack:type_name -> trainvm.v1.CheckpointAcknowledgement
-	55,  // 69: trainvm.v1.WorkerToController.lifecycle_ack:type_name -> trainvm.v1.LifecycleAcknowledgement
-	52,  // 70: trainvm.v1.WorkerToController.phase_receipt:type_name -> trainvm.v1.WorkerExecutionPhaseReceipt
-	34,  // 71: trainvm.v1.WorkerCommand.pause:type_name -> trainvm.v1.PauseCommand
-	35,  // 72: trainvm.v1.WorkerCommand.resume:type_name -> trainvm.v1.ResumeCommand
-	36,  // 73: trainvm.v1.WorkerCommand.checkpoint:type_name -> trainvm.v1.CheckpointCommand
-	37,  // 74: trainvm.v1.WorkerCommand.cancel:type_name -> trainvm.v1.CancelCommand
-	39,  // 75: trainvm.v1.WorkerCommand.controls:type_name -> trainvm.v1.ControlPatchCommand
-	23,  // 76: trainvm.v1.WorkerWelcome.disposition:type_name -> trainvm.v1.WorkerWelcome.Disposition
-	51,  // 77: trainvm.v1.WorkerWelcome.execution_phase_requests:type_name -> trainvm.v1.WorkerExecutionPhaseRequest
-	1,   // 78: trainvm.v1.WorkerReceipt.observed_state:type_name -> trainvm.v1.ObservedState
-	57,  // 79: trainvm.v1.ControllerToWorker.command:type_name -> trainvm.v1.WorkerCommand
-	58,  // 80: trainvm.v1.ControllerToWorker.welcome:type_name -> trainvm.v1.WorkerWelcome
-	59,  // 81: trainvm.v1.ControllerToWorker.receipt:type_name -> trainvm.v1.WorkerReceipt
-	26,  // 82: trainvm.v1.GetCompiledPlanResponse.run:type_name -> trainvm.v1.RunIdentity
-	1,   // 83: trainvm.v1.ListRunsRequest.observed_states:type_name -> trainvm.v1.ObservedState
-	79,  // 84: trainvm.v1.ListRunsRequest.labels:type_name -> trainvm.v1.ListRunsRequest.LabelsEntry
-	27,  // 85: trainvm.v1.ListRunsResponse.runs:type_name -> trainvm.v1.RunSummary
-	4,   // 86: trainvm.v1.ControlDescriptor.type:type_name -> trainvm.v1.ControlType
-	25,  // 87: trainvm.v1.ControlDescriptor.default_value:type_name -> trainvm.v1.ScalarValue
-	25,  // 88: trainvm.v1.ControlDescriptor.values:type_name -> trainvm.v1.ScalarValue
-	2,   // 89: trainvm.v1.ControlDescriptor.apply_point:type_name -> trainvm.v1.ApplyPoint
-	2,   // 90: trainvm.v1.ControlCommandView.apply_point:type_name -> trainvm.v1.ApplyPoint
-	38,  // 91: trainvm.v1.ControlCommandView.assignments:type_name -> trainvm.v1.ControlAssignment
-	12,  // 92: trainvm.v1.ControlCommandView.status:type_name -> trainvm.v1.ControlCommandResult.Status
-	38,  // 93: trainvm.v1.ControlCommandView.effective_values:type_name -> trainvm.v1.ControlAssignment
-	24,  // 94: trainvm.v1.ControlCommandView.diagnostics:type_name -> trainvm.v1.Diagnostic
-	80,  // 95: trainvm.v1.GetControlViewResponse.catalog:type_name -> trainvm.v1.GetControlViewResponse.CatalogEntry
-	38,  // 96: trainvm.v1.GetControlViewResponse.effective_values:type_name -> trainvm.v1.ControlAssignment
-	69,  // 97: trainvm.v1.GetControlViewResponse.commands:type_name -> trainvm.v1.ControlCommandView
-	6,   // 98: trainvm.v1.HostdCoordinatorAuthorityStatus.lifecycle:type_name -> trainvm.v1.HostdLifecycle
-	9,   // 99: trainvm.v1.HostResourceFenceStatus.kind:type_name -> trainvm.v1.HostResourceKind
-	10,  // 100: trainvm.v1.HostResourceFenceStatus.vendor:type_name -> trainvm.v1.HostAcceleratorVendor
-	8,   // 101: trainvm.v1.HostdProcessAuthorityStatus.phase:type_name -> trainvm.v1.HostdProcessPhase
-	73,  // 102: trainvm.v1.GetHostAuthorityStatusResponse.coordinator:type_name -> trainvm.v1.HostdCoordinatorAuthorityStatus
-	7,   // 103: trainvm.v1.GetHostAuthorityStatusResponse.startup_phase:type_name -> trainvm.v1.HostdStartupPhase
-	74,  // 104: trainvm.v1.GetHostAuthorityStatusResponse.active_fences:type_name -> trainvm.v1.HostResourceFenceStatus
-	75,  // 105: trainvm.v1.GetHostAuthorityStatusResponse.active_processes:type_name -> trainvm.v1.HostdProcessAuthorityStatus
-	68,  // 106: trainvm.v1.GetControlViewResponse.CatalogEntry.value:type_name -> trainvm.v1.ControlDescriptor
-	28,  // 107: trainvm.v1.TrainVM.SubmitExperiment:input_type -> trainvm.v1.SubmitExperimentRequest
-	30,  // 108: trainvm.v1.TrainVM.AuthorRun:input_type -> trainvm.v1.AuthorRunRequest
-	32,  // 109: trainvm.v1.TrainVM.DiffPlan:input_type -> trainvm.v1.PlanDiffRequest
-	41,  // 110: trainvm.v1.TrainVM.CommandRun:input_type -> trainvm.v1.RunCommandRequest
-	61,  // 111: trainvm.v1.TrainVM.GetRun:input_type -> trainvm.v1.GetRunRequest
-	62,  // 112: trainvm.v1.TrainVM.GetCompiledPlan:input_type -> trainvm.v1.GetCompiledPlanRequest
-	64,  // 113: trainvm.v1.TrainVM.ListRuns:input_type -> trainvm.v1.ListRunsRequest
-	66,  // 114: trainvm.v1.TrainVM.WatchEvents:input_type -> trainvm.v1.WatchEventsRequest
-	67,  // 115: trainvm.v1.TrainVM.GetControlView:input_type -> trainvm.v1.GetControlViewRequest
-	71,  // 116: trainvm.v1.TrainVM.GetDescriptor:input_type -> trainvm.v1.DescriptorRequest
-	76,  // 117: trainvm.v1.TrainVM.GetHostAuthorityStatus:input_type -> trainvm.v1.GetHostAuthorityStatusRequest
-	56,  // 118: trainvm.v1.WorkerControl.Connect:input_type -> trainvm.v1.WorkerToController
-	29,  // 119: trainvm.v1.TrainVM.SubmitExperiment:output_type -> trainvm.v1.SubmitExperimentResponse
-	31,  // 120: trainvm.v1.TrainVM.AuthorRun:output_type -> trainvm.v1.AuthorRunUpdate
-	33,  // 121: trainvm.v1.TrainVM.DiffPlan:output_type -> trainvm.v1.PlanDiffResponse
-	45,  // 122: trainvm.v1.TrainVM.CommandRun:output_type -> trainvm.v1.RunCommandResponse
-	27,  // 123: trainvm.v1.TrainVM.GetRun:output_type -> trainvm.v1.RunSummary
-	63,  // 124: trainvm.v1.TrainVM.GetCompiledPlan:output_type -> trainvm.v1.GetCompiledPlanResponse
-	65,  // 125: trainvm.v1.TrainVM.ListRuns:output_type -> trainvm.v1.ListRunsResponse
-	47,  // 126: trainvm.v1.TrainVM.WatchEvents:output_type -> trainvm.v1.EventEnvelope
-	70,  // 127: trainvm.v1.TrainVM.GetControlView:output_type -> trainvm.v1.GetControlViewResponse
-	72,  // 128: trainvm.v1.TrainVM.GetDescriptor:output_type -> trainvm.v1.DescriptorResponse
-	77,  // 129: trainvm.v1.TrainVM.GetHostAuthorityStatus:output_type -> trainvm.v1.GetHostAuthorityStatusResponse
-	60,  // 130: trainvm.v1.WorkerControl.Connect:output_type -> trainvm.v1.ControllerToWorker
-	119, // [119:131] is the sub-list for method output_type
-	107, // [107:119] is the sub-list for method input_type
-	107, // [107:107] is the sub-list for extension type_name
-	107, // [107:107] is the sub-list for extension extendee
-	0,   // [0:107] is the sub-list for field type_name
+	81,  // 41: trainvm.v1.MetricSample.labels:type_name -> trainvm.v1.MetricSample.LabelsEntry
+	84,  // 42: trainvm.v1.MetricSample.observed_at:type_name -> google.protobuf.Timestamp
+	84,  // 43: trainvm.v1.WorkerHeartbeat.observed_at:type_name -> google.protobuf.Timestamp
+	17,  // 44: trainvm.v1.WorkerHeartbeat.execution_phase:type_name -> trainvm.v1.WorkerExecutionPhaseRequest.Phase
+	17,  // 45: trainvm.v1.WorkerExecutionPhaseRequest.phase:type_name -> trainvm.v1.WorkerExecutionPhaseRequest.Phase
+	17,  // 46: trainvm.v1.WorkerExecutionPhaseReceipt.phase:type_name -> trainvm.v1.WorkerExecutionPhaseRequest.Phase
+	18,  // 47: trainvm.v1.WorkerExecutionPhaseReceipt.disposition:type_name -> trainvm.v1.WorkerExecutionPhaseReceipt.Disposition
+	24,  // 48: trainvm.v1.WorkerExecutionPhaseReceipt.diagnostics:type_name -> trainvm.v1.Diagnostic
+	84,  // 49: trainvm.v1.WorkerExecutionPhaseReceipt.started_at:type_name -> google.protobuf.Timestamp
+	84,  // 50: trainvm.v1.WorkerExecutionPhaseReceipt.completed_at:type_name -> google.protobuf.Timestamp
+	19,  // 51: trainvm.v1.ControlPatchAcknowledgement.disposition:type_name -> trainvm.v1.ControlPatchAcknowledgement.Disposition
+	2,   // 52: trainvm.v1.ControlPatchAcknowledgement.apply_point:type_name -> trainvm.v1.ApplyPoint
+	38,  // 53: trainvm.v1.ControlPatchAcknowledgement.effective_values:type_name -> trainvm.v1.ControlAssignment
+	24,  // 54: trainvm.v1.ControlPatchAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
+	84,  // 55: trainvm.v1.ControlPatchAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
+	20,  // 56: trainvm.v1.CheckpointAcknowledgement.disposition:type_name -> trainvm.v1.CheckpointAcknowledgement.Disposition
+	24,  // 57: trainvm.v1.CheckpointAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
+	84,  // 58: trainvm.v1.CheckpointAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
+	21,  // 59: trainvm.v1.LifecycleAcknowledgement.kind:type_name -> trainvm.v1.LifecycleAcknowledgement.Kind
+	22,  // 60: trainvm.v1.LifecycleAcknowledgement.disposition:type_name -> trainvm.v1.LifecycleAcknowledgement.Disposition
+	24,  // 61: trainvm.v1.LifecycleAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
+	84,  // 62: trainvm.v1.LifecycleAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
+	49,  // 63: trainvm.v1.WorkerToController.hello:type_name -> trainvm.v1.WorkerHello
+	50,  // 64: trainvm.v1.WorkerToController.heartbeat:type_name -> trainvm.v1.WorkerHeartbeat
+	47,  // 65: trainvm.v1.WorkerToController.event:type_name -> trainvm.v1.EventEnvelope
+	48,  // 66: trainvm.v1.WorkerToController.metric:type_name -> trainvm.v1.MetricSample
+	46,  // 67: trainvm.v1.WorkerToController.artifact:type_name -> trainvm.v1.ArtifactManifest
+	53,  // 68: trainvm.v1.WorkerToController.control_ack:type_name -> trainvm.v1.ControlPatchAcknowledgement
+	54,  // 69: trainvm.v1.WorkerToController.checkpoint_ack:type_name -> trainvm.v1.CheckpointAcknowledgement
+	55,  // 70: trainvm.v1.WorkerToController.lifecycle_ack:type_name -> trainvm.v1.LifecycleAcknowledgement
+	52,  // 71: trainvm.v1.WorkerToController.phase_receipt:type_name -> trainvm.v1.WorkerExecutionPhaseReceipt
+	34,  // 72: trainvm.v1.WorkerCommand.pause:type_name -> trainvm.v1.PauseCommand
+	35,  // 73: trainvm.v1.WorkerCommand.resume:type_name -> trainvm.v1.ResumeCommand
+	36,  // 74: trainvm.v1.WorkerCommand.checkpoint:type_name -> trainvm.v1.CheckpointCommand
+	37,  // 75: trainvm.v1.WorkerCommand.cancel:type_name -> trainvm.v1.CancelCommand
+	39,  // 76: trainvm.v1.WorkerCommand.controls:type_name -> trainvm.v1.ControlPatchCommand
+	23,  // 77: trainvm.v1.WorkerWelcome.disposition:type_name -> trainvm.v1.WorkerWelcome.Disposition
+	51,  // 78: trainvm.v1.WorkerWelcome.execution_phase_requests:type_name -> trainvm.v1.WorkerExecutionPhaseRequest
+	1,   // 79: trainvm.v1.WorkerReceipt.observed_state:type_name -> trainvm.v1.ObservedState
+	57,  // 80: trainvm.v1.ControllerToWorker.command:type_name -> trainvm.v1.WorkerCommand
+	58,  // 81: trainvm.v1.ControllerToWorker.welcome:type_name -> trainvm.v1.WorkerWelcome
+	59,  // 82: trainvm.v1.ControllerToWorker.receipt:type_name -> trainvm.v1.WorkerReceipt
+	26,  // 83: trainvm.v1.GetCompiledPlanResponse.run:type_name -> trainvm.v1.RunIdentity
+	1,   // 84: trainvm.v1.ListRunsRequest.observed_states:type_name -> trainvm.v1.ObservedState
+	82,  // 85: trainvm.v1.ListRunsRequest.labels:type_name -> trainvm.v1.ListRunsRequest.LabelsEntry
+	27,  // 86: trainvm.v1.ListRunsResponse.runs:type_name -> trainvm.v1.RunSummary
+	4,   // 87: trainvm.v1.ControlDescriptor.type:type_name -> trainvm.v1.ControlType
+	25,  // 88: trainvm.v1.ControlDescriptor.default_value:type_name -> trainvm.v1.ScalarValue
+	25,  // 89: trainvm.v1.ControlDescriptor.values:type_name -> trainvm.v1.ScalarValue
+	2,   // 90: trainvm.v1.ControlDescriptor.apply_point:type_name -> trainvm.v1.ApplyPoint
+	2,   // 91: trainvm.v1.ControlCommandView.apply_point:type_name -> trainvm.v1.ApplyPoint
+	38,  // 92: trainvm.v1.ControlCommandView.assignments:type_name -> trainvm.v1.ControlAssignment
+	12,  // 93: trainvm.v1.ControlCommandView.status:type_name -> trainvm.v1.ControlCommandResult.Status
+	38,  // 94: trainvm.v1.ControlCommandView.effective_values:type_name -> trainvm.v1.ControlAssignment
+	24,  // 95: trainvm.v1.ControlCommandView.diagnostics:type_name -> trainvm.v1.Diagnostic
+	83,  // 96: trainvm.v1.GetControlViewResponse.catalog:type_name -> trainvm.v1.GetControlViewResponse.CatalogEntry
+	38,  // 97: trainvm.v1.GetControlViewResponse.effective_values:type_name -> trainvm.v1.ControlAssignment
+	69,  // 98: trainvm.v1.GetControlViewResponse.commands:type_name -> trainvm.v1.ControlCommandView
+	6,   // 99: trainvm.v1.HostdCoordinatorAuthorityStatus.lifecycle:type_name -> trainvm.v1.HostdLifecycle
+	9,   // 100: trainvm.v1.HostResourceFenceStatus.kind:type_name -> trainvm.v1.HostResourceKind
+	10,  // 101: trainvm.v1.HostResourceFenceStatus.vendor:type_name -> trainvm.v1.HostAcceleratorVendor
+	8,   // 102: trainvm.v1.HostdProcessAuthorityStatus.phase:type_name -> trainvm.v1.HostdProcessPhase
+	73,  // 103: trainvm.v1.GetHostAuthorityStatusResponse.coordinator:type_name -> trainvm.v1.HostdCoordinatorAuthorityStatus
+	7,   // 104: trainvm.v1.GetHostAuthorityStatusResponse.startup_phase:type_name -> trainvm.v1.HostdStartupPhase
+	74,  // 105: trainvm.v1.GetHostAuthorityStatusResponse.active_fences:type_name -> trainvm.v1.HostResourceFenceStatus
+	75,  // 106: trainvm.v1.GetHostAuthorityStatusResponse.active_processes:type_name -> trainvm.v1.HostdProcessAuthorityStatus
+	79,  // 107: trainvm.v1.GetReconciliationStatusResponse.waits:type_name -> trainvm.v1.ReconciliationRunWait
+	68,  // 108: trainvm.v1.GetControlViewResponse.CatalogEntry.value:type_name -> trainvm.v1.ControlDescriptor
+	28,  // 109: trainvm.v1.TrainVM.SubmitExperiment:input_type -> trainvm.v1.SubmitExperimentRequest
+	30,  // 110: trainvm.v1.TrainVM.AuthorRun:input_type -> trainvm.v1.AuthorRunRequest
+	32,  // 111: trainvm.v1.TrainVM.DiffPlan:input_type -> trainvm.v1.PlanDiffRequest
+	41,  // 112: trainvm.v1.TrainVM.CommandRun:input_type -> trainvm.v1.RunCommandRequest
+	61,  // 113: trainvm.v1.TrainVM.GetRun:input_type -> trainvm.v1.GetRunRequest
+	62,  // 114: trainvm.v1.TrainVM.GetCompiledPlan:input_type -> trainvm.v1.GetCompiledPlanRequest
+	64,  // 115: trainvm.v1.TrainVM.ListRuns:input_type -> trainvm.v1.ListRunsRequest
+	66,  // 116: trainvm.v1.TrainVM.WatchEvents:input_type -> trainvm.v1.WatchEventsRequest
+	67,  // 117: trainvm.v1.TrainVM.GetControlView:input_type -> trainvm.v1.GetControlViewRequest
+	71,  // 118: trainvm.v1.TrainVM.GetDescriptor:input_type -> trainvm.v1.DescriptorRequest
+	76,  // 119: trainvm.v1.TrainVM.GetHostAuthorityStatus:input_type -> trainvm.v1.GetHostAuthorityStatusRequest
+	78,  // 120: trainvm.v1.TrainVM.GetReconciliationStatus:input_type -> trainvm.v1.GetReconciliationStatusRequest
+	56,  // 121: trainvm.v1.WorkerControl.Connect:input_type -> trainvm.v1.WorkerToController
+	29,  // 122: trainvm.v1.TrainVM.SubmitExperiment:output_type -> trainvm.v1.SubmitExperimentResponse
+	31,  // 123: trainvm.v1.TrainVM.AuthorRun:output_type -> trainvm.v1.AuthorRunUpdate
+	33,  // 124: trainvm.v1.TrainVM.DiffPlan:output_type -> trainvm.v1.PlanDiffResponse
+	45,  // 125: trainvm.v1.TrainVM.CommandRun:output_type -> trainvm.v1.RunCommandResponse
+	27,  // 126: trainvm.v1.TrainVM.GetRun:output_type -> trainvm.v1.RunSummary
+	63,  // 127: trainvm.v1.TrainVM.GetCompiledPlan:output_type -> trainvm.v1.GetCompiledPlanResponse
+	65,  // 128: trainvm.v1.TrainVM.ListRuns:output_type -> trainvm.v1.ListRunsResponse
+	47,  // 129: trainvm.v1.TrainVM.WatchEvents:output_type -> trainvm.v1.EventEnvelope
+	70,  // 130: trainvm.v1.TrainVM.GetControlView:output_type -> trainvm.v1.GetControlViewResponse
+	72,  // 131: trainvm.v1.TrainVM.GetDescriptor:output_type -> trainvm.v1.DescriptorResponse
+	77,  // 132: trainvm.v1.TrainVM.GetHostAuthorityStatus:output_type -> trainvm.v1.GetHostAuthorityStatusResponse
+	80,  // 133: trainvm.v1.TrainVM.GetReconciliationStatus:output_type -> trainvm.v1.GetReconciliationStatusResponse
+	60,  // 134: trainvm.v1.WorkerControl.Connect:output_type -> trainvm.v1.ControllerToWorker
+	122, // [122:135] is the sub-list for method output_type
+	109, // [109:122] is the sub-list for method input_type
+	109, // [109:109] is the sub-list for extension type_name
+	109, // [109:109] is the sub-list for extension extendee
+	0,   // [0:109] is the sub-list for field type_name
 }
 
 func init() { file_trainvm_v1_trainvm_proto_init() }
@@ -7937,6 +8331,7 @@ func file_trainvm_v1_trainvm_proto_init() {
 		(*RunCommandRequest_Controls)(nil),
 		(*RunCommandRequest_AdoptPlan)(nil),
 	}
+	file_trainvm_v1_trainvm_proto_msgTypes[22].OneofWrappers = []any{}
 	file_trainvm_v1_trainvm_proto_msgTypes[23].OneofWrappers = []any{}
 	file_trainvm_v1_trainvm_proto_msgTypes[27].OneofWrappers = []any{}
 	file_trainvm_v1_trainvm_proto_msgTypes[32].OneofWrappers = []any{
@@ -7972,7 +8367,7 @@ func file_trainvm_v1_trainvm_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_trainvm_v1_trainvm_proto_rawDesc), len(file_trainvm_v1_trainvm_proto_rawDesc)),
 			NumEnums:      24,
-			NumMessages:   57,
+			NumMessages:   60,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

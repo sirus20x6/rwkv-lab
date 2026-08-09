@@ -842,3 +842,162 @@ def test_resumed_eval_examples_ack_latches_exact_attempt_baseline() -> None:
     assert controls.pre_optimizer_step(8, lambda *_: None) == ()
     session.finish("node.completed", {"ok": True}, optimizer_step=7)
     session.close()
+
+
+def test_cancellation_is_observable_to_a_phase_without_stealing_the_command() -> None:
+    controller = FakeController(
+        send_cancel=True,
+        execution={
+            "component": "trainer",
+            "operation": "train",
+            "warmup": {"enabled": True, "steps": 3},
+        },
+    )
+    session = WorkerSession(
+        load_worker_bootstrap(bootstrap_document()), connector=controller
+    )
+    session.start()
+    assert controller.control_sent.wait(2)
+    (command,) = wait_for_commands(session)
+
+    # The phase runtime sees the cancellation, and the adapter still receives
+    # the command it owes a lifecycle acknowledgement for.
+    assert command.kind is CommandKind.CANCEL
+    assert session.execution_phase_cancellation == "operator stop"
+
+    warmup = session.execution_phase_requests[0]
+    fingerprint = state_fingerprint({"model": "m1", "optimizer": "o1"})
+    assert (
+        session.execution_phase_receipt(
+            warmup,
+            ExecutionPhaseDisposition.CANCELLED,
+            steps_executed=1,
+            state_fingerprint_before=fingerprint,
+            state_fingerprint_after=fingerprint,
+            started_at_ns=10,
+            completed_at_ns=20,
+            diagnostics=(
+                (
+                    wire.Diagnostic.SEVERITY_WARNING,
+                    "execution.phase_cancelled",
+                    "/spec/execution/warmup",
+                    "operator stop",
+                    "the receipt records how far the phase got",
+                ),
+            ),
+            wait=True,
+        )
+        == 1
+    )
+    session.finish("node.completed", {"ok": True}, optimizer_step=0)
+    phase_receipt = controller.received[-2].phase_receipt
+    assert (
+        phase_receipt.disposition
+        == wire.WorkerExecutionPhaseReceipt.DISPOSITION_CANCELLED
+    )
+    assert phase_receipt.steps_executed == 1
+    session.close()
+
+
+def test_a_cancelled_receipt_must_stay_within_its_declared_bound() -> None:
+    controller = FakeController(
+        execution={
+            "component": "trainer",
+            "operation": "train",
+            "warmup": {"enabled": True, "steps": 3},
+        }
+    )
+    session = WorkerSession(
+        load_worker_bootstrap(bootstrap_document()), connector=controller
+    )
+    session.start()
+    warmup = session.execution_phase_requests[0]
+    fingerprint = state_fingerprint({"model": "m1"})
+    diagnostics = (
+        (
+            wire.Diagnostic.SEVERITY_WARNING,
+            "execution.phase_cancelled",
+            "/spec/execution/warmup",
+            "operator stop",
+            "help",
+        ),
+    )
+    with pytest.raises(WorkerSessionError, match="inconsistent"):
+        session.execution_phase_receipt(
+            warmup,
+            ExecutionPhaseDisposition.CANCELLED,
+            steps_executed=4,
+            state_fingerprint_before=fingerprint,
+            state_fingerprint_after=fingerprint,
+            started_at_ns=10,
+            completed_at_ns=20,
+            diagnostics=diagnostics,
+        )
+    # Cancelling is as disposable as completing: the trajectory must be intact.
+    with pytest.raises(WorkerSessionError, match="inconsistent"):
+        session.execution_phase_receipt(
+            warmup,
+            ExecutionPhaseDisposition.CANCELLED,
+            steps_executed=1,
+            state_fingerprint_before=fingerprint,
+            state_fingerprint_after=state_fingerprint({"model": "m2"}),
+            started_at_ns=10,
+            completed_at_ns=20,
+            diagnostics=diagnostics,
+        )
+    # And it has to say what stopped it.
+    with pytest.raises(WorkerSessionError, match="inconsistent"):
+        session.execution_phase_receipt(
+            warmup,
+            ExecutionPhaseDisposition.CANCELLED,
+            steps_executed=1,
+            state_fingerprint_before=fingerprint,
+            state_fingerprint_after=fingerprint,
+            started_at_ns=10,
+            completed_at_ns=20,
+        )
+    session.close()
+
+
+def test_heartbeat_execution_phase_is_typed_and_bound_to_a_request() -> None:
+    controller = FakeController(
+        execution={
+            "component": "trainer",
+            "operation": "train",
+            "compile": {"enabled": True},
+            "warmup": {"enabled": False},
+        }
+    )
+    session = WorkerSession(
+        load_worker_bootstrap(bootstrap_document()), connector=controller
+    )
+    session.start()
+
+    assert (
+        session.heartbeat(
+            0, "compile", execution_phase=ExecutionPhase.COMPILE, wait=True
+        )
+        == 1
+    )
+    heartbeat = controller.received[-1].heartbeat
+    assert (
+        heartbeat.execution_phase
+        == wire.WorkerExecutionPhaseRequest.PHASE_COMPILE
+    )
+
+    # A label alone may not claim a phase.
+    with pytest.raises(WorkerSessionError, match="impersonates"):
+        session.heartbeat(0, "compile")
+    with pytest.raises(WorkerSessionError, match="impersonates"):
+        session.heartbeat(0, "warmup", execution_phase=ExecutionPhase.COMPILE)
+    # A declared-but-disabled phase was never requested of this worker.
+    with pytest.raises(WorkerSessionError, match="did not request"):
+        session.heartbeat(0, "warming", execution_phase=ExecutionPhase.WARMUP)
+
+    # Outside a phase the label stays free text and the typed field is unset.
+    assert session.heartbeat(1, "verifying_inputs", wait=True) == 2
+    assert (
+        controller.received[-1].heartbeat.execution_phase
+        == wire.WorkerExecutionPhaseRequest.PHASE_UNSPECIFIED
+    )
+    session.close()

@@ -300,6 +300,12 @@ func optimizerMetricEvent(sequence, step uint64) Event {
 }
 
 func executionPhaseEvent(sequence uint64, disposition string) Event {
+	return executionPhaseEventWith(sequence, disposition, 2, "[]")
+}
+
+func executionPhaseEventWith(
+	sequence uint64, disposition string, stepsExecuted uint64, diagnostics string,
+) Event {
 	fingerprint := "sha256:" + strings.Repeat("a", 64)
 	return Event{
 		Sequence: sequence, EventID: "phase", RunID: "run-1", NodeID: "train",
@@ -307,10 +313,10 @@ func executionPhaseEvent(sequence uint64, disposition string) Event {
 		EventType: "worker.execution_phase_receipted", WallTimeNS: 3_000,
 		Payload: json.RawMessage(fmt.Sprintf(`{
 			"phase":"warmup","enabled":true,"requested_steps":2,
-			"request_digest":%q,"disposition":%q,"steps_executed":2,
+			"request_digest":%q,"disposition":%q,"steps_executed":%d,
 			"state_fingerprint_before":%q,"state_fingerprint_after":%q,
-			"started_at_ns":2000,"completed_at_ns":3000,"diagnostics":[]
-		}`, fingerprint, disposition, fingerprint, fingerprint)),
+			"started_at_ns":2000,"completed_at_ns":3000,"diagnostics":%s
+		}`, fingerprint, disposition, stepsExecuted, fingerprint, fingerprint, diagnostics)),
 	}
 }
 
@@ -591,5 +597,65 @@ func TestTelemetrySnapshotUsesOnePathAcrossRepresentativeFamiliesAndStatelessNod
 				t.Fatalf("family-neutral projection failed: %#v found=%v err=%v", snapshot, found, err)
 			}
 		})
+	}
+}
+
+func TestCancelledExecutionPhaseIsProjectedWithinItsBound(t *testing.T) {
+	cancelled := `[{"severity":"warning","code":"execution.phase_cancelled",
+		"document_path":"/spec/execution/warmup","message":"operator stop","help":"h"}]`
+	point, err := executionPhaseReceiptFromEvent(
+		executionPhaseEventWith(5, "cancelled", 1, cancelled))
+	if err != nil || point.Disposition != "cancelled" || point.StepsExecuted != 1 {
+		t.Fatalf("valid cancelled receipt was not projected: %#v err=%v", point, err)
+	}
+
+	// A cancellation is bounded, self-describing, restores the trajectory, and
+	// cannot apply to a phase that was never enabled.
+	malformed := []Event{
+		executionPhaseEventWith(5, "cancelled", 3, cancelled),
+		executionPhaseEventWith(5, "cancelled", 1, "[]"),
+	}
+	moved := executionPhaseEventWith(5, "cancelled", 1, cancelled)
+	moved.Payload = json.RawMessage(strings.Replace(string(moved.Payload),
+		`"state_fingerprint_after":"sha256:`+strings.Repeat("a", 64),
+		`"state_fingerprint_after":"sha256:`+strings.Repeat("b", 64), 1))
+	disabled := executionPhaseEventWith(5, "cancelled", 1, cancelled)
+	disabled.Payload = json.RawMessage(strings.Replace(string(disabled.Payload),
+		`"enabled":true`, `"enabled":false`, 1))
+	malformed = append(malformed, moved, disabled)
+	for index, event := range malformed {
+		if _, err := executionPhaseReceiptFromEvent(event); err == nil {
+			t.Fatalf("malformed cancelled receipt %d unexpectedly accepted", index)
+		}
+	}
+}
+
+func TestHeartbeatExecutionPhaseIsTypedAndCannotBeImpersonated(t *testing.T) {
+	step := uint64(8)
+	base := Event{
+		Sequence: 1, EventID: "heartbeat", RunID: "run-1", NodeID: "train",
+		AttemptID: "train@1", WorkerSequence: 1, EventType: "worker.heartbeat",
+		WallTimeNS: 1_000, OptimizerStep: &step,
+		Payload: json.RawMessage(
+			`{"phase":"compile","execution_phase":"compile","observed_at_ns":900}`),
+	}
+	point, err := heartbeatFromEvent(base)
+	if err != nil || point.ExecutionPhase != "compile" {
+		t.Fatalf("typed heartbeat was not projected: %#v err=%v", point, err)
+	}
+
+	malformed := []Event{base, base, base}
+	// A free-text label may not claim a phase the typed field does not name.
+	malformed[0].Payload = json.RawMessage(
+		`{"phase":"compile","execution_phase":"","observed_at_ns":900}`)
+	malformed[1].Payload = json.RawMessage(
+		`{"phase":"warmup","execution_phase":"compile","observed_at_ns":900}`)
+	// And the typed field itself is a closed set.
+	malformed[2].Payload = json.RawMessage(
+		`{"phase":"train","execution_phase":"qualify","observed_at_ns":900}`)
+	for index, event := range malformed {
+		if _, err := heartbeatFromEvent(event); err == nil {
+			t.Fatalf("malformed typed heartbeat %d unexpectedly accepted", index)
+		}
 	}
 }

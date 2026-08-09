@@ -423,8 +423,16 @@ message WorkerHello {
 message WorkerHeartbeat {
   uint64 worker_sequence = 1;
   uint64 optimizer_step = 2;
+  // Free-text progress label for operators.  It is descriptive only: the
+  // authority never routes on it, and it may not impersonate one of the typed
+  // execution phases below.
   string phase = 3;
   google.protobuf.Timestamp observed_at = 4;
+  // Which authority-issued execution phase this heartbeat belongs to, or
+  // PHASE_UNSPECIFIED outside a phase.  The authority accepts a typed value
+  // only when the active attempt's immutable requests carry that phase and it
+  // is enabled, so a worker cannot claim work the authority never requested.
+  WorkerExecutionPhaseRequest.Phase execution_phase = 5;
 }
 
 // One immutable execution phase selected by the authority from the compiled
@@ -453,6 +461,12 @@ message WorkerExecutionPhaseReceipt {
     DISPOSITION_COMPLETED = 1;
     DISPOSITION_SKIPPED = 2;
     DISPOSITION_FAILED = 3;
+    // The worker observed a controller cancellation part-way through an
+    // enabled phase and stopped at a step boundary.  Distinct from FAILED
+    // because nothing went wrong: the trajectory is still restored, so the
+    // before/after fingerprints must still match, and steps_executed records
+    // how far the bounded phase actually got.
+    DISPOSITION_CANCELLED = 4;
   }
 
   WorkerExecutionPhaseRequest.Phase phase = 1;

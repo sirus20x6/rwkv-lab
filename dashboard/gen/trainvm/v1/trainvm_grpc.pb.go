@@ -19,17 +19,18 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	TrainVM_SubmitExperiment_FullMethodName       = "/trainvm.v1.TrainVM/SubmitExperiment"
-	TrainVM_AuthorRun_FullMethodName              = "/trainvm.v1.TrainVM/AuthorRun"
-	TrainVM_DiffPlan_FullMethodName               = "/trainvm.v1.TrainVM/DiffPlan"
-	TrainVM_CommandRun_FullMethodName             = "/trainvm.v1.TrainVM/CommandRun"
-	TrainVM_GetRun_FullMethodName                 = "/trainvm.v1.TrainVM/GetRun"
-	TrainVM_GetCompiledPlan_FullMethodName        = "/trainvm.v1.TrainVM/GetCompiledPlan"
-	TrainVM_ListRuns_FullMethodName               = "/trainvm.v1.TrainVM/ListRuns"
-	TrainVM_WatchEvents_FullMethodName            = "/trainvm.v1.TrainVM/WatchEvents"
-	TrainVM_GetControlView_FullMethodName         = "/trainvm.v1.TrainVM/GetControlView"
-	TrainVM_GetDescriptor_FullMethodName          = "/trainvm.v1.TrainVM/GetDescriptor"
-	TrainVM_GetHostAuthorityStatus_FullMethodName = "/trainvm.v1.TrainVM/GetHostAuthorityStatus"
+	TrainVM_SubmitExperiment_FullMethodName        = "/trainvm.v1.TrainVM/SubmitExperiment"
+	TrainVM_AuthorRun_FullMethodName               = "/trainvm.v1.TrainVM/AuthorRun"
+	TrainVM_DiffPlan_FullMethodName                = "/trainvm.v1.TrainVM/DiffPlan"
+	TrainVM_CommandRun_FullMethodName              = "/trainvm.v1.TrainVM/CommandRun"
+	TrainVM_GetRun_FullMethodName                  = "/trainvm.v1.TrainVM/GetRun"
+	TrainVM_GetCompiledPlan_FullMethodName         = "/trainvm.v1.TrainVM/GetCompiledPlan"
+	TrainVM_ListRuns_FullMethodName                = "/trainvm.v1.TrainVM/ListRuns"
+	TrainVM_WatchEvents_FullMethodName             = "/trainvm.v1.TrainVM/WatchEvents"
+	TrainVM_GetControlView_FullMethodName          = "/trainvm.v1.TrainVM/GetControlView"
+	TrainVM_GetDescriptor_FullMethodName           = "/trainvm.v1.TrainVM/GetDescriptor"
+	TrainVM_GetHostAuthorityStatus_FullMethodName  = "/trainvm.v1.TrainVM/GetHostAuthorityStatus"
+	TrainVM_GetReconciliationStatus_FullMethodName = "/trainvm.v1.TrainVM/GetReconciliationStatus"
 )
 
 // TrainVMClient is the client API for TrainVM service.
@@ -47,6 +48,10 @@ type TrainVMClient interface {
 	GetControlView(ctx context.Context, in *GetControlViewRequest, opts ...grpc.CallOption) (*GetControlViewResponse, error)
 	GetDescriptor(ctx context.Context, in *DescriptorRequest, opts ...grpc.CallOption) (*DescriptorResponse, error)
 	GetHostAuthorityStatus(ctx context.Context, in *GetHostAuthorityStatusRequest, opts ...grpc.CallOption) (*GetHostAuthorityStatusResponse, error)
+	// Deliberately not folded into GetHostAuthorityStatus: that call fails closed
+	// when no hostd is configured, and supervisor telemetry has to be readable
+	// exactly when the host authority is missing or poisoned.
+	GetReconciliationStatus(ctx context.Context, in *GetReconciliationStatusRequest, opts ...grpc.CallOption) (*GetReconciliationStatusResponse, error)
 }
 
 type trainVMClient struct {
@@ -185,6 +190,16 @@ func (c *trainVMClient) GetHostAuthorityStatus(ctx context.Context, in *GetHostA
 	return out, nil
 }
 
+func (c *trainVMClient) GetReconciliationStatus(ctx context.Context, in *GetReconciliationStatusRequest, opts ...grpc.CallOption) (*GetReconciliationStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetReconciliationStatusResponse)
+	err := c.cc.Invoke(ctx, TrainVM_GetReconciliationStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // TrainVMServer is the server API for TrainVM service.
 // All implementations must embed UnimplementedTrainVMServer
 // for forward compatibility.
@@ -200,6 +215,10 @@ type TrainVMServer interface {
 	GetControlView(context.Context, *GetControlViewRequest) (*GetControlViewResponse, error)
 	GetDescriptor(context.Context, *DescriptorRequest) (*DescriptorResponse, error)
 	GetHostAuthorityStatus(context.Context, *GetHostAuthorityStatusRequest) (*GetHostAuthorityStatusResponse, error)
+	// Deliberately not folded into GetHostAuthorityStatus: that call fails closed
+	// when no hostd is configured, and supervisor telemetry has to be readable
+	// exactly when the host authority is missing or poisoned.
+	GetReconciliationStatus(context.Context, *GetReconciliationStatusRequest) (*GetReconciliationStatusResponse, error)
 	mustEmbedUnimplementedTrainVMServer()
 }
 
@@ -242,6 +261,9 @@ func (UnimplementedTrainVMServer) GetDescriptor(context.Context, *DescriptorRequ
 }
 func (UnimplementedTrainVMServer) GetHostAuthorityStatus(context.Context, *GetHostAuthorityStatusRequest) (*GetHostAuthorityStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetHostAuthorityStatus not implemented")
+}
+func (UnimplementedTrainVMServer) GetReconciliationStatus(context.Context, *GetReconciliationStatusRequest) (*GetReconciliationStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetReconciliationStatus not implemented")
 }
 func (UnimplementedTrainVMServer) mustEmbedUnimplementedTrainVMServer() {}
 func (UnimplementedTrainVMServer) testEmbeddedByValue()                 {}
@@ -448,6 +470,24 @@ func _TrainVM_GetHostAuthorityStatus_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _TrainVM_GetReconciliationStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetReconciliationStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TrainVMServer).GetReconciliationStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TrainVM_GetReconciliationStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TrainVMServer).GetReconciliationStatus(ctx, req.(*GetReconciliationStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // TrainVM_ServiceDesc is the grpc.ServiceDesc for TrainVM service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -490,6 +530,10 @@ var TrainVM_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetHostAuthorityStatus",
 			Handler:    _TrainVM_GetHostAuthorityStatus_Handler,
+		},
+		{
+			MethodName: "GetReconciliationStatus",
+			Handler:    _TrainVM_GetReconciliationStatus_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -107,7 +107,12 @@ class FakeSession:
         return len(self.lifecycle_acknowledgements)
 
     def heartbeat(
-        self, optimizer_step: int, phase: str, *, wait: bool = False
+        self,
+        optimizer_step: int,
+        phase: str,
+        *,
+        execution_phase: object = None,
+        wait: bool = False,
     ) -> int:
         assert wait is True
         self.heartbeats.append((optimizer_step, phase))

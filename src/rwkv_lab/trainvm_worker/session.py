@@ -32,6 +32,11 @@ from .invocation import WorkerInvocation, load_worker_invocation
 
 MAXIMUM_WORKER_MESSAGE_BYTES = 64 * 1024
 
+_WIRE_HEARTBEAT_PHASE = {
+    ExecutionPhase.COMPILE: wire.WorkerExecutionPhaseRequest.PHASE_COMPILE,
+    ExecutionPhase.WARMUP: wire.WorkerExecutionPhaseRequest.PHASE_WARMUP,
+}
+
 
 class WorkerSessionError(RuntimeError):
     pass
@@ -216,6 +221,7 @@ class WorkerSession:
         self._receipt: WorkerReceipt | None = None
         self._error: BaseException | None = None
         self._closed = False
+        self._cancellation: str | None = None
         self._next_worker_sequence = 1
         self._acknowledged_worker_sequence = 0
         self._last_controller_sequence = bootstrap.last_acked_controller_sequence
@@ -264,6 +270,11 @@ class WorkerSession:
             if self._welcome is None:
                 raise WorkerSessionError("worker session has no Welcome phase requests")
             return self._execution_phase_requests
+
+    @property
+    def execution_phase_cancellation(self) -> str | None:
+        with self._condition:
+            return self._cancellation
 
     @property
     def acknowledged_worker_sequence(self) -> int:
@@ -434,6 +445,16 @@ class WorkerSession:
             if decoded.controller_sequence <= self._last_controller_sequence:
                 raise WorkerSessionError("controller command sequence is stale")
             self._last_controller_sequence = decoded.controller_sequence
+            if decoded.kind is CommandKind.CANCEL:
+                # Observed here, not in poll_commands, and the command is still
+                # queued: an execution phase must be able to see a cancellation
+                # while the adapter is inside a blocking phase and has not
+                # reached its next poll point, without the phase stealing the
+                # command the adapter owes a lifecycle acknowledgement for.
+                # Sticky, because a cancellation is never withdrawn.
+                self._cancellation = (
+                    decoded.reason or "the controller cancelled this attempt"
+                )
             self._commands.put(decoded)
             self._condition.notify_all()
 
@@ -499,7 +520,40 @@ class WorkerSession:
                     )
                 self._condition.wait(remaining)
 
-    def heartbeat(self, optimizer_step: int, phase: str, *, wait: bool = False) -> int:
+    def heartbeat(
+        self,
+        optimizer_step: int,
+        phase: str,
+        *,
+        execution_phase: ExecutionPhase | None = None,
+        wait: bool = False,
+    ) -> int:
+        """Publish one liveness heartbeat.
+
+        ``phase`` stays a free-text operator label.  ``execution_phase`` is the
+        typed one: pass it while inside an authority-requested compile or
+        warmup so the journal binds the heartbeat to that request.  The
+        authority refuses a typed phase this attempt did not request, and
+        refuses a label of "compile" or "warmup" that the typed field does not
+        agree with, so the check below fails locally rather than on the wire.
+        """
+
+        if phase in {item.value for item in ExecutionPhase} and (
+            execution_phase is None or execution_phase.value != phase
+        ):
+            raise WorkerSessionError(
+                "heartbeat label impersonates an execution phase"
+            )
+        if execution_phase is not None:
+            with self._condition:
+                requests = self._execution_phase_requests
+            if not any(
+                request.phase is execution_phase and request.enabled
+                for request in requests
+            ):
+                raise WorkerSessionError(
+                    "heartbeat names an execution phase this attempt did not request"
+                )
         sequence = self._allocate_sequence()
         return self._send(
             wire.WorkerToController(
@@ -508,6 +562,11 @@ class WorkerSession:
                     optimizer_step=optimizer_step,
                     phase=phase,
                     observed_at=_timestamp_now(),
+                    execution_phase=(
+                        wire.WorkerExecutionPhaseRequest.PHASE_UNSPECIFIED
+                        if execution_phase is None
+                        else _WIRE_HEARTBEAT_PHASE[execution_phase]
+                    ),
                 )
             ),
             sequence,
@@ -696,6 +755,7 @@ class WorkerSession:
                 in {
                     ExecutionPhaseDisposition.COMPLETED,
                     ExecutionPhaseDisposition.SKIPPED,
+                    ExecutionPhaseDisposition.CANCELLED,
                 }
                 and state_fingerprint_before != state_fingerprint_after
             )
@@ -707,7 +767,11 @@ class WorkerSession:
                 disposition is ExecutionPhaseDisposition.SKIPPED and steps_executed != 0
             )
             or (
-                disposition is ExecutionPhaseDisposition.FAILED
+                disposition
+                in {
+                    ExecutionPhaseDisposition.FAILED,
+                    ExecutionPhaseDisposition.CANCELLED,
+                }
                 and (steps_executed > requested_steps or not diagnostic_values)
             )
         ):
@@ -722,6 +786,7 @@ class WorkerSession:
             ExecutionPhaseDisposition.COMPLETED: wire.WorkerExecutionPhaseReceipt.DISPOSITION_COMPLETED,
             ExecutionPhaseDisposition.SKIPPED: wire.WorkerExecutionPhaseReceipt.DISPOSITION_SKIPPED,
             ExecutionPhaseDisposition.FAILED: wire.WorkerExecutionPhaseReceipt.DISPOSITION_FAILED,
+            ExecutionPhaseDisposition.CANCELLED: wire.WorkerExecutionPhaseReceipt.DISPOSITION_CANCELLED,
         }
         sequence = self._allocate_sequence()
         receipt = wire.WorkerExecutionPhaseReceipt(

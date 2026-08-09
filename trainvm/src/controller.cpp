@@ -71,10 +71,26 @@ void require_worker_observation_shape(const Event& event,
     throw std::invalid_argument("worker observation is not canonical");
   }
   if (event.event_type == "worker.heartbeat") {
-    if (!event.optimizer_step || event.payload.size() != 2U ||
-        !event.payload.contains("phase") ||
-        !event.payload.at("phase").is_string() ||
-        event.payload.at("phase").get_ref<const std::string&>().empty() ||
+    // `execution_phase` is empty outside a phase and otherwise names the typed
+    // phase the authority authorized at accept time. Replay re-checks the same
+    // impersonation rule the live path applies, so a hand-edited journal
+    // cannot introduce a heartbeat labelled with a phase it never carried.
+    const bool typed_fields = event.payload.contains("execution_phase") &&
+                              event.payload.at("execution_phase").is_string() &&
+                              event.payload.contains("phase") &&
+                              event.payload.at("phase").is_string();
+    const std::string execution_phase =
+        typed_fields ? event.payload.at("execution_phase").get<std::string>()
+                     : std::string{};
+    const std::string phase =
+        typed_fields ? event.payload.at("phase").get<std::string>()
+                     : std::string{};
+    if (!event.optimizer_step || event.payload.size() != 3U || !typed_fields ||
+        phase.empty() ||
+        !(execution_phase.empty() || execution_phase == "compile" ||
+          execution_phase == "warmup") ||
+        ((phase == "compile" || phase == "warmup") &&
+         phase != execution_phase) ||
         !event.payload.contains("observed_at_ns") ||
         !event.payload.at("observed_at_ns").is_number_integer()) {
       throw std::invalid_argument("worker heartbeat is not canonical");
@@ -178,9 +194,9 @@ void require_worker_observation_shape(const Event& event,
                  !diagnostic.value("message", std::string{}).empty();
         });
     const bool known_phase = phase == "compile" || phase == "warmup";
-    const bool known_disposition = disposition == "completed" ||
-                                   disposition == "skipped" ||
-                                   disposition == "failed";
+    const bool known_disposition =
+        disposition == "completed" || disposition == "skipped" ||
+        disposition == "failed" || disposition == "cancelled";
     const bool restored =
         payload.contains("state_fingerprint_before") &&
         payload.contains("state_fingerprint_after") &&
@@ -207,9 +223,12 @@ void require_worker_observation_shape(const Event& event,
             payload.at("completed_at_ns").get<std::int64_t>() ||
         !canonical_diagnostics || (enabled && disposition == "skipped") ||
         (!enabled && disposition != "skipped") ||
-        ((disposition == "completed" || disposition == "skipped") &&
+        ((disposition == "completed" || disposition == "skipped" ||
+          disposition == "cancelled") &&
          !restored) ||
-        (disposition == "failed" && diagnostics.empty()) ||
+        ((disposition == "failed" || disposition == "cancelled") &&
+         diagnostics.empty()) ||
+        (disposition == "cancelled" && !enabled) ||
         (phase == "compile" &&
          payload.at("requested_steps").get<std::uint64_t>() != 0U) ||
         (disposition == "completed" &&
@@ -217,7 +236,7 @@ void require_worker_observation_shape(const Event& event,
              payload.at("requested_steps").get<std::uint64_t>()) ||
         (disposition == "skipped" &&
          payload.at("steps_executed").get<std::uint64_t>() != 0U) ||
-        (disposition == "failed" &&
+        ((disposition == "failed" || disposition == "cancelled") &&
          payload.at("steps_executed").get<std::uint64_t>() >
              payload.at("requested_steps").get<std::uint64_t>())) {
       throw std::invalid_argument(

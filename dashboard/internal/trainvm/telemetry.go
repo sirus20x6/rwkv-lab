@@ -163,7 +163,11 @@ type WorkerHeartbeatPoint struct {
 	RunID          string `json:"run_id"`
 	NodeID         string `json:"node_id"`
 	AttemptID      string `json:"attempt_id"`
-	Phase          string `json:"phase"`
+	Phase string `json:"phase"`
+	// ExecutionPhase is "compile", "warmup", or empty outside a phase. Unlike
+	// Phase, which is a free-text operator label, the authority accepted this
+	// only against the attempt's immutable phase requests.
+	ExecutionPhase string `json:"execution_phase"`
 	OptimizerStep  uint64 `json:"optimizer_step"`
 	ObservedAtNS   int64  `json:"observed_at_ns"`
 	AcceptedAtNS   int64  `json:"accepted_at_ns"`
@@ -330,8 +334,9 @@ func validMetricScalar(value any) bool {
 
 func heartbeatFromEvent(event Event) (WorkerHeartbeatPoint, error) {
 	var payload struct {
-		Phase        string `json:"phase"`
-		ObservedAtNS int64  `json:"observed_at_ns"`
+		Phase          string `json:"phase"`
+		ExecutionPhase string `json:"execution_phase"`
+		ObservedAtNS   int64  `json:"observed_at_ns"`
 	}
 	if err := strictPayload(event.Payload, &payload); err != nil ||
 		event.EventType != "worker.heartbeat" || event.Sequence == 0 ||
@@ -340,14 +345,23 @@ func heartbeatFromEvent(event Event) (WorkerHeartbeatPoint, error) {
 		!validBoundedText(event.NodeID, 256, false) ||
 		!validBoundedText(event.AttemptID, 256, false) ||
 		!validBoundedText(payload.Phase, 128, false) ||
+		(payload.ExecutionPhase != "" && payload.ExecutionPhase != "compile" &&
+			payload.ExecutionPhase != "warmup") ||
+		// The authority refuses a label that claims a phase the typed field
+		// does not name. Re-check it here rather than trust the producer, so a
+		// journal written by an older or patched authority cannot render a
+		// compile the run never ran.
+		((payload.Phase == "compile" || payload.Phase == "warmup") &&
+			payload.Phase != payload.ExecutionPhase) ||
 		payload.ObservedAtNS < 0 || event.WallTimeNS < 0 {
 		return WorkerHeartbeatPoint{}, fmt.Errorf("TrainVM heartbeat event %q has a malformed payload", event.EventID)
 	}
 	return WorkerHeartbeatPoint{
 		Sequence: event.Sequence, RunID: event.RunID, NodeID: event.NodeID,
 		AttemptID: event.AttemptID, Phase: payload.Phase,
-		OptimizerStep: *event.OptimizerStep, ObservedAtNS: payload.ObservedAtNS,
-		AcceptedAtNS: event.WallTimeNS, WorkerSequence: event.WorkerSequence,
+		ExecutionPhase: payload.ExecutionPhase,
+		OptimizerStep:  *event.OptimizerStep, ObservedAtNS: payload.ObservedAtNS,
+		AcceptedAtNS:   event.WallTimeNS, WorkerSequence: event.WorkerSequence,
 	}, nil
 }
 
@@ -387,7 +401,7 @@ func executionPhaseReceiptFromEvent(event Event) (ExecutionPhaseReceiptPoint, er
 		!validBoundedText(event.AttemptID, 256, false) ||
 		(payload.Phase != "compile" && payload.Phase != "warmup") ||
 		(payload.Disposition != "completed" && payload.Disposition != "skipped" &&
-			payload.Disposition != "failed") ||
+			payload.Disposition != "failed" && payload.Disposition != "cancelled") ||
 		!validSHA256Digest(payload.RequestDigest) ||
 		!validSHA256Digest(payload.StateFingerprintBefore) ||
 		!validSHA256Digest(payload.StateFingerprintAfter) ||
@@ -398,8 +412,13 @@ func executionPhaseReceiptFromEvent(event Event) (ExecutionPhaseReceiptPoint, er
 		(payload.Phase == "compile" && payload.RequestedSteps != 0) ||
 		(payload.Disposition == "completed" && payload.StepsExecuted != payload.RequestedSteps) ||
 		(payload.Disposition == "skipped" && payload.StepsExecuted != 0) ||
-		(payload.Disposition == "failed" &&
+		// A cancellation shares the failure bounds — it stopped part-way, so a
+		// partial step count is legal and diagnostics must say what stopped it
+		// — but not the failure exemption below: cancelling an enabled phase
+		// still has to leave the trajectory exactly where it found it.
+		((payload.Disposition == "failed" || payload.Disposition == "cancelled") &&
 			(payload.StepsExecuted > payload.RequestedSteps || len(payload.Diagnostics) == 0)) ||
+		(payload.Disposition == "cancelled" && !payload.Enabled) ||
 		(payload.Disposition != "failed" &&
 			payload.StateFingerprintBefore != payload.StateFingerprintAfter) {
 		return ExecutionPhaseReceiptPoint{}, fmt.Errorf(
