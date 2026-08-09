@@ -207,6 +207,19 @@ jobs:
       - name: Native ctest exclusions are declared and pinned
         run: python scripts/validate_native_ci_exclusions.py
 
+      # Runs here, in the seconds-fast Python job, because it needs no compiler:
+      # it reads the #include graph out of the source text. That is deliberate
+      # -- the native job takes an ~8 minute GCC 16 build and is skipped or
+      # unable to start often enough that a gate living only there is a gate
+      # that often does not run. This one reports on every pull request.
+      #
+      # It fails rather than warns. Four fully-implemented, fully-tested,
+      # green modules with zero production callers survived in this repository
+      # in a single session; a non-blocking signal for something that already
+      # got past careful review four times would be ignored.
+      - name: Every native module has a production includer or an explained exclusion
+        run: python scripts/ci_unwired_module_gate.py
+
       # Same reasoning, applied to the source-disposition pins. The native
       # suite already enforces them, but only after an ~8 minute toolchain and
       # C++26 build; this reports the same drift in seconds and keeps reporting

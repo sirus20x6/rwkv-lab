@@ -269,11 +269,20 @@ confidence in a method that then returns a confident, wrong "absent" on the next
 squashed PR you try it on. A method that is consistently useless is safer than
 one that is occasionally right.
 
-**So do not use any of these to decide whether work reached main:**
+**`git cherry` and patch-id comparison cannot decide whether work reached main** —
+`git cherry` reported all 10 commits of a branch absent when 9 were present.
 
-- `git merge-base --is-ancestor <branch> main`
-- `git cherry` — it reported all 10 commits of a branch absent when 9 were present
-- patch-id comparison
+**`git merge-base --is-ancestor <sha> main` is usable in exactly one direction.**
+A **yes** is decisive: nothing makes a commit that never landed an ancestor of
+main. A **no** carries zero information, because a squashed branch head is never
+an ancestor by construction. So it is a free positive — try it first and fall
+through to a content check when it says no. Never quote a negative as evidence
+of absence.
+
+That refinement came from the 239-card sweep: the instruction it was given said
+flatly never to use ancestry, and it worked out the asymmetry itself and applied
+it correctly to 173 citations. The blunter rule was wrong in the cheap direction,
+which is the direction worth fixing.
 
 Use instead, in order of strength:
 
@@ -353,6 +362,7 @@ making the merged-PR reference structural instead of a prose convention.
 
 ```bash
 python scripts/ci_coverage_gate.py -m "not gpu"
+python scripts/ci_unwired_module_gate.py
 python scripts/validate_benchmark_matrix.py
 python scripts/validate_experiment_documents.py
 python scripts/validate_native_ci_exclusions.py
@@ -364,6 +374,24 @@ done
 Each ends with a line stating `PASSED` or `FAILED`. Read that line — the older
 form printed a neutral tally that looked identical either way, and a PR was
 pushed red because its output was truncated to exactly that line.
+
+### Adding a native module now costs a caller or a stated reason
+
+`ci_unwired_module_gate.py` fails when a header under `trainvm/include/trainvm/`
+is reached by no translation unit in `trainvm/src/` other than its own `.cpp`.
+So a new module lands red until something in production includes it — directly
+or through another header, the traversal is transitive — or until
+`docs/experiment-vm/unwired-module-exclusions.v1.json` says why not.
+
+That is deliberate friction and it is affordable, because landing the module
+ahead of its consumer is often right. What is not affordable is doing it
+silently: four modules shipped fully implemented, fully tested and green with
+zero production callers, and every one was found by a card sweep months later.
+An allowlist entry costs one sentence and turns that into a recorded decision.
+
+The allowlist is a countdown. An entry whose module later gains a production
+includer **fails**, so it can only shrink — write the entry expecting to delete
+it.
 
 ## Content pins, and how to refresh them
 
