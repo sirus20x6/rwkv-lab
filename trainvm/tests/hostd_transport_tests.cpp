@@ -422,21 +422,58 @@ private:
   HostdAuthorityStatus value_;
 };
 
-class DelayedAuthorityStatusSource final : public IHostdAuthorityStatusSource {
+// Withholds its snapshot until a shared monotonic deadline has passed. A test
+// that wants to prove a listener's own accept deadline was not inherited by
+// the session it routed needs the routed work to outlive that deadline. Doing
+// that with a fixed sleep compared against a fixed deadline only holds while
+// the machine keeps both constants honest; keying the wait to the deadline
+// itself makes the assertion exact for any accept latency.
+class DeadlineOutlastingAuthorityStatusSource final
+    : public IHostdAuthorityStatusSource {
 public:
-  DelayedAuthorityStatusSource(HostdAuthorityStatus value,
-                               std::chrono::nanoseconds delay)
-      : value_(std::move(value)), delay_(delay) {}
+  DeadlineOutlastingAuthorityStatusSource(
+      HostdAuthorityStatus value,
+      std::shared_ptr<std::atomic<std::int64_t>> outlast_deadline_ns)
+      : value_(std::move(value)),
+        outlast_deadline_ns_(std::move(outlast_deadline_ns)) {}
 
   [[nodiscard]] HostdAuthorityStatus snapshot() const override {
-    std::this_thread::sleep_for(delay_);
+    while (hostd_monotonic_now_ns() <= outlast_deadline_ns_->load())
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
     return value_;
   }
 
 private:
   HostdAuthorityStatus value_;
-  std::chrono::nanoseconds delay_;
+  std::shared_ptr<std::atomic<std::int64_t>> outlast_deadline_ns_;
 };
+
+// Reports whether the listening socket has a connection waiting to be
+// accepted. Polling for readability neither accepts nor consumes it, so a
+// server's own accept can still be timed afterwards -- but from the peer's
+// arrival rather than from the moment a client thread was created. Creating a
+// thread and completing connect() are unbounded on a loaded machine; accepting
+// a connection that is already pending is not.
+bool listener_connection_pending(int listener_descriptor,
+                                 std::int64_t absolute_deadline_ns) {
+  for (;;) {
+    const std::int64_t now = hostd_monotonic_now_ns();
+    if (absolute_deadline_ns <= now)
+      return false;
+    const std::int64_t remaining = absolute_deadline_ns - now;
+    timespec timeout{.tv_sec = remaining / 1'000'000'000LL,
+                     .tv_nsec = remaining % 1'000'000'000LL};
+    pollfd descriptor{
+        .fd = listener_descriptor, .events = POLLIN, .revents = 0};
+    const int result = ::ppoll(&descriptor, 1U, &timeout, nullptr);
+    if (result > 0)
+      return (descriptor.revents & POLLIN) != 0;
+    if (result == 0)
+      return false;
+    if (errno != EINTR)
+      return false;
+  }
+}
 
 constexpr std::string_view kMutationEvidenceDigest =
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -2053,8 +2090,10 @@ void mutation_transport_dispatches_replays_and_disconnects() {
       fixture.observed.receipt_digest;
   delayed_status.process_launch_enabled = true;
   delayed_status.mutation_enabled = true;
-  auto delayed_source = std::make_shared<DelayedAuthorityStatusSource>(
-      delayed_status, std::chrono::milliseconds(200));
+  auto routing_deadline_ns = std::make_shared<std::atomic<std::int64_t>>(0);
+  auto delayed_source =
+      std::make_shared<DeadlineOutlastingAuthorityStatusSource>(
+          delayed_status, routing_deadline_ns);
   HostdStatusServer status_server(
       authority, fixture.coordinator,
       {.allowed_uid = ::geteuid(), .allowed_gid = ::getegid()}, {},
@@ -2093,8 +2132,21 @@ void mutation_transport_dispatches_replays_and_disconnects() {
       status_error = std::current_exception();
     }
   });
-  const HostdServeResult status_served =
-      unified.serve_one(deadline(100'000'000LL));
+  // The routed status source has to outlive the router's own deadline, or this
+  // case would still pass if serve_one leaked that deadline into the session it
+  // hands off. That made the deadline a race: it used to start when the client
+  // thread was constructed, so creating the thread, scheduling it, and
+  // completing connect() all had to fit inside 100ms. On a loaded runner they
+  // do not, serve_one gives up before the peer arrives, and the client then
+  // waits out its own deadline and reports "hostd receive deadline expired" --
+  // which is exactly how this failed in CI. Time the router from the peer's
+  // arrival instead, and let the source key its wait to the deadline rather
+  // than to a constant chosen to be larger than it.
+  require(listener_connection_pending(authority->listener_fd(), deadline()),
+          "the routed status client connects before the router is timed");
+  const std::int64_t routing_deadline = deadline(100'000'000LL);
+  routing_deadline_ns->store(routing_deadline);
+  const HostdServeResult status_served = unified.serve_one(routing_deadline);
   status_thread.join();
   if (status_error) std::rethrow_exception(status_error);
   require(status_served == HostdServeResult::served && routed_status &&
