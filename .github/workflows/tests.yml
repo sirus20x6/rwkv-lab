@@ -5,9 +5,26 @@ on:
     branches: [main, dashboard/declarative-vm-fsm]
   pull_request:
 
+# Cancel superseded PR runs, never branch-push runs.
+#
+# A second push to a pull request supersedes the first: the earlier run is
+# testing code nobody will merge, so cancelling it is free. Two pushes to a
+# BRANCH are not supersessions — each validates a different commit, and on main
+# each of those commits is one somebody already merged. Cancelling there does
+# not save work, it discards the only run positioned to catch a semantic
+# conflict between two pull requests that each passed against their own base.
+#
+# That is not theoretical. On 2026-08-09, eight merges in about ninety minutes
+# left four of the last six main commits with no validation at all — c0433c0,
+# f311dfa, 26fd8c6 and f25d5cf were each cancelled by the merge that followed.
+# In the same window PR #91 failed on main's newer content while passing on its
+# own base, which is exactly the class this discards.
+#
+# Keyed on the event rather than the branch name because `push` also covers
+# dashboard/declarative-vm-fsm, whose runs are equally not supersessions.
 concurrency:
   group: tests-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
