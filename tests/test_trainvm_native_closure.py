@@ -401,33 +401,209 @@ def test_a_removed_extension_is_rejected(tree):
         closure.verify()
 
 
-def test_a_changed_cuda_driver_identity_is_rejected(tree, tmp_path, monkeypatch):
-    """The driver is in the kernel, so no pinned byte can carry its identity."""
+def build_id_note(description: bytes) -> bytes:
+    """An `NT_GNU_BUILD_ID` note as /sys/module/<name>/notes/ serves it."""
+
+    return (
+        len(b"GNU\x00").to_bytes(4, sys.byteorder)
+        + len(description).to_bytes(4, sys.byteorder)
+        + (3).to_bytes(4, sys.byteorder)
+        + b"GNU\x00"
+        + description
+    )
+
+
+# The line this host actually serves. It ends in the user and host that
+# compiled the module, which is the whole reason the identity is not this line.
+_REAL_SHAPE = (
+    "NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  {version}  "
+    "Release Build  ({builder})"
+)
+
+
+@pytest.fixture
+def driver(tmp_path, monkeypatch):
+    """A driver identity this test owns, on both copies at once.
+
+    Both the guard and the builder are pointed at the same pair of files, so a
+    test that moves one moves it for both -- and neither reads the real host,
+    which would make every assertion here depend on whether the machine
+    running the suite happens to have an NVIDIA driver loaded.
+    """
 
     version = tmp_path / "nvidia-version"
-    version.write_text("NVRM version: 610.43.03\n")
-    monkeypatch.setattr(builder, "NVIDIA_DRIVER_VERSION_FILE", str(version))
-    monkeypatch.setattr(guard, "NVIDIA_DRIVER_VERSION_FILE", str(version))
+    note = tmp_path / "nvidia-build-id"
+
+    def write(*, driver_version: str | None, build: str = "root@sealed", note_bytes=b""):
+        if driver_version is None:
+            version.unlink(missing_ok=True)
+        else:
+            version.write_text(
+                _REAL_SHAPE.format(version=driver_version, builder=build) + "  \n"
+            )
+        if note_bytes:
+            note.write_bytes(note_bytes)
+        else:
+            note.unlink(missing_ok=True)
+
+    for module in (builder, guard):
+        monkeypatch.setattr(module, "NVIDIA_DRIVER_VERSION_FILE", str(version))
+        monkeypatch.setattr(module, "NVIDIA_MODULE_BUILD_ID_FILE", str(note))
+    return write
+
+
+def test_a_changed_cuda_driver_identity_is_rejected(tree, driver):
+    """The driver is in the kernel, so no pinned byte can carry its identity."""
+
+    driver(driver_version="610.43.03", note_bytes=build_id_note(b"\x11" * 20))
     closure = build(tree)
-    assert closure.native["cuda"]["driver_version"] == "NVRM version: 610.43.03"
+    assert closure.native["cuda"]["driver_identity"] == (
+        "610.43.03+gnu-build-id:" + "11" * 20
+    )
     closure.verify()
-    version.write_text("NVRM version: 611.00.00\n")
+    driver(driver_version="611.00.00", note_bytes=build_id_note(b"\x11" * 20))
     with pytest.raises(guard.RuntimeClosureError) as failure:
         closure.verify()
     assert "CUDA driver identity changed" in str(failure.value)
 
 
-def test_a_host_that_grew_a_driver_is_rejected(tree, tmp_path, monkeypatch):
-    absent = tmp_path / "no-such-driver"
-    monkeypatch.setattr(builder, "NVIDIA_DRIVER_VERSION_FILE", str(absent))
-    monkeypatch.setattr(guard, "NVIDIA_DRIVER_VERSION_FILE", str(absent))
+def test_a_rebuilt_driver_of_the_same_version_is_accepted(tree, driver):
+    """The defect this pair replaced: a rebuild is not a driver change.
+
+    Same version, same module bytes, different machine did the compiling. The
+    v3 identity was the whole `/proc/driver/nvidia/version` line, so this
+    refused the host and took every cache namespace cold with it for a
+    bit-for-bit compatible driver.
+    """
+
+    driver(
+        driver_version="610.43.03",
+        build="root@neuromancer",
+        note_bytes=build_id_note(b"\x22" * 20),
+    )
     closure = build(tree)
-    assert closure.native["cuda"]["driver_version"] is None
+    sealed = closure.native["cuda"]["driver_report"]
+    driver(
+        driver_version="610.43.03",
+        build="builder@some-distribution-farm",
+        note_bytes=build_id_note(b"\x22" * 20),
+    )
     closure.verify()
-    absent.write_text("NVRM version: 610.43.03\n")
+    # The line that moved is still recorded -- it is evidence, so it is kept
+    # and simply not compared.
+    assert "neuromancer" in sealed
+    assert sealed != guard.driver_report()
+
+
+def test_a_rebuild_that_changed_the_module_is_rejected(tree, driver):
+    """And the other direction, which is why the version alone is not enough.
+
+    Same version string, different artifact: an open kernel module compiled
+    with different flags is not the module the closure was sealed against, and
+    the build ID is the part that notices.
+    """
+
+    driver(driver_version="610.43.03", note_bytes=build_id_note(b"\x33" * 20))
+    closure = build(tree)
+    closure.verify()
+    driver(driver_version="610.43.03", note_bytes=build_id_note(b"\x44" * 20))
     with pytest.raises(guard.RuntimeClosureError) as failure:
         closure.verify()
     assert "CUDA driver identity changed" in str(failure.value)
+
+
+def test_a_driver_identity_is_a_legal_downstream_identity(driver):
+    """`fixed_public_identity` in trainvm/src/cache_namespace.cpp accepts it.
+
+    The identity reaches the cache namespace claim through
+    `compute_compatibility_digest`, and that validator allows only
+    `[A-Za-z0-9._+:-]`. The v3 whole-line form contained a space, `(`, `)` and
+    `@`, so it could not have been claimed at all.
+    """
+
+    allowed = set(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-+:"
+    )
+    driver(driver_version="610.43.03", note_bytes=build_id_note(b"\x55" * 20))
+    identity = guard.driver_identity()
+    assert identity is not None
+    assert not set(identity) - allowed
+    assert set(guard.driver_report() or "") - allowed
+
+
+def test_a_driver_without_a_build_id_falls_back_to_the_version(tree, driver):
+    """A module linked with `--build-id=none` still has a usable identity."""
+
+    driver(driver_version="610.43.03")
+    closure = build(tree)
+    assert closure.native["cuda"]["driver_identity"] == "610.43.03"
+    closure.verify()
+    driver(driver_version="610.43.03", note_bytes=build_id_note(b"\x66" * 20))
+    with pytest.raises(guard.RuntimeClosureError) as failure:
+        closure.verify()
+    assert "CUDA driver identity changed" in str(failure.value)
+
+
+def test_a_malformed_build_id_note_is_ignored_rather_than_trusted(driver):
+    driver(driver_version="610.43.03")
+    assert guard._module_build_id() is None
+    note = pathlib.Path(guard.NVIDIA_MODULE_BUILD_ID_FILE)
+    for broken in (
+        b"",
+        b"\x00" * 8,
+        build_id_note(b"")[:10],
+        # Right shape, wrong note type: NT_GNU_ABI_TAG, not a build ID.
+        (4).to_bytes(4, sys.byteorder)
+        + (16).to_bytes(4, sys.byteorder)
+        + (1).to_bytes(4, sys.byteorder)
+        + b"GNU\x00"
+        + b"\x07" * 16,
+        # A description longer than the note delivers.
+        build_id_note(b"\x01" * 20)[:-4],
+    ):
+        note.write_bytes(broken)
+        assert guard._module_build_id() is None, broken
+        assert builder._module_build_id() is None, broken
+        assert guard.driver_identity() == "610.43.03"
+
+
+def test_a_host_that_grew_a_driver_is_rejected(tree, driver):
+    driver(driver_version=None)
+    closure = build(tree)
+    assert closure.native["cuda"]["driver_identity"] is None
+    assert closure.native["cuda"]["driver_report"] is None
+    closure.verify()
+    driver(driver_version="610.43.03", note_bytes=build_id_note(b"\x77" * 20))
+    with pytest.raises(guard.RuntimeClosureError) as failure:
+        closure.verify()
+    assert "CUDA driver identity changed" in str(failure.value)
+
+
+def test_the_two_driver_identity_readings_agree(driver):
+    """The third thing the two copies must not drift on.
+
+    `native_objects` has `test_the_two_import_path_walks_agree`; this is the
+    same protection for the driver identity, which `card-ed669b66` moved in
+    both copies at once. Extended here rather than read a third time: a third
+    reading of a fact two copies already state is exactly the defect being
+    fixed.
+    """
+
+    cases = [
+        {"driver_version": "610.43.03", "note_bytes": build_id_note(b"\x88" * 20)},
+        {"driver_version": "610.43.03", "build": "someone@elsewhere"},
+        {"driver_version": "611.0", "note_bytes": build_id_note(b"\x99" * 8)},
+        {"driver_version": None},
+    ]
+    for case in cases:
+        driver(**case)
+        assert builder.driver_identity() == guard.driver_identity(), case
+        assert builder.driver_report() == guard.driver_report(), case
+        assert builder._module_build_id() == guard._module_build_id(), case
+    # An unparseable line keeps its whole self rather than dropping the driver
+    # out of the identity, and both copies have to make that same choice.
+    pathlib.Path(guard.NVIDIA_DRIVER_VERSION_FILE).write_text("NVRM version: rolling\n")
+    assert builder.driver_identity() == guard.driver_identity() == "NVRM version: rolling"
 
 
 def test_cuda_dependencies_are_named_in_the_receipt(tmp_path, monkeypatch):
@@ -551,7 +727,7 @@ def test_every_manifest_validator_agrees_on_the_field_set():
         builder.SCHEMA
         == guard.RUNTIME_CLOSURE_SCHEMA
         == artifact.RUNTIME_CLOSURE_SCHEMA
-        == "trainvm.python-bootstrap-runtime-closure/v3"
+        == "trainvm.python-bootstrap-runtime-closure/v4"
     )
     source = (REPOSITORY / "scripts" / "build_trainvm_worker_artifact.py").read_text()
     assert '"native",' in source, "the artifact builder must require the native section"

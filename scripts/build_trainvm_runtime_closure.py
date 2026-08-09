@@ -40,6 +40,7 @@ import importlib.metadata
 import json
 import mmap
 import os
+import re
 import stat
 import struct
 import sys
@@ -52,7 +53,7 @@ from typing import Any
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
-SCHEMA = "trainvm.python-bootstrap-runtime-closure/v3"
+SCHEMA = "trainvm.python-bootstrap-runtime-closure/v4"
 DEFAULT_ROOT_DISTRIBUTIONS = (
     "grpcio",
     "pillow",
@@ -99,6 +100,9 @@ CUDA_SONAME_PREFIXES = (
 )
 
 NVIDIA_DRIVER_VERSION_FILE = "/proc/driver/nvidia/version"
+NVIDIA_MODULE_BUILD_ID_FILE = "/sys/module/nvidia/notes/.note.gnu.build-id"
+_NT_GNU_BUILD_ID = 3
+_DRIVER_VERSION_TOKEN = re.compile(r"\d+(?:\.\d+)+")
 
 
 def _canonical(value: Any) -> bytes:
@@ -516,13 +520,15 @@ def native_objects(roots: list[str]) -> list[str]:
     return sorted(set(found))
 
 
-def driver_version() -> str | None:
-    """The NVIDIA kernel driver identity, which no file digest can pin.
+def driver_report() -> str | None:
+    """The kernel's own description of the NVIDIA driver, verbatim.
 
-    The driver is loaded into the kernel, not installed into the closure, so a
-    driver upgrade changes what every CUDA library binds to while leaving every
-    pinned byte identical. Recorded here so the guard can compare it, and null
-    on a host with no NVIDIA driver so the absence is itself pinned.
+    Evidence, never an identity. The line ends in the user and host that
+    compiled the module -- ``(root@neuromancer)`` -- so comparing it for
+    equality refuses a host for having rebuilt its driver rather than for
+    running a different one. Recorded in the manifest beside the identity, and
+    quoted in the rejection, so a human debugging one can still see both the
+    build the closure was sealed against and the build in front of them.
     """
 
     try:
@@ -531,6 +537,81 @@ def driver_version() -> str | None:
     except OSError:
         return None
     return line or None
+
+
+def _module_build_id() -> str | None:
+    """The GNU build ID of the loaded ``nvidia`` module, from its ELF note.
+
+    The build ID is the linker's hash of the module's own contents, so it
+    answers the question the build host was standing in for: is this the same
+    artifact? Read from sysfs rather than from the module file on disk, which
+    is ``/lib/modules/<release>/updates/dkms/nvidia.ko.zst`` on a DKMS host --
+    compressed, at a path that depends on how the driver was packaged, and not
+    necessarily the artifact the kernel actually has loaded. The sysfs note is
+    a fixed path, a plain read, and world-readable.
+
+    None when the kernel exposes no usable note, which is not an error: a
+    module linked with ``--build-id=none`` has none to expose, and the identity
+    falls back to the version token alone.
+    """
+
+    try:
+        with open(NVIDIA_MODULE_BUILD_ID_FILE, "rb") as stream:
+            note = stream.read(4096)
+    except OSError:
+        return None
+    if len(note) < 12:
+        return None
+    name_size = int.from_bytes(note[0:4], sys.byteorder)
+    description_size = int.from_bytes(note[4:8], sys.byteorder)
+    start = 12 + (name_size + 3) // 4 * 4
+    if (
+        int.from_bytes(note[8:12], sys.byteorder) != _NT_GNU_BUILD_ID
+        or note[12 : 12 + name_size] != b"GNU\x00"
+        or not 8 <= description_size <= 64
+        or len(note) < start + description_size
+    ):
+        return None
+    return note[start : start + description_size].hex()
+
+
+def driver_identity() -> str | None:
+    """The NVIDIA kernel driver identity, which no file digest can pin.
+
+    The driver is loaded into the kernel, not installed into the closure, so a
+    driver upgrade changes what every CUDA library binds to while leaving every
+    pinned byte identical. Recorded here so the guard can compare it, and null
+    on a host with no NVIDIA driver so the absence is itself pinned.
+
+    It is the driver's version token plus the loaded module's build ID, and
+    deliberately *not* the whole first line of /proc/driver/nvidia/version.
+    That line carries the build user and host, so a DKMS rebuild, or the same
+    driver version built on another machine, moves it while the driver stays
+    bit-for-bit compatible -- and everything keyed on this identity refuses or
+    goes cold for a non-reason: the guard rejects the host, and the worker's
+    cache namespace changes underneath ``compute_compatibility_digest``. The
+    whole line is not even a legal identity downstream: it contains spaces,
+    parentheses and ``@``, none of which ``fixed_public_identity`` in
+    trainvm/src/cache_namespace.cpp accepts.
+
+    The version token alone would be too weak to stand on its own -- "same
+    version string, different build" is a real failure, and an open kernel
+    module compiled elsewhere with different flags is not obviously the same
+    artifact. The build ID closes that: a rebuild producing identical bytes
+    reads as identical, one producing different bytes reads as different, and
+    both directions are what we actually mean.
+    """
+
+    report = driver_report()
+    if report is None:
+        return None
+    found = _DRIVER_VERSION_TOKEN.search(report)
+    # A line whose shape this does not recognise keeps the whole line rather
+    # than dropping the driver out of the identity: too strict is recoverable
+    # by resealing, too permissive is not noticed at all.
+    version = found.group(0) if found else report
+    build_id = _module_build_id()
+    return version if build_id is None else f"{version}+gnu-build-id:{build_id}"
 
 
 def _is_cuda(soname: str) -> bool:
@@ -631,7 +712,9 @@ def _scan_native(
             extensions.append({"path": item, "sha256": None})
     return {
         "cuda": {
-            "driver_version": driver_version(),
+            "driver_identity": driver_identity(),
+            # Evidence beside the identity, never compared. See driver_report.
+            "driver_report": driver_report(),
             "sonames": sorted(cuda_sonames),
         },
         "kernel_registry": {
@@ -749,8 +832,8 @@ def main() -> int:
                 "root_distributions": list(root_distributions),
                 "distribution_count": len(document["distributions"]),
                 "file_count": len(document["files"]),
-                "cuda_driver_version": document["native"]["cuda"][
-                    "driver_version"
+                "cuda_driver_identity": document["native"]["cuda"][
+                    "driver_identity"
                 ],
                 "elf_object_count": len(document["native"]["objects"]),
                 "kernel_registry_digest": document["native"]["kernel_registry"][

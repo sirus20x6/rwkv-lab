@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA = "trainvm.python-worker-artifact/v2"
-RUNTIME_CLOSURE_SCHEMA = "trainvm.python-bootstrap-runtime-closure/v3"
+RUNTIME_CLOSURE_SCHEMA = "trainvm.python-bootstrap-runtime-closure/v4"
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 ENTRYPOINT = (
     b"import sys\n"
