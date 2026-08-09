@@ -301,7 +301,7 @@ reproducibility gaps and use fenced live host identity before device qualificati
 schedule IR whose entity identity is array position rather than a value, exact hazard proofs that
 reject rather than warn when a graph outgrows them, per-SM queue ordering proven on the graph
 augmented with the queues' own edges, and a receipt that enumerates which invariants it actually
-discharged. It names five open questions rather than guessing at them, and it deliberately specifies
+discharged. It names six open questions rather than guessing at them, and it deliberately specifies
 no CUDA.
 
 - Make `compile`, `warmup`, `qualify`, `train`, `eval`, and `profile` explicit graph phases. Warm a

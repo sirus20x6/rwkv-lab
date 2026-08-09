@@ -397,6 +397,7 @@ a table of `(invariant ID → implemented, required-for-feature)` and rejects wi
 | F4 | per-block dynamic shared memory is within the target's opt-in cap | `schedule.resource.smem` |
 | F5 | the launch configuration is cooperatively launchable on the target if the schedule requires it | `schedule.resource.cooperative` |
 | F6 | the bound record's identity matches the fenced hostd resource named in the receipt | `schedule.target.identity` |
+| F7 | the bound resource is a full device, not a partition, until OQ5 is resolved | `schedule.target.partition_unsupported` |
 
 F1 is the audit's sixth gap. Upstream's target table is static data and its `meta["gpu"]` mismatch is
 only a warning; the CUDA build meanwhile derives code generation from the live device, so nothing
@@ -433,6 +434,14 @@ Rules:
 
 1. **Every rejection names a path.** A JSON pointer into the schedule document —
    `/tasks/417/waits/2/threshold`, `/buffers/9/shape/1` — not a task label and not a sentence.
+
+   These are unambiguous for free, which is worth noting because it is not generally true here.
+   `child_path` performs no RFC 6901 escaping — `~` does not become `~0`, `/` does not become `~1` —
+   and it interpolates map keys raw, so a document with an exotic key can produce a pointer that
+   does not resolve to what it names. The schedule IR indexes every entity by integer position and
+   has exactly one map-typed field, `meta`, whose contents are excluded from every proof. So every
+   pointer a *proof* emits is built from array indices and fixed field names and needs no escaping.
+   A decode-phase `field.unknown` on a `meta` key is the one place the general caveat still applies.
 2. **Every rejection names a code** from the tables above. Codes are stable identifiers; message
    text is not, and nothing may match on it.
 
@@ -650,8 +659,17 @@ cannot make it so.
 **OQ5 — MIG.** The SM index space under a MIG compute instance is not the physical device's, and
 TrainVM's inventory already models partitions as first-class. Whether `placement.sm` is validated
 against the partition's SM count or the parent device's, and whether a schedule may be validated
-against a parent and run on a child, is unanswered. Phase F currently assumes a full-device target;
-a partition target is rejected by F1 until this is resolved.
+against a parent and run on a child, is unanswered. Phase F currently assumes a full-device target,
+and F7 rejects a partition outright until this is resolved.
+
+**OQ6 — whether a schedule gets a JSON Schema at all.** B10 requires one descriptor to drive every
+surface, and this repository's fourth surface — the portable JSON Schema that hosted CI validates
+against — has no generator, so `experiment-v1.schema.json` is hand-maintained beside the reflected
+structs it restates. The two admissible options are named under B10: emit the schedule schema from
+the reflected descriptor, or ship none and accept that hosted CI cannot check a schedule document.
+Which one is right depends on how much a schedule needs to be validated by something other than the
+GCC-16 binary, and that is not decided here. What is decided is that hand-writing a third copy of
+the contract is not an option.
 
 ## Non-goals
 
