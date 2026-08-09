@@ -814,13 +814,17 @@ int main() {
     auto& posttraining_node =
         posttraining_source["spec"]["workflow"]["nodes"]
                            ["train_to_boundary"];
+    // Built from the fixture's own workspace root rather than naming the
+    // deployment host, so the literal config stays inside the roots this
+    // document declares wherever the suite runs.
+    const std::string workspace_root =
+        posttraining_source["spec"]["workspace"]["root"].get<std::string>();
     posttraining_node["invoke"]["inputs"] = {
         {"config",
          {{"literal",
-           {{"checkpoint", "/thearray/git/moe-mla/fixtures/base.pt"},
-            {"data", "/thearray/git/moe-mla/fixtures/sft.jsonl"},
-            {"output_dir",
-             "/thearray/git/moe-mla/runs/mage-flow-cache-resume"},
+           {{"checkpoint", workspace_root + "/fixtures/base.pt"},
+            {"data", workspace_root + "/fixtures/sft.jsonl"},
+            {"output_dir", workspace_root + "/runs/mage-flow-cache-resume"},
             {"steps", 10}}}}},
     };
     posttraining_node["invoke"]["training"] = {

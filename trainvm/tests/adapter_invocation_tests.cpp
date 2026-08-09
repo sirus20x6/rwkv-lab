@@ -81,11 +81,16 @@ void round_trip_and_resolve_public_inputs() {
   check(decoded == invocation, "invocation round trip is exact");
   check(decoded.host_id == "sha256:" + std::string(64U, 'b'),
         "invocation is bound to the authority host identity");
+  // The expected values are the fixture's own declared parameter and workspace,
+  // which is what "the binding resolves" means. Copying them out as literals
+  // said the same thing only as long as nobody edited the fixture, and made the
+  // suite read as though it asserted the deployment host's directory layout.
+  const nlohmann::json fixture = load_fixture();
   check(decoded.inputs.at("config") ==
-            "/thearray/git/moe-mla/experiments/mageflow_terminal_repa_fixed_v2.json",
+            fixture.at("spec").at("parameters").at("source_config").at("value"),
         "parameter binding resolves into the invocation");
   check(decoded.inputs.at("run_directory") ==
-            "/thearray/git/moe-mla/runs/mage_flow_terminal_tread_loop_repa_fixed_v2",
+            fixture.at("spec").at("workspace").at("run_directory"),
         "context binding resolves into the invocation");
   check(decoded.controls.at("learning_rate") == 0.000002 &&
             decoded.controls.at("eval_every") == 250 &&
@@ -110,9 +115,14 @@ void round_trip_and_resolve_public_inputs() {
 
 void reflected_content_roots_are_frozen_into_invocation() {
   nlohmann::json fixture = load_fixture();
+  // A content root has to sit inside the fixture's declared read roots, so it
+  // is built from one rather than repeating the deployment host's directories.
+  const std::string content_root =
+      fixture["spec"]["workspace"]["allowed_read_roots"][0].get<std::string>() +
+      "/frozen-pack";
   fixture["spec"]["workspace"]["input_content_roots"] = {
       {{"api_version", "trainvm.input-content-root/v1"},
-       {"path", "/thearray/git/datasets/frozen-pack"},
+       {"path", content_root},
        {"kind", "directory"},
        {"file_count", 12U},
        {"total_bytes", 4096U},
@@ -141,8 +151,9 @@ void reflected_content_roots_are_frozen_into_invocation() {
             fixture["spec"]["workspace"]["input_content_roots"],
         "worker invocation freezes exact recursive content identities");
 
+  // A doubled leading separator names the same directory by a different string.
   fixture["spec"]["workspace"]["input_content_roots"][0]["path"] =
-      "//thearray/git/datasets/frozen-pack";
+      "/" + content_root;
   check(!trainvm::compile_document(fixture).valid(),
         "content-root aliases fail canonical plan validation");
   fixture["spec"]["workspace"]["input_content_roots"][0]["path"] =

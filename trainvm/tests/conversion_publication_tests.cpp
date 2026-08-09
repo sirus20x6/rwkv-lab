@@ -100,7 +100,7 @@ void source_order_must_be_exact_and_content_bound() {
                   "the same source artifact was bound twice");
 
   auto pathlike = replacement();
-  pathlike.sources[0].content_digest = "/thearray/git/moe-mla/Qwen35-9B-Base";
+  pathlike.sources[0].content_digest = "/models/Qwen35-9B-Base";
   require_refused([&] { validate_conversion_publication(pathlike); },
                   "a path was accepted where a content digest is required");
 

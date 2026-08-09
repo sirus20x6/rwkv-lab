@@ -31,6 +31,49 @@ nlohmann::json experiment_fixture() {
   return nlohmann::json::parse(input);
 }
 
+// The checked-in experiment and recipe fixtures describe a particular
+// deployment: their workspace root and `allowed_read_roots` name that host's
+// directories. A `path` override therefore has to sit inside those declared
+// roots or expansion refuses the instance before anything else runs, which is
+// why the paths below cannot simply be pointed somewhere portable.
+//
+// Reading the root out of the fixture states that requirement directly instead
+// of retyping one machine's absolute paths into the test source. Typing them
+// was safe here only by accident: nothing on this path calls
+// filesystem::exists, so the strings were inert. The sibling suite that did
+// reach catalog validation had the same literals, passed on the deployment
+// host, and aborted in CI with "training component configuration path is
+// unavailable". A literal that is correct only on one machine is one added
+// assertion away from that, and the failure lands on whoever adds it.
+std::string workspace_field(const nlohmann::json& document,
+                            const std::string& name) {
+  return document.at("spec").at("workspace").at(name).get<std::string>();
+}
+
+const std::string& fixture_read_root() {
+  static const std::string value =
+      experiment_fixture()
+          .at("spec")
+          .at("workspace")
+          .at("allowed_read_roots")
+          .at(0)
+          .get<std::string>();
+  return value;
+}
+
+const std::string& fixture_workspace_root() {
+  static const std::string value =
+      workspace_field(experiment_fixture(), "root");
+  return value;
+}
+
+// The one source-config override every instance in this file supplies: inside
+// the fixture's first read root, and not the template's own default, so its
+// provenance is visibly an instance override rather than the recipe template.
+std::string source_config_override() {
+  return fixture_read_root() + "/experiments/recipe-profile-test-source.json";
+}
+
 trainvm::RecipeOverrideField path_field() {
   return {
       .name = "data.source_config",
@@ -111,8 +154,7 @@ trainvm::RecipeInstance instance() {
       .recipe = {.name = "mageflow_cache_resume", .version = "1"},
       .run_identity = "recipe-profile-test-a",
       .overrides = {
-          {"data.source_config",
-           "/thearray/git/moe-mla/experiments/mageflow_terminal_repa_fixed_v2.json"},
+          {"data.source_config", source_config_override()},
       },
   };
 }
@@ -175,16 +217,14 @@ void expansion_preserves_ordinary_plan_identity_and_provenance() {
                                   {"version", "1"}}},
                      {"run_identity", "recipe-profile-test-a"},
                      {"overrides",
-                      {{"data.source_config",
-                        "/thearray/git/moe-mla/experiments/"
-                        "mageflow_terminal_repa_fixed_v2.json"}}}});
+                      {{"data.source_config", source_config_override()}}}});
   check(expanded_from_json.instance_digest == expanded.instance_digest,
         "reflected recipe instances have canonical identities");
   check(expanded.plan.canonical_plan.at("metadata").at("name") ==
             "recipe-profile-test-a" &&
             expanded.plan.canonical_plan.at("spec").at("workspace").at(
                 "run_directory") ==
-                "/thearray/git/moe-mla/runs/recipe-profile-test-a" &&
+                fixture_workspace_root() + "/runs/recipe-profile-test-a" &&
             expanded.plan.canonical_plan.at("spec").at("workspace").at(
                 "concurrency_key") ==
                 "local-gpu-training.recipe-profile-test-a",
@@ -318,7 +358,7 @@ void expanded_instances_have_source_aware_diffs() {
   check(std::ranges::any_of(run_differences, [](const auto& difference) {
           return difference.path == "/spec/workspace/run_directory" &&
                  difference.right ==
-                     "/thearray/git/moe-mla/runs/recipe-profile-test-b";
+                     fixture_workspace_root() + "/runs/recipe-profile-test-b";
         }) &&
             std::ranges::all_of(run_differences, [](const auto& difference) {
               return difference.right_source &&
@@ -389,15 +429,22 @@ void registered_component_names_are_finite_recipe_choices() {
        {"values", {"hf_causal@1.0.0", "hf_multimodal@1.0.0"}}});
   const auto registry =
       trainvm::RecipeProfileRegistry::from_json(document.dump());
+  // Every path override has to land inside the roots this very recipe declares,
+  // so take them from the recipe rather than naming one host's directories.
+  const std::string recipe_root = recipe.at("template_document")
+                                      .at("spec")
+                                      .at("workspace")
+                                      .at("allowed_read_roots")
+                                      .at(0)
+                                      .get<std::string>();
   nlohmann::json instance{
       {"api_version", "trainvm.recipe-instance/v1"},
       {"recipe", {{"name", "hf_multimodal_sft"}, {"version", "1"}}},
       {"run_identity", "component-choice"},
       {"overrides",
-       {{"model.path", "/thearray/git/moe-mla"},
-        {"data.root", "/thearray/git/moe-mla"},
-        {"model.target_manifest",
-         "/thearray/git/moe-mla/README.md"},
+       {{"model.path", recipe_root},
+        {"data.root", recipe_root},
+        {"model.target_manifest", recipe_root + "/README.md"},
         {"model.loader", "hf_causal@1.0.0"}}}};
   const auto expanded = registry.expand_json(instance);
   check(expanded.effective_overrides.at("model.loader") ==

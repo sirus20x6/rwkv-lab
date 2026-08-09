@@ -206,8 +206,22 @@ int main() {
         }),
         "packed-token parity diff names the collator implementation change");
 
-  const auto rwkv_registry = trainvm::RecipeProfileRegistry::load_file(
-      root / "docs/experiment-vm/examples/rwkv-lm.recipe-profiles.v1.json");
+  const auto rwkv_profiles_path =
+      root / "docs/experiment-vm/examples/rwkv-lm.recipe-profiles.v1.json";
+  const auto rwkv_registry =
+      trainvm::RecipeProfileRegistry::load_file(rwkv_profiles_path);
+  // A `path` override has to sit inside the read roots the recipe declares, so
+  // the checkpoint below is built from one instead of naming the deployment
+  // host's directories — the same reason locally_resolvable above exists.
+  const std::string rwkv_read_root = read_json(rwkv_profiles_path)
+                                         .at("recipes")
+                                         .at(0)
+                                         .at("template_document")
+                                         .at("spec")
+                                         .at("workspace")
+                                         .at("allowed_read_roots")
+                                         .at(0)
+                                         .get<std::string>();
   const auto expand_rwkv = [&](std::string_view name) {
     const auto instance = read_json(root / "docs/experiment-vm/examples" /
                                     std::string(name));
@@ -222,7 +236,7 @@ int main() {
   continuation_instance["recipe"]["name"] = "rwkv_lm_continuation";
   continuation_instance["run_identity"] = "rwkv-lm-continuation-test";
   continuation_instance["overrides"]["model.checkpoint_path"] =
-      "/thearray/git/moe-mla/README.md";
+      rwkv_read_root + "/README.md";
   continuation_instance["overrides"]["model.activation"] = "silu@1.0.0";
   continuation_instance["overrides"]["hyperparameters.optimizer"] =
       "torch_adamw_no_decay@2.0.0";
