@@ -10,7 +10,6 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:ac686edc6487f6f708470099ed8cce2362f0a84ce3a52337897825581e4bb4bf",
   "entries": [
     {
       "source_path": "src/rwkv_lab/__init__.py",

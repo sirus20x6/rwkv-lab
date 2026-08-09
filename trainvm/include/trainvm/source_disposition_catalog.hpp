@@ -61,9 +61,24 @@ struct SourceDispositionDocument {
   std::string source_repository;
   std::string source_revision;
   SourceDispositionScope source_scope;
+  // Derived from entries by source_tree_digest(), never read from the document.
+  // The catalog used to carry this as a stored field, which made it the single
+  // line every concurrent change to the scope had to rewrite -- four pull
+  // requests conflicted on it in one evening while touching disjoint work.
+  // A document that still declares one is rejected rather than ignored.
   std::string source_tree_digest;
   std::vector<SourceDispositionEntry> entries;
 };
+
+// SHA-256 over the ASCII domain "trainvm.source-disposition-tree/v1" followed,
+// in entry order, by NUL, source_path, NUL, and the entry's leaf digest.
+//
+// Exposed because scripts/print_disposition_digests.py maintains a second,
+// hand-written implementation of this fold. Nothing compares the two unless
+// something drives both over the same entries, which is what
+// source_disposition_catalog_tests.cpp does with this declaration.
+[[nodiscard]] std::string source_tree_digest(
+    const std::vector<SourceDispositionEntry>& entries);
 
 class SourceDispositionCatalog {
  public:
@@ -78,13 +93,21 @@ class SourceDispositionCatalog {
 
   [[nodiscard]] const SourceDispositionDocument& document() const;
   [[nodiscard]] const std::vector<SourceDispositionEntry>& entries() const;
-  [[nodiscard]] const std::string& catalog_digest() const;
+  // SHA-256 over the document with every per-file source_sha256 removed: the
+  // classification itself -- paths, classes, entry points, effects, resume
+  // grades, workflow links -- and nothing that moves when a classified file's
+  // bytes change. That separation is the point. The digest this replaced
+  // covered the whole document, so editing any classified source moved it, and
+  // the constant pinning it in the native tests became a second per-scope
+  // serialization point in a second file. Source bytes are pinned per entry
+  // and re-checked against disk; only the review needs a whole-document pin.
+  [[nodiscard]] const std::string& reviewed_classification_digest() const;
   [[nodiscard]] const std::optional<std::string>&
   repository_root_identity_display() const;
 
  private:
   SourceDispositionDocument document_;
-  std::string catalog_digest_;
+  std::string reviewed_classification_digest_;
   std::optional<std::string> repository_root_identity_display_;
 };
 

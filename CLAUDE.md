@@ -419,22 +419,38 @@ trainvm/build/trainvm print-catalog-digests \
 trainvm/build/trainvm validate-catalog \
   docs/experiment-vm/compatibility-workflows.v1.json .
 
-# 4. The source-disposition catalogs: per-source hashes and the tree digest.
+# 4. The source-disposition catalogs: the per-source hashes, and only those.
+#    The tree digest is no longer stored anywhere; it is computed from entries
+#    at load time. A catalog that still declares one is rejected.
 for c in docs/experiment-vm/source-dispositions.*.v1.json; do
   python scripts/print_disposition_digests.py "$c" --write
 done
 ```
 
-If step 4 changed the scripts or RWKV catalog, rebuild and run
-`ctest --test-dir trainvm/build -R source_disposition_catalog` — it prints each
-computed digest beside its name, which is how you pin the fifth and sixth values
-in `trainvm/tests/source_disposition_catalog_tests.cpp` without guessing.
+Step 4 usually stops there now. The two digests pinned in
+`trainvm/tests/source_disposition_catalog_tests.cpp` cover the *classification*
+with every `source_sha256` erased, so ordinary source edits no longer move them
+— that is deliberate, and it is why two pull requests editing different files
+in the same scope no longer collide. If one of them does move, something in a
+catalog's review content changed: read the diff before repinning. Rebuild and
+run `ctest --test-dir trainvm/build -R source_disposition_catalog`; it prints
+each computed digest beside its name, which is how you pin them without
+guessing.
 
 ### Pin conflicts on a rebase are mechanical — never resolve them by hand
 
-Because every PR touching a classified source rewrites the same pin files, a
-rebase conflicts in them constantly. Do **not** resolve those hunks by editing
-them or by picking a side. A pin is a digest of content: whichever side you
+This used to be constant. Every PR touching a classified source rewrote the
+same single-line pins, so two PRs conflicted whether or not their work
+overlapped: `source_tree_digest` in each catalog, and the whole-document digests
+pinned in `source_disposition_catalog_tests.cpp`. Both are gone — the tree
+digest is derived rather than stored, and the native pins now cover the
+classification with the per-file hashes erased. What is left in the catalogs is
+the `entries` list, where two changes touch two different objects and git merges
+them without help.
+
+Conflicts are still possible in `compatibility-workflows.v1.json` and in
+`compatibility_catalog.cpp`, which keep whole-tree digests on purpose. When one
+happens, do **not** resolve those hunks by editing them or by picking a side. A pin is a digest of content: whichever side you
 choose was computed against a tree that no longer exists, so both sides are
 wrong after the merge, and the result is a plausible-looking digest that
 matches nothing.
@@ -467,7 +483,10 @@ with `-freflection`; that is expected.
 
 Two things to know before you paste a new value in:
 
-`source_tree_digest` moving is mechanical — regenerate it and move on. But if
+The compatibility catalog's `source_tree_digest` moving is mechanical —
+regenerate it and move on. (The source-disposition catalogs no longer have one;
+these two artifacts are different and only the compatibility one stores it.)
+But if
 `classification_surface_digest` also moves, that is a **real** signal: something
 changed a file's entrypoint, argument surface, or checkpoint/resume call sites.
 Read the catalog entry before bumping `kReviewedCatalogDigest`; that bump is the
@@ -486,6 +505,14 @@ in the commit message so the next reader does not have to re-derive it.
 `trainvm/tests/source_disposition_catalog_tests.cpp` holds **two** pins, scripts
 and RWKV. A regex on the first `sha256` in that file changes the wrong one. The
 test catches it only because it prints each computed digest beside its name.
+
+That file also runs the only check comparing
+`scripts/print_disposition_digests.py` against the C++ it mirrors: it drives
+both over the same entries and requires the same answer. Nothing else compares
+them, so if you edit the Python fold, the native suite must run. It will —
+`classify_native_ci_changes.py` lists that script under `FULL_FILES` for exactly
+this reason, because `scripts/` otherwise selects the catalog tier and never
+reaches ctest.
 
 The native suite needs GCC 16 with `-freflection`:
 

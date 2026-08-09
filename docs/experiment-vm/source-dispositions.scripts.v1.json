@@ -11,7 +11,6 @@
       ".sh"
     ]
   },
-  "source_tree_digest": "sha256:2f737d7d781525a4b1f6a3573d6486482bd1e29d713c21dc9e4f7be842013faf",
   "entries": [
     {
       "source_path": "scripts/apply_qwen36_civitai_joy_recaptions.py",
@@ -646,7 +645,7 @@
       ],
       "resume_relevance": "none",
       "compatibility_workflow_id": null,
-      "source_sha256": "sha256:e16bd7c43d022b5e2c2d36d9198fc1805b75622ce7ecce709b9c588336e95e97",
+      "source_sha256": "sha256:8b6d0a32394378cb08309a211f00aca7c6c4a9f630bbdc9d26d064ac11dc7aee",
       "language": "python"
     },
     {

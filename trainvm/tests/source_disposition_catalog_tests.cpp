@@ -3,6 +3,7 @@
 #include <openssl/evp.h>
 
 #include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -14,6 +15,8 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "trainvm/json.hpp"
 
@@ -83,16 +86,12 @@ void write_text(const std::filesystem::path& path, std::string_view text) {
 
 nlohmann::json one_file_document(std::string_view source_bytes) {
   const std::string leaf = "sha256:" + sha256(source_bytes);
-  std::string tree = "trainvm.source-disposition-tree/v1";
-  tree.append("\0scripts/a.py\0", 14U);
-  tree.append(leaf);
   return {{"api_version", "trainvm.source-dispositions/v1"},
           {"authority", "compatibility_evidence_only"},
           {"source_repository", "fixture"},
           {"source_revision", "git-sha1:0000000000000000000000000000000000000000"},
           {"source_scope", {{"prefix", "scripts"}, {"recursive", false},
                             {"extensions", {".py", ".sh"}}}},
-          {"source_tree_digest", "sha256:" + sha256(tree)},
           {"entries", {{{"source_path", "scripts/a.py"},
                          {"class", "executable_operation"},
                          {"canonical_entry_point", "python scripts/a.py"},
@@ -104,6 +103,62 @@ nlohmann::json one_file_document(std::string_view source_bytes) {
 
 void write_json(const std::filesystem::path& path, const nlohmann::json& value) {
   write_text(path, value.dump(2) + "\n");
+}
+
+// Run the Python mirror over exactly these entries and return its answer.
+//
+// This is the whole point of the file. scripts/print_disposition_digests.py
+// carries a second, hand-written implementation of the tree-digest fold, and
+// until now nothing compared the two directly: both were compared against a
+// digest stored in each catalog, so they were cross-checked only transitively,
+// and only at the moment somebody regenerated that stored value. The stored
+// value is gone, so the comparison has to be made here, with both
+// implementations driven over the same entries and nothing in between.
+//
+// It throws rather than returning an error string. A cross-language agreement
+// check that degrades to a skip when the interpreter is missing is a check
+// that reports success for the wrong reason.
+std::string python_tree_digest(const std::filesystem::path& repository_root,
+                               const std::filesystem::path& scratch,
+                               const std::vector<trainvm::SourceDispositionEntry>& entries) {
+  static int sequence = 0;
+  nlohmann::json payload = nlohmann::json::array();
+  for (const auto& entry : entries) {
+    payload.push_back({{"source_path", entry.source_path},
+                       {"source_sha256", entry.source_sha256}});
+  }
+  const auto request = scratch / ("entries-" + std::to_string(++sequence) + ".json");
+  write_text(request, payload.dump());
+  const std::string command =
+      "python3 '" + (repository_root / "scripts/print_disposition_digests.py").string() +
+      "' '" + request.string() + "' --tree-digest";
+  struct PipeCloser {
+    void operator()(FILE* stream) const { if (stream != nullptr) ::pclose(stream); }
+  };
+  std::unique_ptr<FILE, PipeCloser> pipe(::popen(command.c_str(), "r"));
+  if (!pipe) throw std::runtime_error("could not run the Python digest mirror");
+  std::string output;
+  std::array<char, 256> buffer{};
+  while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe.get()) != nullptr) {
+    output.append(buffer.data());
+  }
+  const int status = ::pclose(pipe.release());
+  if (status != 0) {
+    throw std::runtime_error("the Python digest mirror exited " + std::to_string(status) +
+                             " for " + request.string());
+  }
+  while (!output.empty() && (output.back() == '\n' || output.back() == '\r')) output.pop_back();
+  if (output.size() != 71U || !output.starts_with("sha256:")) {
+    throw std::runtime_error("the Python digest mirror printed no digest: " + output);
+  }
+  return output;
+}
+
+trainvm::SourceDispositionEntry synthetic(std::string path, std::string leaf) {
+  trainvm::SourceDispositionEntry entry;
+  entry.source_path = std::move(path);
+  entry.source_sha256 = std::move(leaf);
+  return entry;
 }
 
 std::set<std::string> compatibility_ids(const std::filesystem::path& path) {
@@ -132,9 +187,9 @@ int main() {
       scripts_checked, std::nullopt, known_ids);
   check(scripts_catalog.entries().size() == 129U,
         "script disposition catalog covers all 129 reviewed scripts");
-  check(scripts_catalog.catalog_digest() == "sha256:7cd380a910d2bf0a47713cc5eec57d9d2e57190d251eb7104e49f89b2d666108",
-        std::string("script catalog pins the exact reviewed canonical mapping") +
-            " (computed " + scripts_catalog.catalog_digest() + ")");
+  check(scripts_catalog.reviewed_classification_digest() == "sha256:931285aaaa688f5a07211d5b114885a315b719b8ce94ba04678c45e0758536c4",
+        std::string("script catalog pins the exact reviewed classification") +
+            " (computed " + scripts_catalog.reviewed_classification_digest() + ")");
   std::map<trainvm::SourceDispositionClass, std::size_t> classes;
   std::set<std::string> linked_workflow_ids;
   std::size_t linked_script_sources = 0;
@@ -196,9 +251,9 @@ int main() {
       rwkv_checked, std::nullopt, known_ids);
   check(rwkv_catalog.entries().size() == 165U,
         "RWKV disposition catalog covers all 165 reviewed modules");
-  check(rwkv_catalog.catalog_digest() == "sha256:1fc2641db3a4df889893baea3b32d3f29ca2908c836d29606ad2e2b2a61e06c7",
-        std::string("RWKV catalog pins the exact reviewed canonical mapping") +
-            " (computed " + rwkv_catalog.catalog_digest() + ")");
+  check(rwkv_catalog.reviewed_classification_digest() == "sha256:1bb5314b848e75af740d537584d05acd32c967deaa3ba15198a58750cbf37b71",
+        std::string("RWKV catalog pins the exact reviewed classification") +
+            " (computed " + rwkv_catalog.reviewed_classification_digest() + ")");
   classes.clear();
   std::map<std::string, std::size_t> coverage;
   bool complete_rwkv_metadata = true;
@@ -222,6 +277,52 @@ int main() {
         "RWKV catalog pins the audited 68/60/36/1 coverage split");
 
   TemporaryDirectory temporary;
+
+  // The two implementations of the tree-digest fold, driven over the same
+  // entries, with no stored value between them.
+  //
+  // The real catalogs come first because they are the input that matters: 129
+  // and 165 entries of genuine paths and digests. The synthetic vectors after
+  // them exist because agreeing on well-behaved input is weak evidence -- they
+  // are the cases where two plausible implementations disagree. The collision
+  // pair is the important one: ("ab", "c") and ("a", "bc") concatenate to the
+  // same bytes and must not produce the same digest, which is what the NUL
+  // framing buys and what a length-prefixed or unseparated fold would lose.
+  const std::vector<std::pair<std::string, std::vector<trainvm::SourceDispositionEntry>>>
+      agreement_vectors{
+          {"the checked-in scripts catalog", scripts_catalog.entries()},
+          {"the checked-in rwkv-lab catalog", rwkv_catalog.entries()},
+          {"the checked-in dashboard catalog", dashboard_catalog.entries()},
+          {"no entries at all", {}},
+          {"a single entry", {synthetic("scripts/a.py", "sha256:" + sha256("a"))}},
+          {"separator collision, split one way",
+           {synthetic("ab", "c"), synthetic("d", "e")}},
+          {"separator collision, split the other",
+           {synthetic("a", "bc"), synthetic("d", "e")}},
+          {"the same entries in the other order",
+           {synthetic("d", "e"), synthetic("a", "bc")}},
+          {"paths that exercise JSON escaping",
+           {synthetic("scripts/\"quoted\".py", "sha256:" + sha256("q")),
+            synthetic("scripts/back\\slash.py", "sha256:" + sha256("b")),
+            synthetic("scripts/\xc3\xbcnicode.py", "sha256:" + sha256("u")),
+            synthetic(std::string("scripts/embedded\0nul.py", 23U), "sha256:" + sha256("n"))}},
+      };
+  std::set<std::string> distinct_agreement_digests;
+  for (const auto& [description, entries] : agreement_vectors) {
+    const auto native = trainvm::source_tree_digest(entries);
+    const auto mirrored = python_tree_digest(dashboard_root, temporary.path(), entries);
+    distinct_agreement_digests.insert(native);
+    check(native == mirrored,
+          "the Python mirror agrees with the C++ fold over " + description +
+              " (C++ " + native + ", Python " + mirrored + ")");
+  }
+  // Guards the loop above against agreeing vacuously: if the fold ever
+  // collapsed to a constant, every vector would still "agree".
+  check(distinct_agreement_digests.size() == agreement_vectors.size(),
+        "every agreement vector folds to a distinct digest (" +
+            std::to_string(distinct_agreement_digests.size()) + " of " +
+            std::to_string(agreement_vectors.size()) + ")");
+
   const fs::path repository = temporary.path() / "repository";
   const fs::path fixture_catalog = temporary.path() / "catalog.json";
   write_text(repository / "scripts/a.py", "print('fixture')\n");
@@ -275,6 +376,18 @@ int main() {
   check(throws_invalid_argument([&] {
           (void)trainvm::SourceDispositionCatalog::load_file(fixture_catalog);
         }), "unknown optional metadata is rejected");
+  // A catalog that still carries the retired stored pin must be refused, not
+  // tolerated. Ignoring it would let a value that agrees with nothing sit in a
+  // document looking authoritative, which is the failure mode this repository
+  // keeps paying for.
+  malformed = one_file_document("print('fixture')\n");
+  malformed["source_tree_digest"] =
+      trainvm::source_tree_digest({synthetic("scripts/a.py",
+                                             "sha256:" + sha256("print('fixture')\n"))});
+  write_json(fixture_catalog, malformed);
+  check(throws_invalid_argument([&] {
+          (void)trainvm::SourceDispositionCatalog::load_file(fixture_catalog);
+        }), "a stored source_tree_digest is rejected, even a correct one");
   malformed = one_file_document("print('fixture')\n");
   malformed["source_revision"] = "0000000000000000000000000000000000000000";
   write_json(fixture_catalog, malformed);

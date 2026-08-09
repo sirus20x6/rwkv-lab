@@ -1,13 +1,20 @@
-"""The disposition-pin generator must agree with the C++ that enforces it.
+"""The disposition-pin generator, checked from the side that needs no compiler.
 
 scripts/print_disposition_digests.py replicates source_tree_digest() from
 trainvm/src/source_disposition_catalog.cpp. A replication can drift from the
-thing it replicates, and a drifted generator is worse than none: it would hand
-you a digest the native suite then rejects, or -- far worse -- agree by accident
-on the catalogs you happen to test and disagree on the one you re-pin.
+thing it replicates, and a drifted generator is worse than none.
 
-These pin it in both directions: it reproduces every checked-in digest, and it
-notices a mutated pin rather than recomputing over it silently.
+The agreement between the two implementations is NOT asserted here. It cannot
+be: this job has no C++ build. It is asserted in
+trainvm/tests/source_disposition_catalog_tests.cpp, which drives both over the
+same entries. That test replaced an arrangement where each implementation was
+compared against a `source_tree_digest` stored in every catalog -- which
+cross-checked them only transitively, only when somebody regenerated, and cost
+one guaranteed conflict per concurrent change to a scope.
+
+What is left here is everything that does not need a compiler: the algorithm's
+own properties, the per-file content pins, and the refusal to accept a catalog
+that still stores a tree digest.
 """
 
 from __future__ import annotations
@@ -40,16 +47,42 @@ def test_there_are_catalogs_to_check():
 
 
 @pytest.mark.parametrize("catalog", CATALOGS, ids=lambda p: p.name)
-def test_the_generator_reproduces_the_checked_in_tree_digest(catalog):
-    """The replication agrees with the C++ on every catalog, not just one.
+def test_no_catalog_stores_a_tree_digest(catalog):
+    """The serialization point must stay gone.
 
-    Agreement on a single catalog could be luck; the three here differ in size
-    (3, 128 and 165 entries) and in scope, so agreeing on all three is evidence
-    the fold itself matches rather than one document happening to line up.
+    A stored tree digest is derivable from `entries`, so it adds nothing, and
+    it is the one line two independent changes to the same scope are both
+    forced to rewrite -- four pull requests conflicted on it in one evening
+    while touching disjoint work. Nothing stops it being pasted back except
+    this assertion and the C++ loader's exact key set.
     """
     document = json.loads(catalog.read_text(encoding="utf-8"))
-    assert generator.tree_digest(document["entries"]) == \
-        document["source_tree_digest"]
+    assert "source_tree_digest" not in document
+
+
+def test_the_tree_digest_is_a_pure_function_of_the_entry_pins():
+    """The fold reads source_path and source_sha256 and nothing else.
+
+    This is the property that makes storing it pointless, so it is worth an
+    assertion rather than an argument: everything else in an entry can change
+    without moving the digest.
+    """
+    entries = [{"source_path": "scripts/a.py", "source_sha256": "sha256:" + "a" * 64,
+                "class": "executable_operation", "effects": ["read_source"]}]
+    stripped = [{"source_path": entries[0]["source_path"],
+                 "source_sha256": entries[0]["source_sha256"]}]
+    assert generator.tree_digest(entries) == generator.tree_digest(stripped)
+
+
+def test_the_fold_is_framed_so_a_split_cannot_be_moved():
+    """("ab", "c") and ("a", "bc") concatenate alike and must not collide.
+
+    This is what the NUL framing buys. A length-prefixed or unseparated fold
+    would pass every other test in this file and fail here.
+    """
+    left = [{"source_path": "ab", "source_sha256": "c"}]
+    right = [{"source_path": "a", "source_sha256": "bc"}]
+    assert generator.tree_digest(left) != generator.tree_digest(right)
 
 
 @pytest.mark.parametrize("catalog", CATALOGS, ids=lambda p: p.name)
@@ -85,10 +118,28 @@ def test_the_tree_digest_depends_on_entry_order():
     assert generator.tree_digest(swapped) != generator.tree_digest(entries)
 
 
-def test_check_mode_fails_on_a_stale_catalog(tmp_path):
+def test_the_cli_computes_a_tree_digest_over_entries_handed_to_it(tmp_path):
+    """The affordance the native agreement test drives.
+
+    If this mode breaks, the cross-language check in
+    source_disposition_catalog_tests.cpp cannot run at all -- and it lives
+    behind an ~8 minute C++ build, so it is worth failing in seconds here.
+    """
+    entries = [{"source_path": "scripts/a.py", "source_sha256": "sha256:" + "a" * 64},
+               {"source_path": "scripts/b.py", "source_sha256": "sha256:" + "b" * 64}]
+    request = tmp_path / "entries.json"
+    request.write_text(json.dumps(entries), encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, str(GENERATOR), str(request), "--tree-digest"],
+        capture_output=True, text=True, check=False)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == generator.tree_digest(entries)
+
+
+def test_check_mode_fails_on_a_catalog_that_stores_a_tree_digest(tmp_path):
     """End to end, through the real CLI, with a real non-zero exit."""
     document = json.loads(CATALOGS[0].read_text(encoding="utf-8"))
-    document["source_tree_digest"] = "sha256:" + "0" * 64
+    document["source_tree_digest"] = generator.tree_digest(document["entries"])
     stale = tmp_path / "stale.json"
     stale.write_text(json.dumps(document, indent=2), encoding="utf-8")
     completed = subprocess.run(

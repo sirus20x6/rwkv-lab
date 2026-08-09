@@ -31,6 +31,12 @@ FULL_FILES = {
     "scripts/build_trainvm_runtime_closure.py",
     "scripts/build_trainvm_worker_artifact.py",
     "scripts/materialize_trainvm_worker_deployment.py",
+    # Carries a hand-written mirror of trainvm::source_tree_digest(). The only
+    # thing comparing the two implementations is a native test that drives both
+    # over the same entries, and `scripts/` otherwise selects the catalog tier,
+    # which builds the CLI without running ctest. Editing the mirror is exactly
+    # the change that must not skip the test that watches it for drift.
+    "scripts/print_disposition_digests.py",
     "scripts/validate_native_ci_exclusions.py",
 }
 NONE_FILES = {
