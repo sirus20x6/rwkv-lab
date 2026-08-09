@@ -846,6 +846,40 @@ message GetHostAuthorityStatusResponse {
   uint64 resource_inventory_observation_age_ns = 31;
 }
 
+message GetReconciliationStatusRequest {}
+
+// Why a run is not being reconciled right now. Read this before reaching for
+// `top`: a supervisor burning CPU shows up here as reconcile_steps climbing
+// while the runs it is stepping report no progress.
+message ReconciliationRunWait {
+  string run_id = 1;
+  string wait_reason = 2;
+  // Consecutive passes that ended in the same wait without the run's journal
+  // state moving.
+  uint64 idle_passes = 3;
+  uint64 retries = 4;
+  // Current backoff interval, and the authority boot-time deadline it implies.
+  int64 backoff_ns = 5;
+  int64 next_due_boottime_ns = 6;
+  uint64 last_event_sequence = 7;
+}
+
+message GetReconciliationStatusResponse {
+  bool supervisor_running = 1;
+  uint64 wakes = 2;
+  uint64 explicit_wakes = 3;
+  uint64 cadence_wakes = 4;
+  uint64 scans = 5;
+  uint64 reconcile_passes = 6;
+  uint64 reconcile_steps = 7;
+  uint64 skipped_idle_runs = 8;
+  uint64 budget_requeues = 9;
+  uint64 failures = 10;
+  uint64 tracked_runs = 11;
+  repeated ReconciliationRunWait waits = 12;
+  bool waits_truncated = 13;
+}
+
 service TrainVM {
   rpc SubmitExperiment(SubmitExperimentRequest) returns (SubmitExperimentResponse);
   rpc AuthorRun(AuthorRunRequest) returns (stream AuthorRunUpdate);
@@ -858,6 +892,10 @@ service TrainVM {
   rpc GetControlView(GetControlViewRequest) returns (GetControlViewResponse);
   rpc GetDescriptor(DescriptorRequest) returns (DescriptorResponse);
   rpc GetHostAuthorityStatus(GetHostAuthorityStatusRequest) returns (GetHostAuthorityStatusResponse);
+  // Deliberately not folded into GetHostAuthorityStatus: that call fails closed
+  // when no hostd is configured, and supervisor telemetry has to be readable
+  // exactly when the host authority is missing or poisoned.
+  rpc GetReconciliationStatus(GetReconciliationStatusRequest) returns (GetReconciliationStatusResponse);
 }
 
 service WorkerControl {
