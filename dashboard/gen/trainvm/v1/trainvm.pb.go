@@ -1174,7 +1174,7 @@ func (x ControlPatchAcknowledgement_Disposition) Number() protoreflect.EnumNumbe
 
 // Deprecated: Use ControlPatchAcknowledgement_Disposition.Descriptor instead.
 func (ControlPatchAcknowledgement_Disposition) EnumDescriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{29, 0}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{31, 0}
 }
 
 type CheckpointAcknowledgement_Disposition int32
@@ -1223,7 +1223,7 @@ func (x CheckpointAcknowledgement_Disposition) Number() protoreflect.EnumNumber 
 
 // Deprecated: Use CheckpointAcknowledgement_Disposition.Descriptor instead.
 func (CheckpointAcknowledgement_Disposition) EnumDescriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{30, 0}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{32, 0}
 }
 
 type LifecycleAcknowledgement_Kind int32
@@ -1275,7 +1275,7 @@ func (x LifecycleAcknowledgement_Kind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use LifecycleAcknowledgement_Kind.Descriptor instead.
 func (LifecycleAcknowledgement_Kind) EnumDescriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{31, 0}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{33, 0}
 }
 
 type LifecycleAcknowledgement_Disposition int32
@@ -1324,7 +1324,7 @@ func (x LifecycleAcknowledgement_Disposition) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use LifecycleAcknowledgement_Disposition.Descriptor instead.
 func (LifecycleAcknowledgement_Disposition) EnumDescriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{31, 1}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{33, 1}
 }
 
 type WorkerWelcome_Disposition int32
@@ -1376,7 +1376,7 @@ func (x WorkerWelcome_Disposition) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use WorkerWelcome_Disposition.Descriptor instead.
 func (WorkerWelcome_Disposition) EnumDescriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{34, 0}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{36, 0}
 }
 
 type Diagnostic struct {
@@ -4267,6 +4267,251 @@ func (x *WorkerExecutionPhaseReceipt) GetCompletedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+// One name/version pair a compiled artifact binds to, as the worker observes
+// it.  Carried only inside WorkerRuntimeEvidence.
+type WorkerRuntimeVersionIdentity struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Version       string                 `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkerRuntimeVersionIdentity) Reset() {
+	*x = WorkerRuntimeVersionIdentity{}
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkerRuntimeVersionIdentity) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkerRuntimeVersionIdentity) ProtoMessage() {}
+
+func (x *WorkerRuntimeVersionIdentity) ProtoReflect() protoreflect.Message {
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkerRuntimeVersionIdentity.ProtoReflect.Descriptor instead.
+func (*WorkerRuntimeVersionIdentity) Descriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *WorkerRuntimeVersionIdentity) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *WorkerRuntimeVersionIdentity) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
+// What a worker measured about the runtime it is actually running in, and the
+// attempt identity it claims while saying so.
+//
+// This message is EXACTLY trainvm::WorkerRuntimeEvidenceReport, field for
+// field, and must stay that way: every member is either a fact only the worker
+// can observe, or an identity claim the authority already knows independently
+// and compares rather than believes.  Nothing here names a receipt or carries
+// a digest the authority derives for itself -- no host_id, boot_id,
+// launch_spec_digest, inventory_receipt_digest, resource_binding_digest or
+// receipt name -- because those are the fields that would let a worker author
+// the receipt a cache lookup reads.  Admission assigns them from derived
+// context instead.
+//
+// There is deliberately no worker_sequence either.  Runtime evidence is not an
+// observation in the worker's ordered stream; it is published as its own
+// immutable receipt, so the transport stays the report and nothing else.
+// `worker_runtime_evidence_wire_hop` in the native suite asserts this
+// message and the C++ struct agree exactly, because they are two literals
+// nothing else keeps in step.
+type WorkerRuntimeEvidence struct {
+	state                      protoimpl.MessageState          `protogen:"open.v1"`
+	ApiVersion                 string                          `protobuf:"bytes,1,opt,name=api_version,json=apiVersion,proto3" json:"api_version,omitempty"`
+	RunId                      string                          `protobuf:"bytes,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	NodeId                     string                          `protobuf:"bytes,3,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	AttemptId                  string                          `protobuf:"bytes,4,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"`
+	LaunchNonce                string                          `protobuf:"bytes,5,opt,name=launch_nonce,json=launchNonce,proto3" json:"launch_nonce,omitempty"`
+	ConcurrencyKey             string                          `protobuf:"bytes,6,opt,name=concurrency_key,json=concurrencyKey,proto3" json:"concurrency_key,omitempty"`
+	LeaseId                    string                          `protobuf:"bytes,7,opt,name=lease_id,json=leaseId,proto3" json:"lease_id,omitempty"`
+	FencingToken               uint64                          `protobuf:"varint,8,opt,name=fencing_token,json=fencingToken,proto3" json:"fencing_token,omitempty"`
+	ComputeDeviceVendor        string                          `protobuf:"bytes,9,opt,name=compute_device_vendor,json=computeDeviceVendor,proto3" json:"compute_device_vendor,omitempty"`
+	ComputeArchitecture        string                          `protobuf:"bytes,10,opt,name=compute_architecture,json=computeArchitecture,proto3" json:"compute_architecture,omitempty"`
+	ComputeDeviceUuid          *string                         `protobuf:"bytes,11,opt,name=compute_device_uuid,json=computeDeviceUuid,proto3,oneof" json:"compute_device_uuid,omitempty"`
+	ComputeDevicePciAddress    *string                         `protobuf:"bytes,12,opt,name=compute_device_pci_address,json=computeDevicePciAddress,proto3,oneof" json:"compute_device_pci_address,omitempty"`
+	DriverVersion              string                          `protobuf:"bytes,13,opt,name=driver_version,json=driverVersion,proto3" json:"driver_version,omitempty"`
+	RuntimeVersions            []*WorkerRuntimeVersionIdentity `protobuf:"bytes,14,rep,name=runtime_versions,json=runtimeVersions,proto3" json:"runtime_versions,omitempty"`
+	RuntimeClosureFingerprint  string                          `protobuf:"bytes,15,opt,name=runtime_closure_fingerprint,json=runtimeClosureFingerprint,proto3" json:"runtime_closure_fingerprint,omitempty"`
+	HostAbiDigest              string                          `protobuf:"bytes,16,opt,name=host_abi_digest,json=hostAbiDigest,proto3" json:"host_abi_digest,omitempty"`
+	ComputeCompatibilityDigest string                          `protobuf:"bytes,17,opt,name=compute_compatibility_digest,json=computeCompatibilityDigest,proto3" json:"compute_compatibility_digest,omitempty"`
+	unknownFields              protoimpl.UnknownFields
+	sizeCache                  protoimpl.SizeCache
+}
+
+func (x *WorkerRuntimeEvidence) Reset() {
+	*x = WorkerRuntimeEvidence{}
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkerRuntimeEvidence) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkerRuntimeEvidence) ProtoMessage() {}
+
+func (x *WorkerRuntimeEvidence) ProtoReflect() protoreflect.Message {
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkerRuntimeEvidence.ProtoReflect.Descriptor instead.
+func (*WorkerRuntimeEvidence) Descriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *WorkerRuntimeEvidence) GetApiVersion() string {
+	if x != nil {
+		return x.ApiVersion
+	}
+	return ""
+}
+
+func (x *WorkerRuntimeEvidence) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *WorkerRuntimeEvidence) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *WorkerRuntimeEvidence) GetAttemptId() string {
+	if x != nil {
+		return x.AttemptId
+	}
+	return ""
+}
+
+func (x *WorkerRuntimeEvidence) GetLaunchNonce() string {
+	if x != nil {
+		return x.LaunchNonce
+	}
+	return ""
+}
+
+func (x *WorkerRuntimeEvidence) GetConcurrencyKey() string {
+	if x != nil {
+		return x.ConcurrencyKey
+	}
+	return ""
+}
+
+func (x *WorkerRuntimeEvidence) GetLeaseId() string {
+	if x != nil {
+		return x.LeaseId
+	}
+	return ""
+}
+
+func (x *WorkerRuntimeEvidence) GetFencingToken() uint64 {
+	if x != nil {
+		return x.FencingToken
+	}
+	return 0
+}
+
+func (x *WorkerRuntimeEvidence) GetComputeDeviceVendor() string {
+	if x != nil {
+		return x.ComputeDeviceVendor
+	}
+	return ""
+}
+
+func (x *WorkerRuntimeEvidence) GetComputeArchitecture() string {
+	if x != nil {
+		return x.ComputeArchitecture
+	}
+	return ""
+}
+
+func (x *WorkerRuntimeEvidence) GetComputeDeviceUuid() string {
+	if x != nil && x.ComputeDeviceUuid != nil {
+		return *x.ComputeDeviceUuid
+	}
+	return ""
+}
+
+func (x *WorkerRuntimeEvidence) GetComputeDevicePciAddress() string {
+	if x != nil && x.ComputeDevicePciAddress != nil {
+		return *x.ComputeDevicePciAddress
+	}
+	return ""
+}
+
+func (x *WorkerRuntimeEvidence) GetDriverVersion() string {
+	if x != nil {
+		return x.DriverVersion
+	}
+	return ""
+}
+
+func (x *WorkerRuntimeEvidence) GetRuntimeVersions() []*WorkerRuntimeVersionIdentity {
+	if x != nil {
+		return x.RuntimeVersions
+	}
+	return nil
+}
+
+func (x *WorkerRuntimeEvidence) GetRuntimeClosureFingerprint() string {
+	if x != nil {
+		return x.RuntimeClosureFingerprint
+	}
+	return ""
+}
+
+func (x *WorkerRuntimeEvidence) GetHostAbiDigest() string {
+	if x != nil {
+		return x.HostAbiDigest
+	}
+	return ""
+}
+
+func (x *WorkerRuntimeEvidence) GetComputeCompatibilityDigest() string {
+	if x != nil {
+		return x.ComputeCompatibilityDigest
+	}
+	return ""
+}
+
 type ControlPatchAcknowledgement struct {
 	state           protoimpl.MessageState                  `protogen:"open.v1"`
 	ControlRevision uint64                                  `protobuf:"varint,1,opt,name=control_revision,json=controlRevision,proto3" json:"control_revision,omitempty"`
@@ -4287,7 +4532,7 @@ type ControlPatchAcknowledgement struct {
 
 func (x *ControlPatchAcknowledgement) Reset() {
 	*x = ControlPatchAcknowledgement{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[29]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4299,7 +4544,7 @@ func (x *ControlPatchAcknowledgement) String() string {
 func (*ControlPatchAcknowledgement) ProtoMessage() {}
 
 func (x *ControlPatchAcknowledgement) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[29]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4312,7 +4557,7 @@ func (x *ControlPatchAcknowledgement) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlPatchAcknowledgement.ProtoReflect.Descriptor instead.
 func (*ControlPatchAcknowledgement) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{29}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *ControlPatchAcknowledgement) GetControlRevision() uint64 {
@@ -4417,7 +4662,7 @@ type CheckpointAcknowledgement struct {
 
 func (x *CheckpointAcknowledgement) Reset() {
 	*x = CheckpointAcknowledgement{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[30]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4429,7 +4674,7 @@ func (x *CheckpointAcknowledgement) String() string {
 func (*CheckpointAcknowledgement) ProtoMessage() {}
 
 func (x *CheckpointAcknowledgement) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[30]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4442,7 +4687,7 @@ func (x *CheckpointAcknowledgement) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckpointAcknowledgement.ProtoReflect.Descriptor instead.
 func (*CheckpointAcknowledgement) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{30}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *CheckpointAcknowledgement) GetCommandId() string {
@@ -4534,7 +4779,7 @@ type LifecycleAcknowledgement struct {
 
 func (x *LifecycleAcknowledgement) Reset() {
 	*x = LifecycleAcknowledgement{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[31]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4546,7 +4791,7 @@ func (x *LifecycleAcknowledgement) String() string {
 func (*LifecycleAcknowledgement) ProtoMessage() {}
 
 func (x *LifecycleAcknowledgement) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[31]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4559,7 +4804,7 @@ func (x *LifecycleAcknowledgement) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LifecycleAcknowledgement.ProtoReflect.Descriptor instead.
 func (*LifecycleAcknowledgement) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{31}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *LifecycleAcknowledgement) GetCommandId() string {
@@ -4652,6 +4897,7 @@ type WorkerToController struct {
 	//	*WorkerToController_CheckpointAck
 	//	*WorkerToController_LifecycleAck
 	//	*WorkerToController_PhaseReceipt
+	//	*WorkerToController_RuntimeEvidence
 	Message       isWorkerToController_Message `protobuf_oneof:"message"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4659,7 +4905,7 @@ type WorkerToController struct {
 
 func (x *WorkerToController) Reset() {
 	*x = WorkerToController{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[32]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4671,7 +4917,7 @@ func (x *WorkerToController) String() string {
 func (*WorkerToController) ProtoMessage() {}
 
 func (x *WorkerToController) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[32]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4684,7 +4930,7 @@ func (x *WorkerToController) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkerToController.ProtoReflect.Descriptor instead.
 func (*WorkerToController) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{32}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *WorkerToController) GetMessage() isWorkerToController_Message {
@@ -4775,6 +5021,15 @@ func (x *WorkerToController) GetPhaseReceipt() *WorkerExecutionPhaseReceipt {
 	return nil
 }
 
+func (x *WorkerToController) GetRuntimeEvidence() *WorkerRuntimeEvidence {
+	if x != nil {
+		if x, ok := x.Message.(*WorkerToController_RuntimeEvidence); ok {
+			return x.RuntimeEvidence
+		}
+	}
+	return nil
+}
+
 type isWorkerToController_Message interface {
 	isWorkerToController_Message()
 }
@@ -4815,6 +5070,10 @@ type WorkerToController_PhaseReceipt struct {
 	PhaseReceipt *WorkerExecutionPhaseReceipt `protobuf:"bytes,9,opt,name=phase_receipt,json=phaseReceipt,proto3,oneof"`
 }
 
+type WorkerToController_RuntimeEvidence struct {
+	RuntimeEvidence *WorkerRuntimeEvidence `protobuf:"bytes,10,opt,name=runtime_evidence,json=runtimeEvidence,proto3,oneof"`
+}
+
 func (*WorkerToController_Hello) isWorkerToController_Message() {}
 
 func (*WorkerToController_Heartbeat) isWorkerToController_Message() {}
@@ -4832,6 +5091,8 @@ func (*WorkerToController_CheckpointAck) isWorkerToController_Message() {}
 func (*WorkerToController_LifecycleAck) isWorkerToController_Message() {}
 
 func (*WorkerToController_PhaseReceipt) isWorkerToController_Message() {}
+
+func (*WorkerToController_RuntimeEvidence) isWorkerToController_Message() {}
 
 type WorkerCommand struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
@@ -4851,7 +5112,7 @@ type WorkerCommand struct {
 
 func (x *WorkerCommand) Reset() {
 	*x = WorkerCommand{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[33]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4863,7 +5124,7 @@ func (x *WorkerCommand) String() string {
 func (*WorkerCommand) ProtoMessage() {}
 
 func (x *WorkerCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[33]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4876,7 +5137,7 @@ func (x *WorkerCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkerCommand.ProtoReflect.Descriptor instead.
 func (*WorkerCommand) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{33}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *WorkerCommand) GetControllerSequence() uint64 {
@@ -5013,7 +5274,7 @@ type WorkerWelcome struct {
 
 func (x *WorkerWelcome) Reset() {
 	*x = WorkerWelcome{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[34]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5025,7 +5286,7 @@ func (x *WorkerWelcome) String() string {
 func (*WorkerWelcome) ProtoMessage() {}
 
 func (x *WorkerWelcome) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[34]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5038,7 +5299,7 @@ func (x *WorkerWelcome) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkerWelcome.ProtoReflect.Descriptor instead.
 func (*WorkerWelcome) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{34}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *WorkerWelcome) GetDisposition() WorkerWelcome_Disposition {
@@ -5210,7 +5471,7 @@ type WorkerReceipt struct {
 
 func (x *WorkerReceipt) Reset() {
 	*x = WorkerReceipt{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[35]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5222,7 +5483,7 @@ func (x *WorkerReceipt) String() string {
 func (*WorkerReceipt) ProtoMessage() {}
 
 func (x *WorkerReceipt) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[35]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5235,7 +5496,7 @@ func (x *WorkerReceipt) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkerReceipt.ProtoReflect.Descriptor instead.
 func (*WorkerReceipt) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{35}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *WorkerReceipt) GetEventId() string {
@@ -5302,7 +5563,7 @@ type ControllerToWorker struct {
 
 func (x *ControllerToWorker) Reset() {
 	*x = ControllerToWorker{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[36]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5314,7 +5575,7 @@ func (x *ControllerToWorker) String() string {
 func (*ControllerToWorker) ProtoMessage() {}
 
 func (x *ControllerToWorker) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[36]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5327,7 +5588,7 @@ func (x *ControllerToWorker) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControllerToWorker.ProtoReflect.Descriptor instead.
 func (*ControllerToWorker) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{36}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *ControllerToWorker) GetMessage() isControllerToWorker_Message {
@@ -5410,7 +5671,7 @@ type GetRunRequest struct {
 
 func (x *GetRunRequest) Reset() {
 	*x = GetRunRequest{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[37]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5422,7 +5683,7 @@ func (x *GetRunRequest) String() string {
 func (*GetRunRequest) ProtoMessage() {}
 
 func (x *GetRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[37]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5435,7 +5696,7 @@ func (x *GetRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRunRequest.ProtoReflect.Descriptor instead.
 func (*GetRunRequest) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{37}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *GetRunRequest) GetRunId() string {
@@ -5457,7 +5718,7 @@ type GetCompiledPlanRequest struct {
 
 func (x *GetCompiledPlanRequest) Reset() {
 	*x = GetCompiledPlanRequest{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[38]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5469,7 +5730,7 @@ func (x *GetCompiledPlanRequest) String() string {
 func (*GetCompiledPlanRequest) ProtoMessage() {}
 
 func (x *GetCompiledPlanRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[38]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5482,7 +5743,7 @@ func (x *GetCompiledPlanRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCompiledPlanRequest.ProtoReflect.Descriptor instead.
 func (*GetCompiledPlanRequest) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{38}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *GetCompiledPlanRequest) GetRunId() string {
@@ -5503,7 +5764,7 @@ type GetCompiledPlanResponse struct {
 
 func (x *GetCompiledPlanResponse) Reset() {
 	*x = GetCompiledPlanResponse{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[39]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5515,7 +5776,7 @@ func (x *GetCompiledPlanResponse) String() string {
 func (*GetCompiledPlanResponse) ProtoMessage() {}
 
 func (x *GetCompiledPlanResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[39]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5528,7 +5789,7 @@ func (x *GetCompiledPlanResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCompiledPlanResponse.ProtoReflect.Descriptor instead.
 func (*GetCompiledPlanResponse) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{39}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *GetCompiledPlanResponse) GetJournalId() string {
@@ -5564,7 +5825,7 @@ type ListRunsRequest struct {
 
 func (x *ListRunsRequest) Reset() {
 	*x = ListRunsRequest{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[40]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5576,7 +5837,7 @@ func (x *ListRunsRequest) String() string {
 func (*ListRunsRequest) ProtoMessage() {}
 
 func (x *ListRunsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[40]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5589,7 +5850,7 @@ func (x *ListRunsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRunsRequest.ProtoReflect.Descriptor instead.
 func (*ListRunsRequest) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{40}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *ListRunsRequest) GetObservedStates() []ObservedState {
@@ -5631,7 +5892,7 @@ type ListRunsResponse struct {
 
 func (x *ListRunsResponse) Reset() {
 	*x = ListRunsResponse{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[41]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5643,7 +5904,7 @@ func (x *ListRunsResponse) String() string {
 func (*ListRunsResponse) ProtoMessage() {}
 
 func (x *ListRunsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[41]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5656,7 +5917,7 @@ func (x *ListRunsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRunsResponse.ProtoReflect.Descriptor instead.
 func (*ListRunsResponse) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{41}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *ListRunsResponse) GetRuns() []*RunSummary {
@@ -5706,7 +5967,7 @@ type WatchEventsRequest struct {
 
 func (x *WatchEventsRequest) Reset() {
 	*x = WatchEventsRequest{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[42]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5718,7 +5979,7 @@ func (x *WatchEventsRequest) String() string {
 func (*WatchEventsRequest) ProtoMessage() {}
 
 func (x *WatchEventsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[42]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5731,7 +5992,7 @@ func (x *WatchEventsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchEventsRequest.ProtoReflect.Descriptor instead.
 func (*WatchEventsRequest) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{42}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *WatchEventsRequest) GetRunIds() []string {
@@ -5792,7 +6053,7 @@ type GetControlViewRequest struct {
 
 func (x *GetControlViewRequest) Reset() {
 	*x = GetControlViewRequest{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[43]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5804,7 +6065,7 @@ func (x *GetControlViewRequest) String() string {
 func (*GetControlViewRequest) ProtoMessage() {}
 
 func (x *GetControlViewRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[43]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5817,7 +6078,7 @@ func (x *GetControlViewRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetControlViewRequest.ProtoReflect.Descriptor instead.
 func (*GetControlViewRequest) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{43}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *GetControlViewRequest) GetRunId() string {
@@ -5845,7 +6106,7 @@ type ControlDescriptor struct {
 
 func (x *ControlDescriptor) Reset() {
 	*x = ControlDescriptor{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[44]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5857,7 +6118,7 @@ func (x *ControlDescriptor) String() string {
 func (*ControlDescriptor) ProtoMessage() {}
 
 func (x *ControlDescriptor) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[44]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5870,7 +6131,7 @@ func (x *ControlDescriptor) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlDescriptor.ProtoReflect.Descriptor instead.
 func (*ControlDescriptor) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{44}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *ControlDescriptor) GetType() ControlType {
@@ -5961,7 +6222,7 @@ type ControlCommandView struct {
 
 func (x *ControlCommandView) Reset() {
 	*x = ControlCommandView{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[45]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5973,7 +6234,7 @@ func (x *ControlCommandView) String() string {
 func (*ControlCommandView) ProtoMessage() {}
 
 func (x *ControlCommandView) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[45]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5986,7 +6247,7 @@ func (x *ControlCommandView) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlCommandView.ProtoReflect.Descriptor instead.
 func (*ControlCommandView) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{45}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *ControlCommandView) GetCommandId() string {
@@ -6072,7 +6333,7 @@ type GetControlViewResponse struct {
 
 func (x *GetControlViewResponse) Reset() {
 	*x = GetControlViewResponse{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[46]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6084,7 +6345,7 @@ func (x *GetControlViewResponse) String() string {
 func (*GetControlViewResponse) ProtoMessage() {}
 
 func (x *GetControlViewResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[46]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6097,7 +6358,7 @@ func (x *GetControlViewResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetControlViewResponse.ProtoReflect.Descriptor instead.
 func (*GetControlViewResponse) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{46}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *GetControlViewResponse) GetCatalog() map[string]*ControlDescriptor {
@@ -6145,7 +6406,7 @@ type DescriptorRequest struct {
 
 func (x *DescriptorRequest) Reset() {
 	*x = DescriptorRequest{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[47]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6157,7 +6418,7 @@ func (x *DescriptorRequest) String() string {
 func (*DescriptorRequest) ProtoMessage() {}
 
 func (x *DescriptorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[47]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6170,7 +6431,7 @@ func (x *DescriptorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DescriptorRequest.ProtoReflect.Descriptor instead.
 func (*DescriptorRequest) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{47}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *DescriptorRequest) GetAdapter() string {
@@ -6198,7 +6459,7 @@ type DescriptorResponse struct {
 
 func (x *DescriptorResponse) Reset() {
 	*x = DescriptorResponse{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[48]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6210,7 +6471,7 @@ func (x *DescriptorResponse) String() string {
 func (*DescriptorResponse) ProtoMessage() {}
 
 func (x *DescriptorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[48]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6223,7 +6484,7 @@ func (x *DescriptorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DescriptorResponse.ProtoReflect.Descriptor instead.
 func (*DescriptorResponse) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{48}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *DescriptorResponse) GetSchemaJson() string {
@@ -6262,7 +6523,7 @@ type HostdCoordinatorAuthorityStatus struct {
 
 func (x *HostdCoordinatorAuthorityStatus) Reset() {
 	*x = HostdCoordinatorAuthorityStatus{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[49]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6274,7 +6535,7 @@ func (x *HostdCoordinatorAuthorityStatus) String() string {
 func (*HostdCoordinatorAuthorityStatus) ProtoMessage() {}
 
 func (x *HostdCoordinatorAuthorityStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[49]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6287,7 +6548,7 @@ func (x *HostdCoordinatorAuthorityStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HostdCoordinatorAuthorityStatus.ProtoReflect.Descriptor instead.
 func (*HostdCoordinatorAuthorityStatus) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{49}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *HostdCoordinatorAuthorityStatus) GetApiVersion() string {
@@ -6403,7 +6664,7 @@ type HostResourceFenceStatus struct {
 
 func (x *HostResourceFenceStatus) Reset() {
 	*x = HostResourceFenceStatus{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[50]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6415,7 +6676,7 @@ func (x *HostResourceFenceStatus) String() string {
 func (*HostResourceFenceStatus) ProtoMessage() {}
 
 func (x *HostResourceFenceStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[50]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6428,7 +6689,7 @@ func (x *HostResourceFenceStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HostResourceFenceStatus.ProtoReflect.Descriptor instead.
 func (*HostResourceFenceStatus) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{50}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *HostResourceFenceStatus) GetKind() HostResourceKind {
@@ -6510,7 +6771,7 @@ type HostdProcessAuthorityStatus struct {
 
 func (x *HostdProcessAuthorityStatus) Reset() {
 	*x = HostdProcessAuthorityStatus{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[51]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6522,7 +6783,7 @@ func (x *HostdProcessAuthorityStatus) String() string {
 func (*HostdProcessAuthorityStatus) ProtoMessage() {}
 
 func (x *HostdProcessAuthorityStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[51]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6535,7 +6796,7 @@ func (x *HostdProcessAuthorityStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HostdProcessAuthorityStatus.ProtoReflect.Descriptor instead.
 func (*HostdProcessAuthorityStatus) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{51}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *HostdProcessAuthorityStatus) GetAllocationId() string {
@@ -6700,7 +6961,7 @@ type GetHostAuthorityStatusRequest struct {
 
 func (x *GetHostAuthorityStatusRequest) Reset() {
 	*x = GetHostAuthorityStatusRequest{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[52]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6712,7 +6973,7 @@ func (x *GetHostAuthorityStatusRequest) String() string {
 func (*GetHostAuthorityStatusRequest) ProtoMessage() {}
 
 func (x *GetHostAuthorityStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[52]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6725,7 +6986,7 @@ func (x *GetHostAuthorityStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetHostAuthorityStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetHostAuthorityStatusRequest) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{52}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{54}
 }
 
 type GetHostAuthorityStatusResponse struct {
@@ -6767,7 +7028,7 @@ type GetHostAuthorityStatusResponse struct {
 
 func (x *GetHostAuthorityStatusResponse) Reset() {
 	*x = GetHostAuthorityStatusResponse{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[53]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6779,7 +7040,7 @@ func (x *GetHostAuthorityStatusResponse) String() string {
 func (*GetHostAuthorityStatusResponse) ProtoMessage() {}
 
 func (x *GetHostAuthorityStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[53]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6792,7 +7053,7 @@ func (x *GetHostAuthorityStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetHostAuthorityStatusResponse.ProtoReflect.Descriptor instead.
 func (*GetHostAuthorityStatusResponse) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{53}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *GetHostAuthorityStatusResponse) GetApiVersion() string {
@@ -7020,7 +7281,7 @@ type GetReconciliationStatusRequest struct {
 
 func (x *GetReconciliationStatusRequest) Reset() {
 	*x = GetReconciliationStatusRequest{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[54]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7032,7 +7293,7 @@ func (x *GetReconciliationStatusRequest) String() string {
 func (*GetReconciliationStatusRequest) ProtoMessage() {}
 
 func (x *GetReconciliationStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[54]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7045,7 +7306,7 @@ func (x *GetReconciliationStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetReconciliationStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetReconciliationStatusRequest) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{54}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{56}
 }
 
 // Why a run is not being reconciled right now. Read this before reaching for
@@ -7069,7 +7330,7 @@ type ReconciliationRunWait struct {
 
 func (x *ReconciliationRunWait) Reset() {
 	*x = ReconciliationRunWait{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[55]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7081,7 +7342,7 @@ func (x *ReconciliationRunWait) String() string {
 func (*ReconciliationRunWait) ProtoMessage() {}
 
 func (x *ReconciliationRunWait) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[55]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7094,7 +7355,7 @@ func (x *ReconciliationRunWait) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReconciliationRunWait.ProtoReflect.Descriptor instead.
 func (*ReconciliationRunWait) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{55}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *ReconciliationRunWait) GetRunId() string {
@@ -7167,7 +7428,7 @@ type GetReconciliationStatusResponse struct {
 
 func (x *GetReconciliationStatusResponse) Reset() {
 	*x = GetReconciliationStatusResponse{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[56]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7179,7 +7440,7 @@ func (x *GetReconciliationStatusResponse) String() string {
 func (*GetReconciliationStatusResponse) ProtoMessage() {}
 
 func (x *GetReconciliationStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[56]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7192,7 +7453,7 @@ func (x *GetReconciliationStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetReconciliationStatusResponse.ProtoReflect.Descriptor instead.
 func (*GetReconciliationStatusResponse) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{56}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *GetReconciliationStatusResponse) GetSupervisorRunning() bool {
@@ -7619,7 +7880,33 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x15DISPOSITION_COMPLETED\x10\x01\x12\x17\n" +
 	"\x13DISPOSITION_SKIPPED\x10\x02\x12\x16\n" +
 	"\x12DISPOSITION_FAILED\x10\x03\x12\x19\n" +
-	"\x15DISPOSITION_CANCELLED\x10\x04\"\xfa\x05\n" +
+	"\x15DISPOSITION_CANCELLED\x10\x04\"L\n" +
+	"\x1cWorkerRuntimeVersionIdentity\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\tR\aversion\"\xce\x06\n" +
+	"\x15WorkerRuntimeEvidence\x12\x1f\n" +
+	"\vapi_version\x18\x01 \x01(\tR\n" +
+	"apiVersion\x12\x15\n" +
+	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x17\n" +
+	"\anode_id\x18\x03 \x01(\tR\x06nodeId\x12\x1d\n" +
+	"\n" +
+	"attempt_id\x18\x04 \x01(\tR\tattemptId\x12!\n" +
+	"\flaunch_nonce\x18\x05 \x01(\tR\vlaunchNonce\x12'\n" +
+	"\x0fconcurrency_key\x18\x06 \x01(\tR\x0econcurrencyKey\x12\x19\n" +
+	"\blease_id\x18\a \x01(\tR\aleaseId\x12#\n" +
+	"\rfencing_token\x18\b \x01(\x04R\ffencingToken\x122\n" +
+	"\x15compute_device_vendor\x18\t \x01(\tR\x13computeDeviceVendor\x121\n" +
+	"\x14compute_architecture\x18\n" +
+	" \x01(\tR\x13computeArchitecture\x123\n" +
+	"\x13compute_device_uuid\x18\v \x01(\tH\x00R\x11computeDeviceUuid\x88\x01\x01\x12@\n" +
+	"\x1acompute_device_pci_address\x18\f \x01(\tH\x01R\x17computeDevicePciAddress\x88\x01\x01\x12%\n" +
+	"\x0edriver_version\x18\r \x01(\tR\rdriverVersion\x12S\n" +
+	"\x10runtime_versions\x18\x0e \x03(\v2(.trainvm.v1.WorkerRuntimeVersionIdentityR\x0fruntimeVersions\x12>\n" +
+	"\x1bruntime_closure_fingerprint\x18\x0f \x01(\tR\x19runtimeClosureFingerprint\x12&\n" +
+	"\x0fhost_abi_digest\x18\x10 \x01(\tR\rhostAbiDigest\x12@\n" +
+	"\x1ccompute_compatibility_digest\x18\x11 \x01(\tR\x1acomputeCompatibilityDigestB\x16\n" +
+	"\x14_compute_device_uuidB\x1d\n" +
+	"\x1b_compute_device_pci_address\"\xfa\x05\n" +
 	"\x1bControlPatchAcknowledgement\x12)\n" +
 	"\x10control_revision\x18\x01 \x01(\x04R\x0fcontrolRevision\x12U\n" +
 	"\vdisposition\x18\x02 \x01(\x0e23.trainvm.v1.ControlPatchAcknowledgement.DispositionR\vdisposition\x127\n" +
@@ -7683,7 +7970,7 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\vDisposition\x12\x1b\n" +
 	"\x17DISPOSITION_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13DISPOSITION_APPLIED\x10\x01\x12\x18\n" +
-	"\x14DISPOSITION_REJECTED\x10\x02\"\xe9\x04\n" +
+	"\x14DISPOSITION_REJECTED\x10\x02\"\xb9\x05\n" +
 	"\x12WorkerToController\x12/\n" +
 	"\x05hello\x18\x01 \x01(\v2\x17.trainvm.v1.WorkerHelloH\x00R\x05hello\x12;\n" +
 	"\theartbeat\x18\x02 \x01(\v2\x1b.trainvm.v1.WorkerHeartbeatH\x00R\theartbeat\x121\n" +
@@ -7694,7 +7981,9 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"controlAck\x12N\n" +
 	"\x0echeckpoint_ack\x18\a \x01(\v2%.trainvm.v1.CheckpointAcknowledgementH\x00R\rcheckpointAck\x12K\n" +
 	"\rlifecycle_ack\x18\b \x01(\v2$.trainvm.v1.LifecycleAcknowledgementH\x00R\flifecycleAck\x12N\n" +
-	"\rphase_receipt\x18\t \x01(\v2'.trainvm.v1.WorkerExecutionPhaseReceiptH\x00R\fphaseReceiptB\t\n" +
+	"\rphase_receipt\x18\t \x01(\v2'.trainvm.v1.WorkerExecutionPhaseReceiptH\x00R\fphaseReceipt\x12N\n" +
+	"\x10runtime_evidence\x18\n" +
+	" \x01(\v2!.trainvm.v1.WorkerRuntimeEvidenceH\x00R\x0fruntimeEvidenceB\t\n" +
 	"\amessage\"\x86\x03\n" +
 	"\rWorkerCommand\x12/\n" +
 	"\x13controller_sequence\x18\x01 \x01(\x04R\x12controllerSequence\x12\x1d\n" +
@@ -8079,7 +8368,7 @@ func file_trainvm_v1_trainvm_proto_rawDescGZIP() []byte {
 }
 
 var file_trainvm_v1_trainvm_proto_enumTypes = make([]protoimpl.EnumInfo, 24)
-var file_trainvm_v1_trainvm_proto_msgTypes = make([]protoimpl.MessageInfo, 60)
+var file_trainvm_v1_trainvm_proto_msgTypes = make([]protoimpl.MessageInfo, 62)
 var file_trainvm_v1_trainvm_proto_goTypes = []any{
 	(DesiredState)(0),                            // 0: trainvm.v1.DesiredState
 	(ObservedState)(0),                           // 1: trainvm.v1.ObservedState
@@ -8134,56 +8423,58 @@ var file_trainvm_v1_trainvm_proto_goTypes = []any{
 	(*WorkerHeartbeat)(nil),                      // 50: trainvm.v1.WorkerHeartbeat
 	(*WorkerExecutionPhaseRequest)(nil),          // 51: trainvm.v1.WorkerExecutionPhaseRequest
 	(*WorkerExecutionPhaseReceipt)(nil),          // 52: trainvm.v1.WorkerExecutionPhaseReceipt
-	(*ControlPatchAcknowledgement)(nil),          // 53: trainvm.v1.ControlPatchAcknowledgement
-	(*CheckpointAcknowledgement)(nil),            // 54: trainvm.v1.CheckpointAcknowledgement
-	(*LifecycleAcknowledgement)(nil),             // 55: trainvm.v1.LifecycleAcknowledgement
-	(*WorkerToController)(nil),                   // 56: trainvm.v1.WorkerToController
-	(*WorkerCommand)(nil),                        // 57: trainvm.v1.WorkerCommand
-	(*WorkerWelcome)(nil),                        // 58: trainvm.v1.WorkerWelcome
-	(*WorkerReceipt)(nil),                        // 59: trainvm.v1.WorkerReceipt
-	(*ControllerToWorker)(nil),                   // 60: trainvm.v1.ControllerToWorker
-	(*GetRunRequest)(nil),                        // 61: trainvm.v1.GetRunRequest
-	(*GetCompiledPlanRequest)(nil),               // 62: trainvm.v1.GetCompiledPlanRequest
-	(*GetCompiledPlanResponse)(nil),              // 63: trainvm.v1.GetCompiledPlanResponse
-	(*ListRunsRequest)(nil),                      // 64: trainvm.v1.ListRunsRequest
-	(*ListRunsResponse)(nil),                     // 65: trainvm.v1.ListRunsResponse
-	(*WatchEventsRequest)(nil),                   // 66: trainvm.v1.WatchEventsRequest
-	(*GetControlViewRequest)(nil),                // 67: trainvm.v1.GetControlViewRequest
-	(*ControlDescriptor)(nil),                    // 68: trainvm.v1.ControlDescriptor
-	(*ControlCommandView)(nil),                   // 69: trainvm.v1.ControlCommandView
-	(*GetControlViewResponse)(nil),               // 70: trainvm.v1.GetControlViewResponse
-	(*DescriptorRequest)(nil),                    // 71: trainvm.v1.DescriptorRequest
-	(*DescriptorResponse)(nil),                   // 72: trainvm.v1.DescriptorResponse
-	(*HostdCoordinatorAuthorityStatus)(nil),      // 73: trainvm.v1.HostdCoordinatorAuthorityStatus
-	(*HostResourceFenceStatus)(nil),              // 74: trainvm.v1.HostResourceFenceStatus
-	(*HostdProcessAuthorityStatus)(nil),          // 75: trainvm.v1.HostdProcessAuthorityStatus
-	(*GetHostAuthorityStatusRequest)(nil),        // 76: trainvm.v1.GetHostAuthorityStatusRequest
-	(*GetHostAuthorityStatusResponse)(nil),       // 77: trainvm.v1.GetHostAuthorityStatusResponse
-	(*GetReconciliationStatusRequest)(nil),       // 78: trainvm.v1.GetReconciliationStatusRequest
-	(*ReconciliationRunWait)(nil),                // 79: trainvm.v1.ReconciliationRunWait
-	(*GetReconciliationStatusResponse)(nil),      // 80: trainvm.v1.GetReconciliationStatusResponse
-	nil,                                          // 81: trainvm.v1.MetricSample.LabelsEntry
-	nil,                                          // 82: trainvm.v1.ListRunsRequest.LabelsEntry
-	nil,                                          // 83: trainvm.v1.GetControlViewResponse.CatalogEntry
-	(*timestamppb.Timestamp)(nil),                // 84: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),                  // 85: google.protobuf.Duration
-	(*anypb.Any)(nil),                            // 86: google.protobuf.Any
+	(*WorkerRuntimeVersionIdentity)(nil),         // 53: trainvm.v1.WorkerRuntimeVersionIdentity
+	(*WorkerRuntimeEvidence)(nil),                // 54: trainvm.v1.WorkerRuntimeEvidence
+	(*ControlPatchAcknowledgement)(nil),          // 55: trainvm.v1.ControlPatchAcknowledgement
+	(*CheckpointAcknowledgement)(nil),            // 56: trainvm.v1.CheckpointAcknowledgement
+	(*LifecycleAcknowledgement)(nil),             // 57: trainvm.v1.LifecycleAcknowledgement
+	(*WorkerToController)(nil),                   // 58: trainvm.v1.WorkerToController
+	(*WorkerCommand)(nil),                        // 59: trainvm.v1.WorkerCommand
+	(*WorkerWelcome)(nil),                        // 60: trainvm.v1.WorkerWelcome
+	(*WorkerReceipt)(nil),                        // 61: trainvm.v1.WorkerReceipt
+	(*ControllerToWorker)(nil),                   // 62: trainvm.v1.ControllerToWorker
+	(*GetRunRequest)(nil),                        // 63: trainvm.v1.GetRunRequest
+	(*GetCompiledPlanRequest)(nil),               // 64: trainvm.v1.GetCompiledPlanRequest
+	(*GetCompiledPlanResponse)(nil),              // 65: trainvm.v1.GetCompiledPlanResponse
+	(*ListRunsRequest)(nil),                      // 66: trainvm.v1.ListRunsRequest
+	(*ListRunsResponse)(nil),                     // 67: trainvm.v1.ListRunsResponse
+	(*WatchEventsRequest)(nil),                   // 68: trainvm.v1.WatchEventsRequest
+	(*GetControlViewRequest)(nil),                // 69: trainvm.v1.GetControlViewRequest
+	(*ControlDescriptor)(nil),                    // 70: trainvm.v1.ControlDescriptor
+	(*ControlCommandView)(nil),                   // 71: trainvm.v1.ControlCommandView
+	(*GetControlViewResponse)(nil),               // 72: trainvm.v1.GetControlViewResponse
+	(*DescriptorRequest)(nil),                    // 73: trainvm.v1.DescriptorRequest
+	(*DescriptorResponse)(nil),                   // 74: trainvm.v1.DescriptorResponse
+	(*HostdCoordinatorAuthorityStatus)(nil),      // 75: trainvm.v1.HostdCoordinatorAuthorityStatus
+	(*HostResourceFenceStatus)(nil),              // 76: trainvm.v1.HostResourceFenceStatus
+	(*HostdProcessAuthorityStatus)(nil),          // 77: trainvm.v1.HostdProcessAuthorityStatus
+	(*GetHostAuthorityStatusRequest)(nil),        // 78: trainvm.v1.GetHostAuthorityStatusRequest
+	(*GetHostAuthorityStatusResponse)(nil),       // 79: trainvm.v1.GetHostAuthorityStatusResponse
+	(*GetReconciliationStatusRequest)(nil),       // 80: trainvm.v1.GetReconciliationStatusRequest
+	(*ReconciliationRunWait)(nil),                // 81: trainvm.v1.ReconciliationRunWait
+	(*GetReconciliationStatusResponse)(nil),      // 82: trainvm.v1.GetReconciliationStatusResponse
+	nil,                                          // 83: trainvm.v1.MetricSample.LabelsEntry
+	nil,                                          // 84: trainvm.v1.ListRunsRequest.LabelsEntry
+	nil,                                          // 85: trainvm.v1.GetControlViewResponse.CatalogEntry
+	(*timestamppb.Timestamp)(nil),                // 86: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),                  // 87: google.protobuf.Duration
+	(*anypb.Any)(nil),                            // 88: google.protobuf.Any
 }
 var file_trainvm_v1_trainvm_proto_depIdxs = []int32{
 	11,  // 0: trainvm.v1.Diagnostic.severity:type_name -> trainvm.v1.Diagnostic.Severity
 	26,  // 1: trainvm.v1.RunSummary.identity:type_name -> trainvm.v1.RunIdentity
 	0,   // 2: trainvm.v1.RunSummary.desired_state:type_name -> trainvm.v1.DesiredState
 	1,   // 3: trainvm.v1.RunSummary.observed_state:type_name -> trainvm.v1.ObservedState
-	84,  // 4: trainvm.v1.RunSummary.created_at:type_name -> google.protobuf.Timestamp
-	84,  // 5: trainvm.v1.RunSummary.updated_at:type_name -> google.protobuf.Timestamp
-	84,  // 6: trainvm.v1.RunSummary.last_heartbeat_at:type_name -> google.protobuf.Timestamp
+	86,  // 4: trainvm.v1.RunSummary.created_at:type_name -> google.protobuf.Timestamp
+	86,  // 5: trainvm.v1.RunSummary.updated_at:type_name -> google.protobuf.Timestamp
+	86,  // 6: trainvm.v1.RunSummary.last_heartbeat_at:type_name -> google.protobuf.Timestamp
 	24,  // 7: trainvm.v1.SubmitExperimentResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
 	26,  // 8: trainvm.v1.SubmitExperimentResponse.run:type_name -> trainvm.v1.RunIdentity
 	5,   // 9: trainvm.v1.AuthorRunUpdate.stage:type_name -> trainvm.v1.AuthorRunStage
 	24,  // 10: trainvm.v1.AuthorRunUpdate.diagnostics:type_name -> trainvm.v1.Diagnostic
 	26,  // 11: trainvm.v1.AuthorRunUpdate.run:type_name -> trainvm.v1.RunIdentity
 	24,  // 12: trainvm.v1.PlanDiffResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
-	85,  // 13: trainvm.v1.CancelCommand.graceful_timeout:type_name -> google.protobuf.Duration
+	87,  // 13: trainvm.v1.CancelCommand.graceful_timeout:type_name -> google.protobuf.Duration
 	25,  // 14: trainvm.v1.ControlAssignment.value:type_name -> trainvm.v1.ScalarValue
 	38,  // 15: trainvm.v1.ControlPatchCommand.assignments:type_name -> trainvm.v1.ControlAssignment
 	2,   // 16: trainvm.v1.ControlPatchCommand.apply_point:type_name -> trainvm.v1.ApplyPoint
@@ -8199,7 +8490,7 @@ var file_trainvm_v1_trainvm_proto_depIdxs = []int32{
 	13,  // 26: trainvm.v1.CheckpointCommandResult.status:type_name -> trainvm.v1.CheckpointCommandResult.Status
 	14,  // 27: trainvm.v1.LifecycleCommandResult.kind:type_name -> trainvm.v1.LifecycleCommandResult.Kind
 	15,  // 28: trainvm.v1.LifecycleCommandResult.status:type_name -> trainvm.v1.LifecycleCommandResult.Status
-	85,  // 29: trainvm.v1.LifecycleCommandResult.graceful_timeout:type_name -> google.protobuf.Duration
+	87,  // 29: trainvm.v1.LifecycleCommandResult.graceful_timeout:type_name -> google.protobuf.Duration
 	16,  // 30: trainvm.v1.RunCommandResponse.disposition:type_name -> trainvm.v1.RunCommandResponse.Disposition
 	27,  // 31: trainvm.v1.RunCommandResponse.run:type_name -> trainvm.v1.RunSummary
 	24,  // 32: trainvm.v1.RunCommandResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
@@ -8207,109 +8498,111 @@ var file_trainvm_v1_trainvm_proto_depIdxs = []int32{
 	43,  // 34: trainvm.v1.RunCommandResponse.checkpoint:type_name -> trainvm.v1.CheckpointCommandResult
 	44,  // 35: trainvm.v1.RunCommandResponse.lifecycle:type_name -> trainvm.v1.LifecycleCommandResult
 	3,   // 36: trainvm.v1.ArtifactManifest.kind:type_name -> trainvm.v1.ArtifactKind
-	84,  // 37: trainvm.v1.ArtifactManifest.published_at:type_name -> google.protobuf.Timestamp
-	84,  // 38: trainvm.v1.EventEnvelope.wall_time:type_name -> google.protobuf.Timestamp
-	86,  // 39: trainvm.v1.EventEnvelope.payload:type_name -> google.protobuf.Any
+	86,  // 37: trainvm.v1.ArtifactManifest.published_at:type_name -> google.protobuf.Timestamp
+	86,  // 38: trainvm.v1.EventEnvelope.wall_time:type_name -> google.protobuf.Timestamp
+	88,  // 39: trainvm.v1.EventEnvelope.payload:type_name -> google.protobuf.Any
 	25,  // 40: trainvm.v1.MetricSample.value:type_name -> trainvm.v1.ScalarValue
-	81,  // 41: trainvm.v1.MetricSample.labels:type_name -> trainvm.v1.MetricSample.LabelsEntry
-	84,  // 42: trainvm.v1.MetricSample.observed_at:type_name -> google.protobuf.Timestamp
-	84,  // 43: trainvm.v1.WorkerHeartbeat.observed_at:type_name -> google.protobuf.Timestamp
+	83,  // 41: trainvm.v1.MetricSample.labels:type_name -> trainvm.v1.MetricSample.LabelsEntry
+	86,  // 42: trainvm.v1.MetricSample.observed_at:type_name -> google.protobuf.Timestamp
+	86,  // 43: trainvm.v1.WorkerHeartbeat.observed_at:type_name -> google.protobuf.Timestamp
 	17,  // 44: trainvm.v1.WorkerHeartbeat.execution_phase:type_name -> trainvm.v1.WorkerExecutionPhaseRequest.Phase
 	17,  // 45: trainvm.v1.WorkerExecutionPhaseRequest.phase:type_name -> trainvm.v1.WorkerExecutionPhaseRequest.Phase
 	17,  // 46: trainvm.v1.WorkerExecutionPhaseReceipt.phase:type_name -> trainvm.v1.WorkerExecutionPhaseRequest.Phase
 	18,  // 47: trainvm.v1.WorkerExecutionPhaseReceipt.disposition:type_name -> trainvm.v1.WorkerExecutionPhaseReceipt.Disposition
 	24,  // 48: trainvm.v1.WorkerExecutionPhaseReceipt.diagnostics:type_name -> trainvm.v1.Diagnostic
-	84,  // 49: trainvm.v1.WorkerExecutionPhaseReceipt.started_at:type_name -> google.protobuf.Timestamp
-	84,  // 50: trainvm.v1.WorkerExecutionPhaseReceipt.completed_at:type_name -> google.protobuf.Timestamp
-	19,  // 51: trainvm.v1.ControlPatchAcknowledgement.disposition:type_name -> trainvm.v1.ControlPatchAcknowledgement.Disposition
-	2,   // 52: trainvm.v1.ControlPatchAcknowledgement.apply_point:type_name -> trainvm.v1.ApplyPoint
-	38,  // 53: trainvm.v1.ControlPatchAcknowledgement.effective_values:type_name -> trainvm.v1.ControlAssignment
-	24,  // 54: trainvm.v1.ControlPatchAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
-	84,  // 55: trainvm.v1.ControlPatchAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
-	20,  // 56: trainvm.v1.CheckpointAcknowledgement.disposition:type_name -> trainvm.v1.CheckpointAcknowledgement.Disposition
-	24,  // 57: trainvm.v1.CheckpointAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
-	84,  // 58: trainvm.v1.CheckpointAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
-	21,  // 59: trainvm.v1.LifecycleAcknowledgement.kind:type_name -> trainvm.v1.LifecycleAcknowledgement.Kind
-	22,  // 60: trainvm.v1.LifecycleAcknowledgement.disposition:type_name -> trainvm.v1.LifecycleAcknowledgement.Disposition
-	24,  // 61: trainvm.v1.LifecycleAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
-	84,  // 62: trainvm.v1.LifecycleAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
-	49,  // 63: trainvm.v1.WorkerToController.hello:type_name -> trainvm.v1.WorkerHello
-	50,  // 64: trainvm.v1.WorkerToController.heartbeat:type_name -> trainvm.v1.WorkerHeartbeat
-	47,  // 65: trainvm.v1.WorkerToController.event:type_name -> trainvm.v1.EventEnvelope
-	48,  // 66: trainvm.v1.WorkerToController.metric:type_name -> trainvm.v1.MetricSample
-	46,  // 67: trainvm.v1.WorkerToController.artifact:type_name -> trainvm.v1.ArtifactManifest
-	53,  // 68: trainvm.v1.WorkerToController.control_ack:type_name -> trainvm.v1.ControlPatchAcknowledgement
-	54,  // 69: trainvm.v1.WorkerToController.checkpoint_ack:type_name -> trainvm.v1.CheckpointAcknowledgement
-	55,  // 70: trainvm.v1.WorkerToController.lifecycle_ack:type_name -> trainvm.v1.LifecycleAcknowledgement
-	52,  // 71: trainvm.v1.WorkerToController.phase_receipt:type_name -> trainvm.v1.WorkerExecutionPhaseReceipt
-	34,  // 72: trainvm.v1.WorkerCommand.pause:type_name -> trainvm.v1.PauseCommand
-	35,  // 73: trainvm.v1.WorkerCommand.resume:type_name -> trainvm.v1.ResumeCommand
-	36,  // 74: trainvm.v1.WorkerCommand.checkpoint:type_name -> trainvm.v1.CheckpointCommand
-	37,  // 75: trainvm.v1.WorkerCommand.cancel:type_name -> trainvm.v1.CancelCommand
-	39,  // 76: trainvm.v1.WorkerCommand.controls:type_name -> trainvm.v1.ControlPatchCommand
-	23,  // 77: trainvm.v1.WorkerWelcome.disposition:type_name -> trainvm.v1.WorkerWelcome.Disposition
-	51,  // 78: trainvm.v1.WorkerWelcome.execution_phase_requests:type_name -> trainvm.v1.WorkerExecutionPhaseRequest
-	1,   // 79: trainvm.v1.WorkerReceipt.observed_state:type_name -> trainvm.v1.ObservedState
-	57,  // 80: trainvm.v1.ControllerToWorker.command:type_name -> trainvm.v1.WorkerCommand
-	58,  // 81: trainvm.v1.ControllerToWorker.welcome:type_name -> trainvm.v1.WorkerWelcome
-	59,  // 82: trainvm.v1.ControllerToWorker.receipt:type_name -> trainvm.v1.WorkerReceipt
-	26,  // 83: trainvm.v1.GetCompiledPlanResponse.run:type_name -> trainvm.v1.RunIdentity
-	1,   // 84: trainvm.v1.ListRunsRequest.observed_states:type_name -> trainvm.v1.ObservedState
-	82,  // 85: trainvm.v1.ListRunsRequest.labels:type_name -> trainvm.v1.ListRunsRequest.LabelsEntry
-	27,  // 86: trainvm.v1.ListRunsResponse.runs:type_name -> trainvm.v1.RunSummary
-	4,   // 87: trainvm.v1.ControlDescriptor.type:type_name -> trainvm.v1.ControlType
-	25,  // 88: trainvm.v1.ControlDescriptor.default_value:type_name -> trainvm.v1.ScalarValue
-	25,  // 89: trainvm.v1.ControlDescriptor.values:type_name -> trainvm.v1.ScalarValue
-	2,   // 90: trainvm.v1.ControlDescriptor.apply_point:type_name -> trainvm.v1.ApplyPoint
-	2,   // 91: trainvm.v1.ControlCommandView.apply_point:type_name -> trainvm.v1.ApplyPoint
-	38,  // 92: trainvm.v1.ControlCommandView.assignments:type_name -> trainvm.v1.ControlAssignment
-	12,  // 93: trainvm.v1.ControlCommandView.status:type_name -> trainvm.v1.ControlCommandResult.Status
-	38,  // 94: trainvm.v1.ControlCommandView.effective_values:type_name -> trainvm.v1.ControlAssignment
-	24,  // 95: trainvm.v1.ControlCommandView.diagnostics:type_name -> trainvm.v1.Diagnostic
-	83,  // 96: trainvm.v1.GetControlViewResponse.catalog:type_name -> trainvm.v1.GetControlViewResponse.CatalogEntry
-	38,  // 97: trainvm.v1.GetControlViewResponse.effective_values:type_name -> trainvm.v1.ControlAssignment
-	69,  // 98: trainvm.v1.GetControlViewResponse.commands:type_name -> trainvm.v1.ControlCommandView
-	6,   // 99: trainvm.v1.HostdCoordinatorAuthorityStatus.lifecycle:type_name -> trainvm.v1.HostdLifecycle
-	9,   // 100: trainvm.v1.HostResourceFenceStatus.kind:type_name -> trainvm.v1.HostResourceKind
-	10,  // 101: trainvm.v1.HostResourceFenceStatus.vendor:type_name -> trainvm.v1.HostAcceleratorVendor
-	8,   // 102: trainvm.v1.HostdProcessAuthorityStatus.phase:type_name -> trainvm.v1.HostdProcessPhase
-	73,  // 103: trainvm.v1.GetHostAuthorityStatusResponse.coordinator:type_name -> trainvm.v1.HostdCoordinatorAuthorityStatus
-	7,   // 104: trainvm.v1.GetHostAuthorityStatusResponse.startup_phase:type_name -> trainvm.v1.HostdStartupPhase
-	74,  // 105: trainvm.v1.GetHostAuthorityStatusResponse.active_fences:type_name -> trainvm.v1.HostResourceFenceStatus
-	75,  // 106: trainvm.v1.GetHostAuthorityStatusResponse.active_processes:type_name -> trainvm.v1.HostdProcessAuthorityStatus
-	79,  // 107: trainvm.v1.GetReconciliationStatusResponse.waits:type_name -> trainvm.v1.ReconciliationRunWait
-	68,  // 108: trainvm.v1.GetControlViewResponse.CatalogEntry.value:type_name -> trainvm.v1.ControlDescriptor
-	28,  // 109: trainvm.v1.TrainVM.SubmitExperiment:input_type -> trainvm.v1.SubmitExperimentRequest
-	30,  // 110: trainvm.v1.TrainVM.AuthorRun:input_type -> trainvm.v1.AuthorRunRequest
-	32,  // 111: trainvm.v1.TrainVM.DiffPlan:input_type -> trainvm.v1.PlanDiffRequest
-	41,  // 112: trainvm.v1.TrainVM.CommandRun:input_type -> trainvm.v1.RunCommandRequest
-	61,  // 113: trainvm.v1.TrainVM.GetRun:input_type -> trainvm.v1.GetRunRequest
-	62,  // 114: trainvm.v1.TrainVM.GetCompiledPlan:input_type -> trainvm.v1.GetCompiledPlanRequest
-	64,  // 115: trainvm.v1.TrainVM.ListRuns:input_type -> trainvm.v1.ListRunsRequest
-	66,  // 116: trainvm.v1.TrainVM.WatchEvents:input_type -> trainvm.v1.WatchEventsRequest
-	67,  // 117: trainvm.v1.TrainVM.GetControlView:input_type -> trainvm.v1.GetControlViewRequest
-	71,  // 118: trainvm.v1.TrainVM.GetDescriptor:input_type -> trainvm.v1.DescriptorRequest
-	76,  // 119: trainvm.v1.TrainVM.GetHostAuthorityStatus:input_type -> trainvm.v1.GetHostAuthorityStatusRequest
-	78,  // 120: trainvm.v1.TrainVM.GetReconciliationStatus:input_type -> trainvm.v1.GetReconciliationStatusRequest
-	56,  // 121: trainvm.v1.WorkerControl.Connect:input_type -> trainvm.v1.WorkerToController
-	29,  // 122: trainvm.v1.TrainVM.SubmitExperiment:output_type -> trainvm.v1.SubmitExperimentResponse
-	31,  // 123: trainvm.v1.TrainVM.AuthorRun:output_type -> trainvm.v1.AuthorRunUpdate
-	33,  // 124: trainvm.v1.TrainVM.DiffPlan:output_type -> trainvm.v1.PlanDiffResponse
-	45,  // 125: trainvm.v1.TrainVM.CommandRun:output_type -> trainvm.v1.RunCommandResponse
-	27,  // 126: trainvm.v1.TrainVM.GetRun:output_type -> trainvm.v1.RunSummary
-	63,  // 127: trainvm.v1.TrainVM.GetCompiledPlan:output_type -> trainvm.v1.GetCompiledPlanResponse
-	65,  // 128: trainvm.v1.TrainVM.ListRuns:output_type -> trainvm.v1.ListRunsResponse
-	47,  // 129: trainvm.v1.TrainVM.WatchEvents:output_type -> trainvm.v1.EventEnvelope
-	70,  // 130: trainvm.v1.TrainVM.GetControlView:output_type -> trainvm.v1.GetControlViewResponse
-	72,  // 131: trainvm.v1.TrainVM.GetDescriptor:output_type -> trainvm.v1.DescriptorResponse
-	77,  // 132: trainvm.v1.TrainVM.GetHostAuthorityStatus:output_type -> trainvm.v1.GetHostAuthorityStatusResponse
-	80,  // 133: trainvm.v1.TrainVM.GetReconciliationStatus:output_type -> trainvm.v1.GetReconciliationStatusResponse
-	60,  // 134: trainvm.v1.WorkerControl.Connect:output_type -> trainvm.v1.ControllerToWorker
-	122, // [122:135] is the sub-list for method output_type
-	109, // [109:122] is the sub-list for method input_type
-	109, // [109:109] is the sub-list for extension type_name
-	109, // [109:109] is the sub-list for extension extendee
-	0,   // [0:109] is the sub-list for field type_name
+	86,  // 49: trainvm.v1.WorkerExecutionPhaseReceipt.started_at:type_name -> google.protobuf.Timestamp
+	86,  // 50: trainvm.v1.WorkerExecutionPhaseReceipt.completed_at:type_name -> google.protobuf.Timestamp
+	53,  // 51: trainvm.v1.WorkerRuntimeEvidence.runtime_versions:type_name -> trainvm.v1.WorkerRuntimeVersionIdentity
+	19,  // 52: trainvm.v1.ControlPatchAcknowledgement.disposition:type_name -> trainvm.v1.ControlPatchAcknowledgement.Disposition
+	2,   // 53: trainvm.v1.ControlPatchAcknowledgement.apply_point:type_name -> trainvm.v1.ApplyPoint
+	38,  // 54: trainvm.v1.ControlPatchAcknowledgement.effective_values:type_name -> trainvm.v1.ControlAssignment
+	24,  // 55: trainvm.v1.ControlPatchAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
+	86,  // 56: trainvm.v1.ControlPatchAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
+	20,  // 57: trainvm.v1.CheckpointAcknowledgement.disposition:type_name -> trainvm.v1.CheckpointAcknowledgement.Disposition
+	24,  // 58: trainvm.v1.CheckpointAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
+	86,  // 59: trainvm.v1.CheckpointAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
+	21,  // 60: trainvm.v1.LifecycleAcknowledgement.kind:type_name -> trainvm.v1.LifecycleAcknowledgement.Kind
+	22,  // 61: trainvm.v1.LifecycleAcknowledgement.disposition:type_name -> trainvm.v1.LifecycleAcknowledgement.Disposition
+	24,  // 62: trainvm.v1.LifecycleAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
+	86,  // 63: trainvm.v1.LifecycleAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
+	49,  // 64: trainvm.v1.WorkerToController.hello:type_name -> trainvm.v1.WorkerHello
+	50,  // 65: trainvm.v1.WorkerToController.heartbeat:type_name -> trainvm.v1.WorkerHeartbeat
+	47,  // 66: trainvm.v1.WorkerToController.event:type_name -> trainvm.v1.EventEnvelope
+	48,  // 67: trainvm.v1.WorkerToController.metric:type_name -> trainvm.v1.MetricSample
+	46,  // 68: trainvm.v1.WorkerToController.artifact:type_name -> trainvm.v1.ArtifactManifest
+	55,  // 69: trainvm.v1.WorkerToController.control_ack:type_name -> trainvm.v1.ControlPatchAcknowledgement
+	56,  // 70: trainvm.v1.WorkerToController.checkpoint_ack:type_name -> trainvm.v1.CheckpointAcknowledgement
+	57,  // 71: trainvm.v1.WorkerToController.lifecycle_ack:type_name -> trainvm.v1.LifecycleAcknowledgement
+	52,  // 72: trainvm.v1.WorkerToController.phase_receipt:type_name -> trainvm.v1.WorkerExecutionPhaseReceipt
+	54,  // 73: trainvm.v1.WorkerToController.runtime_evidence:type_name -> trainvm.v1.WorkerRuntimeEvidence
+	34,  // 74: trainvm.v1.WorkerCommand.pause:type_name -> trainvm.v1.PauseCommand
+	35,  // 75: trainvm.v1.WorkerCommand.resume:type_name -> trainvm.v1.ResumeCommand
+	36,  // 76: trainvm.v1.WorkerCommand.checkpoint:type_name -> trainvm.v1.CheckpointCommand
+	37,  // 77: trainvm.v1.WorkerCommand.cancel:type_name -> trainvm.v1.CancelCommand
+	39,  // 78: trainvm.v1.WorkerCommand.controls:type_name -> trainvm.v1.ControlPatchCommand
+	23,  // 79: trainvm.v1.WorkerWelcome.disposition:type_name -> trainvm.v1.WorkerWelcome.Disposition
+	51,  // 80: trainvm.v1.WorkerWelcome.execution_phase_requests:type_name -> trainvm.v1.WorkerExecutionPhaseRequest
+	1,   // 81: trainvm.v1.WorkerReceipt.observed_state:type_name -> trainvm.v1.ObservedState
+	59,  // 82: trainvm.v1.ControllerToWorker.command:type_name -> trainvm.v1.WorkerCommand
+	60,  // 83: trainvm.v1.ControllerToWorker.welcome:type_name -> trainvm.v1.WorkerWelcome
+	61,  // 84: trainvm.v1.ControllerToWorker.receipt:type_name -> trainvm.v1.WorkerReceipt
+	26,  // 85: trainvm.v1.GetCompiledPlanResponse.run:type_name -> trainvm.v1.RunIdentity
+	1,   // 86: trainvm.v1.ListRunsRequest.observed_states:type_name -> trainvm.v1.ObservedState
+	84,  // 87: trainvm.v1.ListRunsRequest.labels:type_name -> trainvm.v1.ListRunsRequest.LabelsEntry
+	27,  // 88: trainvm.v1.ListRunsResponse.runs:type_name -> trainvm.v1.RunSummary
+	4,   // 89: trainvm.v1.ControlDescriptor.type:type_name -> trainvm.v1.ControlType
+	25,  // 90: trainvm.v1.ControlDescriptor.default_value:type_name -> trainvm.v1.ScalarValue
+	25,  // 91: trainvm.v1.ControlDescriptor.values:type_name -> trainvm.v1.ScalarValue
+	2,   // 92: trainvm.v1.ControlDescriptor.apply_point:type_name -> trainvm.v1.ApplyPoint
+	2,   // 93: trainvm.v1.ControlCommandView.apply_point:type_name -> trainvm.v1.ApplyPoint
+	38,  // 94: trainvm.v1.ControlCommandView.assignments:type_name -> trainvm.v1.ControlAssignment
+	12,  // 95: trainvm.v1.ControlCommandView.status:type_name -> trainvm.v1.ControlCommandResult.Status
+	38,  // 96: trainvm.v1.ControlCommandView.effective_values:type_name -> trainvm.v1.ControlAssignment
+	24,  // 97: trainvm.v1.ControlCommandView.diagnostics:type_name -> trainvm.v1.Diagnostic
+	85,  // 98: trainvm.v1.GetControlViewResponse.catalog:type_name -> trainvm.v1.GetControlViewResponse.CatalogEntry
+	38,  // 99: trainvm.v1.GetControlViewResponse.effective_values:type_name -> trainvm.v1.ControlAssignment
+	71,  // 100: trainvm.v1.GetControlViewResponse.commands:type_name -> trainvm.v1.ControlCommandView
+	6,   // 101: trainvm.v1.HostdCoordinatorAuthorityStatus.lifecycle:type_name -> trainvm.v1.HostdLifecycle
+	9,   // 102: trainvm.v1.HostResourceFenceStatus.kind:type_name -> trainvm.v1.HostResourceKind
+	10,  // 103: trainvm.v1.HostResourceFenceStatus.vendor:type_name -> trainvm.v1.HostAcceleratorVendor
+	8,   // 104: trainvm.v1.HostdProcessAuthorityStatus.phase:type_name -> trainvm.v1.HostdProcessPhase
+	75,  // 105: trainvm.v1.GetHostAuthorityStatusResponse.coordinator:type_name -> trainvm.v1.HostdCoordinatorAuthorityStatus
+	7,   // 106: trainvm.v1.GetHostAuthorityStatusResponse.startup_phase:type_name -> trainvm.v1.HostdStartupPhase
+	76,  // 107: trainvm.v1.GetHostAuthorityStatusResponse.active_fences:type_name -> trainvm.v1.HostResourceFenceStatus
+	77,  // 108: trainvm.v1.GetHostAuthorityStatusResponse.active_processes:type_name -> trainvm.v1.HostdProcessAuthorityStatus
+	81,  // 109: trainvm.v1.GetReconciliationStatusResponse.waits:type_name -> trainvm.v1.ReconciliationRunWait
+	70,  // 110: trainvm.v1.GetControlViewResponse.CatalogEntry.value:type_name -> trainvm.v1.ControlDescriptor
+	28,  // 111: trainvm.v1.TrainVM.SubmitExperiment:input_type -> trainvm.v1.SubmitExperimentRequest
+	30,  // 112: trainvm.v1.TrainVM.AuthorRun:input_type -> trainvm.v1.AuthorRunRequest
+	32,  // 113: trainvm.v1.TrainVM.DiffPlan:input_type -> trainvm.v1.PlanDiffRequest
+	41,  // 114: trainvm.v1.TrainVM.CommandRun:input_type -> trainvm.v1.RunCommandRequest
+	63,  // 115: trainvm.v1.TrainVM.GetRun:input_type -> trainvm.v1.GetRunRequest
+	64,  // 116: trainvm.v1.TrainVM.GetCompiledPlan:input_type -> trainvm.v1.GetCompiledPlanRequest
+	66,  // 117: trainvm.v1.TrainVM.ListRuns:input_type -> trainvm.v1.ListRunsRequest
+	68,  // 118: trainvm.v1.TrainVM.WatchEvents:input_type -> trainvm.v1.WatchEventsRequest
+	69,  // 119: trainvm.v1.TrainVM.GetControlView:input_type -> trainvm.v1.GetControlViewRequest
+	73,  // 120: trainvm.v1.TrainVM.GetDescriptor:input_type -> trainvm.v1.DescriptorRequest
+	78,  // 121: trainvm.v1.TrainVM.GetHostAuthorityStatus:input_type -> trainvm.v1.GetHostAuthorityStatusRequest
+	80,  // 122: trainvm.v1.TrainVM.GetReconciliationStatus:input_type -> trainvm.v1.GetReconciliationStatusRequest
+	58,  // 123: trainvm.v1.WorkerControl.Connect:input_type -> trainvm.v1.WorkerToController
+	29,  // 124: trainvm.v1.TrainVM.SubmitExperiment:output_type -> trainvm.v1.SubmitExperimentResponse
+	31,  // 125: trainvm.v1.TrainVM.AuthorRun:output_type -> trainvm.v1.AuthorRunUpdate
+	33,  // 126: trainvm.v1.TrainVM.DiffPlan:output_type -> trainvm.v1.PlanDiffResponse
+	45,  // 127: trainvm.v1.TrainVM.CommandRun:output_type -> trainvm.v1.RunCommandResponse
+	27,  // 128: trainvm.v1.TrainVM.GetRun:output_type -> trainvm.v1.RunSummary
+	65,  // 129: trainvm.v1.TrainVM.GetCompiledPlan:output_type -> trainvm.v1.GetCompiledPlanResponse
+	67,  // 130: trainvm.v1.TrainVM.ListRuns:output_type -> trainvm.v1.ListRunsResponse
+	47,  // 131: trainvm.v1.TrainVM.WatchEvents:output_type -> trainvm.v1.EventEnvelope
+	72,  // 132: trainvm.v1.TrainVM.GetControlView:output_type -> trainvm.v1.GetControlViewResponse
+	74,  // 133: trainvm.v1.TrainVM.GetDescriptor:output_type -> trainvm.v1.DescriptorResponse
+	79,  // 134: trainvm.v1.TrainVM.GetHostAuthorityStatus:output_type -> trainvm.v1.GetHostAuthorityStatusResponse
+	82,  // 135: trainvm.v1.TrainVM.GetReconciliationStatus:output_type -> trainvm.v1.GetReconciliationStatusResponse
+	62,  // 136: trainvm.v1.WorkerControl.Connect:output_type -> trainvm.v1.ControllerToWorker
+	124, // [124:137] is the sub-list for method output_type
+	111, // [111:124] is the sub-list for method input_type
+	111, // [111:111] is the sub-list for extension type_name
+	111, // [111:111] is the sub-list for extension extendee
+	0,   // [0:111] is the sub-list for field type_name
 }
 
 func init() { file_trainvm_v1_trainvm_proto_init() }
@@ -8334,7 +8627,8 @@ func file_trainvm_v1_trainvm_proto_init() {
 	file_trainvm_v1_trainvm_proto_msgTypes[22].OneofWrappers = []any{}
 	file_trainvm_v1_trainvm_proto_msgTypes[23].OneofWrappers = []any{}
 	file_trainvm_v1_trainvm_proto_msgTypes[27].OneofWrappers = []any{}
-	file_trainvm_v1_trainvm_proto_msgTypes[32].OneofWrappers = []any{
+	file_trainvm_v1_trainvm_proto_msgTypes[30].OneofWrappers = []any{}
+	file_trainvm_v1_trainvm_proto_msgTypes[34].OneofWrappers = []any{
 		(*WorkerToController_Hello)(nil),
 		(*WorkerToController_Heartbeat)(nil),
 		(*WorkerToController_Event)(nil),
@@ -8344,30 +8638,31 @@ func file_trainvm_v1_trainvm_proto_init() {
 		(*WorkerToController_CheckpointAck)(nil),
 		(*WorkerToController_LifecycleAck)(nil),
 		(*WorkerToController_PhaseReceipt)(nil),
+		(*WorkerToController_RuntimeEvidence)(nil),
 	}
-	file_trainvm_v1_trainvm_proto_msgTypes[33].OneofWrappers = []any{
+	file_trainvm_v1_trainvm_proto_msgTypes[35].OneofWrappers = []any{
 		(*WorkerCommand_Pause)(nil),
 		(*WorkerCommand_Resume)(nil),
 		(*WorkerCommand_Checkpoint)(nil),
 		(*WorkerCommand_Cancel)(nil),
 		(*WorkerCommand_Controls)(nil),
 	}
-	file_trainvm_v1_trainvm_proto_msgTypes[36].OneofWrappers = []any{
+	file_trainvm_v1_trainvm_proto_msgTypes[38].OneofWrappers = []any{
 		(*ControllerToWorker_Command)(nil),
 		(*ControllerToWorker_AcknowledgeWorkerSequence)(nil),
 		(*ControllerToWorker_Welcome)(nil),
 		(*ControllerToWorker_Receipt)(nil),
 	}
-	file_trainvm_v1_trainvm_proto_msgTypes[44].OneofWrappers = []any{}
-	file_trainvm_v1_trainvm_proto_msgTypes[45].OneofWrappers = []any{}
-	file_trainvm_v1_trainvm_proto_msgTypes[51].OneofWrappers = []any{}
+	file_trainvm_v1_trainvm_proto_msgTypes[46].OneofWrappers = []any{}
+	file_trainvm_v1_trainvm_proto_msgTypes[47].OneofWrappers = []any{}
+	file_trainvm_v1_trainvm_proto_msgTypes[53].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_trainvm_v1_trainvm_proto_rawDesc), len(file_trainvm_v1_trainvm_proto_rawDesc)),
 			NumEnums:      24,
-			NumMessages:   60,
+			NumMessages:   62,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

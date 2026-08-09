@@ -1527,7 +1527,8 @@ TrainVMService::TrainVMService(
     ICacheQualificationEvidenceResolver* cache_qualification,
     SqliteAuthorityEnforcementGrade filesystem_enforcement_grade,
     std::shared_ptr<ITrainingPreflightEvidenceProvider> preflight_evidence,
-    std::filesystem::path recipe_registry_path)
+    std::filesystem::path recipe_registry_path,
+    IWorkerRuntimeEvidenceAuthority* worker_runtime_evidence)
     : TrainVMService(journal_path, std::move(adapter_registry),
                      std::move(host_launch_registry),
                      HostLaunchResolver::local_host_identity(),
@@ -1536,7 +1537,8 @@ TrainVMService::TrainVMService(
                      std::move(training_components), {}, {}, {},
                      cache_qualification, filesystem_enforcement_grade,
                      std::move(preflight_evidence),
-                     std::move(recipe_registry_path)) {
+                     std::move(recipe_registry_path),
+                     worker_runtime_evidence) {
   if (hostd_configuration) {
     configure_hostd(*hostd_configuration, std::move(controller_target));
   }
@@ -1560,7 +1562,8 @@ TrainVMService::TrainVMService(
     ICacheQualificationEvidenceResolver* cache_qualification,
     SqliteAuthorityEnforcementGrade filesystem_enforcement_grade,
     std::shared_ptr<ITrainingPreflightEvidenceProvider> preflight_evidence,
-    std::filesystem::path recipe_registry_path)
+    std::filesystem::path recipe_registry_path,
+    IWorkerRuntimeEvidenceAuthority* worker_runtime_evidence)
     : authority_lock_(std::make_unique<AuthorityLock>(
           journal_path, filesystem_enforcement_grade)),
       journal_(authority_lock_->journal_path(),
@@ -1594,7 +1597,8 @@ TrainVMService::TrainVMService(
               : nullptr),
       reconciler_(journal_, adapter_registry_, training_components_,
                   command_mutex_,
-                  [this] { return authority_now(); }, cache_qualification) {
+                  [this] { return authority_now(); }, cache_qualification),
+      worker_runtime_evidence_(worker_runtime_evidence) {
   if (!recipe_registry_path_.is_absolute() ||
       recipe_registry_path_.lexically_normal() != recipe_registry_path_ ||
       recipe_registry_path_.native().size() > 4'096U) {
@@ -4223,6 +4227,123 @@ grpc::Status TrainVMService::record_worker_execution_phase_receipt(
   }
 }
 
+grpc::Status TrainVMService::record_worker_runtime_evidence(
+    const v1::WorkerRuntimeEvidence& evidence,
+    const WorkerConnection& connection) {
+  if (evidence.ByteSizeLong() > kMaximumWorkerMessageBytes) {
+    return {grpc::StatusCode::RESOURCE_EXHAUSTED,
+            "worker runtime evidence exceeds 64 KiB"};
+  }
+  // Decoding is the only place the proto arm and the C++ struct meet, so it
+  // is a plain field-for-field copy with nothing derived, defaulted, or
+  // repaired. `worker_runtime_evidence_wire_hop` asserts the two
+  // literals still describe the same document.
+  WorkerRuntimeEvidenceReport report{
+      .api_version = evidence.api_version(),
+      .run_id = evidence.run_id(),
+      .node_id = evidence.node_id(),
+      .attempt_id = evidence.attempt_id(),
+      .launch_nonce = evidence.launch_nonce(),
+      .concurrency_key = evidence.concurrency_key(),
+      .lease_id = evidence.lease_id(),
+      .fencing_token = evidence.fencing_token(),
+      .compute_device_vendor = evidence.compute_device_vendor(),
+      .compute_architecture = evidence.compute_architecture(),
+      .compute_device_uuid =
+          evidence.has_compute_device_uuid()
+              ? std::optional<std::string>{evidence.compute_device_uuid()}
+              : std::nullopt,
+      .compute_device_pci_address =
+          evidence.has_compute_device_pci_address()
+              ? std::optional<std::string>{
+                    evidence.compute_device_pci_address()}
+              : std::nullopt,
+      .driver_version = evidence.driver_version(),
+      .runtime_versions = {},
+      .runtime_closure_fingerprint = evidence.runtime_closure_fingerprint(),
+      .host_abi_digest = evidence.host_abi_digest(),
+      .compute_compatibility_digest = evidence.compute_compatibility_digest(),
+  };
+  report.runtime_versions.reserve(
+      static_cast<std::size_t>(evidence.runtime_versions_size()));
+  for (const auto& version : evidence.runtime_versions()) {
+    report.runtime_versions.push_back(
+        {.name = version.name(), .version = version.version()});
+  }
+  try {
+    // Shape only, and the canonical ordering the namespace digest closes over.
+    (void)worker_runtime_evidence_json(report);
+  } catch (const WorkerRuntimeEvidenceError& error) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, error.what()};
+  }
+
+  // Every refusal below happens on the wire, before a publisher exists to
+  // refuse at. The three checks are deliberately separate because they answer
+  // different questions.
+  //
+  // First: is this report even about the connection it arrived on? A worker
+  // holds one attempt's stream and may only speak for that attempt.
+  if (report.run_id != connection.identity.run_id ||
+      report.node_id != connection.identity.node_id ||
+      report.attempt_id != connection.identity.attempt_id ||
+      report.launch_nonce != connection.identity.launch_nonce ||
+      report.concurrency_key != connection.identity.concurrency_key ||
+      report.lease_id != connection.identity.lease_id ||
+      report.fencing_token != connection.identity.fencing_token) {
+    return {grpc::StatusCode::PERMISSION_DENIED,
+            "worker runtime evidence claims an attempt fence this connection "
+            "does not hold"};
+  }
+  try {
+    std::scoped_lock lock(command_mutex_);
+    // Second: is that attempt fence still the live one? A connection's
+    // identity was true when the stream opened and says nothing about now. A
+    // worker whose lease moved -- released, taken by a relaunch, superseded by
+    // a higher fencing token -- is still holding an open stream, and its
+    // evidence would otherwise be admitted against a launch binding the
+    // authority has already replaced. Re-reading the durable binding is what
+    // makes late arrival a refusal here rather than at the publisher.
+    const std::string launch_id =
+        connection.identity.run_id + ":worker-launch:" +
+        connection.identity.node_id + ":" + connection.identity.attempt_id;
+    const auto binding = journal_.launch_binding(launch_id);
+    if (!binding) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "worker runtime evidence has no durable launch binding to be "
+              "bound to"};
+    }
+    const ResolvedLaunchIdentity& identity = binding->identity;
+    if (identity.launch_nonce != connection.identity.launch_nonce ||
+        identity.concurrency_key != connection.identity.concurrency_key ||
+        identity.lease_id != connection.identity.lease_id ||
+        identity.fencing_token != connection.identity.fencing_token ||
+        identity.host != authority_host_ ||
+        identity.host_registry_digest !=
+            host_launch_registry_.registry_digest()) {
+      return {grpc::StatusCode::PERMISSION_DENIED,
+              "worker runtime evidence arrived after its attempt's lease or "
+              "launch authority moved"};
+    }
+    // Third: can this deployment publish at all? A deployment with no
+    // configured immutable receipt root holds no evidence authority, and
+    // silently accepting a report it cannot publish would look to a worker
+    // exactly like a published one.
+    if (worker_runtime_evidence_ == nullptr) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "authority has no configured cache evidence receipt root to "
+              "publish worker runtime evidence to"};
+    }
+    (void)worker_runtime_evidence_->publish(report, authority_host_, *binding);
+    return grpc::Status::OK;
+  } catch (const WorkerRuntimeEvidenceError& error) {
+    return {grpc::StatusCode::PERMISSION_DENIED, error.what()};
+  } catch (const CacheNamespaceAuthorityError& error) {
+    return {grpc::StatusCode::PERMISSION_DENIED, error.what()};
+  } catch (const std::exception& exception) {
+    return worker_failure(exception);
+  }
+}
+
 grpc::Status TrainVMService::acknowledge_worker_control(
     const v1::ControlPatchAcknowledgement& acknowledgement,
     const WorkerConnection& connection, std::uint64_t& acknowledged) {
@@ -4648,6 +4769,19 @@ grpc::Status TrainVMService::Connect(
                        "worker disconnected after durable result commit"});
       }
       return finish(grpc::Status::OK);
+    }
+
+    if (message.has_runtime_evidence()) {
+      // Not acknowledged, because it carries no worker_sequence to
+      // acknowledge: the transport is the report struct exactly. Acceptance
+      // is the immutable receipt the authority published; refusal is this
+      // terminal status.
+      status = record_worker_runtime_evidence(message.runtime_evidence(),
+                                              connection);
+      if (!status.ok()) return finish(std::move(status));
+      status = send_pending_commands();
+      if (!status.ok()) return finish(std::move(status));
+      continue;
     }
 
     std::uint64_t acknowledged = 0U;
