@@ -1,7 +1,7 @@
 {
   "api_version": "trainvm.compatibility-workflows/v1",
   "authority": "compatibility_evidence_only",
-  "classification_surface_digest": "sha256:d17ea6adcefc11e12f5e9f7ccee6a32f0cfd6bfde400996d290090f6c480a2bc",
+  "classification_surface_digest": "sha256:f3f355cd1ff6f757934d7a58ceda3082c8571db6df75753380b944e8dd42e0b1",
   "source_digests": [
     {
       "source_path": "dashboard/internal/server/alerts_handlers.go",
@@ -549,7 +549,7 @@
     },
     {
       "source_path": "src/rwkv_lab/train_mla.py",
-      "source_sha256": "sha256:c5190e9a87c098d0c4233e8b80220b740f32803d62598e1176958cb31e37856d"
+      "source_sha256": "sha256:0c18e8203ca52972d5c92c991b815e26401a5e0dde0891857d694040ae98921d"
     },
     {
       "source_path": "src/rwkv_lab/train_mla_engram.py",

@@ -120,23 +120,6 @@ UNMAPPED_INTERCEPTION: dict[str, str] = {
         "baseline work but never calls the boundary before mutating",
     "rwkv_lab.mageflow_terminal_expert.v1.Train":
         "mage_flow_terminal_train.py mutates without reaching the boundary",
-    "rwkv_lab.transformer_mla.v1.Train":
-        "train_mla.py mutates without reaching the boundary",
-    "rwkv_lab.transformer_mla_mtp.v1.Train":
-        "train_mla.py mutates without reaching the boundary",
-    "rwkv_lab.transformer_mla_mutor.v1.Train":
-        "train_mla.py mutates without reaching the boundary",
-    "rwkv_lab.transformer_mla_fsp.v1.Train":
-        "train_mla.py mutates without reaching the boundary",
-    "rwkv_lab.transformer_mla_parallel.v1.Train":
-        "train_mla.py mutates without reaching the boundary",
-    "rwkv_lab.transformer_mla_rwkv8.v1.Train":
-        "train_mla.py mutates without reaching the boundary",
-    "rwkv_lab.transformer_mla_engram.v1.Train":
-        "train_mla.py mutates without reaching the boundary; this route also "
-        "holds two optimizer-category components in different slots",
-    "rwkv_lab.transformer_mla_full_backbone.v1.Train":
-        "train_mla.py mutates without reaching the boundary",
 }
 
 # Operations that resolve no optimizer mutation at all, so there is nothing for

@@ -1063,6 +1063,58 @@ def _full_attn_indices(cfg: TrainConfig) -> list[int]:
     return manifest["full_attn_layer_indices"]
 
 
+def refuse_ungated_attempt_baseline(
+    worker_controls: Any | None, start_step: int
+) -> None:
+    """Refuse a resume the controller's attempt baseline does not admit.
+
+    The controller gates an attempt at an immutable baseline step: zero for a
+    fresh attempt, the resume checkpoint's step for a replacement one. The
+    pre-mutation crossing names ``step + 1`` and ``WorkerControlRuntime``
+    refuses any step at or below the baseline, so an attempt whose loop begins
+    somewhere else can never reach a legal first mutation -- it would stall at
+    the first crossing with nothing saying why, after a full model load and a
+    baseline evaluation.
+
+    All eight Transformer MLA profiles resume, so this route reaches the
+    replacement-attempt case for real rather than in principle. The comparison
+    is against ``attempt_baseline_optimizer_step`` and never against a literal
+    zero: a literal zero is right for the fresh attempt and silently wrong for
+    every replacement one, which is the bug ``mage_flow_pretrain.py`` shipped
+    and 8f0da3e fixed (PR #94/#115/#130). A branch keyed to zero that never
+    fires looks exactly like a branch with nothing to do.
+
+    ``start_step`` is the loop's own starting point -- read from the resume
+    checkpoint, or zero for a fresh run -- so this is the journal/checkpoint
+    evidence side of the gate meeting the controller's side, and a disagreement
+    between them is refused before any parameter moves.
+
+    A gate the controller requires and this attempt has not satisfied is
+    refused here too, rather than at the first crossing thousands of tokens
+    later. That refusal is not a way to skip the crossing: the crossing happens
+    on every step regardless, and a controller that replayed durable evidence
+    from its journal on reconnect reports the gate satisfied and this returns.
+    """
+
+    if worker_controls is None:
+        return
+    baseline = worker_controls.attempt_baseline_optimizer_step
+    if start_step != baseline:
+        raise ValueError(
+            "Transformer MLA resumed at a step the controller does not gate: "
+            f"{start_step} != {baseline}"
+        )
+    if (
+        worker_controls.step_zero_eval_gate_required
+        and not worker_controls.step_zero_eval_gate_satisfied
+    ):
+        raise ValueError(
+            "Transformer MLA cannot mutate: the controller requires durable "
+            f"attempt-baseline evidence at step {baseline} and none is "
+            "recorded for this attempt"
+        )
+
+
 # ---------------------------------------------------------------------------
 # TrainVM-capable trainer entry point
 # ---------------------------------------------------------------------------
@@ -1074,6 +1126,11 @@ def train(
     worker_observability: Any | None = None,
     worker_controls: Any | None = None,
 ) -> dict[str, object]:
+    # Imported here rather than at module scope, following qwen_ao3_cpt.py: this
+    # trainer also runs standalone from its own CLI on hosts without the
+    # trainvm-worker extra, and that package pulls in the wire protocol.
+    from rwkv_lab.trainvm_worker import OptimizerMutationSentinel
+
     validate_train_config(cfg)
     _interrupt_flag["count"] = 0
     # Install before any model/data load or baseline evaluation. A first TERM
@@ -1925,6 +1982,11 @@ def train(
         print(f"resumed at step {start_step}")
         del ckpt
 
+    # Before the baseline evaluation and long before the loop, so a disagreement
+    # with the controller's immutable attempt baseline is diagnosed as itself
+    # rather than as a refused first crossing after a full model load.
+    refuse_ungated_attempt_baseline(worker_controls, start_step)
+
     if worker_components is not None:
         trainvm_weight_decay = worker_components.weight_decay_schedule(optimizer)
         trainvm_scheduler = worker_components.learning_rate_schedule(optimizer)
@@ -2099,209 +2161,61 @@ def train(
         print(f"time-based checkpoint: every {cfg.save_every_seconds}s")
     if cfg.max_saved_checkpoints > 0:
         print(f"checkpoint retention: keep last {cfg.max_saved_checkpoints}")
-    while step < cfg.max_steps:
-        optimizer.zero_grad(set_to_none=True)
-        if optimizer_host is not None:
-            optimizer_host.zero_grad(set_to_none=True)
-        if optimizer_aux is not None:
-            optimizer_aux.zero_grad(set_to_none=True)
-        accum_loss_t = None
-        for _ in range(cfg.grad_accum_steps):
-            if worker_observability is not None:
-                worker_observability.optimizer_step(step, "train")
-            if worker_controls is not None:
-                worker_controls.microbatch(step + 1, reject_live_controls)
-            ids = next(_train_iter).to(device, non_blocking=True)
-            x, y = ids[:, :-1], ids[:, 1:]
-            if cfg.train_aux_only:
-                # Aux-only: backbone forward (no_grad), compute aux losses only.
-                # No chain MTP — MTP is frozen, computing through it wastes
-                # compute since there's no gradient to absorb.
-                text_model = _text_model(model)
-                with torch.no_grad():
-                    text_out = text_model(input_ids=x, use_cache=False)
-                    backbone_hidden = _last_hidden(text_out).detach()
-                    del text_out
+    # Installed for the whole loop, so ordering is enforced against every
+    # optimizer instance in the process rather than only the ones this module
+    # constructed -- a fused update, an optimizer built later, or an edit that
+    # moves the crossing below the mutation all fail closed here instead of
+    # mutating parameters the controller never authorized.
+    mutation_sentinel = OptimizerMutationSentinel()
 
-                loss = backbone_hidden.new_zeros((), dtype=torch.float32)
-                if cfg.mutor_enabled:
-                    mut_l, n_mut = mutor_loss(
-                        backbone_hidden, y, model.lm_head, model.mutor_head,
-                        num_registers=cfg.mutor_num_registers,
-                        d_min=cfg.mutor_d_min, d_max=cfg.mutor_d_max,
-                    )
-                    if n_mut > 0:
-                        loss = loss + cfg.mutor_weight * mut_l
-                if cfg.fsp_enabled:
-                    fsp_l, n_fsp = fsp_loss(
-                        backbone_hidden, y, model.lm_head, model.fsp_head,
-                        num_positions=cfg.fsp_num_positions, tau=cfg.fsp_tau,
-                    )
-                    if n_fsp > 0:
-                        loss = loss + cfg.fsp_weight * fsp_l
-                if cfg.parallel_enabled:
-                    ph_l, n_ph = parallel_heads_loss(
-                        backbone_hidden, y, model.lm_head, model.parallel_heads,
-                        weights=_ph_weights_cache,
-                    )
-                    if n_ph > 0:
-                        loss = loss + ph_l
-                logits = loss  # placeholder for downstream del
-                del backbone_hidden
-            elif cfg.train_mtp_only:
-                text_model = _text_model(model)
-                with torch.no_grad():
-                    text_out = text_model(input_ids=x, use_cache=False)
-                    backbone_hidden = _last_hidden(text_out).detach()
-                    del text_out
+    def cross_mutation_boundary(next_step: int, *, mutations: int) -> None:
+        """Cross the controller boundary for ``next_step``, then arm the token.
 
-                T = x.shape[1]
-                # Precompute full-range RoPE once. Each horizon slices into this
-                # instead of making len(_chain_horizons) separate rotary_emb calls.
-                full_pos = train_pos_base[:, :T].expand(x.shape[0], -1)
-                cos_all, sin_all = text_model.rotary_emb(backbone_hidden, full_pos)
+        ``mutations`` is how many optimizer mutations this training step will
+        make: this route steps up to three optimizers per step and the
+        controller must hear about that step once, not once per optimizer. A
+        boundary that refuses leaves the sentinel disarmed, so every mutation
+        it was meant to guard fails rather than proceeding.
+        """
 
-                losses_by_horizon: list[torch.Tensor] = []
-                prev_out = backbone_hidden            # [B, T, H], k=0 init
-                for k, (horizon, weight) in enumerate(zip(_chain_horizons, _chain_weights)):
-                    # At chain step k we predict horizon = k + 2.
-                    # Current sequence length: L_k = T - k. Input is y[:, k:T].
-                    L_k = T - k
-                    hidden_k = prev_out[:, :L_k]          # [B, L_k, H]
-                    ids_k = y[:, k:k + L_k]               # [B, L_k], tokens at abs pos k+1..T
-                    # Absolute-position RoPE (tokens live at abs positions k..T-1)
-                    pos_k = full_pos[:, k:k + L_k]
-                    cos_k = cos_all[:, k:k + L_k]
-                    sin_k = sin_all[:, k:k + L_k]
+        mutation_sentinel.cross(
+            next_step,
+            (
+                lambda boundary_step: worker_controls.pre_optimizer_step(
+                    boundary_step, reject_live_controls
+                )
+            )
+            if worker_controls is not None
+            else None,
+            mutations=mutations,
+        )
 
-                    mtp_out_k = model.mtp_trainer(
-                        input_ids=ids_k,
-                        hidden_states=hidden_k,
-                        position_embeddings=(cos_k, sin_k),
-                        position_ids=pos_k,
-                    )
-                    # Valid prediction range: first L_k - 1 positions (last predicts
-                    # beyond label range). Labels for this horizon: y[k+1 : T].
-                    valid_logits_hidden = mtp_out_k[:, :L_k - 1]
-                    valid_labels = y[:, k + 1:]  # length T - k - 1 = L_k - 1
-                    loss_h = training_ce(
-                        valid_logits_hidden, model.lm_head, valid_labels
-                    )
-                    losses_by_horizon.append(weight * loss_h)
-
-                    prev_out = mtp_out_k
-                    del hidden_k, ids_k, pos_k, cos_k, sin_k
-
-                loss = sum(losses_by_horizon)
-
-                # Aux losses against the frozen backbone_hidden. Gradient flows
-                # only to the aux heads' own trainable params (offset_emb,
-                # fsp_bias, parallel MLPs) because backbone_hidden is detached
-                # (produced under torch.no_grad above). This is the clean way
-                # to warm up aux heads before unfreezing the backbone.
-                if cfg.mutor_enabled:
-                    mut_l, n_mut = mutor_loss(
-                        backbone_hidden, y, model.lm_head, model.mutor_head,
-                        num_registers=cfg.mutor_num_registers,
-                        d_min=cfg.mutor_d_min, d_max=cfg.mutor_d_max,
-                    )
-                    if n_mut > 0:
-                        loss = loss + cfg.mutor_weight * mut_l
-                if cfg.fsp_enabled:
-                    fsp_l, n_fsp = fsp_loss(
-                        backbone_hidden, y, model.lm_head, model.fsp_head,
-                        num_positions=cfg.fsp_num_positions, tau=cfg.fsp_tau,
-                    )
-                    if n_fsp > 0:
-                        loss = loss + cfg.fsp_weight * fsp_l
-                if cfg.parallel_enabled:
-                    ph_l, n_ph = parallel_heads_loss(
-                        backbone_hidden, y, model.lm_head, model.parallel_heads,
-                        weights=_ph_weights_cache,
-                    )
-                    if n_ph > 0:
-                        loss = loss + ph_l
-
-                logits = loss  # placeholder so downstream `del logits` doesn't error
-                del backbone_hidden, prev_out, losses_by_horizon
-            elif mtp_installed:
-                text_model = _text_model(model)
-                outputs = text_model(input_ids=x, use_cache=False)
-                backbone_hidden = _last_hidden(outputs)
-                lm_loss = training_ce(backbone_hidden, model.lm_head, y)
-
-                T = x.shape[1]
-                # Precompute full-range RoPE once; each horizon slices.
-                full_pos = train_pos_base[:, :T].expand(x.shape[0], -1)
-                cos_all, sin_all = text_model.rotary_emb(backbone_hidden, full_pos)
-
-                # Chained MTP loss over _chain_horizons (h=2,3,4 by default).
-                # Same cascade as train_mtp_only branch, but backbone_hidden has
-                # requires_grad here, so the full chain's gradient flows into it.
-                chain_losses: list[torch.Tensor] = []
-                prev_out = backbone_hidden
-                for k, (horizon, weight) in enumerate(zip(_chain_horizons, _chain_weights)):
-                    L_k = T - k
-                    hidden_k = prev_out[:, :L_k]
-                    ids_k = y[:, k:k + L_k]
-                    pos_k = full_pos[:, k:k + L_k]
-                    cos_k = cos_all[:, k:k + L_k]
-                    sin_k = sin_all[:, k:k + L_k]
-                    mtp_out_k = model.mtp_trainer(
-                        input_ids=ids_k,
-                        hidden_states=hidden_k,
-                        position_embeddings=(cos_k, sin_k),
-                        position_ids=pos_k,
-                    )
-                    valid_logits_hidden = mtp_out_k[:, :L_k - 1]
-                    valid_labels = y[:, k + 1:]
-                    loss_h = training_ce(
-                        valid_logits_hidden, model.lm_head, valid_labels
-                    )
-                    chain_losses.append(weight * loss_h)
-                    prev_out = mtp_out_k
-                    del hidden_k, ids_k, pos_k, cos_k, sin_k
-
-                mtp_loss = sum(chain_losses)
-                loss = lm_loss + cfg.mtp_loss_weight * mtp_loss
-
-                # MuToR aux loss: multi-horizon register-style prediction at
-                # randomly-sampled positions in backbone_hidden. In combined
-                # mode (here), gradient flows into both offset_emb AND backbone.
-                if cfg.mutor_enabled:
-                    mut_l, n_mut = mutor_loss(
-                        backbone_hidden, y, model.lm_head, model.mutor_head,
-                        num_registers=cfg.mutor_num_registers,
-                        d_min=cfg.mutor_d_min, d_max=cfg.mutor_d_max,
-                    )
-                    if n_mut > 0:
-                        loss = loss + cfg.mutor_weight * mut_l
-                # FSP-BCE aux loss: future-bag multi-hot BCE at sampled positions.
-                if cfg.fsp_enabled:
-                    fsp_l, n_fsp = fsp_loss(
-                        backbone_hidden, y, model.lm_head, model.fsp_head,
-                        num_positions=cfg.fsp_num_positions, tau=cfg.fsp_tau,
-                    )
-                    if n_fsp > 0:
-                        loss = loss + cfg.fsp_weight * fsp_l
-                # Parallel heads (Gloeckle) — each head's weight is already
-                # applied internally, so we add the summed parallel loss with
-                # unit coefficient.
-                if cfg.parallel_enabled:
-                    ph_l, n_ph = parallel_heads_loss(
-                        backbone_hidden, y, model.lm_head, model.parallel_heads,
-                        weights=_ph_weights_cache,
-                    )
-                    if n_ph > 0:
-                        loss = loss + ph_l
-                logits = loss  # placeholder for downstream del
-                del outputs, backbone_hidden, prev_out, chain_losses
-            else:
-                if cfg.mutor_enabled or cfg.fsp_enabled or cfg.parallel_enabled:
+    with mutation_sentinel.installed():
+        while step < cfg.max_steps:
+            optimizer.zero_grad(set_to_none=True)
+            if optimizer_host is not None:
+                optimizer_host.zero_grad(set_to_none=True)
+            if optimizer_aux is not None:
+                optimizer_aux.zero_grad(set_to_none=True)
+            accum_loss_t = None
+            for _ in range(cfg.grad_accum_steps):
+                if worker_observability is not None:
+                    worker_observability.optimizer_step(step, "train")
+                if worker_controls is not None:
+                    worker_controls.microbatch(step + 1, reject_live_controls)
+                ids = next(_train_iter).to(device, non_blocking=True)
+                x, y = ids[:, :-1], ids[:, 1:]
+                if cfg.train_aux_only:
+                    # Aux-only: backbone forward (no_grad), compute aux losses only.
+                    # No chain MTP — MTP is frozen, computing through it wastes
+                    # compute since there's no gradient to absorb.
                     text_model = _text_model(model)
-                    outputs = text_model(input_ids=x, use_cache=False)
-                    backbone_hidden = _last_hidden(outputs)
-                    loss = training_ce(backbone_hidden, model.lm_head, y)
+                    with torch.no_grad():
+                        text_out = text_model(input_ids=x, use_cache=False)
+                        backbone_hidden = _last_hidden(text_out).detach()
+                        del text_out
+
+                    loss = backbone_hidden.new_zeros((), dtype=torch.float32)
                     if cfg.mutor_enabled:
                         mut_l, n_mut = mutor_loss(
                             backbone_hidden, y, model.lm_head, model.mutor_head,
@@ -2325,205 +2239,407 @@ def train(
                         if n_ph > 0:
                             loss = loss + ph_l
                     logits = loss  # placeholder for downstream del
-                    del outputs, backbone_hidden
-                else:
+                    del backbone_hidden
+                elif cfg.train_mtp_only:
+                    text_model = _text_model(model)
+                    with torch.no_grad():
+                        text_out = text_model(input_ids=x, use_cache=False)
+                        backbone_hidden = _last_hidden(text_out).detach()
+                        del text_out
+
+                    T = x.shape[1]
+                    # Precompute full-range RoPE once. Each horizon slices into this
+                    # instead of making len(_chain_horizons) separate rotary_emb calls.
+                    full_pos = train_pos_base[:, :T].expand(x.shape[0], -1)
+                    cos_all, sin_all = text_model.rotary_emb(backbone_hidden, full_pos)
+
+                    losses_by_horizon: list[torch.Tensor] = []
+                    prev_out = backbone_hidden            # [B, T, H], k=0 init
+                    for k, (horizon, weight) in enumerate(zip(_chain_horizons, _chain_weights)):
+                        # At chain step k we predict horizon = k + 2.
+                        # Current sequence length: L_k = T - k. Input is y[:, k:T].
+                        L_k = T - k
+                        hidden_k = prev_out[:, :L_k]          # [B, L_k, H]
+                        ids_k = y[:, k:k + L_k]               # [B, L_k], tokens at abs pos k+1..T
+                        # Absolute-position RoPE (tokens live at abs positions k..T-1)
+                        pos_k = full_pos[:, k:k + L_k]
+                        cos_k = cos_all[:, k:k + L_k]
+                        sin_k = sin_all[:, k:k + L_k]
+
+                        mtp_out_k = model.mtp_trainer(
+                            input_ids=ids_k,
+                            hidden_states=hidden_k,
+                            position_embeddings=(cos_k, sin_k),
+                            position_ids=pos_k,
+                        )
+                        # Valid prediction range: first L_k - 1 positions (last predicts
+                        # beyond label range). Labels for this horizon: y[k+1 : T].
+                        valid_logits_hidden = mtp_out_k[:, :L_k - 1]
+                        valid_labels = y[:, k + 1:]  # length T - k - 1 = L_k - 1
+                        loss_h = training_ce(
+                            valid_logits_hidden, model.lm_head, valid_labels
+                        )
+                        losses_by_horizon.append(weight * loss_h)
+
+                        prev_out = mtp_out_k
+                        del hidden_k, ids_k, pos_k, cos_k, sin_k
+
+                    loss = sum(losses_by_horizon)
+
+                    # Aux losses against the frozen backbone_hidden. Gradient flows
+                    # only to the aux heads' own trainable params (offset_emb,
+                    # fsp_bias, parallel MLPs) because backbone_hidden is detached
+                    # (produced under torch.no_grad above). This is the clean way
+                    # to warm up aux heads before unfreezing the backbone.
+                    if cfg.mutor_enabled:
+                        mut_l, n_mut = mutor_loss(
+                            backbone_hidden, y, model.lm_head, model.mutor_head,
+                            num_registers=cfg.mutor_num_registers,
+                            d_min=cfg.mutor_d_min, d_max=cfg.mutor_d_max,
+                        )
+                        if n_mut > 0:
+                            loss = loss + cfg.mutor_weight * mut_l
+                    if cfg.fsp_enabled:
+                        fsp_l, n_fsp = fsp_loss(
+                            backbone_hidden, y, model.lm_head, model.fsp_head,
+                            num_positions=cfg.fsp_num_positions, tau=cfg.fsp_tau,
+                        )
+                        if n_fsp > 0:
+                            loss = loss + cfg.fsp_weight * fsp_l
+                    if cfg.parallel_enabled:
+                        ph_l, n_ph = parallel_heads_loss(
+                            backbone_hidden, y, model.lm_head, model.parallel_heads,
+                            weights=_ph_weights_cache,
+                        )
+                        if n_ph > 0:
+                            loss = loss + ph_l
+
+                    logits = loss  # placeholder so downstream `del logits` doesn't error
+                    del backbone_hidden, prev_out, losses_by_horizon
+                elif mtp_installed:
                     text_model = _text_model(model)
                     outputs = text_model(input_ids=x, use_cache=False)
-                    hidden = _last_hidden(outputs)
-                    loss = training_ce(hidden, model.lm_head, y)
+                    backbone_hidden = _last_hidden(outputs)
+                    lm_loss = training_ce(backbone_hidden, model.lm_head, y)
+
+                    T = x.shape[1]
+                    # Precompute full-range RoPE once; each horizon slices.
+                    full_pos = train_pos_base[:, :T].expand(x.shape[0], -1)
+                    cos_all, sin_all = text_model.rotary_emb(backbone_hidden, full_pos)
+
+                    # Chained MTP loss over _chain_horizons (h=2,3,4 by default).
+                    # Same cascade as train_mtp_only branch, but backbone_hidden has
+                    # requires_grad here, so the full chain's gradient flows into it.
+                    chain_losses: list[torch.Tensor] = []
+                    prev_out = backbone_hidden
+                    for k, (horizon, weight) in enumerate(zip(_chain_horizons, _chain_weights)):
+                        L_k = T - k
+                        hidden_k = prev_out[:, :L_k]
+                        ids_k = y[:, k:k + L_k]
+                        pos_k = full_pos[:, k:k + L_k]
+                        cos_k = cos_all[:, k:k + L_k]
+                        sin_k = sin_all[:, k:k + L_k]
+                        mtp_out_k = model.mtp_trainer(
+                            input_ids=ids_k,
+                            hidden_states=hidden_k,
+                            position_embeddings=(cos_k, sin_k),
+                            position_ids=pos_k,
+                        )
+                        valid_logits_hidden = mtp_out_k[:, :L_k - 1]
+                        valid_labels = y[:, k + 1:]
+                        loss_h = training_ce(
+                            valid_logits_hidden, model.lm_head, valid_labels
+                        )
+                        chain_losses.append(weight * loss_h)
+                        prev_out = mtp_out_k
+                        del hidden_k, ids_k, pos_k, cos_k, sin_k
+
+                    mtp_loss = sum(chain_losses)
+                    loss = lm_loss + cfg.mtp_loss_weight * mtp_loss
+
+                    # MuToR aux loss: multi-horizon register-style prediction at
+                    # randomly-sampled positions in backbone_hidden. In combined
+                    # mode (here), gradient flows into both offset_emb AND backbone.
+                    if cfg.mutor_enabled:
+                        mut_l, n_mut = mutor_loss(
+                            backbone_hidden, y, model.lm_head, model.mutor_head,
+                            num_registers=cfg.mutor_num_registers,
+                            d_min=cfg.mutor_d_min, d_max=cfg.mutor_d_max,
+                        )
+                        if n_mut > 0:
+                            loss = loss + cfg.mutor_weight * mut_l
+                    # FSP-BCE aux loss: future-bag multi-hot BCE at sampled positions.
+                    if cfg.fsp_enabled:
+                        fsp_l, n_fsp = fsp_loss(
+                            backbone_hidden, y, model.lm_head, model.fsp_head,
+                            num_positions=cfg.fsp_num_positions, tau=cfg.fsp_tau,
+                        )
+                        if n_fsp > 0:
+                            loss = loss + cfg.fsp_weight * fsp_l
+                    # Parallel heads (Gloeckle) — each head's weight is already
+                    # applied internally, so we add the summed parallel loss with
+                    # unit coefficient.
+                    if cfg.parallel_enabled:
+                        ph_l, n_ph = parallel_heads_loss(
+                            backbone_hidden, y, model.lm_head, model.parallel_heads,
+                            weights=_ph_weights_cache,
+                        )
+                        if n_ph > 0:
+                            loss = loss + ph_l
                     logits = loss  # placeholder for downstream del
-                    del outputs, hidden
+                    del outputs, backbone_hidden, prev_out, chain_losses
+                else:
+                    if cfg.mutor_enabled or cfg.fsp_enabled or cfg.parallel_enabled:
+                        text_model = _text_model(model)
+                        outputs = text_model(input_ids=x, use_cache=False)
+                        backbone_hidden = _last_hidden(outputs)
+                        loss = training_ce(backbone_hidden, model.lm_head, y)
+                        if cfg.mutor_enabled:
+                            mut_l, n_mut = mutor_loss(
+                                backbone_hidden, y, model.lm_head, model.mutor_head,
+                                num_registers=cfg.mutor_num_registers,
+                                d_min=cfg.mutor_d_min, d_max=cfg.mutor_d_max,
+                            )
+                            if n_mut > 0:
+                                loss = loss + cfg.mutor_weight * mut_l
+                        if cfg.fsp_enabled:
+                            fsp_l, n_fsp = fsp_loss(
+                                backbone_hidden, y, model.lm_head, model.fsp_head,
+                                num_positions=cfg.fsp_num_positions, tau=cfg.fsp_tau,
+                            )
+                            if n_fsp > 0:
+                                loss = loss + cfg.fsp_weight * fsp_l
+                        if cfg.parallel_enabled:
+                            ph_l, n_ph = parallel_heads_loss(
+                                backbone_hidden, y, model.lm_head, model.parallel_heads,
+                                weights=_ph_weights_cache,
+                            )
+                            if n_ph > 0:
+                                loss = loss + ph_l
+                        logits = loss  # placeholder for downstream del
+                        del outputs, backbone_hidden
+                    else:
+                        text_model = _text_model(model)
+                        outputs = text_model(input_ids=x, use_cache=False)
+                        hidden = _last_hidden(outputs)
+                        loss = training_ce(hidden, model.lm_head, y)
+                        logits = loss  # placeholder for downstream del
+                        del outputs, hidden
 
-            scaled_loss = (
-                trainvm_accumulation.scale_loss(loss)
-                if trainvm_accumulation is not None
-                else loss / cfg.grad_accum_steps
+                scaled_loss = (
+                    trainvm_accumulation.scale_loss(loss)
+                    if trainvm_accumulation is not None
+                    else loss / cfg.grad_accum_steps
+                )
+                scaled_loss.backward()
+                loss_for_log = loss.detach() / cfg.grad_accum_steps
+                accum_loss_t = loss_for_log if accum_loss_t is None else accum_loss_t + loss_for_log
+                running_tokens += y.numel()
+                del logits, loss
+
+            if accum_loss_t is not None:
+                running_loss_t = (
+                    accum_loss_t if running_loss_t is None else running_loss_t + accum_loss_t
+                )
+
+            # LR schedule. `lr` is computed relative to cfg.lr (the main-group peak).
+            # We derive a schedule fraction and apply it per-group relative to each
+            # group's stored peak, then multiply by the ROP plateau-multiplier (if
+            # enabled). The plateau mult is set inside do_eval() and persists between
+            # evals; it can only reduce, never raise.
+            lr = (
+                float(optimizer.param_groups[0]["lr"])
+                if trainvm_scheduler is not None
+                else lr_at(step, cfg, start_step=start_step)
             )
-            scaled_loss.backward()
-            loss_for_log = loss.detach() / cfg.grad_accum_steps
-            accum_loss_t = loss_for_log if accum_loss_t is None else accum_loss_t + loss_for_log
-            running_tokens += y.numel()
-            del logits, loss
-
-        if accum_loss_t is not None:
-            running_loss_t = (
-                accum_loss_t if running_loss_t is None else running_loss_t + accum_loss_t
-            )
-
-        # LR schedule. `lr` is computed relative to cfg.lr (the main-group peak).
-        # We derive a schedule fraction and apply it per-group relative to each
-        # group's stored peak, then multiply by the ROP plateau-multiplier (if
-        # enabled). The plateau mult is set inside do_eval() and persists between
-        # evals; it can only reduce, never raise.
-        lr = (
-            float(optimizer.param_groups[0]["lr"])
-            if trainvm_scheduler is not None
-            else lr_at(step, cfg, start_step=start_step)
-        )
-        sched_frac = lr / cfg.lr if cfg.lr > 0 else 1.0
-        rop_mult = plateau_ctrl.mult if plateau_ctrl is not None else 1.0
-        if trainvm_scheduler is not None:
-            # The registered scheduler already set every main optimizer group,
-            # preserving declared per-group base-LR ratios. Engram's separately
-            # declared sparse host optimizer follows the same normalized phase.
+            sched_frac = lr / cfg.lr if cfg.lr > 0 else 1.0
+            rop_mult = plateau_ctrl.mult if plateau_ctrl is not None else 1.0
+            if trainvm_scheduler is not None:
+                # The registered scheduler already set every main optimizer group,
+                # preserving declared per-group base-LR ratios. Engram's separately
+                # declared sparse host optimizer follows the same normalized phase.
+                if optimizer_host is not None:
+                    for group in optimizer_host.param_groups:
+                        group["lr"] = lr * cfg.engram_lr_mult
+            elif engram_modules and len(optimizer.param_groups) >= 2:
+                optimizer.param_groups[0]["lr"] = lr * rop_mult
+                optimizer.param_groups[1]["lr"] = lr * cfg.engram_lr_mult * rop_mult
+            elif cfg.optimizer in ("muon", "muonclip"):
+                # Each group's stored "peak_lr" was captured at construction; scale
+                # all groups by sched_frac × rop_mult, preserving cross-group ratios.
+                for g in optimizer.param_groups:
+                    g["lr"] = g["peak_lr"] * sched_frac * rop_mult
+            else:
+                for g in optimizer.param_groups:
+                    g["lr"] = lr * rop_mult
             if optimizer_host is not None:
-                for group in optimizer_host.param_groups:
-                    group["lr"] = lr * cfg.engram_lr_mult
-        elif engram_modules and len(optimizer.param_groups) >= 2:
-            optimizer.param_groups[0]["lr"] = lr * rop_mult
-            optimizer.param_groups[1]["lr"] = lr * cfg.engram_lr_mult * rop_mult
-        elif cfg.optimizer in ("muon", "muonclip"):
-            # Each group's stored "peak_lr" was captured at construction; scale
-            # all groups by sched_frac × rop_mult, preserving cross-group ratios.
-            for g in optimizer.param_groups:
-                g["lr"] = g["peak_lr"] * sched_frac * rop_mult
-        else:
-            for g in optimizer.param_groups:
-                g["lr"] = lr * rop_mult
-        if optimizer_host is not None:
-            for g in optimizer_host.param_groups:
-                g["lr"] = lr * cfg.engram_lr_mult * rop_mult
-        if optimizer_aux is not None:
-            # Prodigy's `lr` is a multiplier; the actual step is d_t * lr.
-            # We still apply the warmup/schedule fraction so Prodigy's effective
-            # step ramps up alongside Muon's during the resume rewarmup.
-            for g in optimizer_aux.param_groups:
-                g["lr"] = g["peak_lr"] * sched_frac * rop_mult
-        # Grad clip GPU params only. Sparse CPU grads can't be clip-normed
-        # jointly (mixed-device + sparse). Set --grad-clip <= 0 or
-        # --grad-clip-every=0 to skip the reduction entirely.
-        clip_due = (
-            cfg.grad_clip > 0
-            and cfg.grad_clip_every > 0
-            and step % cfg.grad_clip_every == 0
-        )
-        if clip_due:
-            last_gnorm_t = (
-                worker_components.gradient_clipping(clip_targets).detach()
-                if worker_components is not None
-                else torch.nn.utils.clip_grad_norm_(
-                    clip_targets, cfg.grad_clip
-                ).detach()
+                for g in optimizer_host.param_groups:
+                    g["lr"] = lr * cfg.engram_lr_mult * rop_mult
+            if optimizer_aux is not None:
+                # Prodigy's `lr` is a multiplier; the actual step is d_t * lr.
+                # We still apply the warmup/schedule fraction so Prodigy's effective
+                # step ramps up alongside Muon's during the resume rewarmup.
+                for g in optimizer_aux.param_groups:
+                    g["lr"] = g["peak_lr"] * sched_frac * rop_mult
+            # Grad clip GPU params only. Sparse CPU grads can't be clip-normed
+            # jointly (mixed-device + sparse). Set --grad-clip <= 0 or
+            # --grad-clip-every=0 to skip the reduction entirely.
+            clip_due = (
+                cfg.grad_clip > 0
+                and cfg.grad_clip_every > 0
+                and step % cfg.grad_clip_every == 0
             )
-        if trainvm_weight_decay is not None:
-            trainvm_weight_decay.step(step)
-        optimizer.step()
-        if optimizer_host is not None:
-            optimizer_host.step()
-        if optimizer_aux is not None:
-            optimizer_aux.step()
-        if trainvm_scheduler is not None:
-            trainvm_scheduler.step()
-        step += 1
-        if worker_step_profiler is not None:
-            worker_step_profiler.step(step)
-        if worker_observability is not None:
-            worker_observability.optimizer_step(step)
-        if worker_controls is not None:
-            worker_controls.optimizer_step(step, reject_live_controls)
-
-        if step % cfg.log_every == 0:
-            dt = time.time() - t_win
-            tps = running_tokens / dt
-            n_log_steps = max(1, step - last_log_step)
-            avg = (
-                float((running_loss_t / n_log_steps).item())
-                if running_loss_t is not None else 0.0
-            )
-            last_log_step = step
-            gnorm = float(last_gnorm_t.item()) if last_gnorm_t is not None else None
-            gnorm_s = f"{gnorm:.2f}" if gnorm is not None else "n/a"
-            # Guard saturation diagnostic (only present on GuardedMuonClip).
-            guard_s = ""
-            guard_extra = {}
-            if hasattr(optimizer, "last_guard_saturation"):
-                gs = optimizer.last_guard_saturation
-                guard_s = (f"  guard_sat=m{gs['muon_sat']}/{gs['muon_total']}"
-                           f"|a{gs['adam_sat']}/{gs['adam_total']}")
-                guard_extra = {f"guard_{k}": v for k, v in gs.items()}
-            # Prodigy's effective step size = d (auto-adapted) — log if available.
-            if optimizer_aux is not None and len(optimizer_aux.param_groups) > 0:
-                d_est = optimizer_aux.param_groups[0].get("d", None)
-                if d_est is not None:
-                    guard_s += f"  d_prodigy={d_est:.2e}"
-                    guard_extra["d_prodigy"] = float(d_est)
-            print(f"  step {step:5d} | loss={avg:.4f}  lr={lr:.2e}  "
-                  f"gnorm={gnorm_s}  tok/s={tps:.0f}{guard_s}")
-            log({"step": step, "kind": "train", "loss": avg, "lr": lr, **guard_extra,
-                 "gnorm": gnorm, "tok_per_sec": tps})
-            running_loss_t = None
-            running_tokens = 0
-            t_win = time.time()
-
-        if step % cfg.eval_every == 0:
-            do_eval(step)
-            t_win = time.time()  # don't count eval time in tok/s
-
-        # Step-based save
-        step_save_due = cfg.save_every > 0 and step % cfg.save_every == 0
-        # Time-based save (wall clock, independent of step count)
-        time_save_due = (cfg.save_every_seconds > 0
-                        and time.time() - last_save_time >= cfg.save_every_seconds)
-        checkpoint_requested = bool(
-            worker_controls is not None
-            and worker_controls.checkpoint_boundary_requested
-        )
-        if step_save_due or time_save_due or checkpoint_requested:
-            reason = "step" if step_save_due else f"{int(time.time()-last_save_time)}s elapsed"
-            if checkpoint_requested:
-                reason = "controller request"
-            print(f"  [ckpt] saving at step {step} ({reason})...")
-            if worker_controls is not None:
-                worker_controls.checkpoint(step, reject_live_controls)
-            with (
-                worker_observability.keepalive(step, "checkpointing")
-                if worker_observability is not None
-                else nullcontext()
-            ):
-                checkpoint_path = save_checkpoint(
-                    step, mla_modules, optimizer, cfg, model=model,
-                    engram_modules=engram_modules, optimizer_host=optimizer_host,
-                    optimizer_aux=optimizer_aux,
-                    plateau_state=plateau_ctrl.state_dict(),
-                    component_evidence=component_evidence,
-                    component_composition_digest=component_composition_digest,
-                    worker_control_state=(
-                        worker_controls.checkpoint_state()
-                        if worker_controls is not None else None
-                    ),
+            if clip_due:
+                last_gnorm_t = (
+                    worker_components.gradient_clipping(clip_targets).detach()
+                    if worker_components is not None
+                    else torch.nn.utils.clip_grad_norm_(
+                        clip_targets, cfg.grad_clip
+                    ).detach()
                 )
-            _prune_old_checkpoints(Path(cfg.out_dir), cfg.max_saved_checkpoints)
-            log({"step": step, "kind": "checkpoint"})
-            if (
+            if trainvm_weight_decay is not None:
+                trainvm_weight_decay.step(step)
+            # The mandatory pre-mutation boundary, immediately before the
+            # updates it guards. The count covers every mutation below and is
+            # exact: `optimizer` always steps, `optimizer_host` exists only for
+            # the engram route's second optimizer-category component, and
+            # `optimizer_aux` only for the standalone Prodigy branch.
+            #
+            # `trainvm_scheduler` is deliberately NOT counted. It is an
+            # `LRScheduler`, not an `Optimizer` -- its `step()` rewrites
+            # `param_group["lr"]` and never enters `Optimizer.step`, so it does
+            # not reach the process-global pre-hook and mutates no parameter.
+            # Counting it would leave authorization outstanding at the next
+            # crossing and stall the run.
+            cross_mutation_boundary(
+                step + 1,
+                mutations=(
+                    1
+                    + (optimizer_host is not None)
+                    + (optimizer_aux is not None)
+                ),
+            )
+            optimizer.step()
+            if optimizer_host is not None:
+                optimizer_host.step()
+            if optimizer_aux is not None:
+                optimizer_aux.step()
+            if trainvm_scheduler is not None:
+                trainvm_scheduler.step()
+            step += 1
+            if worker_step_profiler is not None:
+                worker_step_profiler.step(step)
+            if worker_observability is not None:
+                worker_observability.optimizer_step(step)
+            # The control safe point that used to sit here is now the
+            # pre-mutation crossing above, at the same effective step
+            # (`pre_optimizer_step` forwards to `optimizer_step`). It is moved
+            # rather than duplicated: kept in both places it would apply the
+            # same safe point twice per step and leave two plausible answers to
+            # "where is this trainer's boundary", one of them after the update.
+
+            if step % cfg.log_every == 0:
+                dt = time.time() - t_win
+                tps = running_tokens / dt
+                n_log_steps = max(1, step - last_log_step)
+                avg = (
+                    float((running_loss_t / n_log_steps).item())
+                    if running_loss_t is not None else 0.0
+                )
+                last_log_step = step
+                gnorm = float(last_gnorm_t.item()) if last_gnorm_t is not None else None
+                gnorm_s = f"{gnorm:.2f}" if gnorm is not None else "n/a"
+                # Guard saturation diagnostic (only present on GuardedMuonClip).
+                guard_s = ""
+                guard_extra = {}
+                if hasattr(optimizer, "last_guard_saturation"):
+                    gs = optimizer.last_guard_saturation
+                    guard_s = (f"  guard_sat=m{gs['muon_sat']}/{gs['muon_total']}"
+                               f"|a{gs['adam_sat']}/{gs['adam_total']}")
+                    guard_extra = {f"guard_{k}": v for k, v in gs.items()}
+                # Prodigy's effective step size = d (auto-adapted) — log if available.
+                if optimizer_aux is not None and len(optimizer_aux.param_groups) > 0:
+                    d_est = optimizer_aux.param_groups[0].get("d", None)
+                    if d_est is not None:
+                        guard_s += f"  d_prodigy={d_est:.2e}"
+                        guard_extra["d_prodigy"] = float(d_est)
+                print(f"  step {step:5d} | loss={avg:.4f}  lr={lr:.2e}  "
+                      f"gnorm={gnorm_s}  tok/s={tps:.0f}{guard_s}")
+                log({"step": step, "kind": "train", "loss": avg, "lr": lr, **guard_extra,
+                     "gnorm": gnorm, "tok_per_sec": tps})
+                running_loss_t = None
+                running_tokens = 0
+                t_win = time.time()
+
+            if step % cfg.eval_every == 0:
+                do_eval(step)
+                t_win = time.time()  # don't count eval time in tok/s
+
+            # Step-based save
+            step_save_due = cfg.save_every > 0 and step % cfg.save_every == 0
+            # Time-based save (wall clock, independent of step count)
+            time_save_due = (cfg.save_every_seconds > 0
+                            and time.time() - last_save_time >= cfg.save_every_seconds)
+            checkpoint_requested = bool(
                 worker_controls is not None
-                and worker_controls.checkpoint_completion_requested
-            ):
-                worker_controls.publish_requested_checkpoint_directory(
-                    str(checkpoint_path),
-                    optimizer_step=step,
-                    resume_grade="compatible",
-                    state_components=(
-                        "component_composition",
-                        "control_revision",
-                        "lr_schedule",
-                        "model",
-                        "optimizer",
-                        "optimizer_groups",
-                        "plateau_state",
-                        "topology",
-                    ),
-                    progress=lambda _bytes: worker_observability.optimizer_step(
-                        step, "checkpointing"
-                    )
+                and worker_controls.checkpoint_boundary_requested
+            )
+            if step_save_due or time_save_due or checkpoint_requested:
+                reason = "step" if step_save_due else f"{int(time.time()-last_save_time)}s elapsed"
+                if checkpoint_requested:
+                    reason = "controller request"
+                print(f"  [ckpt] saving at step {step} ({reason})...")
+                if worker_controls is not None:
+                    worker_controls.checkpoint(step, reject_live_controls)
+                with (
+                    worker_observability.keepalive(step, "checkpointing")
                     if worker_observability is not None
-                    else None,
-                )
-            last_save_time = time.time()
-            t_win = time.time()
+                    else nullcontext()
+                ):
+                    checkpoint_path = save_checkpoint(
+                        step, mla_modules, optimizer, cfg, model=model,
+                        engram_modules=engram_modules, optimizer_host=optimizer_host,
+                        optimizer_aux=optimizer_aux,
+                        plateau_state=plateau_ctrl.state_dict(),
+                        component_evidence=component_evidence,
+                        component_composition_digest=component_composition_digest,
+                        worker_control_state=(
+                            worker_controls.checkpoint_state()
+                            if worker_controls is not None else None
+                        ),
+                    )
+                _prune_old_checkpoints(Path(cfg.out_dir), cfg.max_saved_checkpoints)
+                log({"step": step, "kind": "checkpoint"})
+                if (
+                    worker_controls is not None
+                    and worker_controls.checkpoint_completion_requested
+                ):
+                    worker_controls.publish_requested_checkpoint_directory(
+                        str(checkpoint_path),
+                        optimizer_step=step,
+                        resume_grade="compatible",
+                        state_components=(
+                            "component_composition",
+                            "control_revision",
+                            "lr_schedule",
+                            "model",
+                            "optimizer",
+                            "optimizer_groups",
+                            "plateau_state",
+                            "topology",
+                        ),
+                        progress=lambda _bytes: worker_observability.optimizer_step(
+                            step, "checkpointing"
+                        )
+                        if worker_observability is not None
+                        else None,
+                    )
+                last_save_time = time.time()
+                t_win = time.time()
 
-        # Signal-based save-and-exit (Ctrl-C / systemd stop)
-        if _interrupt_flag["count"] > 0:
-            return finish_interrupted(step)
+            # Signal-based save-and-exit (Ctrl-C / systemd stop)
+            if _interrupt_flag["count"] > 0:
+                return finish_interrupted(step)
 
     # Final eval + save (never pruned — always the latest)
     do_eval(step, prefix="final ")
