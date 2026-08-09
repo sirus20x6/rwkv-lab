@@ -387,6 +387,20 @@ if(TRAINVM_PYTHON_EXECUTABLE)
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_rwkv_lab_worker_contract.py
       $<TARGET_FILE:trainvm>
   )
+  # The registry half of docs/experiment-vm/STEP_ZERO_ARMING.md. That table is
+  # generated and compared on every pull request by
+  # scripts/ci_step_zero_arming_gate.py, which has no compiler and so reads the
+  # registry facts out of a pin. This is the only thing that compares that pin
+  # against a real build; without it the pin could drift from the authority and
+  # the fast gate would keep agreeing with the stale copy.
+  add_test(NAME step_zero_arming_pin
+    COMMAND ${TRAINVM_PYTHON_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/print_step_zero_arming_pin.py
+      $<TARGET_FILE:trainvm>
+      --repository ${CMAKE_CURRENT_SOURCE_DIR}/..
+      --check
+  )
+
   # Deliberately NOT part of rwkv_lab_worker_artifact: that test builds a
   # sealed worker artifact and is excluded from the hosted native job, which
   # is how a stale adapter pin survived for hours. This one needs only the

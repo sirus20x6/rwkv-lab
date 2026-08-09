@@ -230,6 +230,23 @@ jobs:
       - name: Figures stated in the compatibility catalog document are true
         run: python scripts/ci_catalog_doc_counts_gate.py
 
+      # Same reasoning again, applied to the step-zero arming table. The pull
+      # request that changes an arming answer is usually a JSON edit to a
+      # recipe-profile catalog under docs/experiment-vm/examples/, which is the
+      # one least likely to be waiting on the native build -- and the
+      # native-change-scope classifier can skip that build entirely for a
+      # docs-only change, so a gate living only there would not run at all on
+      # exactly the change that breaks the table.
+      #
+      # The registry half is pinned (ctest step_zero_arming_pin checks the pin
+      # against a real build); the composition half is recomputed here from the
+      # documents, which needs no compiler and no torch. The pin's route set is
+      # compared against the worker's dispatch table in the CPU job instead --
+      # importing that table pulls in torch, which this job deliberately does
+      # not install.
+      - name: The step-zero arming table describes the repository
+        run: python scripts/ci_step_zero_arming_gate.py
+
       # Same reasoning, applied to the source-disposition pins. The native
       # suite already enforces them, but only after an ~8 minute toolchain and
       # C++26 build; this reports the same drift in seconds and keeps reporting

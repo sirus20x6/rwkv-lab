@@ -364,6 +364,7 @@ making the merged-PR reference structural instead of a prose convention.
 python scripts/ci_coverage_gate.py -m "not gpu"
 python scripts/ci_unwired_module_gate.py
 python scripts/ci_catalog_doc_counts_gate.py
+python scripts/ci_step_zero_arming_gate.py
 python scripts/validate_benchmark_matrix.py
 python scripts/validate_experiment_documents.py
 python scripts/validate_native_ci_exclusions.py
