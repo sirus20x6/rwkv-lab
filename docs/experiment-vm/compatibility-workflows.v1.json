@@ -1,7 +1,7 @@
 {
   "api_version": "trainvm.compatibility-workflows/v1",
   "authority": "compatibility_evidence_only",
-  "classification_surface_digest": "sha256:974d7c794977f95319f02c8d11993ea31d41a890e5f96ea8640c5337d75662a2",
+  "classification_surface_digest": "sha256:b5a227b757b872c4b8a5a00a62a9653c69aae14b89967a8b274f1ce2f21bb621",
   "source_digests": [
     {
       "source_path": "dashboard/internal/server/alerts_handlers.go",
@@ -593,11 +593,11 @@
     },
     {
       "source_path": "src/rwkv_lab/vision_native_train.py",
-      "source_sha256": "sha256:9d6dd1bedc85fb15e2f0e11eb49732a3d43066216b4f4a5fc319bcb6ffad6e11"
+      "source_sha256": "sha256:9aa56cd0c778ecefb47ca78d16b687e5a674eae7d7df2c32be28a0647f36756e"
     },
     {
       "source_path": "src/rwkv_lab/vision_rwkv_student_train.py",
-      "source_sha256": "sha256:7c8a8d0111a6dccaf464fbd362b8d4023b9d6593a95b9e2c1e600bbc6a1e7ff8"
+      "source_sha256": "sha256:a902ea20c1c6fce4c551d76608ae57bd4a5784ece105bda149e6451051941959"
     },
     {
       "source_path": "src/rwkv_lab/vision_sam_dense_cache.py",
@@ -605,11 +605,11 @@
     },
     {
       "source_path": "src/rwkv_lab/vision_teacher_compressor.py",
-      "source_sha256": "sha256:d7e9697920bdc1294539282b0698ef8c8f30421b06e6af2e3b3f02b768d48323"
+      "source_sha256": "sha256:22e8122322a940a2302f6c82d10d7bc849060cd1102b8b0beadceed81d68021f"
     },
     {
       "source_path": "src/rwkv_lab/vision_train.py",
-      "source_sha256": "sha256:16bb7eec0eef43c1c6fcbe1197f8fbbe60573ecc708482b308956dd0cac07e34"
+      "source_sha256": "sha256:d90534b073f0a841991849d9dcfb9647c598a69a0689dea64f8c85c2f3fc4ba6"
     },
     {
       "source_path": "trainvm/include/trainvm/input_content_authority.hpp",

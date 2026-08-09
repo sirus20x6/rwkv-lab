@@ -24,6 +24,9 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
+from rwkv_lab.trainvm_worker.mutation_sentinel import (
+    OptimizerMutationSentinel,
+)
 from rwkv_lab.deep_vision import DeepVisionInjector
 from rwkv_lab.engram_lmb import LexicalMemoryBank, attach_engram, float_growth_params
 from rwkv_lab.generate import WorldVocab
@@ -653,156 +656,181 @@ def train(
             "trainable_scope": "vision_compressor.native_output_head",
         })
 
-        while step < args.steps and not stop:
-            batches = (
-                worker_step_profiler.track_input(train_loader)
-                if worker_step_profiler is not None
-                else train_loader
-            )
-            for indices, moon, fusion in batches:
-                if step >= args.steps or stop:
-                    break
-                if worker_controls is not None:
-                    worker_controls.microbatch(step + 1, reject_live_controls)
-                started = time.perf_counter()
-                native.train()
-                optimizer.zero_grad(set_to_none=True)
-                loss, metrics, tokens = _batch_loss(
-                    indices=indices, moon=moon, fusion=fusion, rows=train_rows,
-                    rwkv=rwkv, native=native, identity=identity, engram=engram,
-                    deep_vision=deep_vision, nextlat=nextlat,
-                    grounding=grounding, baseline_args=baseline_args,
-                    training=True)
-                if not torch.isfinite(loss):
-                    raise FloatingPointError(f"non-finite native arm loss: {loss}")
-                loss.backward()
-                gnorm = (
-                    worker_components.gradient_clipping(trainable)
-                    if worker_components is not None
-                    else torch.nn.utils.clip_grad_norm_(trainable, args.grad_clip)
+        # Installed for the whole loop, so the ordering below is enforced
+        # against every optimizer instance in the process rather than the one
+        # this trainer constructed. A fused update, a second optimizer, or a
+        # later edit that moves the crossing below the mutation all fail closed
+        # here instead of mutating parameters the controller never authorized.
+        # The controller-facing call the sentinel crosses. It is None when this
+        # trainer runs outside TrainVM authority; the sentinel still binds every
+        # mutation to one crossing, so the ordering discipline is identical and a
+        # standalone run cannot silently acquire a second update path either.
+        pre_optimizer_step = (
+            (lambda next_step: worker_controls.pre_optimizer_step(
+                next_step, reject_live_controls
+            ))
+            if worker_controls is not None
+            else None
+        )
+        mutation_sentinel = OptimizerMutationSentinel()
+        with mutation_sentinel.installed():
+            while step < args.steps and not stop:
+                batches = (
+                    worker_step_profiler.track_input(train_loader)
+                    if worker_step_profiler is not None
+                    else train_loader
                 )
-                optimizer.step()
-                step += 1
-                if learning_rate_schedule is not None:
-                    learning_rate_schedule.step()
-                if weight_decay_schedule is not None:
-                    weight_decay_schedule.step(step)
-                if worker_step_profiler is not None:
-                    worker_step_profiler.step(step)
-                if worker_observability is not None:
-                    worker_observability.optimizer_step(step)
-                if worker_controls is not None:
-                    worker_controls.optimizer_step(step, reject_live_controls)
-                elapsed = time.perf_counter() - started
-                event = {
-                    "kind": "train", "step": step, "loss": float(loss.detach()),
-                    "lr": optimizer.param_groups[0]["lr"],
-                    "gnorm": float(gnorm), "tok_per_sec": tokens / max(elapsed, 1e-9),
-                    "batch": len(indices), "step_seconds": elapsed,
-                    "ce_loss": float(metrics["ce_loss"]),
-                    "grounded_ce_loss": float(metrics["grounded_ce_loss"]),
-                    "deployment_bridge": False,
-                }
-                for name in ("nextlat_loss", "grounding_contrastive_loss",
-                             "grounding_retrieval_accuracy", "deep_vision_inj_rms"):
-                    if name in metrics:
-                        event[name] = float(metrics[name])
-                _append_json(log, event)
-                if worker_observability is not None:
-                    for name, value in (
-                        ("train.loss", event["loss"]),
-                        ("train.learning_rate", event["lr"]),
-                        ("train.gradient_norm", event["gnorm"]),
-                        ("train.tokens_per_second", event["tok_per_sec"]),
-                        ("train.step_seconds", event["step_seconds"]),
-                        ("train.cross_entropy", event["ce_loss"]),
-                    ):
-                        worker_observability.publish_if_declared(
-                            name, value, step=step
-                        )
-                _atomic_json(status_path, {
-                    "state": "training", "step": step,
-                    "loss": event["loss"], "updated": time.time(),
-                    "step_seconds": elapsed, "deployment_bridge": False,
-                    "trainable_scope": "vision_compressor.native_output_head",
-                })
-
-                if step % args.checkpoint_every == 0:
-                    save_checkpoint()
-                    _append_json(log, {"kind": "checkpoint", "step": step,
-                                       "reason": "periodic", "path": str(checkpoint_path)})
-
-                if step % args.eval_every == 0:
+                for indices, moon, fusion in batches:
+                    if step >= args.steps or stop:
+                        break
                     if worker_controls is not None:
-                        worker_controls.evaluation(step, reject_live_controls)
-                    _atomic_json(status_path, {
-                        "state": "evaluating", "step": step,
-                        "updated": time.time(), "deployment_bridge": False})
-                    eval_loss = _evaluate(
-                        eval_loader, eval_rows, max_examples=args.eval_examples,
-                        rwkv=rwkv, native=native, identity=identity,
-                        engram=engram, deep_vision=deep_vision,
-                        baseline_args=baseline_args)
-                    ppl = math.exp(min(eval_loss, 20.0))
-                    _append_json(log, {
-                        "kind": "eval", "step": step, "loss": eval_loss,
-                        "ppl": ppl, "baseline_ppl": config["baseline_best_ppl"],
-                        "ppl_delta": ppl - config["baseline_best_ppl"],
-                        "examples": min(args.eval_examples, len(eval_rows)),
-                        "deployment_bridge": False,
-                    })
+                        worker_controls.microbatch(step + 1, reject_live_controls)
+                    started = time.perf_counter()
+                    native.train()
+                    optimizer.zero_grad(set_to_none=True)
+                    loss, metrics, tokens = _batch_loss(
+                        indices=indices, moon=moon, fusion=fusion, rows=train_rows,
+                        rwkv=rwkv, native=native, identity=identity, engram=engram,
+                        deep_vision=deep_vision, nextlat=nextlat,
+                        grounding=grounding, baseline_args=baseline_args,
+                        training=True)
+                    if not torch.isfinite(loss):
+                        raise FloatingPointError(f"non-finite native arm loss: {loss}")
+                    loss.backward()
+                    gnorm = (
+                        worker_components.gradient_clipping(trainable)
+                        if worker_components is not None
+                        else torch.nn.utils.clip_grad_norm_(trainable, args.grad_clip)
+                    )
+                    # The mandatory pre-mutation boundary, immediately before
+                    # the only optimizer mutation in this loop. A controller
+                    # refusal leaves the sentinel disarmed, so the `step()`
+                    # below raises rather than mutating unguarded. This
+                    # replaces the post-mutation `worker_controls
+                    # .optimizer_step` that used to sit after the update: same
+                    # safe point, same effective step number, now on the side
+                    # of the mutation where a refusal can still prevent it.
+                    mutation_sentinel.cross(step + 1, pre_optimizer_step)
+                    optimizer.step()
+                    step += 1
+                    if learning_rate_schedule is not None:
+                        learning_rate_schedule.step()
+                    if weight_decay_schedule is not None:
+                        weight_decay_schedule.step(step)
+                    if worker_step_profiler is not None:
+                        worker_step_profiler.step(step)
                     if worker_observability is not None:
-                        worker_observability.publish_if_declared(
-                            "eval.loss", eval_loss, step=step
-                        )
-                        worker_observability.publish_if_declared(
-                            "eval.perplexity", ppl, step=step
-                        )
-                    if eval_loss < best_eval:
-                        best_eval = eval_loss
-                        best_path = best_dir / f"native_head_step_{step:08d}.pt"
-                        save_checkpoint(best_path)
-                        _atomic_json(best_dir / "best.json", {
-                            "step": step, "loss": eval_loss, "ppl": ppl,
-                            "checkpoint": best_path.name,
-                            "baseline_ppl": config["baseline_best_ppl"],
-                            "deployment_bridge": False,
-                        })
-                    save_checkpoint()
+                        worker_observability.optimizer_step(step)
+                    elapsed = time.perf_counter() - started
+                    event = {
+                        "kind": "train", "step": step, "loss": float(loss.detach()),
+                        "lr": optimizer.param_groups[0]["lr"],
+                        "gnorm": float(gnorm), "tok_per_sec": tokens / max(elapsed, 1e-9),
+                        "batch": len(indices), "step_seconds": elapsed,
+                        "ce_loss": float(metrics["ce_loss"]),
+                        "grounded_ce_loss": float(metrics["grounded_ce_loss"]),
+                        "deployment_bridge": False,
+                    }
+                    for name in ("nextlat_loss", "grounding_contrastive_loss",
+                                 "grounding_retrieval_accuracy", "deep_vision_inj_rms"):
+                        if name in metrics:
+                            event[name] = float(metrics[name])
+                    _append_json(log, event)
+                    if worker_observability is not None:
+                        for name, value in (
+                            ("train.loss", event["loss"]),
+                            ("train.learning_rate", event["lr"]),
+                            ("train.gradient_norm", event["gnorm"]),
+                            ("train.tokens_per_second", event["tok_per_sec"]),
+                            ("train.step_seconds", event["step_seconds"]),
+                            ("train.cross_entropy", event["ce_loss"]),
+                        ):
+                            worker_observability.publish_if_declared(
+                                name, value, step=step
+                            )
                     _atomic_json(status_path, {
                         "state": "training", "step": step,
-                        "eval_loss": eval_loss, "eval_ppl": ppl,
-                        "baseline_ppl": config["baseline_best_ppl"],
-                        "updated": time.time(), "deployment_bridge": False,
+                        "loss": event["loss"], "updated": time.time(),
+                        "step_seconds": elapsed, "deployment_bridge": False,
+                        "trainable_scope": "vision_compressor.native_output_head",
                     })
 
-                checkpoint_requested = bool(
-                    worker_controls is not None
-                    and worker_controls.checkpoint_boundary_requested
-                )
-                if checkpoint_requested:
-                    worker_controls.checkpoint(step, reject_live_controls)
-                    with (
-                        worker_observability.keepalive(step, "checkpointing")
-                        if worker_observability is not None
-                        else nullcontext()
-                    ):
+                    if step % args.checkpoint_every == 0:
                         save_checkpoint()
-                    if worker_controls.checkpoint_completion_requested:
-                        worker_controls.publish_requested_checkpoint_directory(
-                            str(checkpoint_directory),
-                            optimizer_step=step,
-                            resume_grade="compatible",
-                            state_components=(
-                                "component_composition",
-                                "control_revision",
-                                "model",
-                                "optimizer",
-                                "rng_accelerator",
-                                "rng_python",
-                                "rng_torch",
-                            ),
-                        )
+                        _append_json(log, {"kind": "checkpoint", "step": step,
+                                           "reason": "periodic", "path": str(checkpoint_path)})
+
+                    if step % args.eval_every == 0:
+                        if worker_controls is not None:
+                            worker_controls.evaluation(step, reject_live_controls)
+                        _atomic_json(status_path, {
+                            "state": "evaluating", "step": step,
+                            "updated": time.time(), "deployment_bridge": False})
+                        eval_loss = _evaluate(
+                            eval_loader, eval_rows, max_examples=args.eval_examples,
+                            rwkv=rwkv, native=native, identity=identity,
+                            engram=engram, deep_vision=deep_vision,
+                            baseline_args=baseline_args)
+                        ppl = math.exp(min(eval_loss, 20.0))
+                        _append_json(log, {
+                            "kind": "eval", "step": step, "loss": eval_loss,
+                            "ppl": ppl, "baseline_ppl": config["baseline_best_ppl"],
+                            "ppl_delta": ppl - config["baseline_best_ppl"],
+                            "examples": min(args.eval_examples, len(eval_rows)),
+                            "deployment_bridge": False,
+                        })
+                        if worker_observability is not None:
+                            worker_observability.publish_if_declared(
+                                "eval.loss", eval_loss, step=step
+                            )
+                            worker_observability.publish_if_declared(
+                                "eval.perplexity", ppl, step=step
+                            )
+                        if eval_loss < best_eval:
+                            best_eval = eval_loss
+                            best_path = best_dir / f"native_head_step_{step:08d}.pt"
+                            save_checkpoint(best_path)
+                            _atomic_json(best_dir / "best.json", {
+                                "step": step, "loss": eval_loss, "ppl": ppl,
+                                "checkpoint": best_path.name,
+                                "baseline_ppl": config["baseline_best_ppl"],
+                                "deployment_bridge": False,
+                            })
+                        save_checkpoint()
+                        _atomic_json(status_path, {
+                            "state": "training", "step": step,
+                            "eval_loss": eval_loss, "eval_ppl": ppl,
+                            "baseline_ppl": config["baseline_best_ppl"],
+                            "updated": time.time(), "deployment_bridge": False,
+                        })
+
+                    checkpoint_requested = bool(
+                        worker_controls is not None
+                        and worker_controls.checkpoint_boundary_requested
+                    )
+                    if checkpoint_requested:
+                        worker_controls.checkpoint(step, reject_live_controls)
+                        with (
+                            worker_observability.keepalive(step, "checkpointing")
+                            if worker_observability is not None
+                            else nullcontext()
+                        ):
+                            save_checkpoint()
+                        if worker_controls.checkpoint_completion_requested:
+                            worker_controls.publish_requested_checkpoint_directory(
+                                str(checkpoint_directory),
+                                optimizer_step=step,
+                                resume_grade="compatible",
+                                state_components=(
+                                    "component_composition",
+                                    "control_revision",
+                                    "model",
+                                    "optimizer",
+                                    "rng_accelerator",
+                                    "rng_python",
+                                    "rng_torch",
+                                ),
+                            )
 
     save_checkpoint()
     _atomic_json(status_path, {

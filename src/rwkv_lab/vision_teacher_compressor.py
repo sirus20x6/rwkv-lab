@@ -26,6 +26,9 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset, Sampler
 
+from rwkv_lab.trainvm_worker.mutation_sentinel import (
+    OptimizerMutationSentinel,
+)
 from rwkv_lab.moonvit import checkpoint_fingerprint, feature_cache_key
 from rwkv_lab.vision_fusion import VisionTowerConfig, aligned_feature_cache_key
 
@@ -643,177 +646,203 @@ def train(
     started = time.perf_counter()
     session_examples = 0
     previous_batch_finished = started
-    while step < args.steps and not stop:
-        train_loader = DataLoader(
-            train, batch_sampler=sampler, num_workers=args.workers,
-            pin_memory=True, persistent_workers=args.workers > 0,
-            prefetch_factor=2 if args.workers > 0 else None)
-        loaded_batches = (
-            worker_step_profiler.track_input(train_loader)
-            if worker_step_profiler is not None
-            else train_loader
-        )
-        for moon, fusion in loaded_batches:
-            if worker_controls is not None:
-                worker_controls.microbatch(step + 1, reject_live_controls)
-            batch_started = time.perf_counter()
-            moon = moon.to(device, non_blocking=True)
-            fusion = fusion.to(device, non_blocking=True)
-            streams = split_cached_features(moon, fusion)
-            keep = teacher_keep_mask(moon.shape[0], len(STREAM_WIDTHS),
-                                     args.teacher_dropout, device)
-            optimizer.zero_grad(set_to_none=True)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                latent, predictions = model(streams, keep)
-                loss, metrics = compressor_loss(
-                    latent, predictions, streams,
-                    relational_weight=args.relational_weight,
-                    variance_weight=args.variance_weight,
-                    covariance_weight=args.covariance_weight,
-                    diversity_weight=args.diversity_weight)
-            loss.backward()
-            gradient_norm = (
-                worker_components.gradient_clipping(model.parameters())
-                if worker_components is not None
-                else torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), args.max_gradient_norm
-                )
+    # Installed for the whole loop, so the ordering below is enforced
+    # against every optimizer instance in the process rather than the one
+    # this trainer constructed. A fused update, a second optimizer, or a
+    # later edit that moves the crossing below the mutation all fail closed
+    # here instead of mutating parameters the controller never authorized.
+    # The controller-facing call the sentinel crosses. It is None when this
+    # trainer runs outside TrainVM authority; the sentinel still binds every
+    # mutation to one crossing, so the ordering discipline is identical and a
+    # standalone run cannot silently acquire a second update path either.
+    pre_optimizer_step = (
+        (lambda next_step: worker_controls.pre_optimizer_step(
+            next_step, reject_live_controls
+        ))
+        if worker_controls is not None
+        else None
+    )
+    mutation_sentinel = OptimizerMutationSentinel()
+    with mutation_sentinel.installed():
+        while step < args.steps and not stop:
+            train_loader = DataLoader(
+                train, batch_sampler=sampler, num_workers=args.workers,
+                pin_memory=True, persistent_workers=args.workers > 0,
+                prefetch_factor=2 if args.workers > 0 else None)
+            loaded_batches = (
+                worker_step_profiler.track_input(train_loader)
+                if worker_step_profiler is not None
+                else train_loader
             )
-            used_learning_rate = float(optimizer.param_groups[0]["lr"])
-            optimizer.step()
-            if learning_rate_schedule is not None:
-                learning_rate_schedule.step()
-            if weight_decay_schedule is not None:
-                weight_decay_schedule.step(step + 1)
-            sampler.consumed(moon.shape[0])
-            session_examples += moon.shape[0]
-            step += 1
-            if worker_step_profiler is not None:
-                worker_step_profiler.step(step)
-            if worker_observability is not None:
-                worker_observability.optimizer_step(step)
-            if worker_controls is not None:
-                worker_controls.optimizer_step(step, reject_live_controls)
-            batch_finished = time.perf_counter()
-            if step % args.log_every == 0 or step == 1:
-                elapsed = batch_finished - started
-                row = {"kind": "train", "step": step, "epoch": sampler.epoch,
-                       "cursor": sampler.cursor,
-                       "examples": sampler.epoch * len(train) + sampler.cursor,
-                       "session_examples_per_s": session_examples / max(elapsed, 1e-6),
-                       "step_s": batch_finished - previous_batch_finished,
-                       "compute_s": batch_finished - batch_started,
-                       "gradient_norm": float(gradient_norm),
-                       **{name: float(value) for name, value in metrics.items()},
-                       "time": time.time()}
-                with metrics_path.open("a") as handle:
-                    handle.write(json.dumps(row) + "\n")
-                _write_json(args.out / "status.json", row)
-                print(row, flush=True)
-                if worker_observability is not None:
-                    for name, value in (
-                        ("train.loss", row["loss"]),
-                        ("train.learning_rate", used_learning_rate),
-                        ("train.gradient_norm", row["gradient_norm"]),
-                        (
-                            "train.examples_per_second",
-                            row["session_examples_per_s"],
-                        ),
-                        ("train.step_seconds", row["step_s"]),
-                        ("train.reconstruction", row["reconstruction"]),
-                        ("train.relational", row["relational"]),
-                        ("train.latent_std", row["latent_std"]),
-                    ):
-                        worker_observability.publish_if_declared(
-                            name, value, step=step
-                        )
-            previous_batch_finished = batch_finished
-            if step % args.eval_every == 0:
+            for moon, fusion in loaded_batches:
                 if worker_controls is not None:
-                    worker_controls.evaluation(step, reject_live_controls)
-                with (
-                    worker_observability.keepalive(step, "evaluating")
-                    if worker_observability is not None
-                    else nullcontext()
-                ):
-                    values = evaluate(model, eval_loader, args, device)
-                row = {"kind": "eval", "step": step, **values, "time": time.time()}
-                with metrics_path.open("a") as handle:
-                    handle.write(json.dumps(row) + "\n")
-                print(row, flush=True)
-                if worker_observability is not None:
-                    for name, value in (
-                        ("eval.loss", values["loss"]),
-                        ("eval.reconstruction", values["reconstruction"]),
-                        ("eval.relational", values["relational"]),
-                        ("eval.latent_std", values["latent_std"]),
-                    ):
-                        worker_observability.publish_if_declared(
-                            name, value, step=step
-                        )
-                if values["loss"] < best_eval:
-                    best_eval = values["loss"]
-                    payload = checkpoint_payload(model=model, optimizer=optimizer,
-                        sampler=sampler, step=step, best_eval=best_eval,
-                        args=args, config=config,
-                        component_evidence=component_evidence,
-                        component_composition_digest=component_composition_digest,
-                        worker_control_state=(
-                            worker_controls.checkpoint_state()
-                            if worker_controls is not None else None))
-                    _durable_save(payload, args.out / "best.pt")
-                    _write_json(args.out / "best.json",
-                                {"step": step, "eval_loss": best_eval})
-            checkpoint_requested = bool(
-                worker_controls is not None
-                and worker_controls.checkpoint_boundary_requested
-            )
-            if (
-                step % args.checkpoint_every == 0
-                or step >= args.steps
-                or stop
-                or checkpoint_requested
-            ):
-                if worker_controls is not None:
-                    worker_controls.checkpoint(step, reject_live_controls)
-                with (
-                    worker_observability.keepalive(step, "checkpointing")
-                    if worker_observability is not None
-                    else nullcontext()
-                ):
-                    save_current_checkpoint()
-                print({"kind": "checkpoint", "step": step, "path": str(last)},
-                      flush=True)
-                if (
-                    worker_controls is not None
-                    and worker_controls.checkpoint_completion_requested
-                ):
-                    worker_controls.publish_requested_checkpoint_directory(
-                        str(checkpoint_directory),
-                        optimizer_step=step,
-                        resume_grade="compatible",
-                        state_components=(
-                            "component_composition",
-                            "control_revision",
-                            "data_cursor",
-                            "model",
-                            "optimizer",
-                            "rng_accelerator",
-                            "rng_python",
-                            "rng_torch",
-                        ),
-                        progress=(
-                            lambda _bytes, current_step=step: worker_observability.optimizer_step(
-                                current_step, "checkpointing"
-                            )
-                            if worker_observability is not None
-                            else None
-                        ),
+                    worker_controls.microbatch(step + 1, reject_live_controls)
+                batch_started = time.perf_counter()
+                moon = moon.to(device, non_blocking=True)
+                fusion = fusion.to(device, non_blocking=True)
+                streams = split_cached_features(moon, fusion)
+                keep = teacher_keep_mask(moon.shape[0], len(STREAM_WIDTHS),
+                                         args.teacher_dropout, device)
+                optimizer.zero_grad(set_to_none=True)
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    latent, predictions = model(streams, keep)
+                    loss, metrics = compressor_loss(
+                        latent, predictions, streams,
+                        relational_weight=args.relational_weight,
+                        variance_weight=args.variance_weight,
+                        covariance_weight=args.covariance_weight,
+                        diversity_weight=args.diversity_weight)
+                loss.backward()
+                gradient_norm = (
+                    worker_components.gradient_clipping(model.parameters())
+                    if worker_components is not None
+                    else torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), args.max_gradient_norm
                     )
-            if step >= args.steps or stop:
-                break
-        # DataLoader reached the end of the epoch. consumed() has already
-        # advanced epoch/cursor exactly when the final short batch was used.
+                )
+                used_learning_rate = float(optimizer.param_groups[0]["lr"])
+                # The mandatory pre-mutation boundary, immediately before the
+                # only optimizer mutation in this loop. The controller refuses
+                # this crossing until the attempt's baseline evidence is
+                # durable, and a refusal leaves the sentinel disarmed, so the
+                # `step()` below raises rather than mutating unguarded. This
+                # replaces the post-mutation `worker_controls.optimizer_step`
+                # that used to sit after the update: same safe point, same
+                # effective step number, now on the side of the mutation where
+                # a refusal can still prevent it.
+                mutation_sentinel.cross(step + 1, pre_optimizer_step)
+                optimizer.step()
+                if learning_rate_schedule is not None:
+                    learning_rate_schedule.step()
+                if weight_decay_schedule is not None:
+                    weight_decay_schedule.step(step + 1)
+                sampler.consumed(moon.shape[0])
+                session_examples += moon.shape[0]
+                step += 1
+                if worker_step_profiler is not None:
+                    worker_step_profiler.step(step)
+                if worker_observability is not None:
+                    worker_observability.optimizer_step(step)
+                batch_finished = time.perf_counter()
+                if step % args.log_every == 0 or step == 1:
+                    elapsed = batch_finished - started
+                    row = {"kind": "train", "step": step, "epoch": sampler.epoch,
+                           "cursor": sampler.cursor,
+                           "examples": sampler.epoch * len(train) + sampler.cursor,
+                           "session_examples_per_s": session_examples / max(elapsed, 1e-6),
+                           "step_s": batch_finished - previous_batch_finished,
+                           "compute_s": batch_finished - batch_started,
+                           "gradient_norm": float(gradient_norm),
+                           **{name: float(value) for name, value in metrics.items()},
+                           "time": time.time()}
+                    with metrics_path.open("a") as handle:
+                        handle.write(json.dumps(row) + "\n")
+                    _write_json(args.out / "status.json", row)
+                    print(row, flush=True)
+                    if worker_observability is not None:
+                        for name, value in (
+                            ("train.loss", row["loss"]),
+                            ("train.learning_rate", used_learning_rate),
+                            ("train.gradient_norm", row["gradient_norm"]),
+                            (
+                                "train.examples_per_second",
+                                row["session_examples_per_s"],
+                            ),
+                            ("train.step_seconds", row["step_s"]),
+                            ("train.reconstruction", row["reconstruction"]),
+                            ("train.relational", row["relational"]),
+                            ("train.latent_std", row["latent_std"]),
+                        ):
+                            worker_observability.publish_if_declared(
+                                name, value, step=step
+                            )
+                previous_batch_finished = batch_finished
+                if step % args.eval_every == 0:
+                    if worker_controls is not None:
+                        worker_controls.evaluation(step, reject_live_controls)
+                    with (
+                        worker_observability.keepalive(step, "evaluating")
+                        if worker_observability is not None
+                        else nullcontext()
+                    ):
+                        values = evaluate(model, eval_loader, args, device)
+                    row = {"kind": "eval", "step": step, **values, "time": time.time()}
+                    with metrics_path.open("a") as handle:
+                        handle.write(json.dumps(row) + "\n")
+                    print(row, flush=True)
+                    if worker_observability is not None:
+                        for name, value in (
+                            ("eval.loss", values["loss"]),
+                            ("eval.reconstruction", values["reconstruction"]),
+                            ("eval.relational", values["relational"]),
+                            ("eval.latent_std", values["latent_std"]),
+                        ):
+                            worker_observability.publish_if_declared(
+                                name, value, step=step
+                            )
+                    if values["loss"] < best_eval:
+                        best_eval = values["loss"]
+                        payload = checkpoint_payload(model=model, optimizer=optimizer,
+                            sampler=sampler, step=step, best_eval=best_eval,
+                            args=args, config=config,
+                            component_evidence=component_evidence,
+                            component_composition_digest=component_composition_digest,
+                            worker_control_state=(
+                                worker_controls.checkpoint_state()
+                                if worker_controls is not None else None))
+                        _durable_save(payload, args.out / "best.pt")
+                        _write_json(args.out / "best.json",
+                                    {"step": step, "eval_loss": best_eval})
+                checkpoint_requested = bool(
+                    worker_controls is not None
+                    and worker_controls.checkpoint_boundary_requested
+                )
+                if (
+                    step % args.checkpoint_every == 0
+                    or step >= args.steps
+                    or stop
+                    or checkpoint_requested
+                ):
+                    if worker_controls is not None:
+                        worker_controls.checkpoint(step, reject_live_controls)
+                    with (
+                        worker_observability.keepalive(step, "checkpointing")
+                        if worker_observability is not None
+                        else nullcontext()
+                    ):
+                        save_current_checkpoint()
+                    print({"kind": "checkpoint", "step": step, "path": str(last)},
+                          flush=True)
+                    if (
+                        worker_controls is not None
+                        and worker_controls.checkpoint_completion_requested
+                    ):
+                        worker_controls.publish_requested_checkpoint_directory(
+                            str(checkpoint_directory),
+                            optimizer_step=step,
+                            resume_grade="compatible",
+                            state_components=(
+                                "component_composition",
+                                "control_revision",
+                                "data_cursor",
+                                "model",
+                                "optimizer",
+                                "rng_accelerator",
+                                "rng_python",
+                                "rng_torch",
+                            ),
+                            progress=(
+                                lambda _bytes, current_step=step: worker_observability.optimizer_step(
+                                    current_step, "checkpointing"
+                                )
+                                if worker_observability is not None
+                                else None
+                            ),
+                        )
+                if step >= args.steps or stop:
+                    break
+            # DataLoader reached the end of the epoch. consumed() has already
+            # advanced epoch/cursor exactly when the final short batch was used.
     if (
         not last.is_file()
         or torch.load(last, map_location="cpu", weights_only=False)["step"] != step
