@@ -1514,6 +1514,41 @@ passive_inventory_rejection(const HostdCoordinatorStatus &coordinator,
   return std::nullopt;
 }
 
+// Turns a configured receipt root into the publisher configuration the
+// deployment holds, and refuses at construction if the root is not actually
+// provisioned for one.
+//
+// The path shape is checked here for the same reason `recipe_registry_path_`
+// is -- an absolute, lexically normal, bounded path is the only kind this
+// authority accepts from a command line. The rest of the check is delegated by
+// *constructing a publisher and throwing it away*: `LinuxCacheEvidencePublisher`
+// already refuses a root that does not exist, is not owned by the effective
+// uid, is group- or other-writable, lacks an owner-writable `runtime/` or
+// `qualification/` subdirectory, or whose subdirectories live on another
+// device. Re-stating those rules here would give a deployment two answers to
+// "is this root usable", and the publisher's answer is the one that decides at
+// publication time. Paying it at startup means a misprovisioned root fails the
+// daemon rather than the first worker message that arrives hours later.
+[[nodiscard]] std::optional<LinuxCacheEvidenceConfig> attested_cache_evidence(
+    std::optional<std::filesystem::path> receipt_root) {
+  if (!receipt_root) return std::nullopt;
+  if (!receipt_root->is_absolute() ||
+      receipt_root->lexically_normal() != *receipt_root ||
+      receipt_root->native().size() > 4'096U) {
+    throw std::invalid_argument(
+        "cache evidence receipt root must be canonical, absolute, and bounded");
+  }
+  LinuxCacheEvidenceConfig config{
+      .receipt_root = std::move(*receipt_root),
+      // Not configurable: the publisher refuses any uid but the effective one,
+      // so a second answer here could only ever be a wrong one.
+      .authority_uid = ::geteuid(),
+      .maximum_receipt_bytes = 1U << 20U,
+  };
+  (void)LinuxCacheEvidencePublisher(config);
+  return config;
+}
+
 }  // namespace
 
 TrainVMService::TrainVMService(
@@ -1528,7 +1563,8 @@ TrainVMService::TrainVMService(
     SqliteAuthorityEnforcementGrade filesystem_enforcement_grade,
     std::shared_ptr<ITrainingPreflightEvidenceProvider> preflight_evidence,
     std::filesystem::path recipe_registry_path,
-    IWorkerRuntimeEvidenceAuthority* worker_runtime_evidence)
+    IWorkerRuntimeEvidenceAuthority* worker_runtime_evidence,
+    std::optional<std::filesystem::path> cache_evidence_root)
     : TrainVMService(journal_path, std::move(adapter_registry),
                      std::move(host_launch_registry),
                      HostLaunchResolver::local_host_identity(),
@@ -1538,7 +1574,8 @@ TrainVMService::TrainVMService(
                      cache_qualification, filesystem_enforcement_grade,
                      std::move(preflight_evidence),
                      std::move(recipe_registry_path),
-                     worker_runtime_evidence) {
+                     worker_runtime_evidence,
+                     std::move(cache_evidence_root)) {
   if (hostd_configuration) {
     configure_hostd(*hostd_configuration, std::move(controller_target));
   }
@@ -1563,7 +1600,8 @@ TrainVMService::TrainVMService(
     SqliteAuthorityEnforcementGrade filesystem_enforcement_grade,
     std::shared_ptr<ITrainingPreflightEvidenceProvider> preflight_evidence,
     std::filesystem::path recipe_registry_path,
-    IWorkerRuntimeEvidenceAuthority* worker_runtime_evidence)
+    IWorkerRuntimeEvidenceAuthority* worker_runtime_evidence,
+    std::optional<std::filesystem::path> cache_evidence_root)
     : authority_lock_(std::make_unique<AuthorityLock>(
           journal_path, filesystem_enforcement_grade)),
       journal_(authority_lock_->journal_path(),
@@ -1598,7 +1636,8 @@ TrainVMService::TrainVMService(
       reconciler_(journal_, adapter_registry_, training_components_,
                   command_mutex_,
                   [this] { return authority_now(); }, cache_qualification),
-      worker_runtime_evidence_(worker_runtime_evidence) {
+      worker_runtime_evidence_(worker_runtime_evidence),
+      cache_evidence_(attested_cache_evidence(std::move(cache_evidence_root))) {
   if (!recipe_registry_path_.is_absolute() ||
       recipe_registry_path_.lexically_normal() != recipe_registry_path_ ||
       recipe_registry_path_.native().size() > 4'096U) {
@@ -4329,9 +4368,22 @@ grpc::Status TrainVMService::record_worker_runtime_evidence(
     // silently accepting a report it cannot publish would look to a worker
     // exactly like a published one.
     if (worker_runtime_evidence_ == nullptr) {
+      // Two different missing things, and a deployment operator needs to be
+      // able to tell them apart. Without a receipt root there is nowhere to
+      // write. With one, the root is attested and writable and what is still
+      // missing is the host inventory receipt the launch was granted against
+      // -- the controller receives only `inventory_digest` and
+      // `inventory_receipt_digest` over the hostd transport, and
+      // `cache_resource_binding` selects rows out of `inventory.resources`, so
+      // a digest cannot stand in for it. Reporting "no receipt root" to a
+      // deployment that configured one would send its operator to fix a
+      // correctly provisioned directory.
       return {grpc::StatusCode::FAILED_PRECONDITION,
-              "authority has no configured cache evidence receipt root to "
-              "publish worker runtime evidence to"};
+              cache_evidence_
+                  ? "authority has no grant-time host inventory receipt to "
+                    "publish worker runtime evidence against"
+                  : "authority has no configured cache evidence receipt root "
+                    "to publish worker runtime evidence to"};
     }
     (void)worker_runtime_evidence_->publish(report, authority_host_, *binding);
     return grpc::Status::OK;
@@ -6425,7 +6477,8 @@ int serve(const std::filesystem::path& journal_path,
           TrainingComponentRegistry training_components,
           std::optional<HostdClientConfiguration> hostd_configuration,
           std::optional<std::uint32_t> worker_socket_gid,
-          std::filesystem::path recipe_registry_path) {
+          std::filesystem::path recipe_registry_path,
+          std::optional<std::filesystem::path> cache_evidence_root) {
   if (journal_path.empty() || socket_path.empty()) {
     throw std::invalid_argument("serve requires journal and socket paths");
   }
@@ -6453,7 +6506,8 @@ int serve(const std::filesystem::path& journal_path,
                          std::move(hostd_configuration),
                          "unix:" + absolute_socket.string(), nullptr,
                          SqliteAuthorityEnforcementGrade::strict_filesystem, {},
-                         std::move(recipe_registry_path));
+                         std::move(recipe_registry_path), nullptr,
+                         std::move(cache_evidence_root));
   if (worker_socket_gid) {
     struct stat parent_status {};
     if (*worker_socket_gid != static_cast<std::uint32_t>(::getegid()) ||

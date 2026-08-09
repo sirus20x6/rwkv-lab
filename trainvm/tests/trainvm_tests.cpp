@@ -15390,28 +15390,185 @@ void test_worker_runtime_evidence_wire_hop() {
           controller.prepare_worker_launch(launch_request, test_time(2'100));
       (void)bind_test_worker_launch(controller, unconfigured_launch, 2'150);
     }
-    trainvm::TrainVMService unconfigured(
+    // Scoped: the journal namespace is held exclusively for a service's
+    // lifetime, so the rooted deployment below cannot open the same database
+    // until this one is destroyed.
+    {
+      trainvm::TrainVMService unconfigured(
+          unconfigured_path,
+          trainvm::AdapterRegistry(fixture_adapter_profiles()),
+          fixture_test_host_launch_registry(*compiled.plan,
+                                            unconfigured_launch),
+          fixture_test_host_identity(), [] { return test_time(2'200); },
+          trainvm::HostGrantEnforcement::legacy_process_free_test);
+      prime_test_service_launch(unconfigured, unconfigured_launch);
+      trainvm::TrainVMService::WorkerConnection unconfigured_connection;
+      const grpc::Status unconfigured_open =
+          unconfigured.open_worker_connection(
+              wire_hello_for(unconfigured_launch), unconfigured_connection);
+      auto evidence = measured_evidence;
+      evidence.set_launch_nonce(unconfigured_connection.identity.launch_nonce);
+      evidence.set_concurrency_key(
+          unconfigured_connection.identity.concurrency_key);
+      evidence.set_lease_id(unconfigured_connection.identity.lease_id);
+      evidence.set_fencing_token(
+          unconfigured_connection.identity.fencing_token);
+      const grpc::Status status = unconfigured.record_worker_runtime_evidence(
+          evidence, unconfigured_connection);
+      check(unconfigured_open.ok() &&
+                status.error_code() == grpc::StatusCode::FAILED_PRECONDITION,
+            "a deployment with no configured receipt root refuses worker "
+            "runtime evidence rather than silently accepting it");
+      check(std::string(status.error_message())
+                    .find("no configured cache evidence receipt root") !=
+                std::string::npos,
+            "the refusal names the receipt root a deployment has not "
+            "configured");
+      check(!unconfigured.cache_evidence_configuration().has_value(),
+            "a deployment that configured no receipt root holds no publisher "
+            "configuration");
+    }
+
+    // ---- A configured root is not yet enough, and says so. ----------------
+    //
+    // This is the honest half of `--cache-evidence-root`: the root is attested
+    // at construction, so the daemon starts only if it is really provisioned,
+    // but the service still holds no authority because it has no host
+    // inventory receipt for the launch. The controller receives only
+    // `inventory_digest` and `inventory_receipt_digest` over the hostd
+    // transport, and `cache_resource_binding` selects rows out of
+    // `inventory.resources`, so a digest cannot stand in for the receipt.
+    // Asserting the *message* rather than only the code is what stops that
+    // gap from being closed silently: when the grant-time receipt lands, this
+    // check has to be rewritten deliberately.
+    trainvm::TrainVMService rooted(
         unconfigured_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
         fixture_test_host_launch_registry(*compiled.plan, unconfigured_launch),
         fixture_test_host_identity(), [] { return test_time(2'200); },
-        trainvm::HostGrantEnforcement::legacy_process_free_test);
-    prime_test_service_launch(unconfigured, unconfigured_launch);
-    trainvm::TrainVMService::WorkerConnection unconfigured_connection;
-    const grpc::Status unconfigured_open = unconfigured.open_worker_connection(
-        wire_hello_for(unconfigured_launch), unconfigured_connection);
-    auto evidence = measured_evidence;
-    evidence.set_launch_nonce(unconfigured_connection.identity.launch_nonce);
-    evidence.set_concurrency_key(
-        unconfigured_connection.identity.concurrency_key);
-    evidence.set_lease_id(unconfigured_connection.identity.lease_id);
-    evidence.set_fencing_token(unconfigured_connection.identity.fencing_token);
-    const grpc::Status status = unconfigured.record_worker_runtime_evidence(
-        evidence, unconfigured_connection);
-    check(unconfigured_open.ok() &&
-              status.error_code() == grpc::StatusCode::FAILED_PRECONDITION,
-          "a deployment with no configured receipt root refuses worker "
-          "runtime evidence rather than silently accepting it");
+        trainvm::HostGrantEnforcement::legacy_process_free_test,
+        trainvm::TrainingComponentRegistry({}), {}, {}, {}, nullptr,
+        trainvm::SqliteAuthorityEnforcementGrade::cooperative_test, {},
+        std::filesystem::path(std::string(trainvm::kInstalledRecipeProfilePath)),
+        nullptr, receipt_root);
+    prime_test_service_launch(rooted, unconfigured_launch);
+    trainvm::TrainVMService::WorkerConnection rooted_connection;
+    const grpc::Status rooted_open = rooted.open_worker_connection(
+        wire_hello_for(unconfigured_launch), rooted_connection);
+    auto rooted_evidence = measured_evidence;
+    rooted_evidence.set_launch_nonce(rooted_connection.identity.launch_nonce);
+    rooted_evidence.set_concurrency_key(
+        rooted_connection.identity.concurrency_key);
+    rooted_evidence.set_lease_id(rooted_connection.identity.lease_id);
+    rooted_evidence.set_fencing_token(rooted_connection.identity.fencing_token);
+    const grpc::Status rooted_status =
+        rooted.record_worker_runtime_evidence(rooted_evidence,
+                                              rooted_connection);
+    check(rooted.cache_evidence_configuration().has_value() &&
+              rooted.cache_evidence_configuration()->receipt_root ==
+                  receipt_root &&
+              rooted.cache_evidence_configuration()->authority_uid ==
+                  ::geteuid(),
+          "a configured receipt root is attested and held as the deployment's "
+          "publisher configuration");
+    check(rooted_open.ok() &&
+              rooted_status.error_code() ==
+                  grpc::StatusCode::FAILED_PRECONDITION &&
+              std::string(rooted_status.error_message())
+                      .find("no grant-time host inventory receipt") !=
+                  std::string::npos,
+          "a deployment that configured a receipt root but has no grant-time "
+          "host inventory receipt refuses, naming the receipt rather than the "
+          "root");
   }
+
+  std::filesystem::remove_all(directory);
+}
+
+// A receipt root is deployment provisioning, not a path string, so the
+// daemon's own construction is where a misprovisioned one has to fail --
+// otherwise the first worker message hours later is what discovers it. Each
+// case below is one thing a deployment can get wrong.
+void test_cache_evidence_root_provisioning() {
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-cache-evidence-root-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  const std::filesystem::path good = directory / "receipts";
+  std::filesystem::create_directories(good / "runtime");
+  std::filesystem::create_directories(good / "qualification");
+  const auto database_path = directory / "provisioning.db";
+
+  const auto construct = [&](std::optional<std::filesystem::path> root) {
+    return trainvm::TrainVMService(
+        database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        trainvm::HostLaunchRegistry({.api_version = "trainvm.host-launches/v4",
+                                     .trusted_roots = {"/test"},
+                                     .profiles = {}}),
+        fixture_test_host_identity(),
+        [] { return test_time(2'200); },
+        trainvm::HostGrantEnforcement::legacy_process_free_test,
+        trainvm::TrainingComponentRegistry({}), {}, {}, {}, nullptr,
+        trainvm::SqliteAuthorityEnforcementGrade::cooperative_test, {},
+        std::filesystem::path(std::string(trainvm::kInstalledRecipeProfilePath)),
+        nullptr, std::move(root));
+  };
+  const auto refused = [&](std::optional<std::filesystem::path> root,
+                           std::string_view label) {
+    bool threw = false;
+    try {
+      construct(std::move(root));
+    } catch (const std::exception&) {
+      threw = true;
+    }
+    check(threw, std::string("a deployment is refused at construction when ") +
+                     std::string(label));
+  };
+
+  {
+    const auto service = construct(good);
+    check(service.cache_evidence_configuration().has_value(),
+          "a provisioned receipt root is accepted at construction");
+  }
+  {
+    const auto service = construct(std::nullopt);
+    check(!service.cache_evidence_configuration().has_value(),
+          "an unconfigured deployment holds no receipt root");
+  }
+  refused(std::filesystem::path("receipts"), "the receipt root is relative");
+  refused(directory / "receipts" / ".." / "receipts",
+          "the receipt root is not lexically normal");
+  refused(directory / "absent", "the receipt root does not exist");
+
+  const std::filesystem::path no_runtime = directory / "no-runtime";
+  std::filesystem::create_directories(no_runtime / "qualification");
+  refused(no_runtime, "the receipt root has no runtime/ subdirectory");
+
+  const std::filesystem::path no_qualification = directory / "no-qualification";
+  std::filesystem::create_directories(no_qualification / "runtime");
+  refused(no_qualification,
+          "the receipt root has no qualification/ subdirectory");
+
+  const std::filesystem::path shared = directory / "group-writable";
+  std::filesystem::create_directories(shared / "runtime");
+  std::filesystem::create_directories(shared / "qualification");
+  std::filesystem::permissions(shared,
+                               std::filesystem::perms::owner_all |
+                                   std::filesystem::perms::group_all,
+                               std::filesystem::perm_options::replace);
+  refused(shared, "the receipt root is group-writable");
+
+  const std::filesystem::path unwritable = directory / "read-only-runtime";
+  std::filesystem::create_directories(unwritable / "runtime");
+  std::filesystem::create_directories(unwritable / "qualification");
+  std::filesystem::permissions(unwritable / "runtime",
+                               std::filesystem::perms::owner_read |
+                                   std::filesystem::perms::owner_exec,
+                               std::filesystem::perm_options::replace);
+  refused(unwritable, "the receipt root's runtime/ is not owner-writable");
+  std::filesystem::permissions(unwritable / "runtime",
+                               std::filesystem::perms::owner_all,
+                               std::filesystem::perm_options::replace);
 
   std::filesystem::remove_all(directory);
 }
@@ -15479,6 +15636,8 @@ int main() {
        test_universal_step_zero_gate_orders_controller_mutation},
       {"worker_runtime_evidence_wire_hop",
        test_worker_runtime_evidence_wire_hop},
+      {"cache_evidence_root_provisioning",
+       test_cache_evidence_root_provisioning},
   };
 
   for (const NamedCase& test_case : kCases) {
