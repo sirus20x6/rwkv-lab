@@ -827,6 +827,112 @@ void test_reflection_and_compiler() {
                            "workflow.resource_release"),
         "semantic compiler counts only the exact builtin release operation");
 
+  // Workspace authority drift. spec.workspace names the fence this run holds
+  // and the one tree its worker may write; the workflow restates both. A
+  // locked document that answers the same question twice, differently, was
+  // accepted, and the disagreement only surfaced at launch.
+  const auto drifted_concurrency = [&](const char* node, nlohmann::json value) {
+    auto drifted = fixture;
+    drifted["spec"]["workflow"]["nodes"][node]["invoke"]["inputs"]
+           ["concurrency_key"] = std::move(value);
+    return trainvm::compile_document(drifted);
+  };
+  const auto rejects_concurrency_drift = [&](const trainvm::CompileResult&
+                                                 compiled) {
+    return !compiled.valid() &&
+           has_diagnostic(compiled, "workspace.concurrency_authority");
+  };
+
+  check(rejects_concurrency_drift(drifted_concurrency(
+            "acquire_gpu", {{"literal", "some-other-fence"}})),
+        "compiler rejects an acquire literal that no longer names the "
+        "workspace concurrency key");
+  check(rejects_concurrency_drift(drifted_concurrency(
+            "release_gpu", {{"literal", "some-other-fence"}})),
+        "compiler rejects a release literal that no longer names the "
+        "workspace concurrency key");
+  check(rejects_concurrency_drift(
+            drifted_concurrency("acquire_gpu", {{"literal", 7}})),
+        "compiler rejects a resource literal that is not even a string");
+  check(rejects_concurrency_drift(drifted_concurrency(
+            "acquire_gpu", {{"parameter", "source_config"}})),
+        "compiler rejects a resource fence deferred to a parameter binding");
+
+  auto renamed_workspace_key = fixture;
+  renamed_workspace_key["spec"]["workspace"]["concurrency_key"] =
+      "renamed-fence";
+  const auto renamed_workspace_key_result =
+      trainvm::compile_document(renamed_workspace_key);
+  check(!renamed_workspace_key_result.valid() &&
+            std::count_if(renamed_workspace_key_result.diagnostics.begin(),
+                          renamed_workspace_key_result.diagnostics.end(),
+                          [](const trainvm::Diagnostic& diagnostic) {
+                            return diagnostic.code ==
+                                   "workspace.concurrency_authority";
+                          }) == 2,
+        "renaming only the workspace fence is refused at both resource nodes");
+
+  auto renamed_everywhere = renamed_workspace_key;
+  for (const char* resource_node : {"acquire_gpu", "release_gpu"}) {
+    renamed_everywhere["spec"]["workflow"]["nodes"][resource_node]["invoke"]
+                      ["inputs"]["concurrency_key"]["literal"] =
+        "renamed-fence";
+  }
+  const auto renamed_everywhere_result =
+      trainvm::compile_document(renamed_everywhere);
+  check(renamed_everywhere_result.valid(),
+        "a fence renamed in every place it is stated still compiles");
+
+  // The locked trainer config restates the run directory. The Python worker
+  // refuses a mismatch when it launches, which is after the plan has been
+  // hashed and submitted; the compiler refuses it while it is still a document.
+  const std::string fixture_run_directory =
+      fixture["spec"]["workspace"]["run_directory"].get<std::string>();
+  const auto with_locked_config = [&](const char* field, nlohmann::json value) {
+    auto locked = fixture;
+    locked["spec"]["workflow"]["nodes"]["train_to_boundary"]["invoke"]
+          ["inputs"]["config"] = {
+              {"literal", {{field, std::move(value)}, {"steps", 10}}}};
+    return trainvm::compile_document(locked);
+  };
+  const auto rejects_run_directory_drift =
+      [&](const trainvm::CompileResult& compiled) {
+        return !compiled.valid() &&
+               has_diagnostic(compiled, "workspace.run_directory_authority");
+      };
+
+  check(with_locked_config("output_dir", fixture_run_directory).valid(),
+        "a locked trainer config naming the declared run directory compiles");
+  check(rejects_run_directory_drift(with_locked_config(
+            "output_dir", fixture_run_directory + "-v2")),
+        "compiler rejects a locked output_dir that drifted from the workspace "
+        "run directory");
+  check(rejects_run_directory_drift(with_locked_config(
+            "output_dir", fixture_run_directory + "/nested")),
+        "run directory authority is exact, so even a child of it is refused");
+  check(rejects_run_directory_drift(
+            with_locked_config("output_dir", nlohmann::json::object())),
+        "compiler rejects a locked output_dir that is not a path string");
+  check(rejects_run_directory_drift(
+            with_locked_config("run_dir", fixture_run_directory + "-v2")),
+        "the same authority holds for a config that spells the field run_dir");
+  check(with_locked_config("run_dir", fixture_run_directory).valid(),
+        "a locked run_dir naming the declared run directory compiles");
+
+  auto moved_run_directory = fixture;
+  moved_run_directory["spec"]["workflow"]["nodes"]["train_to_boundary"]
+                     ["invoke"]["inputs"]["config"] = {
+                         {"literal", {{"output_dir", fixture_run_directory}}}};
+  moved_run_directory["spec"]["workspace"]["run_directory"] =
+      fixture_run_directory + "-moved";
+  moved_run_directory["spec"]["workspace"]["allowed_write_roots"][0] =
+      fixture_run_directory + "-moved";
+  const auto moved_run_directory_result =
+      trainvm::compile_document(moved_run_directory);
+  check(rejects_run_directory_drift(moved_run_directory_result),
+        "moving the workspace run directory under a locked config is refused "
+        "from the other direction too");
+
   auto reordered = nlohmann::json::parse(fixture.dump());
   auto reordered_result = trainvm::compile_document(reordered);
   check(reordered_result.valid() && reordered_result.plan->plan_hash == result.plan->plan_hash,
@@ -5810,6 +5916,12 @@ void test_worker_control_grpc_stream() {
   eof_fixture["metadata"]["name"] = "worker-control-clean-eof";
   eof_fixture["spec"]["workspace"]["concurrency_key"] =
       "local-gpu-training-clean-eof";
+  // A renamed fence has to be renamed everywhere it is restated, or the
+  // document declares two different fences.
+  for (const char* resource_node : {"acquire_gpu", "release_gpu"}) {
+    eof_fixture["spec"]["workflow"]["nodes"][resource_node]["invoke"]["inputs"]
+               ["concurrency_key"]["literal"] = "local-gpu-training-clean-eof";
+  }
   const auto eof_compiled = trainvm::compile_document(eof_fixture);
   check(compiled.valid() && eof_compiled.valid(),
         "fixtures required by WorkerControl gRPC stream compile");

@@ -562,6 +562,70 @@ void validate_resource_lifecycle(const Spec& spec,
   }
 }
 
+// Config keys that name the one directory a worker is permitted to write.
+// Every adapter config declaring one of these resolves it through
+// WorkspacePathAuthority::exact_run_directory, which refuses any value other
+// than the workspace run_directory. Adapter configs that instead derive a
+// per-node directory (vision_frozen, the scalar metric decision) declare
+// neither key, so this list has no false members.
+constexpr std::string_view kRunDirectoryConfigFields[] = {"output_dir",
+                                                          "run_dir"};
+
+// spec.workspace states two authority-bearing facts: concurrency_key is the
+// fence this run holds against every other run on the host, and run_directory
+// is the only tree its worker may write. Both are restated inside the
+// workflow — the core resource nodes carry the key as a literal, and a locked
+// trainer carries its output directory inside the frozen inline config — so a
+// document can carry two disagreeing answers to the same question.
+//
+// Both halves are already enforced somewhere, and in both places too late to
+// help. The recipe instantiator checks the resource literal, but only for
+// documents produced from a recipe; a hand-authored or already-locked document
+// handed straight to validate never passes through it. The run directory is
+// checked by the Python worker at launch, by which point the plan has been
+// compiled, hashed, and submitted. Drift is a property of the document, so the
+// compiler is where it should be refused.
+void validate_workspace_authority(const Spec& spec,
+                                  std::vector<Diagnostic>& diagnostics) {
+  for (const auto& [name, node] : spec.workflow.nodes) {
+    const std::string node_path = "/spec/workflow/nodes/" + name;
+    if (is_exact_resource_acquisition(spec, node) ||
+        is_exact_resource_release(spec, node)) {
+      const auto binding = node.invoke.inputs.find("concurrency_key");
+      const bool bound_to_workspace =
+          binding != node.invoke.inputs.end() && binding->second.literal &&
+          binding->second.literal->is_string() &&
+          binding->second.literal->get<std::string>() ==
+              spec.workspace.concurrency_key;
+      if (!bound_to_workspace) {
+        error(diagnostics, "workspace.concurrency_authority",
+              child_path(node_path, "invoke/inputs/concurrency_key"),
+              "a resource acquire/release node must bind concurrency_key as a "
+              "literal string equal to /spec/workspace/concurrency_key (" +
+                  spec.workspace.concurrency_key + ")");
+      }
+    }
+    const auto config = node.invoke.inputs.find("config");
+    if (config == node.invoke.inputs.end() || !config->second.literal ||
+        !config->second.literal->is_object()) {
+      continue;
+    }
+    for (const std::string_view field : kRunDirectoryConfigFields) {
+      const auto value = config->second.literal->find(field);
+      if (value == config->second.literal->end()) continue;
+      if (!value->is_string() ||
+          value->get<std::string>() != spec.workspace.run_directory) {
+        error(diagnostics, "workspace.run_directory_authority",
+              child_path(node_path, "invoke/inputs/config/literal/" +
+                                        std::string(field)),
+              "a locked trainer config " + std::string(field) +
+                  " must equal /spec/workspace/run_directory (" +
+                  spec.workspace.run_directory + ")");
+      }
+    }
+  }
+}
+
 void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& diagnostics) {
   if (experiment.api_version != kApiVersion) {
     error(diagnostics, "api_version.unsupported", "/api_version",
@@ -1185,6 +1249,7 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
     }
   }
   validate_resource_lifecycle(spec, diagnostics);
+  validate_workspace_authority(spec, diagnostics);
   validate_cache_qualification(spec, diagnostics);
 
   if (workflow.nodes.contains(workflow.entrypoint)) {

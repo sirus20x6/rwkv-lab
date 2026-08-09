@@ -829,12 +829,17 @@ int main() {
     // document declares wherever the suite runs.
     const std::string workspace_root =
         posttraining_source["spec"]["workspace"]["root"].get<std::string>();
+    // output_dir is workspace authority, not a free choice: it names the one
+    // tree this worker may write, so it has to be the declared run_directory.
+    const std::string workspace_run_directory =
+        posttraining_source["spec"]["workspace"]["run_directory"]
+            .get<std::string>();
     posttraining_node["invoke"]["inputs"] = {
         {"config",
          {{"literal",
            {{"checkpoint", workspace_root + "/fixtures/base.pt"},
             {"data", workspace_root + "/fixtures/sft.jsonl"},
-            {"output_dir", workspace_root + "/runs/mage-flow-cache-resume"},
+            {"output_dir", workspace_run_directory},
             {"steps", 10}}}}},
     };
     posttraining_node["invoke"]["training"] = {
