@@ -569,11 +569,17 @@ class WorkerControlRuntime:
     def publish_artifact(self, request: object) -> object:
         """Publish an immutable non-checkpoint operation artifact immediately."""
 
-        from .artifact import ArtifactPublicationRequest, ArtifactPublisher
+        # `ImmutableArtifactPublisher` is the only publisher this module has
+        # ever had; the name imported here was `ArtifactPublisher`, which the
+        # module does not export, so every call raised `ImportError` before it
+        # reached the session. Nothing caught it because every adapter test
+        # drives a controls double whose `publish_artifact` returns a
+        # `SimpleNamespace`.
+        from .artifact import ArtifactPublicationRequest, ImmutableArtifactPublisher
 
         if not isinstance(request, ArtifactPublicationRequest):
             raise WorkerControlError("artifact publication requires a typed request")
-        return ArtifactPublisher(
+        return ImmutableArtifactPublisher(
             self._session, output_name=request.output_name
         ).publish(
             request.source_directory,
