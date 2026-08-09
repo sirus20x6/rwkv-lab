@@ -13505,6 +13505,203 @@ void test_reconciliation_scan_rediscovers_terminal_held_authority() {
   std::filesystem::remove_all(orphaned.directory);
 }
 
+// Counts the durable release receipts a run's logical lease has. This is the
+// only honest existence test for a released lease: `active_lease` filters on
+// the current boot and on an unexpired deadline, so it answers "nothing held"
+// for a lease that expired while still owed — which is the leak itself, not
+// evidence against it. Release is proved by a receipt, never by a deadline.
+std::int64_t lease_release_receipts(const std::filesystem::path& database,
+                                    const std::string& owner_run_id) {
+  sqlite3* raw = nullptr;
+  if (sqlite3_open(database.c_str(), &raw) != SQLITE_OK) {
+    sqlite3_close(raw);
+    return -1;
+  }
+  sqlite3_stmt* statement = nullptr;
+  std::int64_t receipts = -1;
+  if (sqlite3_prepare_v2(raw,
+                         "SELECT COUNT(*) FROM resource_lease_releases "
+                         "WHERE owner_run_id=?",
+                         -1, &statement, nullptr) == SQLITE_OK) {
+    sqlite3_bind_text(statement, 1, owner_run_id.c_str(),
+                      static_cast<int>(owner_run_id.size()), SQLITE_TRANSIENT);
+    if (sqlite3_step(statement) == SQLITE_ROW) {
+      receipts = sqlite3_column_int64(statement, 0);
+    }
+  }
+  sqlite3_finalize(statement);
+  sqlite3_close(raw);
+  return receipts;
+}
+
+// PR #166 made a terminal run that still holds host authority *visible* to the
+// supervisor's recovery scan. Nothing drained it. Every reconcile entry point
+// returned early unless the run was running/running, running/acquiring,
+// cancelled/cancelling or paused/pausing, and `Reconciler::step` returns
+// `no_action` once the controller is not running, so the rediscovered orphan
+// parked under the idle backoff forever with its lease still owed.
+//
+// This drives the whole path a real recovery takes: a run reaches `$failed`
+// while holding its lease, every in-process handle is destroyed, and a fresh
+// service opens the journal it inherited and runs its own supervisor. Nothing
+// but the journal crosses that boundary, which is the point.
+void test_terminal_host_authority_drains_after_controller_restart() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "terminal host authority drain fixture compiles");
+  if (!compiled.plan) return;
+
+  const auto directory = std::filesystem::temp_directory_path() /
+      ("trainvm-terminal-drain-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto database = directory / "journal.db";
+  const std::string run_id = "terminal-drain-run";
+  const auto adapters = fixture_adapter_profiles();
+
+  // The orphan, built through the ordinary declared route. `train_to_boundary`
+  // routes `operation.failed` to `$failed`, and `$failed` clears the current
+  // node outright, so the run never visits its `release_resources` node and the
+  // lease `acquire_gpu` took stays owed.
+  trainvm::ResourceLease lease;
+  {
+    trainvm::Journal journal(
+        database, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued(adapter_locked_submission(
+        *compiled.plan, trainvm::AdapterRegistry(adapters)));
+    lease = controller.begin_acquisition(test_time(1'000)).lease;
+    const trainvm::WorkerLaunchRequest request{
+        .code_fingerprint = "sha256:" + std::string(64U, '5'),
+        .required_capabilities = {"worker.controls"},
+    };
+    const auto launch =
+        controller.prepare_worker_launch(request, test_time(1'100));
+    (void)bind_test_worker_launch(controller, launch, 1'150);
+    (void)controller.accept_worker_hello(
+        {.run_id = launch.run_id,
+         .node_id = launch.node_id,
+         .attempt_id = launch.attempt_id,
+         .launch_nonce = launch.launch_nonce,
+         .adapter = launch.adapter,
+         .adapter_version = launch.adapter_version,
+         .code_fingerprint = launch.code_fingerprint,
+         .capabilities = launch.required_capabilities,
+         .last_acked_controller_sequence = 0,
+         .concurrency_key = launch.concurrency_key,
+         .lease_id = launch.lease_id,
+         .fencing_token = launch.fencing_token},
+        test_time(1'200));
+    const auto dispatch = controller.prepare_dispatch(test_time(1'300));
+    const trainvm::ExecutionState terminal = controller.handle_event(
+        {.event_id = dispatch.dispatch_id + ":failure",
+         .run_id = run_id,
+         .run_revision = dispatch.run_revision,
+         .plan_revision = dispatch.plan_revision,
+         .node_id = launch.node_id,
+         .attempt_id = launch.attempt_id,
+         .worker_sequence = 1,
+         .event_type = "operation.failed",
+         .event_version = 1,
+         .wall_time_ns = 1'400,
+         .monotonic_time_ns = 1,
+         .optimizer_step = std::uint64_t{5'500},
+         .payload = {{"reason", "trainer_crashed"}}},
+        {.run_id = launch.run_id,
+         .node_id = launch.node_id,
+         .attempt_id = launch.attempt_id,
+         .launch_nonce = launch.launch_nonce,
+         .concurrency_key = launch.concurrency_key,
+         .lease_id = launch.lease_id,
+         .fencing_token = launch.fencing_token},
+        test_time(1'400));
+    const auto projection = journal.projection(run_id);
+    check(terminal.status == trainvm::ExecutionStatus::failed &&
+              terminal.current_node_id.empty() && projection &&
+              projection->observed_state == "failed" &&
+              lease.owner_run_id == run_id &&
+              lease_release_receipts(database, run_id) == 0,
+          "the failed run is terminal, has no node left to release from, and "
+          "still owes its logical lease");
+  }
+
+  // The controller restart. Every in-process descriptor is gone; the journal is
+  // all that survives, exactly as after a daemon crash.
+  //
+  // The clock is past the lease deadline, so nothing here can be satisfied by a
+  // liveness query even by accident: `active_lease` answers "nothing held" for
+  // this run, and that answer is the leak rather than evidence against it.
+  const std::int64_t after_expiry = lease.expires_boottime_ns + 1'000'000'000LL;
+  std::atomic<std::int64_t> now_ns{after_expiry};
+  const trainvm::HostIdentity host{
+      .host_id = "sha256:" + std::string(64U, '7'),
+      .boot_id = kTestBootId,
+  };
+  trainvm::TrainVMService service(
+      database, trainvm::AdapterRegistry(adapters),
+      fixture_disabled_host_launch_registry(), host,
+      [&now_ns] { return test_time(now_ns.load(std::memory_order_relaxed)); },
+      trainvm::HostGrantEnforcement::legacy_process_free_test);
+  trainvm::Journal observer(
+      database, std::nullopt,
+      trainvm::HostGrantEnforcement::legacy_process_free_test);
+  check(!observer.active_lease(lease.concurrency_key, test_time(after_expiry))
+             .has_value() &&
+            lease_release_receipts(database, run_id) == 0,
+        "the owed lease is expired rather than released, so no liveness query "
+        "can find the authority that is still out");
+  service.start_reconciliation_supervisor();
+
+  const auto wait_until = [](const std::function<bool()>& predicate) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (predicate()) return true;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return predicate();
+  };
+  const bool drained = wait_until(
+      [&] { return lease_release_receipts(database, run_id) == 1; });
+  const auto contains_run =
+      [&run_id](const std::vector<trainvm::RunProjection>& page) {
+        return std::ranges::any_of(
+            page, [&run_id](const trainvm::RunProjection& candidate) {
+              return candidate.run_id == run_id;
+            });
+      };
+  const auto after_drain = observer.projection(run_id);
+  check(drained && !contains_run(observer.reconcilable_projections({}, 16U)),
+        "a fresh supervisor drains the host authority a terminal run still "
+        "holds, and the drained run leaves the recovery scan");
+
+  // Returning authority is not re-opening a run. A failed run stays failed.
+  check(after_drain && after_drain->observed_state == "failed" &&
+            after_drain->desired_state == "running" &&
+            !service.reconciliation_failure(run_id).has_value(),
+        "draining a terminal run returns its authority without disturbing its "
+        "terminal outcome or reporting a failure");
+
+  // No spin. A drained run holds nothing, leaves the scan, and stops costing
+  // the supervisor anything while its wake cadence keeps running.
+  const auto settled = service.reconciliation_metrics();
+  const std::uint64_t settled_events = observer.event_count();
+  std::this_thread::sleep_for(std::chrono::milliseconds(1'500));
+  const auto idled = service.reconciliation_metrics();
+  check(idled.wakes > settled.wakes + 2U &&
+            idled.reconcile_steps == settled.reconcile_steps &&
+            idled.reconcile_passes == settled.reconcile_passes &&
+            observer.event_count() == settled_events,
+        "a drained terminal run costs the supervisor nothing on later wakes");
+
+  service.stop_reconciliation_supervisor();
+  std::string chain_reason;
+  check(observer.verify_chain(&chain_reason),
+        "terminal authority drain leaves the journal chain intact");
+  std::filesystem::remove_all(directory);
+}
+
 void test_service_reconciliation_supervisor() {
   auto source = load_fixture();
   source["spec"]["resources"]["lease_timeout_seconds"] = 5;
@@ -15746,6 +15943,8 @@ int main() {
       {"host_grant_saga", test_host_grant_saga},
       {"reconciliation_scan_rediscovers_terminal_held_authority",
        test_reconciliation_scan_rediscovers_terminal_held_authority},
+      {"terminal_host_authority_drains_after_controller_restart",
+       test_terminal_host_authority_drains_after_controller_restart},
       {"service_reconciliation_supervisor", test_service_reconciliation_supervisor},
       {"service_supervisor_settles_after_terminal_worker", test_service_supervisor_settles_after_terminal_worker},
       {"service_supervisor_idle_soak", test_service_supervisor_idle_soak},

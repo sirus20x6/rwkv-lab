@@ -7941,6 +7941,45 @@ std::optional<ResourceLease> Journal::active_lease(const std::string& concurrenc
   return lease_from_row(query.get());
 }
 
+std::optional<ResourceLease> Journal::owed_lease(
+    const std::string& owner_run_id) const {
+  if (owner_run_id.empty()) {
+    throw std::invalid_argument("lease owner_run_id must not be empty");
+  }
+  // No boot filter and no deadline filter, on purpose: both would hide the
+  // leaked lease this exists to find. The only proof of release accepted here
+  // is a durable release receipt, which is the same test the reconcilable scan
+  // applies when it decides a terminal run still holds authority. Ordering by
+  // fencing token makes a run that somehow owes more than one lease drain them
+  // oldest first, one reconcile pass each, rather than depending on row order.
+  Statement query(database_, R"sql(
+    SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
+           clock_domain, boot_id, acquired_boottime_ns, expires_boottime_ns,
+           acquired_wall_time_ns, expires_wall_time_ns
+    FROM resource_leases
+    WHERE owner_run_id=? AND released_wall_time_ns IS NULL
+      AND NOT EXISTS(
+        SELECT 1 FROM resource_lease_releases AS release
+        WHERE release.concurrency_key=resource_leases.concurrency_key
+          AND release.owner_run_id=resource_leases.owner_run_id
+          AND release.lease_id=resource_leases.lease_id
+          AND release.fencing_token=resource_leases.fencing_token
+      )
+    ORDER BY fencing_token
+    LIMIT 1
+  )sql");
+  bind_text(query.get(), 1, owner_run_id);
+  const int status = sqlite3_step(query.get());
+  if (status == SQLITE_DONE) {
+    return std::nullopt;
+  }
+  if (status != SQLITE_ROW) {
+    throw std::runtime_error("could not read owed resource lease: " +
+                             std::string(sqlite3_errmsg(database_)));
+  }
+  return lease_from_row(query.get());
+}
+
 HostGrantSagaSnapshot Journal::record_host_resource_request(
     const ResourceBundleRequest& request, const AuthorityTimeSample& now) {
   validate_resource_request(request);

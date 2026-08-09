@@ -295,6 +295,12 @@ class TrainVMService final : public v1::TrainVM::Service,
       const RunProjection& projection, const CompiledPlan& plan,
       const HostProcessSagaSnapshot& process,
       const ResolvedLaunchSpec& binding);
+  // Returns host authority a run kept past its own terminal state. The four
+  // handlers beside this one each require a specific non-terminal state pair,
+  // and Reconciler::step reports no_action once the controller is not running,
+  // so without this a rediscovered orphan reconciles to nothing forever.
+  [[nodiscard]] std::optional<ReconcileDisposition>
+  reconcile_terminal_host_drain(const std::string& run_id);
   [[nodiscard]] std::optional<ReconcileDisposition> reconcile_cancellation(
       const std::string& run_id);
   [[nodiscard]] std::optional<ReconcileDisposition>
