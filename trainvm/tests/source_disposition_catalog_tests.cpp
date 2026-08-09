@@ -154,6 +154,28 @@ std::string python_tree_digest(const std::filesystem::path& repository_root,
   return output;
 }
 
+// Run the Python checker over one fixture catalog and return its exit status.
+//
+// The fold agreement above is about a computed value. This is about the other
+// half of the contract: which documents each side REFUSES. It matters more than
+// it looks, because the loader's source-byte verification only runs when
+// load_file is handed a repository root, and the live-root check below is
+// guarded by TRAINVM_LEGACY_SOURCE_ROOT, unset in CI. For the scripts and RWKV
+// catalogs' 294 sources, `print_disposition_digests.py --check` is the only
+// instrument in a hosted run, so its refusal conditions are the effective
+// contract and have to be the ones written in C++.
+int python_check_status(const std::filesystem::path& repository_root,
+                        const std::filesystem::path& catalog,
+                        const std::filesystem::path& source_root) {
+  const std::string command =
+      "python3 '" + (repository_root / "scripts/print_disposition_digests.py").string() +
+      "' '" + catalog.string() + "' --root '" + source_root.string() +
+      "' --check > /dev/null 2>&1";
+  const int status = std::system(command.c_str());
+  if (status < 0) throw std::runtime_error("could not run the Python pin checker");
+  return status;
+}
+
 trainvm::SourceDispositionEntry synthetic(std::string path, std::string leaf) {
   trainvm::SourceDispositionEntry entry;
   entry.source_path = std::move(path);
@@ -345,6 +367,56 @@ int main() {
   check(throws_invalid_argument([&] {
           (void)trainvm::SourceDispositionCatalog::load_file(fixture_catalog, repository);
         }), "missing reviewed source paths are rejected");
+
+  // Both instruments, one fixture. Each state below is checked from the C++
+  // side and from the Python side, and they must agree -- a state where the
+  // loader refuses and the checker is green is exactly the failure this pair
+  // exists to prevent.
+  write_text(repository / "scripts/a.py", "print('fixture')\n");
+  write_json(fixture_catalog, one_file_document("print('fixture')\n"));
+  check(trainvm::SourceDispositionCatalog::load_file(fixture_catalog, repository)
+            .entries().size() == 1U &&
+            python_check_status(dashboard_root, fixture_catalog, repository) == 0,
+        "both instruments accept the fixture before it is broken");
+
+  // A source replaced by a symlink to byte-identical content. Every digest
+  // still matches; what has changed is that the reviewed file is gone. The C++
+  // refuses it twice over -- enumerate_scope counts regular files only, and
+  // read_bounded_regular_file opens O_NOFOLLOW -- and a checker that merely
+  // hashes the path cannot see it at all.
+  write_text(repository / "identical-twin.py", "print('fixture')\n");
+  fs::remove(repository / "scripts/a.py");
+  fs::create_symlink(repository / "identical-twin.py", repository / "scripts/a.py");
+  check(throws_invalid_argument([&] {
+          (void)trainvm::SourceDispositionCatalog::load_file(fixture_catalog, repository);
+        }) && python_check_status(dashboard_root, fixture_catalog, repository) != 0,
+        "both instruments refuse a source replaced by a symlink to identical bytes");
+  fs::remove(repository / "scripts/a.py");
+  fs::remove(repository / "identical-twin.py");
+  write_text(repository / "scripts/a.py", "print('fixture')\n");
+
+  // An unnormalized source_path. validate_relative_path refuses it before
+  // anything is opened; Python would otherwise resolve the `..` itself and hash
+  // whatever it landed on.
+  auto unnormalized = one_file_document("print('fixture')\n");
+  unnormalized["entries"][0]["source_path"] = "scripts/../scripts/a.py";
+  write_json(fixture_catalog, unnormalized);
+  check(throws_invalid_argument([&] {
+          (void)trainvm::SourceDispositionCatalog::load_file(fixture_catalog, repository);
+        }) && python_check_status(dashboard_root, fixture_catalog, repository) != 0,
+        "both instruments refuse an unnormalized source_path");
+  // Deliberately a spelling that still lands on the real file. An absolute or
+  // escaping path is refused by Python for a second reason -- it resolves to
+  // nothing -- so it would keep this check green with the spelling rule
+  // removed, which is the trap of asserting that something failed rather than
+  // why. A redundant "." component resolves to exactly the pinned bytes.
+  unnormalized["entries"][0]["source_path"] = "scripts/./a.py";
+  write_json(fixture_catalog, unnormalized);
+  check(throws_invalid_argument([&] {
+          (void)trainvm::SourceDispositionCatalog::load_file(fixture_catalog, repository);
+        }) && python_check_status(dashboard_root, fixture_catalog, repository) != 0,
+        "both instruments refuse a source_path with a redundant '.' component");
+  write_json(fixture_catalog, one_file_document("print('fixture')\n"));
 
   auto malformed = one_file_document("print('fixture')\n");
   malformed["entries"][0]["class"] = "unknown";
