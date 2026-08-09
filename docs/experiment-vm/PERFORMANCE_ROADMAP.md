@@ -272,6 +272,51 @@ per-step batch digests published by both arms — not asserted. A loader that re
 one, or resumes on the wrong cursor fails those gates however good its throughput looks. Absent
 digests report `false`, because unmeasured is not the same as equal.
 
+### What a benchmark host must be free of, and how that was measured
+
+An accelerator benchmark that shares its device measures the contention rather than the
+candidate, so `run_benchmark_fixture.py` refuses to run one on a device that is not free.
+The question is what "free" means, and the first answer this repository shipped was wrong:
+it bounded total resident compute memory at 1024 MiB. A logged-in workstation idles above
+that — a Wayland compositor at 491 MiB, an unrelated inference daemon at 550 MiB and a
+Steam helper at 16 MiB come to 1057 MiB at 0% utilisation — so the graders could not run
+there at all, and hosted CI has no GPU, so they ran nowhere.
+
+Measured 2026-08-09 on an RTX PRO 6000 Blackwell (97887 MiB) by running the repository's own
+accelerator workload, `seq1024xbatch4`, 200 timed steps, seven interleaved repeats per
+condition:
+
+| device condition | resident | utilisation | median step | ratio |
+| --- | --- | --- | --- | --- |
+| idle logged-in desktop | 1057 MiB | 0-1% | 1.831 ms | 1.000 |
+| plus 41.7 GiB held by a process running no kernels | 42691 MiB | 0% | 1.858 ms | 1.015 |
+| plus one process saturating compute | 2341 MiB | 100% | 2.561 ms | 1.399 |
+
+The resident condition holds forty times the retired allowance and its samples interleave
+with the idle samples. The busy condition is 1.4x slower and its samples do not overlap the
+idle ones. **Resident memory is not what the benchmark is sensitive to; compute utilisation
+is.** The old bound was unsound in both directions: a 900 MiB process saturating compute —
+inside the 1024 MiB allowance on a headless host — produced the same 1.40x penalty and would
+have been graded.
+
+Correctness is untouched by either condition. `final_loss`, `gradient_norm_sum` and peak
+allocator bytes were bit-identical across all three, which is the point: contention corrupts
+the timing number, and the timing number is what a qualification verdict is computed from.
+
+So the guard bounds compute utilisation (default 10%, above a measured 1-3% idle ceiling over
+180 samples and an order of magnitude below measured contention) and free device memory
+(default 2048 MiB, against the workload's own measured 914 MiB device footprint). A residency
+bound survives as an opt-in tightening for an operator who wants a strictly quiet device; it
+is not the default, because it rejects idle hosts for no measured reason. There is
+deliberately no flag that grades a contended device.
+
+`docs/experiment-vm/gpu-grader-observations.v1.json` records when each GPU-marked grader last
+actually produced a number, on what host and against which commit. Both graders skip without
+an accelerator and a skip is green, so their result alone cannot distinguish "never ran" from
+"ran and passed"; the receipt carries that distinction instead. It is not a staleness
+assertion — an age threshold would fail in hosted CI, which has no accelerator and could never
+satisfy it, for a reason no pull request could fix.
+
 ### Consumer-Blackwell attention candidate
 
 Track [SecondNatureComputing/flash-attn-4-sm120](https://huggingface.co/SecondNatureComputing/flash-attn-4-sm120)

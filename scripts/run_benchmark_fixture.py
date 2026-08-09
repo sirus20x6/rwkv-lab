@@ -18,11 +18,12 @@ Usage:
     python scripts/run_benchmark_fixture.py --fixture ... --candidate compile
     python scripts/run_benchmark_fixture.py --fixture ... --evidence out.json
 
-Accelerator fixtures are refused unless --allow-accelerator is passed AND
-resident compute memory stays within a bounded allowance, because a benchmark
-that shares a GPU with live training measures the contention, not the
-candidate. The allowance admits small ambient desktop clients while still
-rejecting real training residency.
+Accelerator fixtures are refused unless --allow-accelerator is passed AND the
+device is measurably free, because a benchmark that shares a GPU with live
+training measures the contention, not the candidate. "Free" is decided from
+compute utilisation plus free device memory, not from resident compute memory
+— see ACCELERATOR_CONTENTION_EVIDENCE below for what that distinction is
+worth and how it was measured.
 """
 
 from __future__ import annotations
@@ -54,10 +55,50 @@ VISION_CORPUS_WORKLOAD = (
     REPOSITORY / "scripts/benchmark_workloads/vision_corpus_image_step.py"
 )
 VISION_CORPUS_FIXTURE = "vision.multimodal-student"
-# A compositor plus an editor can hold several hundred MiB of compute residency
-# on a workstation. One GiB covers that ambient footprint while remaining far
-# below a credible training allocation; operators can pass zero for strict idle.
-DEFAULT_ACCELERATOR_RESIDENT_MEMORY_ALLOWANCE_MIB = 1024
+# Why the accelerator guard reads utilisation and free memory rather than
+# resident compute memory. Measured 2026-08-09 on an RTX PRO 6000 Blackwell
+# (97887 MiB) by running this repository's own accelerator workload
+# (seq1024xbatch4, 200 timed steps, 7 interleaved repeats per condition) under
+# three device conditions:
+#
+#   condition                                     median step   ratio
+#   idle logged-in desktop, 1057 MiB resident      1.831 ms      1.000
+#   +41.7 GiB resident by a process running no
+#     kernels, utilisation still 0%                1.858 ms      1.015
+#   +one process saturating compute, 100%
+#     utilisation, only 2341 MiB resident          2.561 ms      1.399
+#
+# The resident condition holds forty times the old 1024 MiB allowance and its
+# seven samples interleave with the idle samples; the busy condition is 1.4x
+# slower and its samples do not overlap the idle ones at all. Resident memory
+# is not what the benchmark is sensitive to. Utilisation is.
+#
+# The old bound was also unsound in the other direction: a process holding
+# 900 MiB — inside the 1024 MiB allowance on a headless host — while
+# saturating compute produced the same 1.40x penalty and would have been
+# admitted. It bounded the wrong quantity in both directions.
+#
+# Correctness is untouched by either condition: final_loss, gradient_norm_sum
+# and peak allocator bytes were bit-identical across all three. What
+# contention corrupts is the timing number, which is the number a
+# qualification verdict is computed from.
+ACCELERATOR_CONTENTION_EVIDENCE = "docs/experiment-vm/PERFORMANCE_ROADMAP.md"
+# Measured over 180 samples across 90 s of an idle logged-in desktop (Wayland
+# compositor, an unrelated inference daemon, a Steam helper): utilisation was
+# 1-3% and never higher. A saturating competitor measured 100%. Ten per cent
+# sits above the observed idle ceiling with margin and an order of magnitude
+# below observed contention.
+DEFAULT_ACCELERATOR_UTILIZATION_ALLOWANCE_PERCENT = 10
+# The accelerator workload's own device residency, measured at the largest
+# fixture bucket, is 914 MiB — CUDA context plus allocator, of which torch
+# reports 96 MiB allocated. Two GiB free leaves better than 2x headroom for
+# the phase about to run.
+DEFAULT_ACCELERATOR_FREE_MEMORY_REQUIREMENT_MIB = 2048
+# Utilisation is an instantaneous reading. Sample it repeatedly and keep the
+# maximum, so a quiet moment between two kernels of a busy run cannot be
+# mistaken for a free device. Failing toward "busy" is the safe direction.
+ACCELERATOR_UTILIZATION_SAMPLES = 3
+ACCELERATOR_UTILIZATION_SAMPLE_INTERVAL_SECONDS = 0.2
 # torch.compile may legitimately choose different reduction orders. These
 # tolerances are tight enough to catch a materially different training step
 # while allowing ordinary float32 kernel-order noise. Both the tolerance and
@@ -84,18 +125,41 @@ def workload_for_fixture(fixture: dict) -> pathlib.Path:
     )
 
 
-def _nvidia_smi_query(fields: str) -> str | None:
-    """Return an unadorned nvidia-smi CSV query, or None on uncertainty."""
+# The three answers nvidia-smi can give, kept apart because they mean
+# different things to an operator. "absent" is a host without an NVIDIA
+# accelerator; "failed" is a host that has one and would not say anything
+# usable about it. Collapsing them into None made every GPU-less machine
+# report a scheduling problem it does not have.
+NVIDIA_SMI_OK = "ok"
+NVIDIA_SMI_ABSENT = "absent"
+NVIDIA_SMI_FAILED = "failed"
+
+_NVIDIA_SMI_ABSENCE_MARKERS = (
+    "no devices were found",
+    "nvidia-smi has failed because it couldn't communicate",
+    "couldn't communicate with the nvidia driver",
+    "driver/library version mismatch",
+)
+
+
+def _nvidia_smi_query(fields: str) -> tuple[str, str | None]:
+    """Return (status, output); status separates an absent GPU from a failure."""
     try:
         result = subprocess.run(
             ["nvidia-smi", f"--query-{fields}",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=30, check=False)
+    except FileNotFoundError:
+        # No nvidia-smi on PATH: this host has no NVIDIA accelerator tooling.
+        return (NVIDIA_SMI_ABSENT, None)
     except (OSError, subprocess.SubprocessError):
-        return None
+        return (NVIDIA_SMI_FAILED, None)
     if result.returncode != 0:
-        return None
-    return result.stdout
+        combined = ((result.stderr or "") + (result.stdout or "")).lower()
+        if any(marker in combined for marker in _NVIDIA_SMI_ABSENCE_MARKERS):
+            return (NVIDIA_SMI_ABSENT, None)
+        return (NVIDIA_SMI_FAILED, None)
+    return (NVIDIA_SMI_OK, result.stdout)
 
 
 def _parse_nonnegative_integer(value: str) -> int:
@@ -105,8 +169,34 @@ def _parse_nonnegative_integer(value: str) -> int:
     return parsed
 
 
+def _parse_device_samples(device_output: str) -> list[dict]:
+    """Parse one `memory.total,memory.used,utilization.gpu` sample block."""
+    devices = []
+    for index, line in enumerate(device_output.splitlines()):
+        if not line.strip():
+            continue
+        fields = line.split(",")
+        if len(fields) != 3:
+            raise ValueError("unexpected device column count")
+        total_mib = _parse_nonnegative_integer(fields[0])
+        used_mib = _parse_nonnegative_integer(fields[1])
+        utilization_percent = _parse_nonnegative_integer(fields[2])
+        if (total_mib == 0 or used_mib > total_mib
+                or utilization_percent > 100):
+            raise ValueError("invalid device telemetry")
+        devices.append({
+            "index": index,
+            "used_memory_mib": used_mib,
+            "total_memory_mib": total_mib,
+            "utilization_percent": utilization_percent,
+        })
+    return devices
+
+
 def parse_accelerator_conditions(
-    compute_apps_output: str, device_output: str,
+    compute_apps_output: str,
+    device_output: str,
+    additional_device_outputs: tuple[str, ...] = (),
 ) -> dict | None:
     """Parse auditable contention conditions, failing closed on any ambiguity."""
     try:
@@ -126,27 +216,26 @@ def parse_accelerator_conditions(
                 "used_memory_mib": used_memory_mib,
             })
 
-        devices = []
-        for index, line in enumerate(device_output.splitlines()):
-            if not line.strip():
-                continue
-            fields = line.split(",")
-            if len(fields) != 3:
-                raise ValueError("unexpected device column count")
-            total_mib = _parse_nonnegative_integer(fields[0])
-            used_mib = _parse_nonnegative_integer(fields[1])
-            utilization_percent = _parse_nonnegative_integer(fields[2])
-            if (total_mib == 0 or used_mib > total_mib
-                    or utilization_percent > 100):
-                raise ValueError("invalid device telemetry")
-            devices.append({
-                "index": index,
-                "used_memory_mib": used_mib,
-                "total_memory_mib": total_mib,
-                "utilization_percent": utilization_percent,
-            })
+        devices = _parse_device_samples(device_output)
         if not devices:
             raise ValueError("nvidia-smi reported no devices")
+        # Every extra sample must describe the same devices, and utilisation
+        # is folded in as a maximum: a device seen busy once is busy.
+        utilization_samples = [
+            [device["utilization_percent"] for device in devices]]
+        for extra_output in additional_device_outputs:
+            extra_devices = _parse_device_samples(extra_output)
+            if len(extra_devices) != len(devices):
+                raise ValueError("device count changed between samples")
+            utilization_samples.append(
+                [device["utilization_percent"] for device in extra_devices])
+            for device, extra in zip(devices, extra_devices):
+                device["utilization_percent"] = max(
+                    device["utilization_percent"],
+                    extra["utilization_percent"])
+                # Memory is read as the high-water mark for the same reason.
+                device["used_memory_mib"] = max(
+                    device["used_memory_mib"], extra["used_memory_mib"])
     except (AttributeError, TypeError, ValueError):
         return None
 
@@ -159,51 +248,164 @@ def parse_accelerator_conditions(
             device["used_memory_mib"] for device in devices),
         "device_memory_total_mib": sum(
             device["total_memory_mib"] for device in devices),
+        # The benchmark runs on one device, so headroom is the least free
+        # device rather than the sum, which a multi-GPU host would inflate.
+        "device_memory_free_mib": min(
+            device["total_memory_mib"] - device["used_memory_mib"]
+            for device in devices),
         "device_utilization_percent": max(
             device["utilization_percent"] for device in devices),
+        "utilization_samples": utilization_samples,
     }
 
 
-def query_accelerator_conditions() -> dict | None:
-    """Read both process residency and device-level measurement conditions."""
-    compute_apps = _nvidia_smi_query("compute-apps=pid,used_memory")
-    if compute_apps is None:
-        return None
-    devices = _nvidia_smi_query(
+# Verdicts the guard can reach. They are distinct because they call for
+# different responses: wait, move host, free memory, or fix the driver.
+ACCELERATOR_AVAILABLE = "accelerator_available"
+ACCELERATOR_ABSENT = "accelerator_absent"
+ACCELERATOR_TELEMETRY_UNAVAILABLE = "accelerator_telemetry_unavailable"
+ACCELERATOR_CONTENDED = "accelerator_contended"
+ACCELERATOR_MEMORY_EXHAUSTED = "accelerator_memory_exhausted"
+ACCELERATOR_RESIDENCY_OVER_ALLOWANCE = "accelerator_residency_over_allowance"
+
+
+def query_accelerator_conditions(
+    utilization_samples: int = ACCELERATOR_UTILIZATION_SAMPLES,
+    sample_interval_seconds: float = (
+        ACCELERATOR_UTILIZATION_SAMPLE_INTERVAL_SECONDS),
+) -> dict:
+    """Read measurement conditions, or say why they could not be read.
+
+    Always returns a dict carrying a ``status``. A caller must not read the
+    telemetry fields without checking it: an absent GPU and a busy GPU are
+    different answers and used to be the same ``None``.
+    """
+    apps_status, compute_apps = _nvidia_smi_query(
+        "compute-apps=pid,used_memory")
+    if apps_status != NVIDIA_SMI_OK:
+        return {"status": apps_status}
+    device_status, devices = _nvidia_smi_query(
         "gpu=memory.total,memory.used,utilization.gpu")
-    if devices is None:
-        return None
-    return parse_accelerator_conditions(compute_apps, devices)
-
-
-def contention_exceeds_allowance(
-    conditions: dict | None, resident_memory_allowance_mib: int,
-) -> bool:
-    """Unknown telemetry is busy; otherwise bound compute-process residency."""
+    if device_status != NVIDIA_SMI_OK:
+        return {"status": device_status}
+    extra_samples: list[str] = []
+    for _ in range(max(0, utilization_samples - 1)):
+        time.sleep(max(0.0, sample_interval_seconds))
+        extra_status, extra = _nvidia_smi_query(
+            "gpu=memory.total,memory.used,utilization.gpu")
+        if extra_status != NVIDIA_SMI_OK:
+            return {"status": extra_status}
+        assert extra is not None
+        extra_samples.append(extra)
+    assert compute_apps is not None and devices is not None
+    conditions = parse_accelerator_conditions(
+        compute_apps, devices, tuple(extra_samples))
     if conditions is None:
-        return True
+        # nvidia-smi answered but not in a shape that can be believed.
+        return {"status": NVIDIA_SMI_FAILED}
+    return {"status": NVIDIA_SMI_OK, **conditions}
+
+
+def classify_accelerator_conditions(
+    conditions: dict | None,
+    utilization_allowance_percent: int = (
+        DEFAULT_ACCELERATOR_UTILIZATION_ALLOWANCE_PERCENT),
+    free_memory_requirement_mib: int = (
+        DEFAULT_ACCELERATOR_FREE_MEMORY_REQUIREMENT_MIB),
+    resident_memory_allowance_mib: int | None = None,
+) -> tuple[str, str]:
+    """Decide whether the device can be measured, and say precisely why not.
+
+    Returns ``(verdict, explanation)``. The verdicts separate the three
+    situations an operator has to tell apart — no accelerator on this host, an
+    accelerator that is genuinely busy, and an idle accelerator that is short
+    of memory — because only the middle one is a scheduling problem.
+
+    ``resident_memory_allowance_mib`` is an optional extra tightening for an
+    operator who wants a strictly quiet device. It is off by default: resident
+    memory was measured not to perturb the benchmark (see
+    ACCELERATOR_CONTENTION_EVIDENCE), so bounding it by default rejected idle
+    workstations for no measured reason.
+    """
+    if conditions is None:
+        return (ACCELERATOR_TELEMETRY_UNAVAILABLE,
+                "accelerator telemetry could not be read")
+    status = conditions.get("status", NVIDIA_SMI_OK)
+    if status == NVIDIA_SMI_ABSENT:
+        return (ACCELERATOR_ABSENT,
+                "no accelerator on this host: nvidia-smi reports no NVIDIA "
+                "device (this is not a contention problem and waiting will "
+                "not change it)")
+    if status != NVIDIA_SMI_OK:
+        return (ACCELERATOR_TELEMETRY_UNAVAILABLE,
+                "accelerator telemetry is unavailable or unparseable; "
+                "treating the device as busy rather than guessing")
+
     try:
+        utilization = conditions["device_utilization_percent"]
+        free_memory = conditions["device_memory_free_mib"]
+        total_memory = conditions["device_memory_total_mib"]
         resident_memory = conditions["resident_process_memory_mib"]
         resident_processes = conditions["resident_processes"]
     except (KeyError, TypeError):
-        return True
-    if (not isinstance(resident_memory, int)
-            or isinstance(resident_memory, bool)
-            or resident_memory < 0
-            or not isinstance(resident_processes, list)):
-        return True
-    if resident_memory_allowance_mib == 0:
-        return bool(resident_processes)
-    return resident_memory > resident_memory_allowance_mib
+        return (ACCELERATOR_TELEMETRY_UNAVAILABLE,
+                "accelerator telemetry is missing required fields; "
+                "treating the device as busy rather than guessing")
+    for value in (utilization, free_memory, total_memory, resident_memory):
+        if (not isinstance(value, int) or isinstance(value, bool)
+                or value < 0):
+            return (ACCELERATOR_TELEMETRY_UNAVAILABLE,
+                    "accelerator telemetry is not a believable measurement; "
+                    "treating the device as busy rather than guessing")
+    if not isinstance(resident_processes, list):
+        return (ACCELERATOR_TELEMETRY_UNAVAILABLE,
+                "accelerator telemetry is not a believable measurement; "
+                "treating the device as busy rather than guessing")
+
+    if utilization > utilization_allowance_percent:
+        return (ACCELERATOR_CONTENDED,
+                f"accelerator is busy: compute utilisation {utilization}% is "
+                f"above the {utilization_allowance_percent}% allowance. "
+                "Another process is using the device; a benchmark run now "
+                "would measure the contention. Wait for it to finish.")
+    if free_memory < free_memory_requirement_mib:
+        return (ACCELERATOR_MEMORY_EXHAUSTED,
+                f"accelerator is idle (compute utilisation {utilization}%) "
+                f"but only {free_memory} MiB of {total_memory} MiB is free, "
+                f"below the {free_memory_requirement_mib} MiB this benchmark "
+                "needs. Nothing is competing for compute; something is "
+                "holding memory.")
+    if resident_memory_allowance_mib is not None:
+        if resident_memory_allowance_mib == 0 and resident_processes:
+            return (ACCELERATOR_RESIDENCY_OVER_ALLOWANCE,
+                    f"accelerator is idle (compute utilisation "
+                    f"{utilization}%) but "
+                    f"{len(resident_processes)} compute process(es) are "
+                    "resident and strict idle was requested")
+        if resident_memory > resident_memory_allowance_mib:
+            return (ACCELERATOR_RESIDENCY_OVER_ALLOWANCE,
+                    f"accelerator is idle (compute utilisation "
+                    f"{utilization}%) but resident compute processes use "
+                    f"{resident_memory} MiB, above the requested "
+                    f"{resident_memory_allowance_mib} MiB allowance")
+    return (ACCELERATOR_AVAILABLE,
+            f"accelerator is free: compute utilisation {utilization}%, "
+            f"{free_memory} MiB of {total_memory} MiB free")
 
 
 def accelerator_is_busy(
-    resident_memory_allowance_mib: int = (
-        DEFAULT_ACCELERATOR_RESIDENT_MEMORY_ALLOWANCE_MIB),
+    utilization_allowance_percent: int = (
+        DEFAULT_ACCELERATOR_UTILIZATION_ALLOWANCE_PERCENT),
+    free_memory_requirement_mib: int = (
+        DEFAULT_ACCELERATOR_FREE_MEMORY_REQUIREMENT_MIB),
 ) -> bool:
-    """Compatibility wrapper for callers that only need a busy decision."""
-    return contention_exceeds_allowance(
-        query_accelerator_conditions(), resident_memory_allowance_mib)
+    """Compatibility wrapper for callers that only need a runnable/not answer."""
+    verdict, _ = classify_accelerator_conditions(
+        query_accelerator_conditions(),
+        utilization_allowance_percent,
+        free_memory_requirement_mib,
+    )
+    return verdict != ACCELERATOR_AVAILABLE
 
 
 def accelerator_usage_is_proven(report: dict) -> bool:
@@ -613,10 +815,26 @@ def main() -> int:
     parser.add_argument("--receipt", type=pathlib.Path)
     parser.add_argument("--allow-accelerator", action="store_true")
     parser.add_argument(
+        "--accelerator-utilization-allowance-percent",
+        type=nonnegative_integer,
+        default=DEFAULT_ACCELERATOR_UTILIZATION_ALLOWANCE_PERCENT,
+        help="maximum compute utilisation that still counts as a free device",
+    )
+    parser.add_argument(
+        "--accelerator-free-memory-requirement-mib",
+        type=nonnegative_integer,
+        default=DEFAULT_ACCELERATOR_FREE_MEMORY_REQUIREMENT_MIB,
+        help="free device memory the benchmark needs before it will run",
+    )
+    parser.add_argument(
         "--accelerator-resident-memory-allowance-mib",
         type=nonnegative_integer,
-        default=DEFAULT_ACCELERATOR_RESIDENT_MEMORY_ALLOWANCE_MIB,
-        help="maximum resident compute-process memory (0 demands strict idle)",
+        default=None,
+        help=(
+            "optional extra tightening: maximum resident compute-process "
+            "memory (0 demands strict idle). Off by default because resident "
+            "memory was measured not to perturb the benchmark; this only ever "
+            "narrows what is admitted, never widens it"),
     )
     arguments = parser.parse_args()
 
@@ -639,28 +857,29 @@ def main() -> int:
         for seed in range(arguments.seeds):
             accelerator_conditions = None
             if fixture["accelerator_required"]:
-                accelerator_conditions = query_accelerator_conditions()
-                if accelerator_conditions is None:
-                    print("refusing to benchmark: accelerator contention "
-                          "conditions are unavailable or unparseable",
-                          file=sys.stderr)
-                    return 2
-                allowance = (
+                utilization_allowance = (
+                    arguments.accelerator_utilization_allowance_percent)
+                free_memory_requirement = (
+                    arguments.accelerator_free_memory_requirement_mib)
+                residency_allowance = (
                     arguments.accelerator_resident_memory_allowance_mib)
-                if contention_exceeds_allowance(
-                        accelerator_conditions, allowance):
-                    resident = accelerator_conditions[
-                        "resident_process_memory_mib"]
-                    print(
-                        "refusing to benchmark: resident accelerator compute "
-                        f"processes use {resident} MiB, above the {allowance} "
-                        "MiB allowance",
-                        file=sys.stderr,
-                    )
+                accelerator_conditions = query_accelerator_conditions()
+                verdict, explanation = classify_accelerator_conditions(
+                    accelerator_conditions,
+                    utilization_allowance,
+                    free_memory_requirement,
+                    residency_allowance,
+                )
+                if verdict != ACCELERATOR_AVAILABLE:
+                    print(f"refusing to benchmark [{verdict}]: {explanation}",
+                          file=sys.stderr)
                     return 2
                 accelerator_conditions = {
                     **accelerator_conditions,
-                    "resident_memory_allowance_mib": allowance,
+                    "utilization_allowance_percent": utilization_allowance,
+                    "free_memory_requirement_mib": free_memory_requirement,
+                    "resident_memory_allowance_mib": residency_allowance,
+                    "contention_verdict": verdict,
                 }
             baseline = run_cell(
                 bucket,
