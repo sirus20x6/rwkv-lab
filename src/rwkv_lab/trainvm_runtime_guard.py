@@ -13,10 +13,21 @@ from pathlib import Path
 from typing import Any
 
 RUNTIME_CLOSURE_MEMBER = "TRAINVM_RUNTIME_CLOSURE.json"
-RUNTIME_CLOSURE_SCHEMA = "trainvm.python-bootstrap-runtime-closure/v2"
+RUNTIME_CLOSURE_SCHEMA = "trainvm.python-bootstrap-runtime-closure/v3"
 MAXIMUM_MANIFEST_BYTES = 32 * 1024 * 1024
 MAXIMUM_FILES = 100_000
 MAXIMUM_TOTAL_BYTES = 32 * 1024 * 1024 * 1024
+MAXIMUM_OBJECTS = 8192
+MAXIMUM_NATIVE_OBJECTS = 32768
+
+# Kept identical to scripts/build_trainvm_runtime_closure.py. The two are not
+# shared code: the builder runs inside the adapter's own sealed interpreter,
+# where this package is not importable, and this module must import nothing
+# outside the standard library because it runs before the closure is trusted.
+# tests/test_trainvm_native_closure.py drives both over the same tree and fails
+# when they disagree, which is the protection a shared import would have given.
+NATIVE_SUFFIXES = (".so",)
+NVIDIA_DRIVER_VERSION_FILE = "/proc/driver/nvidia/version"
 
 
 class RuntimeClosureError(RuntimeError):
@@ -167,6 +178,277 @@ def _verify_entry(entry: dict[str, Any]) -> None:
         raise RuntimeClosureError(f"runtime closure file content changed: {path}")
 
 
+def native_roots() -> list[str]:
+    roots: list[str] = []
+    for name in ("purelib", "platlib"):
+        try:
+            root = str(Path(sysconfig.get_paths()[name]).resolve(strict=True))
+        except (KeyError, OSError):
+            continue
+        if root not in roots:
+            roots.append(root)
+    return sorted(roots)
+
+
+def native_objects(roots: list[str]) -> list[str]:
+    """Every loadable native object on the import path, discovered not assumed.
+
+    This walks the directories rather than reading the manifest's list back,
+    which is the whole point: an extension that appeared since the closure was
+    built is invisible to any check that only re-verifies recorded entries, and
+    it is importable and registers whatever it registers all the same.
+    """
+
+    found: list[str] = []
+    for root in roots:
+        for directory, subdirectories, names in os.walk(root, followlinks=False):
+            subdirectories[:] = sorted(
+                name for name in subdirectories if name != "__pycache__"
+            )
+            for name in sorted(names):
+                if not any(
+                    name.endswith(suffix) or f"{suffix}." in name
+                    for suffix in NATIVE_SUFFIXES
+                ):
+                    continue
+                candidate = os.path.join(directory, name)
+                if os.path.isfile(candidate) or os.path.islink(candidate):
+                    found.append(candidate)
+                    if len(found) > MAXIMUM_NATIVE_OBJECTS:
+                        raise RuntimeClosureError(
+                            "native object inventory is unbounded on the import path"
+                        )
+    return sorted(set(found))
+
+
+def driver_version() -> str | None:
+    try:
+        with open(NVIDIA_DRIVER_VERSION_FILE, encoding="utf-8", errors="replace") as f:
+            line = f.readline(4096).strip()
+    except OSError:
+        return None
+    return line or None
+
+
+def _resolve(search: list[str], needed: str) -> str | None:
+    if "/" in needed:
+        return needed if os.path.lexists(needed) else None
+    for directory in search:
+        candidate = os.path.join(directory, needed)
+        if os.path.lexists(candidate):
+            return candidate
+    return None
+
+
+def _sha256_whole(path: str) -> str:
+    value = hashlib.sha256()
+    with open(path, "rb") as stream:
+        while block := stream.read(1 << 20):
+            value.update(block)
+    return "sha256:" + value.hexdigest()
+
+
+def _verify_native_object(
+    item: Any, index: dict[str, dict[str, Any]], pinned: set[str]
+) -> str:
+    if (
+        not isinstance(item, dict)
+        or set(item) != {"dependencies", "path", "search", "soname"}
+        or not isinstance(item.get("path"), str)
+        or not isinstance(item.get("soname"), str)
+        or not isinstance(item.get("search"), list)
+        or not isinstance(item.get("dependencies"), list)
+    ):
+        raise RuntimeClosureError("runtime closure ELF object is malformed")
+    path = item["path"]
+    search = item["search"]
+    if any(
+        not isinstance(directory, str) or not directory.startswith("/")
+        for directory in search
+    ):
+        raise RuntimeClosureError("runtime closure ELF search path is malformed")
+    if path not in pinned:
+        raise RuntimeClosureError(
+            f"runtime closure ELF object is not a pinned file: {path}"
+        )
+    seen: list[str] = []
+    for dependency in item["dependencies"]:
+        if (
+            not isinstance(dependency, dict)
+            or set(dependency) != {"needed", "resolved"}
+            or not isinstance(dependency.get("needed"), str)
+            or not dependency["needed"]
+        ):
+            raise RuntimeClosureError(
+                "runtime closure ELF dependency is malformed"
+            )
+        needed = dependency["needed"]
+        resolved = dependency["resolved"]
+        if resolved is not None and not isinstance(resolved, str):
+            raise RuntimeClosureError(
+                "runtime closure ELF dependency target is malformed"
+            )
+        seen.append(needed)
+        # Re-run the loader's decision rather than trusting the recorded
+        # answer. Content digests cannot see this: planting a library in a
+        # directory that comes earlier in this object's search order changes
+        # which file is loaded while every pinned byte stays identical.
+        if _resolve(search, needed) != resolved:
+            raise RuntimeClosureError(
+                f"runtime closure shared library resolution changed: "
+                f"{path} needs {needed}"
+            )
+        if resolved is not None and resolved not in index and resolved not in pinned:
+            raise RuntimeClosureError(
+                f"runtime closure shared library is not pinned: {resolved}"
+            )
+    if seen != sorted(set(seen)):
+        raise RuntimeClosureError(
+            "runtime closure ELF dependencies are not canonical"
+        )
+    return path
+
+
+def _verify_kernel_registry(
+    registry: Any, index: dict[str, dict[str, Any]]
+) -> set[str]:
+    if (
+        not isinstance(registry, dict)
+        or set(registry) != {"digest", "extensions", "roots"}
+        or not isinstance(registry.get("digest"), str)
+        or not isinstance(registry.get("extensions"), list)
+        or registry.get("roots") != native_roots()
+    ):
+        raise RuntimeClosureError("runtime closure kernel registry is malformed")
+    extensions = registry["extensions"]
+    if len(extensions) > MAXIMUM_NATIVE_OBJECTS:
+        raise RuntimeClosureError("runtime closure kernel registry is unbounded")
+    if registry["digest"] != _digest(_canonical(extensions)):
+        raise RuntimeClosureError("runtime closure kernel registry digest is invalid")
+    recorded: list[str] = []
+    answerable: set[str] = set()
+    for extension in extensions:
+        if (
+            not isinstance(extension, dict)
+            or set(extension) != {"path", "sha256"}
+            or not isinstance(extension.get("path"), str)
+            or not extension["path"].startswith("/")
+        ):
+            raise RuntimeClosureError(
+                "runtime closure kernel registry entry is malformed"
+            )
+        path = extension["path"]
+        sha256 = extension["sha256"]
+        recorded.append(path)
+        if sha256 is None:
+            if os.path.isfile(path):
+                raise RuntimeClosureError(
+                    f"runtime closure kernel registry entry became loadable: {path}"
+                )
+            continue
+        if not isinstance(sha256, str):
+            raise RuntimeClosureError(
+                "runtime closure kernel registry digest is malformed"
+            )
+        answerable.add(path)
+        entry = index.get(path)
+        if entry is not None and entry["kind"] == "regular":
+            # Already verified byte for byte by the file pass; agreeing with it
+            # is what makes the registry a view of the closure rather than a
+            # second, independently forgeable claim about the same file.
+            if entry["sha256"] != sha256:
+                raise RuntimeClosureError(
+                    f"runtime closure kernel registry disagrees with the file "
+                    f"closure: {path}"
+                )
+            continue
+        if _sha256_whole(path) != sha256:
+            raise RuntimeClosureError(
+                f"runtime closure kernel registry object changed: {path}"
+            )
+    if recorded != sorted(set(recorded)):
+        raise RuntimeClosureError(
+            "runtime closure kernel registry is not canonical"
+        )
+    if native_objects(registry["roots"]) != recorded:
+        raise RuntimeClosureError(
+            "runtime closure kernel registry does not match the import path"
+        )
+    return answerable
+
+
+def _verify_native(native: Any, index: dict[str, dict[str, Any]]) -> None:
+    """Verify what the dynamic loader would do, not only what Python imports.
+
+    Everything here is a property no file digest can carry on its own: which
+    file a SONAME resolves to, which kernel driver the CUDA libraries will bind
+    to, and what is on the import path that the manifest never named.
+    """
+
+    if not isinstance(native, dict) or set(native) != {
+        "cuda",
+        "kernel_registry",
+        "ld_library_path",
+        "loader_configuration",
+        "objects",
+        "system_search",
+    }:
+        raise RuntimeClosureError("runtime closure native section is malformed")
+    search_path = native["ld_library_path"]
+    if search_path != [
+        entry for entry in os.environ.get("LD_LIBRARY_PATH", "").split(":") if entry
+    ]:
+        raise RuntimeClosureError("runtime closure LD_LIBRARY_PATH changed")
+    system = native["system_search"]
+    if not isinstance(system, list) or any(
+        not isinstance(directory, str) or not directory.startswith("/")
+        for directory in system
+    ):
+        raise RuntimeClosureError("runtime closure system search path is malformed")
+    configuration = native["loader_configuration"]
+    if (
+        not isinstance(configuration, list)
+        or configuration != sorted(set(configuration))
+        or any(item not in index for item in configuration)
+    ):
+        # The guard does not re-derive `system_search`; it requires the files
+        # that produce it to be pinned, so editing one is a content change
+        # caught by the file pass.
+        raise RuntimeClosureError(
+            "runtime closure loader configuration is not pinned"
+        )
+    # The registry runs first because it establishes which import-path objects
+    # are answerable for their own bytes. An object on the import path that no
+    # closure distribution claims is still pinned — by the registry rather than
+    # by `files` — and an ELF object may cite either.
+    pinned = _verify_kernel_registry(native["kernel_registry"], index)
+    pinned.update(
+        path for path, entry in index.items() if entry["kind"] == "regular"
+    )
+    objects = native["objects"]
+    if not isinstance(objects, list) or len(objects) > MAXIMUM_OBJECTS:
+        raise RuntimeClosureError("runtime closure ELF object list is invalid")
+    paths = [_verify_native_object(item, index, pinned) for item in objects]
+    if paths != sorted(set(paths)):
+        raise RuntimeClosureError("runtime closure ELF objects are not canonical")
+    cuda = native["cuda"]
+    if (
+        not isinstance(cuda, dict)
+        or set(cuda) != {"driver_version", "sonames"}
+        or not isinstance(cuda["sonames"], list)
+        or cuda["sonames"] != sorted(set(cuda["sonames"]))
+    ):
+        raise RuntimeClosureError("runtime closure CUDA identity is malformed")
+    recorded_driver = cuda["driver_version"]
+    if recorded_driver is not None and not isinstance(recorded_driver, str):
+        raise RuntimeClosureError("runtime closure CUDA driver identity is malformed")
+    # The driver is in the kernel, not in the closure, so nothing else here can
+    # notice it moving. Null is pinned as firmly as a version string: a host
+    # that grew a driver since the closure was sealed is a changed host.
+    if recorded_driver != driver_version():
+        raise RuntimeClosureError("runtime closure CUDA driver identity changed")
+
+
 def verify_embedded_runtime_closure(archive_path: str | None = None) -> str:
     """Verify the deployment environment before importing any third-party code."""
 
@@ -187,6 +469,7 @@ def verify_embedded_runtime_closure(archive_path: str | None = None) -> str:
             "closure_digest",
             "distributions",
             "files",
+            "native",
             "python",
             "root_distributions",
         }:
@@ -244,12 +527,14 @@ def verify_embedded_runtime_closure(archive_path: str | None = None) -> str:
                 "runtime closure root distributions are not canonical"
             )
         paths: list[str] = []
+        index: dict[str, dict[str, Any]] = {}
         total = 0
         for entry in files:
             if not isinstance(entry, dict):
                 raise RuntimeClosureError("runtime closure entry is not an object")
             _verify_entry(entry)
             paths.append(entry["path"])
+            index[entry["path"]] = entry
             if entry["kind"] == "regular":
                 total += entry["size"]
                 if total > MAXIMUM_TOTAL_BYTES:
@@ -258,6 +543,7 @@ def verify_embedded_runtime_closure(archive_path: str | None = None) -> str:
                     )
         if paths != sorted(set(paths)):
             raise RuntimeClosureError("runtime closure paths are not canonical")
+        _verify_native(body.get("native"), index)
         return closure_digest
     except RuntimeClosureError:
         raise
@@ -268,10 +554,15 @@ def verify_embedded_runtime_closure(archive_path: str | None = None) -> str:
 __all__ = [
     "MAXIMUM_FILES",
     "MAXIMUM_MANIFEST_BYTES",
+    "MAXIMUM_NATIVE_OBJECTS",
+    "MAXIMUM_OBJECTS",
     "MAXIMUM_TOTAL_BYTES",
     "RUNTIME_CLOSURE_MEMBER",
     "RUNTIME_CLOSURE_SCHEMA",
     "RuntimeClosureError",
+    "driver_version",
+    "native_objects",
+    "native_roots",
     "self_owned_closure_ancestors",
     "verify_embedded_runtime_closure",
 ]
