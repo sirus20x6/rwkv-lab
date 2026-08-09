@@ -910,6 +910,130 @@ void validate_resource_selection(const ResourceBundleSelection& selection) {
   }
 }
 
+void validate_grant_inventory_projection(
+    const GrantInventoryProjection& projection) {
+  // Accumulated rather than fail-fast: each clause below is a different thing
+  // a producer can get wrong, and a first-problem throw would make them
+  // indistinguishable to a caller and untestable one at a time.
+  std::vector<std::string> faults;
+  if (projection.api_version != kGrantInventoryProjectionApiVersion) {
+    faults.emplace_back("api_version");
+  }
+  if (!digest_valid(projection.inventory_digest)) {
+    faults.emplace_back("inventory_digest");
+  }
+  if (!digest_valid(projection.topology_digest)) {
+    faults.emplace_back("topology_digest");
+  }
+  if (!digest_valid(projection.receipt_digest)) {
+    faults.emplace_back("receipt_digest");
+  }
+  if (projection.host_id.empty() ||
+      projection.host_id.size() >
+          HostResourceBounds::maximum_identifier_bytes) {
+    faults.emplace_back("host_id");
+  }
+  if (projection.boot_id.empty() ||
+      projection.boot_id.size() >
+          HostResourceBounds::maximum_identifier_bytes) {
+    faults.emplace_back("boot_id");
+  }
+  // A grant fences at most maximum_bundle_count resources, so a projection
+  // holding more rows than that is not a projection of any grant.
+  if (projection.resources.size() > HostResourceBounds::maximum_bundle_count) {
+    faults.emplace_back("row count");
+  }
+  if (!std::ranges::is_sorted(projection.resources, resource_less)) {
+    faults.emplace_back("row order");
+  }
+  std::set<std::string> keys;
+  for (const auto& resource : projection.resources) {
+    try {
+      validate_observed_resource(resource);
+    } catch (const HostResourceError&) {
+      faults.emplace_back("row shape");
+      break;
+    }
+    if (!keys.insert(canonical_resource_key(resource.id)).second) {
+      faults.emplace_back("duplicate row");
+      break;
+    }
+  }
+  if (encode_json(projection).dump().size() >
+      HostResourceBounds::maximum_grant_inventory_projection_bytes) {
+    faults.emplace_back("encoded size");
+  }
+  if (!faults.empty()) {
+    std::string message = "grant inventory projection is invalid:";
+    for (const auto& fault : faults) message += " " + fault;
+    throw HostResourceError(message);
+  }
+}
+
+void validate_grant_inventory_projection_against_fences(
+    const GrantInventoryProjection& projection,
+    const std::vector<ResourceFence>& fences) {
+  validate_grant_inventory_projection(projection);
+  // Exactly the fenced rows: neither a row the grant did not fence (which
+  // would put a resource in the binding digest the grant never held) nor a
+  // fence without its row (which would make the binding underivable).
+  std::set<std::string> fenced;
+  for (const ResourceFence& fence : fences) {
+    if (fence.inventory_digest != projection.inventory_digest ||
+        fence.topology_digest != projection.topology_digest) {
+      throw HostResourceError(
+          "grant inventory projection names a different inventory than the "
+          "fences it is carried with");
+    }
+    fenced.insert(canonical_resource_key(fence.resource));
+  }
+  std::set<std::string> projected;
+  for (const auto& resource : projection.resources) {
+    projected.insert(canonical_resource_key(resource.id));
+  }
+  if (fenced != projected) {
+    throw HostResourceError(
+        "grant inventory projection does not carry exactly its grant's fenced "
+        "resources");
+  }
+}
+
+std::optional<GrantInventoryProjection> grant_inventory_projection(
+    const HostInventoryReceipt& receipt,
+    const std::vector<ResourceFence>& fences) {
+  GrantInventoryProjection projection{
+      .api_version = std::string(kGrantInventoryProjectionApiVersion),
+      .host_id = receipt.host_id,
+      .boot_id = receipt.boot_id,
+      .resources = {},
+      .topology_digest = receipt.topology_digest,
+      .inventory_digest = receipt.inventory_digest,
+      .receipt_digest = receipt.receipt_digest,
+  };
+  for (const ResourceFence& fence : fences) {
+    const auto found = std::ranges::find_if(
+        receipt.resources, [&](const ObservedHostResource& candidate) {
+          return candidate.id == fence.resource;
+        });
+    if (found == receipt.resources.end()) {
+      throw HostResourceError(
+          "grant inventory projection cannot project a fence the receipt does "
+          "not hold");
+    }
+    projection.resources.push_back(*found);
+  }
+  std::ranges::sort(projection.resources, resource_less);
+  // Size is the one fault a caller may legitimately absorb, so it is answered
+  // by the return type rather than by an exception a caller would have to
+  // recognise from its message. Everything else still throws.
+  if (encode_json(projection).dump().size() >
+      HostResourceBounds::maximum_grant_inventory_projection_bytes) {
+    return std::nullopt;
+  }
+  validate_grant_inventory_projection_against_fences(projection, fences);
+  return projection;
+}
+
 void validate_resource_occupancy(
     const HostInventoryReceipt& inventory,
     const ResourceOccupancySnapshot& occupancy) {

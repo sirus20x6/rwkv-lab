@@ -59,7 +59,12 @@ struct WorkerRuntimeEvidenceReport {
 struct WorkerRuntimeEvidenceBinding {
   HostIdentity host;
   ResolvedLaunchSpec launch;
-  HostInventoryReceipt inventory;
+  // The grant-time projection, not a whole-host receipt. The controller never
+  // holds a receipt: everything it receives over the hostd transport is
+  // digests, and the whole receipt does not fit that transport's packet
+  // budget. The projection carries the receipt's identity over exactly the
+  // rows this launch fenced, which is all the binding derivation reads.
+  GrantInventoryProjection inventory;
   bool placement_specific{};
 };
 
@@ -71,9 +76,25 @@ struct AdmittedWorkerRuntimeEvidence {
   CacheRuntimeProbeSnapshot snapshot;
 };
 
-class WorkerRuntimeEvidenceError final : public std::runtime_error {
+class WorkerRuntimeEvidenceError : public std::runtime_error {
  public:
   using std::runtime_error::runtime_error;
+};
+
+// The report is fine and the authority is provisioned; this launch simply has
+// no grant-time inventory to publish it against.
+//
+// A distinct type rather than a distinguishing message because the caller has
+// to answer differently: everything else a publish can throw means "this
+// report does not belong to this launch", which is a worker-side fault, and
+// this one means "the authority cannot answer which inventory this launch
+// bound against", which is a deployment-side gap. A caller separating those by
+// substring would keep working while the wording drifted, and the wording is
+// what a deployment operator reads.
+class WorkerRuntimeEvidenceUnavailableError final
+    : public WorkerRuntimeEvidenceError {
+ public:
+  using WorkerRuntimeEvidenceError::WorkerRuntimeEvidenceError;
 };
 
 [[nodiscard]] WorkerRuntimeEvidenceReport worker_runtime_evidence_from_json(
@@ -123,13 +144,25 @@ class IWorkerRuntimeEvidenceAuthority {
 class LinuxWorkerRuntimeEvidenceAuthority final
     : public IWorkerRuntimeEvidenceAuthority {
  public:
-  // `inventory` is the host inventory receipt this authority publishes
-  // against. It is a callable rather than a value because the receipt is
-  // re-observed as the host changes, and a stale one would name a receipt the
-  // namespace derivation would never look for.
-  LinuxWorkerRuntimeEvidenceAuthority(
-      LinuxCacheEvidenceConfig config,
-      std::function<HostInventoryReceipt()> inventory);
+  // `inventory` answers, for one launch, which inventory that launch was
+  // granted against.
+  //
+  // It takes the launch, and that is the whole point. An earlier shape took
+  // none -- `std::function<HostInventoryReceipt()>` -- and so could only ever
+  // answer with the *current* inventory. Current is the wrong answer: it
+  // differs from the granted one exactly when the host changed between grant
+  // and report, so the failure would be intermittent and would name a receipt
+  // the namespace derivation never looks for. Per-launch, the lookup can read
+  // the projection sealed into the grant, which cannot drift.
+  //
+  // An empty result is not an error here: a launch may hold no host grant at
+  // all, or hold one recorded before grants carried a projection. The
+  // authority refuses those rather than substituting anything.
+  using InventoryLookup = std::function<std::optional<GrantInventoryProjection>(
+      const ResolvedLaunchSpec&)>;
+
+  LinuxWorkerRuntimeEvidenceAuthority(LinuxCacheEvidenceConfig config,
+                                      InventoryLookup inventory);
 
   [[nodiscard]] std::string publish(const WorkerRuntimeEvidenceReport& report,
                                     const HostIdentity& host,
@@ -137,7 +170,7 @@ class LinuxWorkerRuntimeEvidenceAuthority final
 
  private:
   LinuxCacheEvidencePublisher publisher_;
-  std::function<HostInventoryReceipt()> inventory_;
+  InventoryLookup inventory_;
 };
 
 }  // namespace trainvm

@@ -34,6 +34,28 @@ void require_rejected(Callable&& callable, const std::string& message) {
   throw std::runtime_error(message);
 }
 
+// Asserting the *type* alone is not enough here: several different checks in
+// this file refuse with HostResourceError, so a test that only catches the
+// type stays green when the condition it was written for is deleted and a
+// neighbouring one refuses the same input. `expected` names the clause.
+template <typename Callable>
+void require_rejected_naming(Callable&& callable, std::string_view expected,
+                             const std::string& message) {
+  try {
+    std::forward<Callable>(callable)();
+  } catch (const HostResourceError& error) {
+    if (std::string_view(error.what()).find(expected) ==
+        std::string_view::npos) {
+      throw std::runtime_error(message + ": refused, but for '" +
+                               std::string(error.what()) +
+                               "' rather than '" + std::string(expected) +
+                               "'");
+    }
+    return;
+  }
+  throw std::runtime_error(message + ": accepted");
+}
+
 HostResourceId gpu_id(std::string_view stable_id) {
   HostResourceId id{};
   id.kind = HostResourceKind::accelerator;
@@ -712,6 +734,232 @@ int main() {
                fence(inventory, mig_id(kMig0, kGpuP))});
         },
         "conflicting active fence rows fail closed");
+
+    // ---- Grant-time inventory projections. ----------------------------
+    //
+    // The projection is the controller's only copy of the inventory a launch
+    // was granted against -- the hostd transport carries digests, and a whole
+    // receipt does not fit its packet budget. So the properties that matter
+    // are: it carries exactly the fenced rows, it keeps the receipt's
+    // identity, and nothing that is not a projection of this grant can pass
+    // for one. Each case below removes exactly one of those.
+    {
+      const std::vector<ResourceFence> fences = {
+          fence(inventory, gpu_id(kGpuB)),
+          fence(inventory, gpu_id(kGpuA)),
+      };
+      const auto projected = grant_inventory_projection(inventory, fences);
+      require(projected.has_value(),
+              "a receipt projects onto the rows a grant fenced");
+      require(projected->receipt_digest == inventory.receipt_digest &&
+                  projected->inventory_digest == inventory.inventory_digest &&
+                  projected->topology_digest == inventory.topology_digest &&
+                  projected->host_id == inventory.host_id &&
+                  projected->boot_id == inventory.boot_id,
+              "a projection keeps the identity of the receipt it came from");
+      require(projected->resources.size() == 2U &&
+                  projected->resources.front().id.stable_id == kGpuA &&
+                  projected->resources.back().id.stable_id == kGpuB,
+              "a projection carries exactly the fenced rows, in canonical "
+              "order rather than fence order");
+      require(projected->resources.front() == inventory.resources.at(0) ||
+                  std::ranges::any_of(inventory.resources,
+                                      [&](const ObservedHostResource& row) {
+                                        return row ==
+                                               projected->resources.front();
+                                      }),
+              "a projected row is the receipt's row, unmodified");
+      validate_grant_inventory_projection_against_fences(*projected, fences);
+
+      // A fence the receipt cannot answer is a fault, not an empty row.
+      require_rejected(
+          [&] {
+            (void)grant_inventory_projection(
+                inventory,
+                {fence(inventory,
+                       gpu_id("GPU-ffffffff-ffff-ffff-ffff-ffffffffffff"))});
+          },
+          "projecting a fence the receipt does not hold fails closed");
+
+      // ---- One mutation per clause of the shape validator. --------------
+      const auto mutated = [&](auto&& apply) {
+        GrantInventoryProjection copy = *projected;
+        apply(copy);
+        return copy;
+      };
+      require_rejected_naming(
+          [&] {
+            validate_grant_inventory_projection(mutated(
+                [](GrantInventoryProjection& value) {
+                  value.api_version = "trainvm.host-inventory/v1";
+                }));
+          },
+          "api_version", "a projection wearing another document's api_version");
+      require_rejected_naming(
+          [&] {
+            validate_grant_inventory_projection(
+                mutated([](GrantInventoryProjection& value) {
+                  value.inventory_digest = "not-a-digest";
+                }));
+          },
+          "inventory_digest", "a projection with an unusable inventory digest");
+      require_rejected_naming(
+          [&] {
+            validate_grant_inventory_projection(
+                mutated([](GrantInventoryProjection& value) {
+                  value.topology_digest = "not-a-digest";
+                }));
+          },
+          "topology_digest", "a projection with an unusable topology digest");
+      require_rejected_naming(
+          [&] {
+            validate_grant_inventory_projection(
+                mutated([](GrantInventoryProjection& value) {
+                  value.receipt_digest = "not-a-digest";
+                }));
+          },
+          "receipt_digest", "a projection with an unusable receipt digest");
+      require_rejected_naming(
+          [&] {
+            validate_grant_inventory_projection(
+                mutated([](GrantInventoryProjection& value) {
+                  value.host_id.clear();
+                }));
+          },
+          "host_id", "a projection naming no host");
+      require_rejected_naming(
+          [&] {
+            validate_grant_inventory_projection(
+                mutated([](GrantInventoryProjection& value) {
+                  value.boot_id.clear();
+                }));
+          },
+          "boot_id", "a projection naming no boot epoch");
+      require_rejected_naming(
+          [&] {
+            validate_grant_inventory_projection(
+                mutated([](GrantInventoryProjection& value) {
+                  std::ranges::reverse(value.resources);
+                }));
+          },
+          "row order",
+          "a projection whose rows are not in canonical order");
+      require_rejected_naming(
+          [&] {
+            validate_grant_inventory_projection(
+                mutated([](GrantInventoryProjection& value) {
+                  value.resources.push_back(value.resources.front());
+                  std::ranges::sort(value.resources,
+                                    [](const ObservedHostResource& left,
+                                       const ObservedHostResource& right) {
+                                      return left.id.stable_id <
+                                             right.id.stable_id;
+                                    });
+                }));
+          },
+          "duplicate row", "a projection carrying a row twice");
+      require_rejected_naming(
+          [&] {
+            validate_grant_inventory_projection(
+                mutated([](GrantInventoryProjection& value) {
+                  value.resources.front().id.stable_id.clear();
+                }));
+          },
+          "row shape", "a projection carrying a malformed row");
+
+      // ---- And one per clause of the against-fences check. --------------
+      require_rejected_naming(
+          [&] {
+            validate_grant_inventory_projection_against_fences(
+                mutated([&](GrantInventoryProjection& value) {
+                  value.resources.pop_back();
+                }),
+                fences);
+          },
+          "exactly its grant's fenced resources",
+          "a projection missing one of its grant's fenced rows");
+      require_rejected_naming(
+          [&] {
+            const auto wider =
+                grant_inventory_projection(inventory,
+                                           {fence(inventory, gpu_id(kGpuA)),
+                                            fence(inventory, gpu_id(kGpuB)),
+                                            fence(inventory, gpu_id(kGpuC))});
+            require(wider.has_value(), "three fenced rows project");
+            validate_grant_inventory_projection_against_fences(*wider, fences);
+          },
+          "exactly its grant's fenced resources",
+          "a projection carrying a row its grant never fenced");
+      require_rejected_naming(
+          [&] {
+            std::vector<ResourceFence> foreign = fences;
+            foreign.front().inventory_digest =
+                "sha256:" + std::string(64U, 'f');
+            validate_grant_inventory_projection_against_fences(*projected,
+                                                               foreign);
+          },
+          "different inventory",
+          "a projection carried beside a fence naming another inventory");
+      require_rejected_naming(
+          [&] {
+            std::vector<ResourceFence> foreign = fences;
+            foreign.front().topology_digest =
+                "sha256:" + std::string(64U, 'f');
+            validate_grant_inventory_projection_against_fences(*projected,
+                                                               foreign);
+          },
+          "different inventory",
+          "a projection carried beside a fence naming another topology");
+    }
+
+    // ---- The size bound is answered by the return type, not a throw. ----
+    //
+    // A grant that cannot be delivered stops a run; a missing projection only
+    // refuses a cache evidence publication. So the producer omits an oversized
+    // projection, and does it deterministically in the host's own inventory
+    // rather than intermittently.
+    {
+      auto heavy_snapshot = base_snapshot("revision-heavy");
+      heavy_snapshot.resources.clear();
+      for (std::size_t index = 0U;
+           index < HostResourceBounds::maximum_bundle_count; ++index) {
+        const char digit = "0123456789abcdef"[index];
+        auto resource = accelerator(
+            gpu_id("GPU-" + std::string(8U, digit) + "-" +
+                   std::string(4U, digit) + "-" + std::string(4U, digit) +
+                   "-" + std::string(4U, digit) + "-" +
+                   std::string(12U, digit)),
+            0, "PCIE-0", "FABRIC-0");
+        // The shared helper assigns BDFs by well-known stable id, so these
+        // synthetic rows get their own.
+        resource.pci_bdf = std::string("0000:1") + digit + ":00.0";
+        resource.device_minor = static_cast<std::uint32_t>(index);
+        for (std::size_t label = 0U;
+             label < HostResourceBounds::maximum_labels_per_resource;
+             ++label) {
+          resource.labels.emplace(
+              "k" + std::string(HostResourceBounds::maximum_label_key_bytes -
+                                    4U,
+                                'k') +
+                  (label < 10U ? "0" : "1") + std::to_string(label % 10U),
+              std::string(HostResourceBounds::maximum_label_value_bytes, 'v'));
+        }
+        heavy_snapshot.resources.push_back(std::move(resource));
+      }
+      const auto heavy = capture(std::move(heavy_snapshot));
+      std::vector<ResourceFence> all;
+      for (const auto& resource : heavy.resources) {
+        all.push_back(fence(heavy, resource.id));
+      }
+      require(!grant_inventory_projection(heavy, all).has_value(),
+              "a projection that would not fit its transport budget is "
+              "omitted rather than thrown");
+      require(grant_inventory_projection(heavy, {fence(heavy,
+                                                       heavy.resources.front()
+                                                           .id)})
+                  .has_value(),
+              "the same inventory still projects onto a bundle that fits");
+    }
 
     std::cout << "host resource P0.1 tests passed\n";
   } catch (const std::exception& exception) {

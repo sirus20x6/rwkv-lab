@@ -1771,6 +1771,57 @@ TrainVMService::TrainVMService(
     throw std::invalid_argument(
         "host grant/process clients and controller target must be configured together");
   }
+  // A deployment that provisioned a receipt root holds an evidence authority,
+  // full stop. Building it here rather than in `serve()` is not a convenience:
+  // the authority's inventory lookup reads this service's journal, so nothing
+  // outside the service can supply it. The consequence is the one the card
+  // asked for -- `worker_runtime_evidence_ == nullptr` now means exactly "no
+  // receipt root", and nothing else.
+  if (cache_evidence_ && worker_runtime_evidence_ == nullptr) {
+    owned_worker_runtime_evidence_ =
+        std::make_unique<LinuxWorkerRuntimeEvidenceAuthority>(
+            *cache_evidence_,
+            [this](const ResolvedLaunchSpec& launch) {
+              return granted_inventory_projection(launch);
+            });
+    worker_runtime_evidence_ = owned_worker_runtime_evidence_.get();
+  }
+}
+
+std::optional<GrantInventoryProjection>
+TrainVMService::granted_inventory_projection(
+    const ResolvedLaunchSpec& launch) const {
+  const std::optional<HostLaunchGrantClaim>& claim =
+      launch.identity.host_grant;
+  if (!claim) return std::nullopt;
+  const std::optional<HostGrantSagaSnapshot> saga =
+      journal_.host_grant_saga(claim->request_id);
+  if (!saga || !saga->grant) return std::nullopt;
+  const ResourceBundleGrant& grant = *saga->grant;
+  // The claim sealed into the launch names one grant receipt by digest. A saga
+  // entry under the same request id whose receipt digest differs is a
+  // different grant -- a retried or superseded one -- and publishing against
+  // it would name an inventory this launch never bound to. Refusing outright
+  // rather than falling back keeps one answer to the question.
+  if (grant.receipt_digest != claim->grant_digest) {
+    throw WorkerRuntimeEvidenceError(
+        "durable host grant does not match the grant digest sealed into this "
+        "launch");
+  }
+  if (!grant.inventory_projection) return std::nullopt;
+  // Against the *claim's* fences, not the grant's. They agree today, and this
+  // is what keeps them agreeing: the projection has to carry exactly the rows
+  // the launch itself was sealed against, whatever the grant record says.
+  try {
+    validate_grant_inventory_projection_against_fences(
+        *grant.inventory_projection, claim->fences);
+  } catch (const HostResourceError& error) {
+    throw WorkerRuntimeEvidenceError(
+        std::string("durable host grant carries an inventory projection that "
+                    "is not this launch's: ") +
+        error.what());
+  }
+  return grant.inventory_projection;
 }
 
 TrainVMService::~TrainVMService() { stop_reconciliation_supervisor(); }
@@ -4489,25 +4540,26 @@ grpc::Status TrainVMService::record_worker_runtime_evidence(
     // silently accepting a report it cannot publish would look to a worker
     // exactly like a published one.
     if (worker_runtime_evidence_ == nullptr) {
-      // Two different missing things, and a deployment operator needs to be
-      // able to tell them apart. Without a receipt root there is nowhere to
-      // write. With one, the root is attested and writable and what is still
-      // missing is the host inventory receipt the launch was granted against
-      // -- the controller receives only `inventory_digest` and
-      // `inventory_receipt_digest` over the hostd transport, and
-      // `cache_resource_binding` selects rows out of `inventory.resources`, so
-      // a digest cannot stand in for it. Reporting "no receipt root" to a
-      // deployment that configured one would send its operator to fix a
-      // correctly provisioned directory.
+      // One condition, one message. A rooted deployment always holds an
+      // authority now -- the constructor builds one -- so reaching here means
+      // the receipt root itself is missing and nothing else does. The second
+      // deployment-side gap, a launch with no grant-time inventory to publish
+      // against, is answered by the authority itself and lands in the
+      // WorkerRuntimeEvidenceUnavailableError handler below; reporting "no
+      // receipt root" for it would send an operator to fix a correctly
+      // provisioned directory.
       return {grpc::StatusCode::FAILED_PRECONDITION,
-              cache_evidence_
-                  ? "authority has no grant-time host inventory receipt to "
-                    "publish worker runtime evidence against"
-                  : "authority has no configured cache evidence receipt root "
-                    "to publish worker runtime evidence to"};
+              "authority has no configured cache evidence receipt root "
+              "to publish worker runtime evidence to"};
     }
     (void)worker_runtime_evidence_->publish(report, authority_host_, *binding);
     return grpc::Status::OK;
+    // Ordered: the unavailable case derives from WorkerRuntimeEvidenceError, so
+    // the general handler below would otherwise swallow it and answer a
+    // deployment gap with PERMISSION_DENIED -- which reads to a worker as "your
+    // report was rejected" rather than "this deployment cannot publish yet".
+  } catch (const WorkerRuntimeEvidenceUnavailableError& error) {
+    return {grpc::StatusCode::FAILED_PRECONDITION, error.what()};
   } catch (const WorkerRuntimeEvidenceError& error) {
     return {grpc::StatusCode::PERMISSION_DENIED, error.what()};
   } catch (const CacheNamespaceAuthorityError& error) {

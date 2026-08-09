@@ -418,8 +418,26 @@ class TrainVMService final : public v1::TrainVM::Service,
   bool reconciliation_started_{};
   std::jthread reconciliation_thread_;
   std::map<std::string, ResolvedLaunch> resolved_launches_;
+  // Which host inventory this launch was granted against, read from the
+  // grant its own sealed claim names. Answering it from the durable grant
+  // rather than from a live inventory is what makes the answer stable: the
+  // current inventory differs from the granted one exactly when the host
+  // changed between grant and report, so a live read would name a receipt the
+  // namespace derivation never looks for, and would do so only sometimes.
+  //
+  // Absent -- not an error -- when the launch holds no host grant at all, or
+  // holds one recorded before grants carried a projection.
+  [[nodiscard]] std::optional<GrantInventoryProjection>
+  granted_inventory_projection(const ResolvedLaunchSpec& launch) const;
+
   IWorkerRuntimeEvidenceAuthority* worker_runtime_evidence_{};
   const std::optional<LinuxCacheEvidenceConfig> cache_evidence_;
+  // The authority a rooted deployment holds. It is owned here rather than
+  // handed in by `serve()` because its inventory lookup reads this service's
+  // own journal, which does not exist until the service does. An explicitly
+  // injected authority wins, so a test can still substitute one.
+  std::unique_ptr<LinuxWorkerRuntimeEvidenceAuthority>
+      owned_worker_runtime_evidence_;
   std::mutex worker_sessions_mutex_;
   std::mutex author_run_mutex_;
   std::set<std::string> active_worker_attempts_;

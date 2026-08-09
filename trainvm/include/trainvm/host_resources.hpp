@@ -32,6 +32,20 @@ struct HostResourceBounds final {
   static constexpr std::size_t maximum_label_key_bytes = 64U;
   static constexpr std::size_t maximum_label_value_bytes = 256U;
   static constexpr std::size_t maximum_probe_detail_bytes = 512U;
+  // A grant-scoped inventory projection rides inside the grant on the hostd
+  // mutation reply, whose canonical JSON is capped at 64 KiB in two
+  // independent places (kHostdStatusMaximumPayloadBytes and
+  // kMaximumCanonicalBytes). The grant itself already spends a few KiB on its
+  // identity and its fences, so the projection gets a bounded share rather
+  // than whatever is left: a bound that depends on the rest of the document
+  // fails somewhere other than where it is declared.
+  //
+  // maximum_bundle_count rows of the shapes a real host kernel produces come
+  // to well under a kilobyte each; the worst case the *type* permits (32
+  // labels of 64+256 bytes) does not fit, and is why the producer omits an
+  // oversized projection instead of failing the grant that carries it.
+  static constexpr std::size_t maximum_grant_inventory_projection_bytes =
+      24U * 1024U;
 };
 
 enum class HostResourceKind {
@@ -256,6 +270,39 @@ struct ResourceFence final {
   bool operator==(const ResourceFence&) const = default;
 };
 
+inline constexpr std::string_view kGrantInventoryProjectionApiVersion =
+    "trainvm.grant-inventory-projection/v1";
+
+// The grant-time projection of a host inventory receipt onto exactly the
+// resources one grant fenced.
+//
+// Deliberately NOT a HostInventoryReceipt, and not convertible to one. A
+// receipt names a whole host and recomputes its own three digests from its own
+// contents -- validate_host_inventory rebuilds all three -- so a receipt
+// carrying a subset of its rows would be a document that fails the system's
+// own check, and would fail it only where someone happened to run that check.
+// This type carries the same inventory *identity* the grant fenced against
+// over a bounded subset of rows, and says so in its name.
+//
+// It exists because the whole receipt does not fit the hostd packet budget:
+// maximum_resources is 256 and a row may carry 32 labels. What consumes it is
+// cache_resource_binding, which reads only the rows its own launch fenced, so
+// projecting changes no derived digest -- the binding digest taken over a
+// projection equals the one taken over the receipt it came from. That is
+// asserted by a test rather than argued here.
+struct GrantInventoryProjection final {
+  std::string api_version;
+  std::string host_id;
+  std::string boot_id;
+  // Exactly the fenced rows, in canonical resource-key order.
+  std::vector<ObservedHostResource> resources;
+  std::string topology_digest;
+  std::string inventory_digest;
+  std::string receipt_digest;
+
+  bool operator==(const GrantInventoryProjection&) const = default;
+};
+
 struct ResourceOccupancySnapshot final {
   std::string api_version;
   std::string host_id;
@@ -346,6 +393,15 @@ void validate_resource_occupancy(
     const HostInventoryReceipt& inventory,
     const ResourceOccupancySnapshot& occupancy);
 void validate_resource_selection(const ResourceBundleSelection& selection);
+// Shape, bounds and internal agreement only. It cannot decide whether the
+// projection is the one a given grant fenced -- that is
+// validate_grant_inventory_projection_against_fences, which the grant's own
+// codec and the controller's journal copy both run.
+void validate_grant_inventory_projection(
+    const GrantInventoryProjection& projection);
+void validate_grant_inventory_projection_against_fences(
+    const GrantInventoryProjection& projection,
+    const std::vector<ResourceFence>& fences);
 
 [[nodiscard]] HostInventoryReceipt capture_host_inventory(IHostKernel& kernel);
 [[nodiscard]] ResourceBundleRequest seal_resource_request(
@@ -357,6 +413,19 @@ void validate_resource_selection(const ResourceBundleSelection& selection);
     const HostInventoryReceipt& inventory,
     const ResourceBundleRequest& request,
     const ResourceOccupancySnapshot& occupancy);
+// Project a receipt onto the rows one grant fenced.
+//
+// Throws if a fence names a resource the receipt does not hold, or if the
+// projection it built disagrees with the fences it was built from. Returns
+// nullopt for exactly one fault -- exceeding
+// maximum_grant_inventory_projection_bytes -- because that is the only one the
+// grant path may legitimately absorb: a grant that cannot be delivered stops a
+// run, while a missing projection only refuses a cache evidence publication.
+// Answering it by return type rather than by an exception message keeps the
+// absorbing caller from having to recognise one throw among several.
+[[nodiscard]] std::optional<GrantInventoryProjection>
+grant_inventory_projection(const HostInventoryReceipt& receipt,
+                           const std::vector<ResourceFence>& fences);
 [[nodiscard]] BundleDegradationReport detect_bundle_degradation(
     const ResourceBundleSelection& selection,
     const HostInventoryReceipt& current_inventory);

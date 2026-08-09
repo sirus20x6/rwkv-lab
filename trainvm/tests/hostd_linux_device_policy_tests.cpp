@@ -125,6 +125,10 @@ ResourceBundleGrant grant(const HostInventoryReceipt &observed,
                   .generation = 1U,
                   .inventory_digest = observed.inventory_digest,
                   .topology_digest = observed.topology_digest}},
+      // This fixture predates grant-time inventory projections and stays that
+      // way on purpose: it is the older grant shape, and it still encodes and
+      // digests exactly as it did.
+      .inventory_projection = std::nullopt,
       .granted_boottime_ns = 10,
       .granted_wall_time_ns = 20,
       .previous_receipt_digest = "sha256:" + std::string(64U, '0'),

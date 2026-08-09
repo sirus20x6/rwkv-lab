@@ -717,7 +717,7 @@ nlohmann::json admission_epoch_json(
 }
 
 nlohmann::json grant_digest_json(const ResourceBundleGrant& grant) {
-  return {{"api_version", grant.api_version},
+  nlohmann::json value = {{"api_version", grant.api_version},
           {"allocation_id", grant.allocation_id},
           {"request_id", grant.request_id},
           {"request_digest", grant.request_digest},
@@ -732,6 +732,15 @@ nlohmann::json grant_digest_json(const ResourceBundleGrant& grant) {
           {"granted_boottime_ns", grant.granted_boottime_ns},
           {"granted_wall_time_ns", grant.granted_wall_time_ns},
           {"previous_receipt_digest", grant.previous_receipt_digest}};
+  // Emitted only when present, so a grant recorded before this field existed
+  // hashes to exactly the digest it was sealed with. The key and the encoding
+  // are the ones the reflected decoder expects, because the decode side of
+  // this codec is reflection over the member and this side is written out by
+  // hand -- they meet only here.
+  if (grant.inventory_projection) {
+    value["inventory_projection"] = encode_json(*grant.inventory_projection);
+  }
+  return value;
 }
 
 nlohmann::json release_digest_json(const ResourceReleaseReceipt& receipt) {
@@ -3187,6 +3196,7 @@ BundleRequestResult SQLiteHostLedger::request_bundle_authorized(
       .boot_id = implementation_->inventory.boot_id,
       .broker_epoch = implementation_->inventory.broker_epoch,
       .fences = {},
+      .inventory_projection = std::nullopt,
       .granted_boottime_ns = now.boottime_ns,
       .granted_wall_time_ns = now.wall_time_ns,
       .previous_receipt_digest = request_receipt,
@@ -3213,6 +3223,18 @@ BundleRequestResult SQLiteHostLedger::request_bundle_authorized(
                             .topology_digest =
                                 implementation_->inventory.topology_digest});
   }
+  // The one moment the answer to "which inventory did this launch bind
+  // against" is decided. Reading it later -- at report time, or on a replayed
+  // grant -- could return a newer inventory, and would do so only sometimes.
+  // Sealing it into the grant means the replay path, which rebuilds the grant
+  // from its stored canonical bytes and reads no inventory at all, returns
+  // this same answer without knowing it is doing so.
+  //
+  // An oversized projection is dropped, not fatal: see the field's comment.
+  // The drop is deterministic in the host's own inventory, so it cannot
+  // present as an intermittent grant failure.
+  grant.inventory_projection =
+      grant_inventory_projection(implementation_->inventory, grant.fences);
   grant.receipt_digest = sha256("trainvm.host-resource-grant/v1",
                                 grant_digest_json(grant).dump());
   for (const ResourceFence& fence : grant.fences) {
@@ -4705,6 +4727,19 @@ BundleRequestResult bundle_request_result_from_json(
 
 nlohmann::json resource_bundle_grant_json(
     const ResourceBundleGrant& grant) {
+  // Before the digest is recomputed over it: a projection that does not carry
+  // exactly this grant's fenced rows, or that names another inventory, is
+  // refused here rather than travelling as an attested part of the grant.
+  if (grant.inventory_projection) {
+    try {
+      validate_grant_inventory_projection_against_fences(
+          *grant.inventory_projection, grant.fences);
+    } catch (const HostResourceError& error) {
+      throw HostLedgerError(std::string("resource bundle grant carries an "
+                                        "invalid inventory projection: ") +
+                            error.what());
+    }
+  }
   nlohmann::json value = grant_digest_json(grant);
   value["receipt_digest"] = grant.receipt_digest;
   const bool canonical_fences =
