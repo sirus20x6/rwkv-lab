@@ -26,6 +26,12 @@ Presence of a digest is not the property; *discrimination* is. A test that only
 asserted a native section had been computed would pass against every one of
 those five.
 
+The attribution block near the end asserts a second property over the same
+rejections: that the sentence explaining one names its own cause. An object
+rewritten after the closure was sealed and an object that never matched it are
+the same exception with the same exit code, and they mean opposite things — so
+those assertions are on the message text, which is the only thing that differs.
+
 Honest scope: the ELF fixtures are synthetic, and no real ``flash_attn``,
 ``bitsandbytes``, ``deepspeed`` or ``fla`` wheel is installed on any machine
 this runs on. What is asserted is the mechanism that covers them — they are
@@ -47,6 +53,7 @@ import os
 import pathlib
 import struct
 import sys
+import time
 import zipfile
 
 import pytest
@@ -175,9 +182,18 @@ def write_elf(
 class Closure:
     """A built native section plus the file index the guard verifies against."""
 
-    def __init__(self, native: dict, paths: dict[str, dict]) -> None:
+    def __init__(
+        self, native: dict, paths: dict[str, dict], sealed_ns: int | None = None
+    ) -> None:
         self.native = native
         self.paths = paths
+        # `verify_embedded_runtime_closure` reads this off the artifact it was
+        # launched from. The fixtures have no artifact, so the moment the
+        # closure was built stands in for it — the same quantity, obtained the
+        # same way, from a clock the fixture also controls.
+        self.sealed_ns = (
+            time.time_ns() if sealed_ns is None else sealed_ns
+        )
 
     def verify(self) -> None:
         # Same order and same fail-closed wrapper as
@@ -186,8 +202,8 @@ class Closure:
         # rather than as a traceback out of the guard.
         try:
             for path in sorted(self.paths):
-                guard._verify_entry(self.paths[path])
-            guard._verify_native(self.native, self.paths)
+                guard._verify_entry(self.paths[path], self.sealed_ns)
+            guard._verify_native(self.native, self.paths, self.sealed_ns)
         except guard.RuntimeClosureError:
             raise
         except (KeyError, OSError, TypeError, ValueError) as error:
@@ -399,6 +415,233 @@ def test_a_removed_extension_is_rejected(tree):
     (tree / "site-packages" / "demo_ext.cpython-312-x86_64-linux-gnu.so").unlink()
     with pytest.raises(guard.RuntimeClosureError):
         closure.verify()
+
+
+# ---------------------------------------------------------------------------
+# Attribution. Every rejection above stays a rejection; what is asserted here
+# is that the sentence explaining it names its own cause.
+#
+# The failure that produced this was a host package rewritten at 17:56 during a
+# session, on a pull request whose diff was sixteen C++ files. The message named
+# `/usr/lib/python3.14/site-packages/tree_sitter_c_sharp/_binding.abi3.so`, and
+# every reading available to that author was wrong. So the assertions below are
+# on the **message text**: an exception type or an exit code is identical in
+# both cases, which is exactly the confusion being fixed.
+# ---------------------------------------------------------------------------
+
+
+def registry_only(tree: pathlib.Path, name: str) -> Closure:
+    """A closure whose `files` pass never reaches `name`.
+
+    This is the real shape: `tree_sitter_c_sharp` belongs to no distribution the
+    worker depends on, so no closure file pins it — but it is a loadable object
+    on the import path, and the kernel registry pins every one of those on
+    purpose, because anything importable can register whatever it registers.
+    Only that path reaches `runtime closure kernel registry object changed`.
+    """
+
+    site = tree / "site-packages"
+    paths: dict[str, dict] = {}
+    seeds = [
+        str(item)
+        for item in sorted(site.rglob("*.so"))
+        if os.path.isfile(item) and item.name != name
+    ]
+    for seed in seeds:
+        builder._add_path(paths, pathlib.Path(seed))
+    native = builder._scan_native(paths, seeds)
+    assert str(site / name) not in paths, "the file pass must not reach it first"
+    assert {
+        entry["path"] for entry in native["kernel_registry"]["extensions"]
+    } >= {str(site / name)}, "the registry must reach it"
+    return Closure(native, paths)
+
+
+def backdate(path: pathlib.Path, before_ns: int) -> None:
+    """Put a file's mtime a minute before `before_ns`, content untouched."""
+
+    when = (before_ns - 60_000_000_000) / 1_000_000_000
+    os.utime(path, (when, when))
+
+
+UNRELATED = "unrelated_ext.cpython-312-x86_64-linux-gnu.so"
+
+
+@pytest.fixture
+def registry_tree(tree):
+    write_elf(
+        tree / "site-packages" / UNRELATED,
+        soname="unrelated_ext.so",
+        filler=b"a package this worker never asked for, v1",
+    )
+    return tree
+
+
+def test_a_registry_object_rewritten_after_the_seal_says_so(registry_tree):
+    """Host churn. The message must not read as being about the author's diff."""
+
+    closure = registry_only(registry_tree, UNRELATED)
+    closure.verify()
+    write_elf(
+        registry_tree / "site-packages" / UNRELATED,
+        soname="unrelated_ext.so",
+        filler=b"a package this worker never asked for, v2",
+    )
+    with pytest.raises(guard.RuntimeClosureError) as failure:
+        closure.verify()
+    message = str(failure.value)
+    assert "runtime closure kernel registry object changed" in message
+    assert UNRELATED in message
+    assert "after this closure was sealed" in message
+    assert "package manager run during a session" in message
+    assert "not evidence about the change under test" in message
+    # The opposite verdict must be absent, not merely outweighed.
+    assert "real mismatch" not in message
+
+
+def test_a_registry_object_that_never_matched_says_the_opposite(registry_tree):
+    """A real mismatch: the bytes were in place at the seal and disagree with it.
+
+    Same object, same rejection, and the sentence has to reach the other
+    conclusion — otherwise the attribution is a constant and explains nothing.
+    """
+
+    closure = registry_only(registry_tree, UNRELATED)
+    closure.verify()
+    planted = write_elf(
+        registry_tree / "site-packages" / UNRELATED,
+        soname="unrelated_ext.so",
+        filler=b"a package this worker never asked for, v2",
+    )
+    backdate(planted, closure.sealed_ns)
+    with pytest.raises(guard.RuntimeClosureError) as failure:
+        closure.verify()
+    message = str(failure.value)
+    assert "runtime closure kernel registry object changed" in message
+    assert UNRELATED in message
+    assert "real mismatch and not host churn" in message
+    assert "after this closure was sealed" not in message
+
+
+def test_the_two_registry_verdicts_are_not_the_same_sentence(registry_tree):
+    """The property in one assertion: same rejection, different explanation.
+
+    Both messages naming the same file and the same failure is what the guard
+    did before; a test that only asserted `RuntimeClosureError` passes against
+    that, and against a constant suffix bolted onto both.
+    """
+
+    def reject(backdated: bool) -> str:
+        closure = registry_only(registry_tree, UNRELATED)
+        closure.verify()
+        planted = write_elf(
+            registry_tree / "site-packages" / UNRELATED,
+            soname="unrelated_ext.so",
+            filler=b"a package this worker never asked for, v2",
+        )
+        if backdated:
+            backdate(planted, closure.sealed_ns)
+        with pytest.raises(guard.RuntimeClosureError) as failure:
+            closure.verify()
+        # Restore, so the second call builds against an unmutated tree.
+        write_elf(
+            registry_tree / "site-packages" / UNRELATED,
+            soname="unrelated_ext.so",
+            filler=b"a package this worker never asked for, v1",
+        )
+        return str(failure.value)
+
+    churn = reject(backdated=False)
+    stale = reject(backdated=True)
+    assert churn != stale
+    # And each is a rejection of the same object for the same reason.
+    for message in (churn, stale):
+        assert message.startswith("runtime closure kernel registry object changed")
+
+
+def test_a_changed_closure_file_is_attributed_the_same_way(tree):
+    """The file pass carries the identical hazard and the identical fix.
+
+    A host package rewrite lands on whichever pass reaches the file first, and
+    for anything a closure distribution pins that is this one. Leaving it
+    unattributed would make the explanation depend on which door the object
+    happened to enter through.
+    """
+
+    closure = build(tree)
+    closure.verify()
+    extension = tree / "site-packages" / "demo_ext.cpython-312-x86_64-linux-gnu.so"
+    write_elf(
+        extension,
+        soname="demo_ext.so",
+        needed=("libdemo.so.1",),
+        runpath=(str(tree / "libs"),),
+        filler=b"compiled extension v2",
+    )
+    churn = str(pytest.raises(guard.RuntimeClosureError, closure.verify).value)
+    assert "runtime closure file content changed" in churn
+    assert "after this closure was sealed" in churn
+    backdate(extension, closure.sealed_ns)
+    stale = str(pytest.raises(guard.RuntimeClosureError, closure.verify).value)
+    assert "runtime closure file content changed" in stale
+    assert "real mismatch and not host churn" in stale
+
+
+def test_an_unreadable_sealing_time_declines_to_attribute(registry_tree):
+    """No seal time, no claim. Silence beats a guess that reads as authority."""
+
+    closure = registry_only(registry_tree, UNRELATED)
+    closure.sealed_ns = None
+    write_elf(
+        registry_tree / "site-packages" / UNRELATED,
+        soname="unrelated_ext.so",
+        filler=b"a package this worker never asked for, v2",
+    )
+    with pytest.raises(guard.RuntimeClosureError) as failure:
+        closure.verify()
+    message = str(failure.value)
+    assert "cannot be placed in time" in message
+    assert "after this closure was sealed" not in message
+    assert "real mismatch" not in message
+
+
+def test_the_attribution_never_decides_the_verdict(registry_tree):
+    """An mtime is writable by whoever wrote the file, so it may not acquit.
+
+    Backdating is the cheapest possible forgery here, and the point of the
+    change is that it buys a misleading sentence and nothing else: the object is
+    rejected either way. If this ever passes, the explanation has become a check.
+    """
+
+    closure = registry_only(registry_tree, UNRELATED)
+    closure.verify()
+    planted = write_elf(
+        registry_tree / "site-packages" / UNRELATED,
+        soname="unrelated_ext.so",
+        filler=b"a package this worker never asked for, v2",
+    )
+    backdate(planted, closure.sealed_ns)
+    with pytest.raises(guard.RuntimeClosureError):
+        closure.verify()
+
+
+def test_the_seal_time_is_the_artifact_not_the_zip_member(tmp_path, monkeypatch):
+    """Where the seal time comes from, asserted rather than assumed.
+
+    The artifact builder writes every member at a fixed 1980 timestamp so the
+    build is byte-reproducible, so `ZipInfo.date_time` cannot answer this. The
+    archive file's own mtime can, and it is the quantity the guard reads.
+    """
+
+    archive = tmp_path / "worker.pyz"
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr(
+            zipfile.ZipInfo(guard.RUNTIME_CLOSURE_MEMBER, (1980, 1, 1, 0, 0, 0)),
+            b"{}\n",
+        )
+    os.utime(archive, (1_700_000_000, 1_700_000_000))
+    assert guard._sealing_time_ns(str(archive)) == 1_700_000_000_000_000_000
+    assert guard._sealing_time_ns(str(tmp_path / "absent.pyz")) is None
 
 
 def build_id_note(description: bytes) -> bytes:
