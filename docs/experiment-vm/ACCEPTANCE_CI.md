@@ -26,7 +26,8 @@ kind, so every TrainVM C++ change merged unverified by CI.
 | `python-cpu` (3.11, 3.12) | hosted | The **whole** `-m "not gpu"` suite, not a named subset |
 | `schema-golden` | hosted | Example experiment documents satisfy `experiment-v1.schema.json`; coverage fixtures carry no executable authority |
 | `go` | hosted | Dashboard builds, vets, and tests |
-| `native` | self-hosted | `cmake` + full `ctest` + `trainvm validate-catalog` |
+| `native-change-scope` | hosted | Changed paths select `full`, `catalog`, or `none`; unknown paths fail closed to `full` |
+| `native` | hosted | Full `cmake` + `ctest`, or CLI-only catalog/adapter-contract validation, according to the scope receipt |
 | `gpu` | self-hosted | The `-m gpu` suite, serialized across the whole repository |
 
 Each job uploads its junit XML or log as a build artifact, so a run's evidence
@@ -75,6 +76,55 @@ has to be published, made visible to this repository, and kept in step with the
 Dockerfile; each of those is a way for CI to drift from the source it claims to
 test. Buildx layer caching makes the cost a first-run one.
 
+### Change-scoped native tiers
+
+The original hosted native job cost about 8 minutes 10 seconds even when a
+pull request changed only Python or documentation: roughly 65 seconds restored
+and loaded the cached 3.46 GiB toolchain image, then roughly 416 seconds built
+all native targets and ran ctest. The image cache was already working; full
+compilation was the dominant cost.
+
+`scripts/classify_native_ci_changes.py` now chooses the smallest honest tier:
+
+- `full` builds every target and runs the declared ctest set. Any C/C++/CMake,
+  TrainVM, native fixture, toolchain, workflow, or unrecognized path selects
+  this tier.
+- `catalog` builds the real `trainvm` CLI, validates the compatibility catalog
+  against the checkout, and crosses the native/Python adapter and runtime-
+  requirement contracts. Python, dashboard, script, and documentation source
+  trees select this tier because their bytes may be catalog inputs.
+- `none` is limited to paths whose behavior is exercised by the Python, schema,
+  or Go jobs. It still produces a scope receipt; it is not a missing job.
+
+Pushes to `main` always use `full`. A missing diff base, malformed path, new
+top-level tree, or unknown file type also selects `full`, so extending the
+repository cannot silently narrow native coverage. Focused tests pin these
+decisions. Each native run uploads its selected mode, elapsed seconds, and
+ccache statistics; those receipts are the source of before/after claims.
+
+Fail-closed has to survive the plumbing, not just the classifier, and two of the
+ways it could have leaked are worth naming because neither is visible from the
+Python:
+
+- The classification step runs under `set -euo pipefail`. GitHub invokes a `run`
+  block with `bash -e` and *not* `-o pipefail`, so a crashed classifier piped
+  into `tee` would have exited 0, written no `mode=` line, and left the job
+  output an empty string. Empty compares unequal to `none`, so the native job
+  would have run — but as the *catalog* tier, quietly dropping ctest because of
+  a Python traceback nothing was watching. The step now also asserts the emitted
+  mode is one of the three known values.
+- Every comparison that decides to do **less** work is written against the
+  narrow tier (`!= catalog`) rather than the wide one (`== full`). The two are
+  identical while the mode is one of three known strings and opposite the moment
+  it is not. `test_workflow_spells_every_narrowing_decision_against_the_narrow_tier`
+  fails if either is rewritten to the positive form, so the property is a red
+  check rather than a comment.
+
+The compiler cache is separate from BuildKit because project compilation
+happens in `docker run`, after the image exists. It is capped at 1 GiB, keyed
+by the pinned toolchain image, mounted at a stable `/build` base, and never
+substitutes for parity or ctest gates.
+
 Building it surfaced three more blockers beyond the protobuf/gRPC pair, none of
 which were guessable from the outside:
 
@@ -98,31 +148,25 @@ would go red for a reason unrelated to the change under test.
 
 ### What the native job does not cover
 
-57 of 61 suites run. Four are excluded, each for a stated reason:
+78 of 82 suites run. Four are excluded, each for a stated reason:
 
 | suite | why |
 |---|---|
 | `hostd_linux_session_authority_tests` | needs `openat2` to pin the session procfs; a container cannot provide it |
 | `host_resources_tests` | asserts pinned inventory/occupancy digests built from a real host |
-| `trainvm_dashboard_live_e2e` | not yet diagnosed |
-| `rwkv_lab_worker_artifact` | not yet diagnosed |
+| `trainvm_dashboard_live_e2e` | needs an authority directory whose complete ancestry is unwritable by others |
+| `rwkv_lab_worker_artifact` | builds a sealed worker artifact from the real runtime closure |
 
-The last two are excluded so the job is usable today, and tracked as a
-follow-up rather than quietly dropped. A permanently red job teaches everyone
-to ignore it, which is worse than not having one. All four still run in
-`scripts/acceptance.sh` on a real host.
+All four still run in `scripts/acceptance.sh` on a real host. Their exact set
+and reasons are pinned by `native-ci-exclusions.v1.json`; the hosted job cannot
+silently add another exclusion.
 
 The job was verified to fail for the right reason: breaking one native
 assertion turns it red (ctest exit 8), so it is a gate rather than decoration.
 
-Both jobs therefore target self-hosted runners and stay off until the
-repository variable `TRAINVM_SELF_HOSTED` is set to `true`. This is a
-deliberate choice over emulating them: a native job that cannot build the
-authority would report green while proving nothing, which is the exact failure
-mode this document exists to prevent.
-
-To enable them, register a runner with labels `self-hosted,linux,trainvm` (and
-`self-hosted,linux,gpu` for the GPU job), then set the variable.
+Only the GPU job is gated by `TRAINVM_SELF_HOSTED`, because it needs a physical
+accelerator. The native tiers run on ordinary hosted Linux runners inside the
+pinned toolchain image.
 
 ## GPU concurrency
 

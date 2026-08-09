@@ -102,6 +102,13 @@ RUN curl -fsSL "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERS
  && tar -C /usr/local --strip-components=1 -xzf /tmp/cmake.tgz \
  && rm /tmp/cmake.tgz
 
+# Object compilation happens after the image build, so BuildKit cannot cache
+# it. Install ccache only after the expensive gRPC/SQLite/CMake layers so this
+# addition does not force one needless toolchain rebuild.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ccache \
+ && rm -rf /var/lib/apt/lists/*
+
 # The dashboard module requires a Go newer than Debian packages.
 RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
       -o /tmp/go.tgz \
@@ -134,6 +141,7 @@ RUN python3 -m venv /opt/venv \
 # config package is worse than no image: the native job would go red for a
 # reason that has nothing to do with the change under test.
 RUN g++ --version | head -1 \
+ && ccache --version | head -1 \
  && mkdir -p /tmp/sq \
  && echo 'consteval int f(){return 1;} int main(){return f()-1;}' > /tmp/r.cpp \
  && g++ -std=c++26 -freflection /tmp/r.cpp -o /tmp/r && /tmp/r \
