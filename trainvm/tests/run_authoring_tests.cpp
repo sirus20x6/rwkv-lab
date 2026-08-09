@@ -73,6 +73,11 @@ nlohmann::json authorable_fixture(const TemporaryDirectory &temporary) {
       {"allowed_read_roots", nlohmann::json::array({input_root.string()})},
       {"allowed_write_roots", nlohmann::json::array({run_directory.string()})},
   };
+  // The resource literals restate the workspace fence renamed just above.
+  for (const char *resource_node : {"acquire_gpu", "release_gpu"}) {
+    spec["workflow"]["nodes"][resource_node]["invoke"]["inputs"]
+        ["concurrency_key"]["literal"] = "authoring-test";
+  }
   spec["parameters"]["source_config"]["value"] =
       (input_root / "config.json").string();
   spec["resources"]["accelerators"]["count"] = 0;

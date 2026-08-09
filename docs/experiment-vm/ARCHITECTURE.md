@@ -194,6 +194,13 @@ Before a run exists, the plan compiler performs:
 - input/output type checking against operation descriptors;
 - reference resolution and graph reachability checks;
 - resource feasibility and path-policy checks;
+- workspace authority agreement: `spec.workspace` states the fence this run holds and the one tree
+  its worker may write, and the workflow restates both, so the compiler requires every exact
+  `trainvm.core` acquire/release node to bind `concurrency_key` as a literal equal to
+  `spec.workspace.concurrency_key`, and every locked inline trainer `config` naming an `output_dir`
+  or `run_dir` to name exactly `spec.workspace.run_directory`. The recipe instantiator already
+  checked the first for documents it produced and the Python worker checks the second at launch;
+  neither reaches a hand-authored or already-locked document before its plan is hashed and submitted;
 - CPU/I/O policy conflict checks and bounded profiler schedule/artifact validation;
 - cycle analysis (every cycle needs a visit bound and monotonic progress value);
 - artifact producer/consumer and immutability checks;

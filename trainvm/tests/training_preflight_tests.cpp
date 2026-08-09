@@ -141,7 +141,11 @@ CompiledPlan compiled_fixture(const TemporaryDirectory &temporary,
   acquire["transitions"] = nlohmann::json::array(
       {{{"on", "resource.acquired"}, {"target", "train_to_boundary"}},
        {{"on", "operation.failed"}, {"target", "$failed"}}});
+  // The workspace above renamed the concurrency key; the resource literals name
+  // the same fence and have to follow it.
+  acquire["invoke"]["inputs"]["concurrency_key"]["literal"] = "preflight-test";
   auto release = spec["workflow"]["nodes"]["release_gpu"];
+  release["invoke"]["inputs"]["concurrency_key"]["literal"] = "preflight-test";
   spec["workflow"]["nodes"] = {
       {"acquire_gpu", std::move(acquire)},
       {"train_to_boundary", std::move(train)},
