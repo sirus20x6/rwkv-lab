@@ -107,3 +107,64 @@ ctest --test-dir trainvm/build -j 4 --output-on-failure
 
 `trainvm/build/` is gitignored; other build directory names are not, and
 `git add -A` will happily commit several gigabytes of object files.
+
+## C++ diagnostics: trust them only after you have configured a build
+
+The editor's C++ diagnostics come from clangd, which is **clang**. The build is
+**GCC 16 with `-freflection`**. They are different compilers, so what clangd
+tells you about this tree is an approximation, and it has already been wrong in
+the most expensive way: confident, specific errors on source that compiles
+clean and passes ctest. An agent that "fixes" one of those damages working code.
+
+**Configure a build first, in every new worktree:**
+
+```bash
+cmake -S trainvm -B trainvm/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+```
+
+Configuring is enough — it writes `trainvm/build/compile_commands.json`, which
+is what clangd reads. You do not have to finish the compile to get a usable
+index. Until that file exists clangd has no include path and no `-std`, falls
+back to bare C++17, and emits a wall of pure fiction: `'trainvm/....hpp' file
+not found`, `no member named 'ranges' in namespace 'std'`, `use of undeclared
+identifier 'nlohmann'`, and finally implicit-int fallout such as `'ostream'
+(aka 'int')` and `cannot initialize return object of type 'int' with an rvalue
+of type 'std::nullptr_t'`. Measured on `trainvm/src/run_authoring.cpp`: 100
+diagnostics, none of them real. **`compile_commands.json` is gitignored and per
+worktree — a fresh worktree always starts in this state.**
+
+`trainvm/.clangd` handles the rest: it strips `-freflection` from the recorded
+GCC command (clang's driver hard-errors on unknown `-f` flags), and supplies
+`-std=c++26 -I../include` as a fallback so an unconfigured tree is merely
+incomplete rather than actively lying. That file configures the indexer only.
+Do not "fix" an indexer complaint by editing `trainvm/CMakeLists.txt` — the
+build is correct and the flags there are load-bearing.
+
+### The one error that is expected and must not be "fixed"
+
+```
+in included file: no member named 'meta' in namespace 'std'
+```
+
+reported against the first `#include` line of the ~46 translation units that
+reach `trainvm/include/trainvm/reflection_json.hpp`, directly or through
+`trainvm/document.hpp`.
+
+This is real and unfixable here. clangd 22 does not implement P2996 static
+reflection at all — it has no `-freflection`, no `__cpp_reflection`, and its
+`<meta>` defines nothing — so `std::meta::identifier_of`, `^^T`, and
+`std::define_static_array` cannot resolve for it. GCC 16 compiles them fine.
+
+It is left visible rather than suppressed on purpose: clangd can only suppress
+by diagnostic name, and `no_member` is exactly the name a genuine
+"no member named X" bug would carry, so silencing it would cost more than it
+saves. **Do not delete the `#include` to make it go away, and do not rewrite
+reflection code to avoid it.** Verify any suspected C++ defect against
+`cmake --build trainvm/build` before believing it.
+
+After configuring, each of `run_authoring.cpp`, `training_component_registry.cpp`,
+`recipe_profile_tests.cpp` and `training_component_registry_tests.cpp` reports
+that single diagnostic and nothing else. Check a file yourself with
+`clangd --check=<path>`; anything beyond that one line is either a real defect
+or a sign that the build directory went stale — reconfigure before concluding
+which.
