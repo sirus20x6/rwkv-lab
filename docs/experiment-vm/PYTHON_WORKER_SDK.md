@@ -199,6 +199,63 @@ carry the same verified effective-control state. The lifecycle service remains s
 mutable controls and only exposes the checkpoint/pause/cancel surface declared by each exact
 adapter profile.
 
+## Worker-originated runtime evidence
+
+A cache namespace is only reusable if the runtime, device and ABI that produced
+the bytes are the runtime, device and ABI about to consume them. Those facts
+exist inside the worker process — it holds the interpreter, the loaded ELF
+graph and the compute context — and nowhere else. The worker therefore measures
+them, and `rwkv_lab.trainvm_worker.runtime_evidence` is where it does so, with
+the standard library only, because it sits on the same side of the trust
+boundary as the pre-import guard.
+
+Measuring is not deciding. The report the worker emits, a canonical
+`trainvm.worker-runtime-evidence/v1` object, is split so that admission cannot
+be confused with transport:
+
+- **measurements** — compute vendor and architecture, device UUID and PCI
+  address where the launch is placement specific, the driver identity taken
+  from the guard's own reading rather than a second parse of the same file, the
+  installed versions of the distributions a compiled artifact binds to, a host
+  ABI digest, and a compute compatibility digest carrying what the architecture
+  string cannot (the host's instruction set, or the exact attributes behind an
+  architecture name several parts share);
+- **identity claims** — run, node, attempt, launch nonce, concurrency key,
+  lease and fencing token, echoed from the sealed bootstrap. The authority
+  already knows all of them, and compares rather than believes: a report from a
+  superseded attempt, a released lease, or a second launch of the same attempt
+  is refused;
+- **nothing else.** There is no host id, no boot id, no launch spec digest, no
+  inventory receipt digest, no resource binding digest and no receipt name. The
+  runtime closure fingerprint is not measured here either — it is whatever the
+  pre-import guard verified, passed in by the caller, because re-deriving it
+  would be a second answer to a question the guard already answered under
+  stricter conditions.
+
+That last bullet is the design, not a simplification of it. Those absent fields
+are exactly the ones that name the immutable receipt a cache lookup reads, so a
+worker cannot author a document that authorizes reuse — not because it would be
+rejected, but because it cannot express one. `admit_worker_runtime_evidence`
+derives the probe context from host identity, the sealed launch and the
+inventory receipt, copies those fields into the snapshot itself, and only then
+compares the worker's measurements against the devices the launch was actually
+fenced to. `publish_worker_runtime_evidence` is the only path to the
+authority-owned immutable publisher, so no caller reaches it with an unadmitted
+snapshot.
+
+Two tests carry this rather than prose. `worker_runtime_evidence_tests` feeds a
+complete sealed runtime receipt back in as a report and requires it to be
+refused, grafts an authority-derived digest onto a valid report and requires
+that to be refused too, and then walks each forged binding — superseded fence,
+foreign lease, other attempt, other launch, other run, unsealed closure, a
+device the launch holds no fence for — asserting after each that the receipt
+directory is still empty and that derivation still has nothing to read.
+`worker_runtime_evidence_python_parity` then runs that same suite over a report
+the real probe measured on the host, through the real bootstrap decoder, so the
+two sides are not each testing their own idea of the other. It uses the
+portable CPU path deliberately: no accelerator, no driver and no CUDA stack, so
+it asserts the same thing on a hosted runner as on the training host.
+
 ## Fixed adapter runner
 
 `scripts/build_trainvm_worker_artifact.py` deterministically builds the sole sealed project-code

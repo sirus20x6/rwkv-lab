@@ -150,6 +150,7 @@ add_library(trainvm_core
   src/training_component_registry.cpp
   src/training_preflight.cpp
   src/worker_bootstrap.cpp
+  src/worker_runtime_evidence.cpp
 )
 target_include_directories(trainvm_core PUBLIC include)
 target_compile_options(trainvm_core PUBLIC -freflection)
@@ -431,6 +432,26 @@ target_compile_options(cache_namespace_authority_tests PRIVATE
 target_link_libraries(cache_namespace_authority_tests PRIVATE trainvm_core)
 add_test(NAME cache_namespace_authority_tests
   COMMAND cache_namespace_authority_tests)
+add_executable(worker_runtime_evidence_tests
+  tests/worker_runtime_evidence_tests.cpp)
+target_compile_options(worker_runtime_evidence_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(worker_runtime_evidence_tests PRIVATE trainvm_core)
+add_test(NAME worker_runtime_evidence_tests
+  COMMAND worker_runtime_evidence_tests)
+if(TRAINVM_PYTHON_EXECUTABLE)
+  # The same suite again, this time over a report a real worker probe measured
+  # on this host rather than one the test wrote. Runs everywhere the suite runs
+  # because the CPU path needs no accelerator, no driver and no CUDA stack.
+  add_test(NAME worker_runtime_evidence_python_parity
+    COMMAND ${CMAKE_COMMAND} -E env
+      PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../src
+      ${TRAINVM_PYTHON_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_worker_runtime_evidence.py
+      $<TARGET_FILE:worker_runtime_evidence_tests>
+  )
+endif()
 add_executable(compatibility_catalog_tests tests/compatibility_catalog_tests.cpp)
 target_compile_options(compatibility_catalog_tests PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
