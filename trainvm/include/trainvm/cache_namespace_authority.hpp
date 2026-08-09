@@ -73,6 +73,28 @@ class ICacheRuntimeProbe {
       const CacheRuntimeProbeContext& context) = 0;
 };
 
+// The accelerators a sealed launch actually holds, and the digest that binds
+// them. Exposed so that everything which needs a probe context derives one the
+// same way; a second implementation would name a different receipt and the
+// resulting namespace would silently never be found.
+struct CacheResourceBinding {
+  std::vector<ObservedHostResource> devices;
+  std::string binding_digest;
+
+  bool operator==(const CacheResourceBinding&) const = default;
+};
+
+[[nodiscard]] CacheResourceBinding cache_resource_binding(
+    const ResolvedLaunchSpec& launch, const HostInventoryReceipt& inventory);
+
+// The authority's own answer to "which observation would this launch need".
+// Every field is derived from host identity, the sealed launch, and the
+// inventory receipt. Nothing a worker says can move it, which is what makes a
+// worker-measured snapshot admissible without being authoritative.
+[[nodiscard]] CacheRuntimeProbeContext cache_runtime_probe_context(
+    const HostIdentity& host, const ResolvedLaunchSpec& launch,
+    const HostInventoryReceipt& inventory, bool placement_specific);
+
 // Shared semantic validator used both before immutable receipt publication and
 // after a probe capture, so malformed authority observations cannot poison a
 // no-replace receipt name.

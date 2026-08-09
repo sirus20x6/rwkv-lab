@@ -71,13 +71,8 @@ const ObservedHostResource* find_resource(
   return found == inventory.resources.end() ? nullptr : &*found;
 }
 
-struct ResourceBinding {
-  std::vector<ObservedHostResource> devices;
-  std::string digest;
-};
-
-ResourceBinding bind_resources(const ResolvedLaunchSpec& launch,
-                               const HostInventoryReceipt& inventory) {
+CacheResourceBinding bind_resources(const ResolvedLaunchSpec& launch,
+                                    const HostInventoryReceipt& inventory) {
   nlohmann::json fences = nlohmann::json::array();
   nlohmann::json resources = nlohmann::json::array();
   std::vector<ObservedHostResource> devices;
@@ -113,7 +108,7 @@ ResourceBinding bind_resources(const ResolvedLaunchSpec& launch,
   }
   return {
       .devices = std::move(devices),
-      .digest = digest(
+      .binding_digest = digest(
           "trainvm.cache-resource-binding/v1",
           nlohmann::json{{"fences", std::move(fences)},
                          {"inventory_receipt_digest", inventory.receipt_digest},
@@ -233,6 +228,25 @@ void validate_authority_receipt(
 
 }  // namespace
 
+CacheResourceBinding cache_resource_binding(
+    const ResolvedLaunchSpec& launch, const HostInventoryReceipt& inventory) {
+  return bind_resources(launch, inventory);
+}
+
+CacheRuntimeProbeContext cache_runtime_probe_context(
+    const HostIdentity& host, const ResolvedLaunchSpec& launch,
+    const HostInventoryReceipt& inventory, bool placement_specific) {
+  CacheResourceBinding resources = bind_resources(launch, inventory);
+  return {
+      .host = host,
+      .launch_spec_digest = launch.spec_digest,
+      .inventory_receipt_digest = inventory.receipt_digest,
+      .resource_binding_digest = std::move(resources.binding_digest),
+      .selected_resources = std::move(resources.devices),
+      .placement_specific = placement_specific,
+  };
+}
+
 void validate_cache_runtime_probe_snapshot(
     const CacheRuntimeProbeSnapshot& snapshot,
     const CacheRuntimeProbeContext& context) {
@@ -306,7 +320,8 @@ CacheNamespaceAuthorityReceipt CacheNamespaceAuthority::derive(
   validate_compile_inputs(request.compile_inputs, invocation);
   const std::string compile_digest =
       compile_inputs_digest(request.compile_inputs, invocation);
-  ResourceBinding resources = bind_resources(launch, inventory);
+  const CacheRuntimeProbeContext probe_context = cache_runtime_probe_context(
+      host_, launch, inventory, request.placement_specific);
   std::size_t required_accelerators = 0U;
   std::string required_vendor;
   if (invocation.resources.is_object() &&
@@ -322,24 +337,17 @@ CacheNamespaceAuthorityReceipt CacheNamespaceAuthority::derive(
     required_accelerators = accelerators.at("count").get<std::size_t>();
     required_vendor = accelerators.at("vendor").get<std::string>();
   }
-  if (required_accelerators != resources.devices.size() ||
+  if (required_accelerators != probe_context.selected_resources.size() ||
       (required_accelerators != 0U && !launch.identity.host_grant) ||
       std::ranges::any_of(
-          resources.devices, [&](const ObservedHostResource& resource) {
+          probe_context.selected_resources,
+          [&](const ObservedHostResource& resource) {
             return !resource.id.vendor ||
                    vendor_name(*resource.id.vendor) != required_vendor;
           })) {
     throw CacheNamespaceAuthorityError(
         "cache namespace selected devices disagree with invocation resources");
   }
-  CacheRuntimeProbeContext probe_context{
-      .host = host_,
-      .launch_spec_digest = launch.spec_digest,
-      .inventory_receipt_digest = inventory.receipt_digest,
-      .resource_binding_digest = resources.digest,
-      .selected_resources = resources.devices,
-      .placement_specific = request.placement_specific,
-  };
   CacheRuntimeProbeSnapshot probe = runtime_probe_.capture(probe_context);
   validate_cache_runtime_probe_snapshot(probe, probe_context);
   if (probe.runtime_closure_fingerprint !=
@@ -384,7 +392,7 @@ CacheNamespaceAuthorityReceipt CacheNamespaceAuthority::derive(
       .fencing_token = launch.identity.fencing_token,
       .launch_spec_digest = launch.spec_digest,
       .inventory_receipt_digest = inventory.receipt_digest,
-      .resource_binding_digest = resources.digest,
+      .resource_binding_digest = probe_context.resource_binding_digest,
       .runtime_probe_digest = probe_digest,
       .compile_inputs_digest = compile_digest,
       .receipt_digest = {},
