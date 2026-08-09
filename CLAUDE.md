@@ -269,11 +269,20 @@ confidence in a method that then returns a confident, wrong "absent" on the next
 squashed PR you try it on. A method that is consistently useless is safer than
 one that is occasionally right.
 
-**So do not use any of these to decide whether work reached main:**
+**`git cherry` and patch-id comparison cannot decide whether work reached main** —
+`git cherry` reported all 10 commits of a branch absent when 9 were present.
 
-- `git merge-base --is-ancestor <branch> main`
-- `git cherry` — it reported all 10 commits of a branch absent when 9 were present
-- patch-id comparison
+**`git merge-base --is-ancestor <sha> main` is usable in exactly one direction.**
+A **yes** is decisive: nothing makes a commit that never landed an ancestor of
+main. A **no** carries zero information, because a squashed branch head is never
+an ancestor by construction. So it is a free positive — try it first and fall
+through to a content check when it says no. Never quote a negative as evidence
+of absence.
+
+That refinement came from the 239-card sweep: the instruction it was given said
+flatly never to use ancestry, and it worked out the asymmetry itself and applied
+it correctly to 173 citations. The blunter rule was wrong in the cheap direction,
+which is the direction worth fixing.
 
 Use instead, in order of strength:
 
