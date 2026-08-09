@@ -1,10 +1,13 @@
 #include "trainvm/cache_namespace_authority.hpp"
 
 #include <algorithm>
+#include <concepts>
 #include <ranges>
 #include <set>
+#include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "trainvm/reflection_json.hpp"
 
@@ -63,16 +66,32 @@ std::string compile_inputs_digest(const CacheCompileInputManifest& inputs,
                                {"invocation_context", invocation_context}});
 }
 
+// Written against the members rather than against one type, because the two
+// inventory shapes a binding can be taken over -- the whole receipt and the
+// grant-time projection of it -- must not be able to drift into two
+// derivations. One body is the mechanism that makes the two overloads equal by
+// construction rather than by a test that could be deleted.
+template <typename Inventory>
+concept BindableInventory = requires(const Inventory& inventory) {
+  { inventory.resources } -> std::convertible_to<
+                                 const std::vector<ObservedHostResource>&>;
+  { inventory.inventory_digest } -> std::convertible_to<const std::string&>;
+  { inventory.topology_digest } -> std::convertible_to<const std::string&>;
+  { inventory.receipt_digest } -> std::convertible_to<const std::string&>;
+};
+
+template <BindableInventory Inventory>
 const ObservedHostResource* find_resource(
-    const HostInventoryReceipt& inventory, const HostResourceId& id) {
+    const Inventory& inventory, const HostResourceId& id) {
   const auto found = std::ranges::find_if(
       inventory.resources,
       [&](const ObservedHostResource& resource) { return resource.id == id; });
   return found == inventory.resources.end() ? nullptr : &*found;
 }
 
+template <BindableInventory Inventory>
 CacheResourceBinding bind_resources(const ResolvedLaunchSpec& launch,
-                                    const HostInventoryReceipt& inventory) {
+                                    const Inventory& inventory) {
   nlohmann::json fences = nlohmann::json::array();
   nlohmann::json resources = nlohmann::json::array();
   std::vector<ObservedHostResource> devices;
@@ -233,9 +252,29 @@ CacheResourceBinding cache_resource_binding(
   return bind_resources(launch, inventory);
 }
 
+CacheResourceBinding cache_resource_binding(
+    const ResolvedLaunchSpec& launch,
+    const GrantInventoryProjection& inventory) {
+  return bind_resources(launch, inventory);
+}
+
 CacheRuntimeProbeContext cache_runtime_probe_context(
     const HostIdentity& host, const ResolvedLaunchSpec& launch,
     const HostInventoryReceipt& inventory, bool placement_specific) {
+  CacheResourceBinding resources = bind_resources(launch, inventory);
+  return {
+      .host = host,
+      .launch_spec_digest = launch.spec_digest,
+      .inventory_receipt_digest = inventory.receipt_digest,
+      .resource_binding_digest = std::move(resources.binding_digest),
+      .selected_resources = std::move(resources.devices),
+      .placement_specific = placement_specific,
+  };
+}
+
+CacheRuntimeProbeContext cache_runtime_probe_context(
+    const HostIdentity& host, const ResolvedLaunchSpec& launch,
+    const GrantInventoryProjection& inventory, bool placement_specific) {
   CacheResourceBinding resources = bind_resources(launch, inventory);
   return {
       .host = host,

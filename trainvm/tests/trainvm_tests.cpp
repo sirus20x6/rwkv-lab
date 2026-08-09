@@ -15391,10 +15391,20 @@ trainvm::HostInventoryReceipt fixture_test_host_inventory() {
 class CountingWorkerRuntimeEvidenceAuthority final
     : public trainvm::IWorkerRuntimeEvidenceAuthority {
  public:
+  // The lookup a controller cannot perform for this fixture's launch -- it
+  // holds no host grant -- is stood in for here, so this case still exercises
+  // the wire hop and the publisher rather than stopping at the lookup. The
+  // journal-backed lookup is exercised by the rooted-deployment cases below.
   explicit CountingWorkerRuntimeEvidenceAuthority(
       trainvm::LinuxCacheEvidenceConfig config)
-      : inner_(std::move(config), [] { return fixture_test_host_inventory(); }) {
-  }
+      : inner_(std::move(config),
+               [](const trainvm::ResolvedLaunchSpec& launch) {
+                 return trainvm::grant_inventory_projection(
+                     fixture_test_host_inventory(),
+                     launch.identity.host_grant
+                         ? launch.identity.host_grant->fences
+                         : std::vector<trainvm::ResourceFence>{});
+               }) {}
 
   std::string publish(const trainvm::WorkerRuntimeEvidenceReport& report,
                       const trainvm::HostIdentity& host,
@@ -15743,18 +15753,23 @@ void test_worker_runtime_evidence_wire_hop() {
             "configuration");
     }
 
-    // ---- A configured root is not yet enough, and says so. ----------------
+    // Everything published by the successful case above. This section shares
+    // its receipt root, so "published nothing" is measured against that count
+    // rather than against zero.
+    const std::size_t published_receipts = runtime_receipt_count(receipt_root);
+
+    // ---- A configured root is enough for the deployment, not for a launch
+    //      that was never granted anything. ------------------------------
     //
-    // This is the honest half of `--cache-evidence-root`: the root is attested
-    // at construction, so the daemon starts only if it is really provisioned,
-    // but the service still holds no authority because it has no host
-    // inventory receipt for the launch. The controller receives only
-    // `inventory_digest` and `inventory_receipt_digest` over the hostd
-    // transport, and `cache_resource_binding` selects rows out of
-    // `inventory.resources`, so a digest cannot stand in for the receipt.
-    // Asserting the *message* rather than only the code is what stops that
-    // gap from being closed silently: when the grant-time receipt lands, this
-    // check has to be rewritten deliberately.
+    // This case used to assert that a rooted deployment held no authority at
+    // all; it now holds one, and the refusal moved to the only question left.
+    // The launch below runs under `legacy_process_free_test` and holds no host
+    // grant, so no grant sealed which inventory it bound against, and there is
+    // nothing to publish against -- as opposed to nowhere to publish to, which
+    // is the case above. Asserting the *message* rather than only the code is
+    // what keeps those two apart: both are FAILED_PRECONDITION, and a
+    // deployment operator sent to provision an already-correct directory has
+    // been told the wrong thing.
     trainvm::TrainVMService rooted(
         unconfigured_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
         fixture_test_host_launch_registry(*compiled.plan, unconfigured_launch),
@@ -15784,15 +15799,357 @@ void test_worker_runtime_evidence_wire_hop() {
                   ::geteuid(),
           "a configured receipt root is attested and held as the deployment's "
           "publisher configuration");
+    check(rooted.worker_runtime_evidence_ != nullptr,
+          "a deployment that configured a receipt root holds a worker runtime "
+          "evidence authority without one being handed in");
     check(rooted_open.ok() &&
               rooted_status.error_code() ==
                   grpc::StatusCode::FAILED_PRECONDITION &&
               std::string(rooted_status.error_message())
-                      .find("no grant-time host inventory receipt") !=
+                      .find("no grant-time host inventory projection") !=
                   std::string::npos,
-          "a deployment that configured a receipt root but has no grant-time "
-          "host inventory receipt refuses, naming the receipt rather than the "
-          "root");
+          "a launch that holds no host grant refuses, naming the missing "
+          "grant-time inventory rather than the receipt root");
+    check(std::string(rooted_status.error_message())
+                  .find("no configured cache evidence receipt root") ==
+              std::string::npos,
+          "the refusal does not send an operator to fix a receipt root that "
+          "is correctly provisioned");
+    check(runtime_receipt_count(receipt_root) == published_receipts,
+          "a refused report publishes no receipt of its own");
+  }
+
+  std::filesystem::remove_all(directory);
+}
+
+// The done-when, from the other side: a `trainvm serve` configured with a
+// receipt root, holding no injected authority of any kind, publishes a real
+// worker's runtime evidence for a launch that actually holds a host grant.
+//
+// Everything in the case above stops one step short of this, because its
+// launch was never granted anything. Here the grant is minted by the real
+// SQLiteHostLedger, travels through the real saga into the service's own
+// journal, and is the sole source of the answer to "which inventory did this
+// launch bind against" -- which is why the receipt's inventory digest is
+// asserted against the ledger's inventory rather than against anything the
+// test hands the service.
+void test_worker_runtime_evidence_publishes_against_its_grant() {
+  auto source = load_fixture();
+  const auto compiled = trainvm::compile_document(source);
+  check(compiled.valid(), "granted-evidence fixture compiles");
+  if (!compiled.plan) return;
+
+  const auto directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-evidence-grant-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  check(::chmod(directory.c_str(), 0700) == 0,
+        "granted-evidence fixture protects its directory");
+  const std::filesystem::path receipt_root = directory / "receipts";
+  std::filesystem::create_directories(receipt_root / "runtime");
+  std::filesystem::create_directories(receipt_root / "qualification");
+
+  constexpr std::string_view kFencedGpu =
+      "GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  constexpr std::string_view kFencedPci = "0000:01:00.0";
+  trainvm::ObservedHostResource gpu{
+      .id = {.kind = trainvm::HostResourceKind::accelerator,
+             .vendor = trainvm::HostAcceleratorVendor::nvidia,
+             .stable_id = std::string(kFencedGpu),
+             .parent_id = std::nullopt},
+      .disposition = trainvm::ResourceObservationDisposition::audited_eligible,
+      .compute_contexts = trainvm::ResourceContextDisposition::absent,
+      .graphics_contexts = trainvm::ResourceContextDisposition::absent,
+      .pci_bdf = std::string(kFencedPci),
+      .device_major = 195U,
+      .device_minor = 0U,
+      .device_nodes = {},
+      .numa_node = 0,
+      .pcie_root_id = "0000:00",
+      .fabric_clique_id = "fabric-0",
+      .total_memory_bytes = 80ULL << 30U,
+      .labels = {},
+  };
+  trainvm::HostKernelSnapshot kernel_snapshot{
+      .api_version = std::string(trainvm::kHostInventoryApiVersion),
+      .host_id = "sha256:" + std::string(64U, 'e'),
+      .boot_id = kTestBootId,
+      .broker_epoch = "broker-evidence-grant",
+      .begin_revision = "revision-evidence-grant",
+      .end_revision = "revision-evidence-grant",
+      .probes = {{.vendor = trainvm::HostAcceleratorVendor::nvidia,
+                  .disposition = trainvm::ProbeDisposition::complete,
+                  .context_details_complete = true,
+                  .detail = "deterministic granted-evidence fixture"}},
+      .resources = {gpu},
+  };
+  trainvm::FakeHostKernel kernel(std::vector<trainvm::FakeHostKernelStep>{
+      {.snapshot = std::move(kernel_snapshot), .failure = std::nullopt}});
+  const auto inventory = trainvm::capture_host_inventory(kernel);
+  auto ledger_authority =
+      std::make_shared<trainvm::HostLedgerFilesystemAuthority>(
+          trainvm::HostLedgerFilesystemAuthority::acquire({
+              .api_version =
+                  std::string(trainvm::kHostLedgerAuthorityApiVersion),
+              .ledger_path = directory / "host-resource.db",
+              .expected_owner_uid = ::geteuid(),
+              .expected_owner_gid = ::getegid(),
+              .enforcement_grade =
+                  trainvm::HostLedgerEnforcementGrade::cooperative_test,
+          }));
+  trainvm::SQLiteHostLedger ledger(ledger_authority, inventory);
+  auto host = std::make_shared<SagaHostClient>(ledger);
+  auto process = std::make_shared<SagaProcessClient>(ledger);
+  const trainvm::HostIdentity host_identity{.host_id = inventory.host_id,
+                                            .boot_id = inventory.boot_id};
+
+  std::int64_t service_now_ns = 10;
+  trainvm::WorkerLaunchTicket registry_ticket;
+  registry_ticket.node_id = "train_to_boundary";
+  registry_ticket.code_fingerprint = "sha256:" + std::string(64U, 'a');
+  registry_ticket.required_capabilities = {"worker.controls", "worker.metrics"};
+  // Carried out of the rooted scope below so the unprovisioned control can run
+  // the same worker's evidence against the same journal. The journal namespace
+  // is held exclusively for a service's lifetime, so the two cannot overlap.
+  trainvm::WorkerLaunchTicket launch;
+  trainvm::v1::WorkerRuntimeEvidence evidence;
+  bool reached_publication = false;
+  {
+  // No IWorkerRuntimeEvidenceAuthority argument. A rooted deployment building
+  // its own is the whole point of the case: nothing outside the service can
+  // supply one, because the lookup reads the service's journal.
+  trainvm::TrainVMService service(
+      directory / "journal.db",
+      trainvm::AdapterRegistry(fixture_adapter_profiles()),
+      fixture_test_host_launch_registry(*compiled.plan, registry_ticket),
+      host_identity, [&service_now_ns] { return test_time(service_now_ns); },
+      trainvm::HostGrantEnforcement::required,
+      trainvm::TrainingComponentRegistry({}), host, process,
+      "unix:/tmp/trainvm-evidence-grant-saga.sock", nullptr,
+      trainvm::SqliteAuthorityEnforcementGrade::cooperative_test, {},
+      std::filesystem::path(std::string(trainvm::kInstalledRecipeProfilePath)),
+      nullptr, receipt_root);
+  check(service.worker_runtime_evidence_ != nullptr,
+        "a rooted deployment builds its own worker runtime evidence "
+        "authority");
+
+  const std::string run_id = "evidence-grant-run";
+  trainvm::Controller controller(*compiled.plan, service.journal_, run_id);
+  controller.create_queued(
+      adapter_locked_submission(*compiled.plan, service.adapter_registry_));
+  const auto acquired = service.reconcile_once(run_id);
+  const auto lease = service.journal_.active_lease(
+      compiled.plan->experiment.spec.workspace.concurrency_key, test_time(10));
+  check(acquired.disposition == trainvm::ReconcileDisposition::lease_acquired &&
+            lease,
+        "granted-evidence fixture holds a logical lease");
+  if (!lease) {
+    std::filesystem::remove_all(directory);
+    return;
+  }
+  const auto request = trainvm::build_resource_bundle_request({
+      .journal_id = service.journal_.journal_id(),
+      .plan_hash = compiled.plan->plan_hash,
+      .run_id = run_id,
+      .resources = compiled.plan->experiment.spec.resources,
+      .lease = *lease,
+  });
+  const auto granted =
+      service.host_grant_saga_->reconcile_request(request, test_time(10));
+  (void)granted;
+  const auto saga = service.journal_.host_grant_saga(request.request_id);
+  check(saga && saga->grant && saga->grant->inventory_projection.has_value(),
+        "the minted grant seals the inventory it fenced against");
+  if (!saga || !saga->grant || !saga->grant->inventory_projection) {
+    std::filesystem::remove_all(directory);
+    return;
+  }
+  check(saga->grant->inventory_projection->receipt_digest ==
+                inventory.receipt_digest &&
+            saga->grant->inventory_projection->resources.size() ==
+                saga->grant->fences.size(),
+        "the sealed projection names the ledger's inventory and carries "
+        "exactly the fenced rows");
+
+  trainvm::Controller worker(*compiled.plan, service.journal_, run_id);
+  worker.recover();
+  launch = worker.prepare_worker_launch(
+      {.code_fingerprint = registry_ticket.code_fingerprint,
+       .required_capabilities = registry_ticket.required_capabilities},
+      test_time(10));
+  (void)bind_test_worker_launch(worker, launch, 10, host_identity);
+  check(launch.host_grant.has_value() && !launch.host_grant->fences.empty(),
+        "the launch carries the host grant claim it was prepared under");
+  prime_test_service_launch(service, launch);
+  trainvm::TrainVMService::WorkerConnection connection;
+  const grpc::Status open =
+      service.open_worker_connection(wire_hello_for(launch), connection);
+  check(open.ok(), "the granted worker's connection opens");
+  if (!open.ok()) {
+    std::filesystem::remove_all(directory);
+    return;
+  }
+
+  // Fenced to exactly one device, so this namespace IS placement specific and
+  // the measured device identity has to be the fenced one. That is derived by
+  // the authority from the projection's rows -- a launch whose projection went
+  // missing could not reach this assertion at all.
+  evidence.set_api_version("trainvm.worker-runtime-evidence/v1");
+  evidence.set_run_id(connection.identity.run_id);
+  evidence.set_node_id(connection.identity.node_id);
+  evidence.set_attempt_id(connection.identity.attempt_id);
+  evidence.set_launch_nonce(connection.identity.launch_nonce);
+  evidence.set_concurrency_key(connection.identity.concurrency_key);
+  evidence.set_lease_id(connection.identity.lease_id);
+  evidence.set_fencing_token(connection.identity.fencing_token);
+  evidence.set_compute_device_vendor("nvidia");
+  evidence.set_compute_architecture("sm_120");
+  evidence.set_compute_device_uuid(std::string(kFencedGpu));
+  evidence.set_compute_device_pci_address(std::string(kFencedPci));
+  evidence.set_driver_version("610.43.03");
+  auto* const version = evidence.add_runtime_versions();
+  version->set_name("cuda");
+  version->set_version("13.1");
+  evidence.set_runtime_closure_fingerprint("sha256:" + std::string(64U, 'd'));
+  evidence.set_host_abi_digest("sha256:" + std::string(64U, '4'));
+  evidence.set_compute_compatibility_digest("sha256:" + std::string(64U, '5'));
+
+  // A device the launch was not fenced to is refused, and refused by the
+  // *projection's* rows: this is the assertion that would go green if the
+  // projection were replaced by an empty one or by a whole-host receipt.
+  {
+    auto foreign = evidence;
+    foreign.set_compute_device_uuid(
+        "GPU-ffffffff-ffff-ffff-ffff-ffffffffffff");
+    const grpc::Status status =
+        service.record_worker_runtime_evidence(foreign, connection);
+    check(!status.ok() && runtime_receipt_count(receipt_root) == 0U,
+          "a worker claiming a device its grant did not fence publishes "
+          "nothing");
+  }
+
+  const grpc::Status published =
+      service.record_worker_runtime_evidence(evidence, connection);
+  check(published.ok() && runtime_receipt_count(receipt_root) == 1U,
+        "a rooted deployment publishes a granted worker's runtime evidence to "
+        "an immutable receipt");
+  if (!published.ok()) {
+    std::cerr << "  published status: " << published.error_message() << "\n";
+  }
+  nlohmann::json receipt;
+  for (const auto& entry :
+       std::filesystem::directory_iterator(receipt_root / "runtime")) {
+    std::ifstream stream(entry.path());
+    std::ostringstream buffer;
+    buffer << stream.rdbuf();
+    receipt = nlohmann::json::parse(buffer.str());
+  }
+  const nlohmann::json probe =
+      receipt.value("snapshot", nlohmann::json::object());
+  check(probe.value("inventory_receipt_digest", std::string{}) ==
+            inventory.receipt_digest,
+        "the published receipt names the inventory the grant sealed, not one "
+        "the service read for itself");
+  check(probe.value("compute_device_uuid", std::string{}) ==
+                std::string(kFencedGpu) &&
+            probe.value("host_id", std::string{}) == host_identity.host_id,
+        "the receipt carries the fenced device under the authority's own host "
+        "identity");
+  reached_publication = published.ok();
+
+  // ---- The lookup answers one grant, or nothing. ---------------------
+  //
+  // Everything above goes through the happy path, where the claim and the
+  // durable grant agree. These drive the lookup directly (the suite compiles
+  // with -fno-access-control) because each is a disagreement that a live saga
+  // cannot be made to produce on demand, and each would otherwise publish
+  // against an inventory this launch never bound to.
+  {
+    const std::string launch_id = launch.run_id + ":worker-launch:" +
+                                  launch.node_id + ":" + launch.attempt_id;
+    const auto binding = service.journal_.launch_binding(launch_id);
+    check(binding.has_value(), "the granted launch has a durable binding");
+    if (binding) {
+      check(service.granted_inventory_projection(*binding).has_value(),
+            "the durable binding resolves to its grant's sealed inventory");
+
+      trainvm::ResolvedLaunchSpec ungranted = *binding;
+      ungranted.identity.host_grant.reset();
+      check(!service.granted_inventory_projection(ungranted).has_value(),
+            "a launch holding no host grant resolves to no inventory rather "
+            "than to the current one");
+
+      trainvm::ResolvedLaunchSpec unknown_request = *binding;
+      unknown_request.identity.host_grant->request_id = "no-such-request";
+      check(!service.granted_inventory_projection(unknown_request).has_value(),
+            "a claim naming no durable saga resolves to no inventory");
+
+      const auto refused_naming = [&](const trainvm::ResolvedLaunchSpec& spec,
+                                      std::string_view expected,
+                                      const char* label) {
+        bool named = false;
+        try {
+          (void)service.granted_inventory_projection(spec);
+        } catch (const trainvm::WorkerRuntimeEvidenceError& error) {
+          named = std::string(error.what()).find(expected) !=
+                  std::string::npos;
+        }
+        check(named, label);
+      };
+      trainvm::ResolvedLaunchSpec other_grant = *binding;
+      other_grant.identity.host_grant->grant_digest =
+          "sha256:" + std::string(64U, 'f');
+      refused_naming(other_grant, "grant digest sealed into this launch",
+                     "a saga entry that is not the grant this launch sealed "
+                     "is refused by name, not substituted");
+      trainvm::ResolvedLaunchSpec other_fences = *binding;
+      other_fences.identity.host_grant->fences.clear();
+      refused_naming(other_fences, "not this launch's",
+                     "a projection that does not carry this launch's own "
+                     "fenced rows is refused by name");
+    }
+  }
+  }
+
+  // ---- And the other half of the done-when, on this same granted launch:
+  //      strip the deployment's receipt root and it refuses. ---------------
+  //
+  // Same journal, same grant, same worker: the only difference is the
+  // provisioning. Sharing everything else is what makes this a control rather
+  // than a second unrelated scenario.
+  if (reached_publication) {
+    trainvm::TrainVMService unrooted(
+        directory / "journal.db",
+        trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        fixture_test_host_launch_registry(*compiled.plan, registry_ticket),
+        host_identity, [&service_now_ns] { return test_time(service_now_ns); },
+        trainvm::HostGrantEnforcement::required,
+        trainvm::TrainingComponentRegistry({}), host, process,
+        "unix:/tmp/trainvm-evidence-grant-saga.sock", nullptr,
+        trainvm::SqliteAuthorityEnforcementGrade::cooperative_test, {},
+        std::filesystem::path(
+            std::string(trainvm::kInstalledRecipeProfilePath)),
+        nullptr, std::nullopt);
+    check(unrooted.worker_runtime_evidence_ == nullptr,
+          "a deployment with no receipt root holds no authority even when its "
+          "launches are granted");
+    prime_test_service_launch(unrooted, launch);
+    trainvm::TrainVMService::WorkerConnection unrooted_connection;
+    const grpc::Status unrooted_open = unrooted.open_worker_connection(
+        wire_hello_for(launch), unrooted_connection);
+    const grpc::Status refused = unrooted.record_worker_runtime_evidence(
+        evidence, unrooted_connection);
+    check(unrooted_open.ok() &&
+              refused.error_code() == grpc::StatusCode::FAILED_PRECONDITION &&
+              std::string(refused.error_message())
+                      .find("no configured cache evidence receipt root") !=
+                  std::string::npos,
+          "an unprovisioned deployment refuses a fully granted worker's "
+          "evidence rather than accepting it");
+    check(runtime_receipt_count(receipt_root) == 1U,
+          "the unprovisioned deployment published nothing of its own");
   }
 
   std::filesystem::remove_all(directory);
@@ -15954,6 +16311,8 @@ int main() {
        test_universal_step_zero_gate_orders_controller_mutation},
       {"worker_runtime_evidence_wire_hop",
        test_worker_runtime_evidence_wire_hop},
+      {"worker_runtime_evidence_publishes_against_its_grant",
+       test_worker_runtime_evidence_publishes_against_its_grant},
       {"cache_evidence_root_provisioning",
        test_cache_evidence_root_provisioning},
   };

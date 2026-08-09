@@ -86,6 +86,14 @@ struct CacheResourceBinding {
 
 [[nodiscard]] CacheResourceBinding cache_resource_binding(
     const ResolvedLaunchSpec& launch, const HostInventoryReceipt& inventory);
+// The same binding, taken over the grant-time projection of that receipt onto
+// the rows the launch fenced. It reads only fenced rows either way, so the two
+// overloads return equal bindings for the same launch -- which is what lets a
+// controller that can only obtain the projection derive the same namespace an
+// inventory holder would.
+[[nodiscard]] CacheResourceBinding cache_resource_binding(
+    const ResolvedLaunchSpec& launch,
+    const GrantInventoryProjection& inventory);
 
 // The authority's own answer to "which observation would this launch need".
 // Every field is derived from host identity, the sealed launch, and the
@@ -94,6 +102,9 @@ struct CacheResourceBinding {
 [[nodiscard]] CacheRuntimeProbeContext cache_runtime_probe_context(
     const HostIdentity& host, const ResolvedLaunchSpec& launch,
     const HostInventoryReceipt& inventory, bool placement_specific);
+[[nodiscard]] CacheRuntimeProbeContext cache_runtime_probe_context(
+    const HostIdentity& host, const ResolvedLaunchSpec& launch,
+    const GrantInventoryProjection& inventory, bool placement_specific);
 
 // Shared semantic validator used both before immutable receipt publication and
 // after a probe capture, so malformed authority observations cannot poison a

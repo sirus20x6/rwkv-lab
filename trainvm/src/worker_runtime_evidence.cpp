@@ -183,8 +183,7 @@ std::string publish_worker_runtime_evidence(
 }
 
 LinuxWorkerRuntimeEvidenceAuthority::LinuxWorkerRuntimeEvidenceAuthority(
-    LinuxCacheEvidenceConfig config,
-    std::function<HostInventoryReceipt()> inventory)
+    LinuxCacheEvidenceConfig config, InventoryLookup inventory)
     : publisher_(std::move(config)), inventory_(std::move(inventory)) {
   if (!inventory_) {
     fail("worker runtime evidence authority requires an inventory source");
@@ -194,7 +193,16 @@ LinuxWorkerRuntimeEvidenceAuthority::LinuxWorkerRuntimeEvidenceAuthority(
 std::string LinuxWorkerRuntimeEvidenceAuthority::publish(
     const WorkerRuntimeEvidenceReport& report, const HostIdentity& host,
     const ResolvedLaunchSpec& launch) {
-  const HostInventoryReceipt inventory = inventory_();
+  const std::optional<GrantInventoryProjection> granted = inventory_(launch);
+  if (!granted) {
+    // Not `fail`: this one is a deployment gap rather than a worker fault, and
+    // the caller has to answer it with a different status code. See the type's
+    // declaration.
+    throw WorkerRuntimeEvidenceUnavailableError(
+        "authority holds no grant-time host inventory projection for this "
+        "launch to publish worker runtime evidence against");
+  }
+  const GrantInventoryProjection& inventory = *granted;
   // Placement specificity is derived, never configured and never claimed. A
   // launch fenced to exactly one device is the only shape whose measured UUID
   // and PCI address are admissible at all -- the shared validator refuses a

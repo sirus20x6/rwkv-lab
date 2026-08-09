@@ -323,12 +323,38 @@ void exercise(const WorkerRuntimeEvidenceReport& report, bool accelerated,
   const ResolvedLaunchSpec resolved_launch =
       launch(launches, host_inventory, closure, accelerated);
   const HostIdentity host{.host_id = kHost, .boot_id = std::string(kBoot)};
+  // What the controller actually holds. It never sees a whole-host receipt --
+  // the hostd transport carries digests -- so the binding is taken over the
+  // grant-time projection of the receipt onto the rows this launch fenced.
+  const std::vector<ResourceFence> fences =
+      resolved_launch.identity.host_grant
+          ? resolved_launch.identity.host_grant->fences
+          : std::vector<ResourceFence>{};
+  const std::optional<GrantInventoryProjection> projection =
+      grant_inventory_projection(host_inventory, fences);
+  require(projection.has_value(),
+          label + ": a receipt projects onto the rows its grant fenced");
   const WorkerRuntimeEvidenceBinding binding{
       .host = host,
       .launch = resolved_launch,
-      .inventory = host_inventory,
+      .inventory = *projection,
       .placement_specific = accelerated,
   };
+  // The property the whole design rests on, asserted rather than argued: the
+  // projection is not an approximation of the receipt for this purpose. A
+  // controller holding only the projection derives the byte-identical probe
+  // context an inventory holder would, so there is exactly one answer to
+  // "which inventory did this launch bind against" and not two.
+  require(cache_runtime_probe_context(host, resolved_launch, *projection,
+                                      accelerated) ==
+              cache_runtime_probe_context(host, resolved_launch,
+                                          host_inventory, accelerated),
+          label + ": the probe context over the projection equals the one "
+                  "over the receipt it was projected from");
+  require(cache_resource_binding(resolved_launch, *projection).binding_digest ==
+              cache_resource_binding(resolved_launch, host_inventory)
+                  .binding_digest,
+          label + ": the resource binding digest is unchanged by projection");
   const CacheNamespaceAuthorityRequest request{
       .invocation = worker_invocation,
       .launch = resolved_launch,

@@ -1,5 +1,7 @@
 #include "trainvm/host_ledger.hpp"
 #include "trainvm/hostd_linux_process_policy_kernel.hpp"
+#include "trainvm/document.hpp"
+#include "trainvm/reflection_json.hpp"
 
 #include <sqlite3.h>
 
@@ -23,6 +25,16 @@
 namespace {
 
 using namespace trainvm;
+
+// The same domain-separated digest the ledger seals a grant with. It is
+// file-local there, so re-deriving one here is the only way to re-seal a grant
+// this file edits; getting it wrong shows up immediately as a refused grant.
+std::string grant_receipt_digest(const nlohmann::json& canonical) {
+  std::string material("trainvm.host-resource-grant/v1");
+  material.push_back('\0');
+  material += canonical.dump();
+  return "sha256:" + sha256_hex(material);
+}
 
 void require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
@@ -458,6 +470,63 @@ void basic_replay_release_and_reopen() {
     require(bundle_request_result_from_json(bundle_request_result_json(first)) ==
                 first,
             "granted result has one strict canonical transport codec");
+
+    // ---- The grant seals which inventory it fenced against. -------------
+    //
+    // This is the controller's only copy: everything it receives over the
+    // hostd transport is digests, and `cache_resource_binding` selects rows,
+    // not digests. So the answer has to ride inside the grant, and has to be
+    // exactly this grant's rows.
+    require(first.grant->inventory_projection.has_value(),
+            "a minted grant seals the inventory rows it fenced");
+    require(first.grant->inventory_projection->receipt_digest ==
+                    observed.receipt_digest &&
+                first.grant->inventory_projection->inventory_digest ==
+                    observed.inventory_digest &&
+                first.grant->inventory_projection->resources.size() ==
+                    first.grant->fences.size(),
+            "the sealed projection names the ledger's own inventory and "
+            "carries exactly the fenced rows");
+    validate_grant_inventory_projection_against_fences(
+        *first.grant->inventory_projection, first.grant->fences);
+
+    // A grant recorded before this field existed still encodes, decodes, and
+    // recomputes the digest it was sealed with -- the member is omitted from
+    // the document when absent rather than written as null. Without that,
+    // every stored ledger becomes unreadable on upgrade.
+    {
+      ResourceBundleGrant legacy = *first.grant;
+      legacy.inventory_projection = std::nullopt;
+      auto canonical = encode_json(legacy);
+      canonical.erase("receipt_digest");
+      require(!canonical.contains("inventory_projection"),
+              "an absent projection is omitted from the encoded grant, not "
+              "written as a null");
+      legacy.receipt_digest = grant_receipt_digest(canonical);
+      require(resource_bundle_grant_from_json(
+                  resource_bundle_grant_json(legacy)) == legacy,
+              "a grant carrying no projection round-trips its codec");
+      require(legacy.receipt_digest != first.grant->receipt_digest,
+              "carrying a projection is inside the grant's own digest");
+    }
+
+    // And a projection that is not this grant's cannot travel as an attested
+    // part of it. Asserting the message, because a grant is refused by a
+    // dozen other clauses with the same exception type.
+    {
+      ResourceBundleGrant grafted = *first.grant;
+      grafted.inventory_projection->resources.clear();
+      bool named = false;
+      try {
+        (void)resource_bundle_grant_json(grafted);
+      } catch (const HostLedgerError& error) {
+        named = std::string(error.what()).find("invalid inventory projection") !=
+                std::string::npos;
+      }
+      require(named,
+              "a grant carrying a projection that is not its own is refused "
+              "by name rather than by a generic grant fault");
+    }
     const auto sealed_release = release_request(*first.grant, "release-codec");
     require(resource_release_request_from_json(
                 resource_release_request_json(sealed_release)) == sealed_release,

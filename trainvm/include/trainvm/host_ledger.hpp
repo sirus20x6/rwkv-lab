@@ -89,6 +89,22 @@ struct ResourceBundleGrant final {
   std::string boot_id;
   std::string broker_epoch;
   std::vector<ResourceFence> fences;
+  // The inventory rows this grant fenced, as they read at grant time.
+  //
+  // Optional, and that is the compatibility mechanism rather than an
+  // afterthought: a reflected std::optional member is omitted from the encoded
+  // document when absent and is omissible on decode, so a grant recorded
+  // before this field existed still decodes, and -- because grant_digest_json
+  // only emits the key when the value is present -- still recomputes its
+  // original receipt_digest. Nothing needs a v2 grant api_version, and no
+  // stored ledger becomes unreadable.
+  //
+  // It is also legitimately absent on a live host: the producer omits a
+  // projection that would not fit maximum_grant_inventory_projection_bytes
+  // rather than failing the grant over it, because a grant that cannot be
+  // delivered stops a run while a missing projection only refuses a cache
+  // evidence publication -- with a message that names what is missing.
+  std::optional<GrantInventoryProjection> inventory_projection;
   std::int64_t granted_boottime_ns{};
   std::int64_t granted_wall_time_ns{};
   std::string previous_receipt_digest;
