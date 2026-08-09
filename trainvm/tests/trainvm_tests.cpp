@@ -14380,15 +14380,27 @@ void test_universal_step_zero_gate_orders_controller_mutation() {
   // real component registry: the controller reads the evaluator's metrics and
   // descriptor digest out of it when it validates an eval-examples publication,
   // so a synthetic stand-in would prove nothing about this family.
-  const nlohmann::json hf_training = recipes.at("recipes")
-                                         .at(0)
-                                         .at("template_document")
-                                         .at("spec")
-                                         .at("workflow")
-                                         .at("nodes")
-                                         .at("train")
-                                         .at("invoke")
-                                         .at("training");
+  nlohmann::json hf_training = recipes.at("recipes")
+                                   .at(0)
+                                   .at("template_document")
+                                   .at("spec")
+                                   .at("workflow")
+                                   .at("nodes")
+                                   .at("train")
+                                   .at("invoke")
+                                   .at("training");
+  // The recipe names one operator's absolute host paths, which do not exist on
+  // a CI runner, and path-typed component configuration is resolved for real.
+  // Repoint the three of them at this source tree, exactly as
+  // recipe_profile_tests.cpp does; nothing here reads their contents.
+  const std::filesystem::path source_root =
+      std::filesystem::canonical(std::filesystem::path(TRAINVM_SOURCE_ROOT));
+  hf_training["components"]["model_loader"]["configuration"]["model_path"] =
+      source_root.string();
+  hf_training["components"]["data"]["configuration"]["dataset_root"] =
+      source_root.string();
+  hf_training["components"]["trainability"]["configuration"]
+             ["target_manifest_path"] = (source_root / "README.md").string();
   fixture["spec"]["workflow"]["nodes"]["train_to_boundary"]["invoke"]
          ["training"] = hf_training;
   fixture["spec"]["workflow"]["nodes"]["resume_training"]["invoke"]

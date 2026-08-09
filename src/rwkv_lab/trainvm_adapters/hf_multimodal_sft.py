@@ -67,9 +67,6 @@ _MULTIMODAL_TENSOR_KEYS = frozenset(
 )
 _ENGINE_STATE_SCHEMA = "rwkv-lab.hf-multimodal-sft-state.v1"
 _CAPTION_PART_SCHEMA = "trainvm.caption-triplet.v1"
-# The universal eval-examples schema forbids line breaks inside a text part, so
-# a caption is folded onto one line rather than dropped. Only whitespace is
-# touched; no character of the evidence itself is rewritten or truncated.
 _IMAGE_MEDIA_TYPES = MappingProxyType(
     {
         ".bmp": "image/bmp",
@@ -2225,8 +2222,11 @@ def _source_image_path(data: HFDataRuntime, sample: ProcessedSample) -> Path | N
 def _caption_evidence_part(role: str, text: str) -> Any:
     """Return one typed eval-examples part carrying a caption.
 
-    An empty generation is real evidence and must survive to the controller, so
-    it becomes a structured part rather than an invalid empty text part.
+    The universal eval-examples schema forbids line breaks inside a text part,
+    so a caption is folded onto one line rather than dropped: only whitespace is
+    touched, and no character of the evidence is rewritten or truncated. An
+    empty generation is itself real evidence and must survive to the controller,
+    so it becomes a structured part rather than an invalid empty text part.
     """
 
     from rwkv_lab.trainvm_worker import EvalEvidencePart
