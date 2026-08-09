@@ -210,6 +210,67 @@ signal for a human reader: an "all checks complete" verdict on a branch whose
 last commit is seconds old is suspect on its face, because CI cannot have
 finished that fast.
 
+### This repository squash-merges, so ancestry cannot answer "did this land"
+
+Squash is the only strategy the repository allows. Set 2026-08-09:
+
+```
+allow_squash_merge   = true
+allow_merge_commit   = false
+allow_rebase_merge   = false
+delete_branch_on_merge = true
+```
+
+Before that all three were enabled and nothing selected between them, so the
+history is **mixed**: of the last 25 commits on main, 22 have one parent and 3
+have two. Existing merge commits are not going anywhere; the setting only fixes
+the shape of everything from here on.
+
+Squash was chosen because it was already the de facto rule — six of seven PRs on
+the evening this was noticed, and the overwhelming majority since — and because
+it keeps main linear and readable at this PR volume. The cost is real and worth
+stating plainly: **a squashed branch head is never an ancestor of main**, by
+construction. That cost is paid either way; what the setting buys is that it is
+now paid *uniformly*.
+
+That uniformity is the entire point, and it is worth more than it sounds.
+"Ancestry never works here" is a rule you can remember and apply safely.
+"Ancestry works for some PRs and not others, with nothing on the card saying
+which" is a rule nobody applies correctly — and it fails in the harmful
+direction. Running `git merge-base --is-ancestor` on one of the three
+merge-committed PRs returns ANCESTOR, correctly. That true positive teaches
+confidence in a method that then returns a confident, wrong "absent" on the next
+squashed PR you try it on. A method that is consistently useless is safer than
+one that is occasionally right.
+
+**So do not use any of these to decide whether work reached main:**
+
+- `git merge-base --is-ancestor <branch> main`
+- `git cherry` — it reported all 10 commits of a branch absent when 9 were present
+- patch-id comparison
+
+Use instead, in order of strength:
+
+1. **A merged PR number** — `gh pr view <n> --json state`. Decisive under any
+   strategy, needs no judgement. When a card records completion it should cite
+   this, or the merge commit on main, never a branch-local sha.
+2. **A distinctive identifier from the diff, grepped against `origin/main`.**
+   Take the identifier from `git show <sha> -- <path> | grep '^+'`, never from a
+   card's prose description of the change — prose paraphrases, and grepping an
+   invented name returns a clean-looking zero.
+   Guard the result by also grepping a subsystem-level term that would survive a
+   refactor. If the neighbourhood is present in quantity and your identifier is
+   zero, the zero means something. If the neighbourhood count has *grown* past
+   what the commit itself contained, the work was **superseded under another
+   name** — porting it would duplicate a live mechanism, not restore a lost one.
+3. **Added file paths** — only for commits that add files, and it fails
+   optimistically: one commit had all five of its files on main and none of its
+   mechanism.
+
+The cost of not having this written down was five days: three cards recorded
+work as complete, citing shas, that had never reached main, and nobody noticed
+because the obvious check silently does not work here.
+
 ## Running the gates locally
 
 ```bash
