@@ -35,12 +35,28 @@ void require(bool condition, std::string_view message) {
     throw std::runtime_error(std::string(message));
 }
 
+// Every rejection in this subsystem is a HostdSessionChallengeRejected, so
+// matching on the type alone cannot tell "rejected for the reason I injected"
+// from "rejected for some other reason entirely" -- a stranger is absorbed and
+// the run aborts later at an unrelated boundary. See the same helper in
+// hostd_transport_tests.cpp and card-852efdc4. A case that expects a NAMED
+// injected fault passes `expected_fragment` and only accepts a throw whose
+// what() contains it; cases that only care that something was refused leave the
+// fragment empty and keep type-only matching.
 template <typename Exception, typename Callable>
-void require_throws(Callable &&callable, std::string_view message) {
+void require_throws(Callable &&callable, std::string_view message,
+                    std::string_view expected_fragment = {}) {
   try {
     std::forward<Callable>(callable)();
-  } catch (const Exception &) {
-    return;
+  } catch (const Exception &error) {
+    const std::string actual(error.what() != nullptr ? error.what() : "");
+    if (expected_fragment.empty() ||
+        actual.find(expected_fragment) != std::string::npos)
+      return;
+    throw std::runtime_error(std::string(message) +
+                             ": expected a failure containing \"" +
+                             std::string(expected_fragment) +
+                             "\" but caught \"" + actual + "\"");
   }
   throw std::runtime_error(std::string(message));
 }
@@ -215,7 +231,8 @@ void nonce_handles_eintr_short_reads_domains_and_poison() {
   HostdLinuxCSPRNGNonceSource throwing(throwing_kernel, 4U);
   require_throws<HostdSessionChallengeRejected>(
       [&] { (void)throwing.next_hex_256("challenge_id"); },
-      "kernel seam exceptions are normalized and poison entropy");
+      "kernel seam exceptions are normalized and poison entropy",
+      "Linux getrandom authority is unavailable");
 }
 
 void nonce_is_creator_thread_bound_before_kernel_or_mutex_state() {
@@ -275,7 +292,8 @@ void boottime_is_boot_bound_high_water_poisoned_and_thread_bound() {
   failed_kernel->clock_fail = true;
   require_throws<HostdSessionChallengeRejected>(
       [&] { (void)failed_time.now(); },
-      "CLOCK_BOOTTIME syscall failure is normalized and poisoned");
+      "CLOCK_BOOTTIME syscall failure is normalized and poisoned",
+      "Linux boottime observation is invalid or torn");
 
   auto thread_kernel = std::make_shared<FakeLinuxKernel>();
   HostdLinuxBoottimeSource thread_bound(std::string(kBootId), thread_kernel);
@@ -379,7 +397,8 @@ void peer_observer_binds_credentials_and_rejects_torn_or_reused_pid() {
   kernel->throw_process = true;
   require_throws<HostdSessionChallengeRejected>(
       [&] { (void)observer.observe(credentials()); },
-      "peer kernel seam exceptions are normalized");
+      "peer kernel seam exceptions are normalized",
+      "Linux peer process observation is unavailable");
 }
 
 void socket_factory_binds_kernel_credentials_and_explicit_grade() {
@@ -459,7 +478,8 @@ void socket_factory_binds_kernel_credentials_and_explicit_grade() {
             HostdLinuxSessionEnforcementGrade::
                 cooperative_namespace_observation);
       },
-      "socket factory normalizes process-observer seam exceptions");
+      "socket factory normalizes process-observer seam exceptions",
+      "Linux socket peer process observation is unavailable");
   kernel->throw_process = false;
   require(::close(strict_sockets[0]) == 0 &&
               ::close(strict_sockets[1]) == 0,

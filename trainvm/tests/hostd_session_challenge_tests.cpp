@@ -60,12 +60,28 @@ void require(bool condition, std::string_view message) {
     throw std::runtime_error(std::string(message));
 }
 
+// Every rejection in this subsystem is a HostdSessionChallengeRejected, so
+// matching on the type alone cannot tell "rejected for the reason I injected"
+// from "rejected for some other reason entirely" — a stranger is absorbed and
+// the run aborts later at an unrelated boundary. See the same helper in
+// hostd_transport_tests.cpp and card-852efdc4. A case that expects a NAMED
+// injected fault passes `expected_fragment` and only accepts a throw whose
+// what() contains it; cases that only care that something was refused leave the
+// fragment empty and keep type-only matching.
 template <typename Exception, typename Callable>
-void require_throws(Callable &&callable, std::string_view message) {
+void require_throws(Callable &&callable, std::string_view message,
+                    std::string_view expected_fragment = {}) {
   try {
     std::forward<Callable>(callable)();
-  } catch (const Exception &) {
-    return;
+  } catch (const Exception &error) {
+    const std::string actual(error.what() != nullptr ? error.what() : "");
+    if (expected_fragment.empty() ||
+        actual.find(expected_fragment) != std::string::npos)
+      return;
+    throw std::runtime_error(std::string(message) +
+                             ": expected a failure containing \"" +
+                             std::string(expected_fragment) +
+                             "\" but caught \"" + actual + "\"");
   }
   throw std::runtime_error(std::string(message));
 }
@@ -705,7 +721,8 @@ void stale_failed_and_tampered_attestation_fail_closed() {
           (void)fixture.verifier->verify(
               hostd_session_challenge_response(challenge), peer());
         },
-        "tampered journal evidence digest is rejected");
+        "tampered journal evidence digest is rejected",
+        "journal fence evidence is stale, tampered, or inexact");
   }
   {
     Fixture fixture;
@@ -716,14 +733,16 @@ void stale_failed_and_tampered_attestation_fail_closed() {
           (void)fixture.verifier->verify(
               hostd_session_challenge_response(challenge), peer());
         },
-        "journal attestor failure is normalized and fails closed");
+        "journal attestor failure is normalized and fails closed",
+        "journal fence attestation is unavailable");
     fixture.journal->fail = false;
     require_throws<HostdSessionChallengeRejected>(
         [&] {
           (void)fixture.verifier->verify(
               hostd_session_challenge_response(challenge), peer());
         },
-        "attestor failure still consumes the challenge");
+        "attestor failure still consumes the challenge",
+        "challenge is unknown, expired, or already consumed");
   }
 }
 
@@ -749,13 +768,15 @@ void bounds_and_injected_authorities_fail_closed() {
     fixture.nonce->malformed_next = true;
     require_throws<HostdSessionChallengeRejected>(
         [&] { (void)fixture.issue(); },
-        "malformed nonce source output is rejected");
+        "malformed nonce source output is rejected",
+        "challenge nonce source returned malformed entropy");
   }
   {
     Fixture fixture;
     fixture.time->fail = true;
     require_throws<HostdSessionChallengeRejected>(
-        [&] { (void)fixture.issue(); }, "time-source failure is normalized");
+        [&] { (void)fixture.issue(); }, "time-source failure is normalized",
+        "challenge time authority is unavailable");
   }
   {
     auto nonce = std::make_shared<DeterministicNonceSource>();
@@ -774,7 +795,8 @@ void bounds_and_injected_authorities_fail_closed() {
     const std::size_t entropy_calls = nonce->counter;
     require_throws<HostdSessionChallengeRejected>(
         [&] { (void)bounded.issue(peer(), claim()); },
-        "outstanding challenge capacity is bounded");
+        "outstanding challenge capacity is bounded",
+        "hostd session challenge capacity is exhausted");
     require(nonce->counter == entropy_calls,
             "capacity rejection occurs before nonce generation");
     time->value.boottime_ns = 3'000'000'000LL;
