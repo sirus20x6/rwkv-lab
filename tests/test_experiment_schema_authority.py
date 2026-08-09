@@ -361,3 +361,184 @@ def test_documents_using_the_recovered_vocabulary_validate() -> None:
             "fingerprint": "manifest_sha256",
         },
     )
+
+
+# --- The gate's scope, not just the schema's content ---------------------
+#
+# The three drifts above were fixed. They survived as long as they did because
+# scripts/validate_experiment_documents.py looked at three example documents and
+# none of the recipe-profile catalogs, then printed PASSED. The schema and the
+# authority disagreed and the check that would have noticed was pointed
+# somewhere else, so the checks below are about where the gate looks rather than
+# about what the schema says.
+
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+
+GATE = REPOSITORY / "scripts/validate_experiment_documents.py"
+EXAMPLES = REPOSITORY / "docs/experiment-vm/examples"
+RECIPE_PROFILE_GLOB = "*.recipe-profiles.v1.json"
+
+
+def _run_gate(root: pathlib.Path) -> subprocess.CompletedProcess:
+    """Run the real gate with `root` as its working directory.
+
+    The gate resolves docs/experiment-vm relative to the cwd but imports
+    scripts.gate_verdict relative to its own location, so a copied docs tree is
+    enough to exercise it against mutated inputs without touching the
+    repository.
+    """
+    return subprocess.run(
+        [sys.executable, str(GATE)], cwd=root,
+        capture_output=True, text=True, check=False)
+
+
+def _sandbox(tmp_path: pathlib.Path) -> pathlib.Path:
+    root = tmp_path / "repository"
+    (root / "docs").mkdir(parents=True)
+    shutil.copytree(REPOSITORY / "docs/experiment-vm",
+                    root / "docs/experiment-vm")
+    return root
+
+
+def test_the_gate_validates_every_recipe_profile_catalog_on_disk() -> None:
+    """Scope stated over the tree, not over a list.
+
+    A hand-maintained list of catalogs would drift exactly as the schema enums
+    did, one level up: a new catalog would be added, nobody would remember the
+    list, and the gate would keep printing a confident PASSED about a set that
+    no longer matched the directory. So the property asserted is set equality
+    between what the tree holds and what the gate says it read.
+    """
+    on_disk = sorted(EXAMPLES.rglob(RECIPE_PROFILE_GLOB))
+    assert on_disk, (
+        f"no {RECIPE_PROFILE_GLOB} under {EXAMPLES}; this test would pass "
+        f"vacuously")
+
+    completed = _run_gate(REPOSITORY)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    summary = completed.stdout.strip().splitlines()[-1]
+
+    counted = re.search(r"from (\d+) catalogs", summary)
+    assert counted is not None, (
+        f"the gate's summary no longer states how many catalogs it read: "
+        f"{summary}")
+    assert int(counted.group(1)) == len(on_disk), (
+        f"{len(on_disk)} recipe-profile catalogs are on disk but the gate "
+        f"read {counted.group(1)}: {summary}")
+
+
+def test_the_gate_summary_names_what_it_did_not_check() -> None:
+    """`PASSED -- 3 documents` used to read as "the examples are clean".
+
+    It was a statement about three of them. The example directory also holds
+    recipe instances, a component registry, a daemon snapshot, qualification
+    evidence and a caption parity contract, none of which have a JSON Schema
+    here. Leaving them unmentioned is what made the old summary misleading, so
+    the gate has to say they were skipped and how many.
+
+    What the gate must NOT do is assert what covers them instead. An earlier
+    draft of this line said "validated by its own native loader", which is true
+    of five of the six api_versions -- the parity contract is read only by
+    tests/test_qwen_caption_declarative_parity.py. A gate that volunteers an
+    unchecked reassurance about coverage elsewhere is the same defect in
+    miniature, so the line states only that this gate did not look.
+    """
+    completed = _run_gate(REPOSITORY)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    lines = completed.stdout.strip().splitlines()
+
+    skipped = [line for line in lines if line.startswith("NOT SCHEMA-CHECKED:")]
+    assert skipped, (
+        "the example directory holds documents this gate has no schema for; "
+        "the gate reported none of them")
+    assert re.search(r"NOT schema-checked", lines[-1]), (
+        f"the verdict line does not state that anything went unchecked: "
+        f"{lines[-1]}")
+
+
+def test_removing_eval_examples_from_the_schema_turns_the_gate_red(
+        tmp_path: pathlib.Path) -> None:
+    """The exact historical drift, replayed against the current gate.
+
+    `eval_examples` was absent from the artifact type enum while the shipped
+    hf-multimodal-sft profiles emitted it, and the gate said PASSED for as long
+    as that lasted. Reintroducing the omission must now fail, and must fail
+    naming the profiles -- if it only failed on some other document the gate
+    would be red for the wrong reason and the drift could return.
+    """
+    root = _sandbox(tmp_path)
+    schema_path = root / "docs/experiment-vm/experiment-v1.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    enum = schema["$defs"]["artifact"]["properties"]["type"]["enum"]
+    assert "eval_examples" in enum, (
+        "the enum no longer carries eval_examples; this test cannot replay the "
+        "drift it exists for")
+    enum.remove("eval_examples")
+    schema_path.write_text(json.dumps(schema, indent=2) + "\n",
+                           encoding="utf-8")
+
+    completed = _run_gate(root)
+    assert completed.returncode != 0, (
+        f"the gate stayed green with eval_examples removed from the schema, "
+        f"which is the state that shipped:\n{completed.stdout}")
+
+    blamed = [line for line in completed.stdout.splitlines()
+              if line.startswith("FAIL:")
+              and RECIPE_PROFILE_GLOB.replace("*", "") in line]
+    assert blamed, (
+        f"the gate failed but not on a recipe-profile catalog, so it is not "
+        f"the profiles that caught this:\n{completed.stdout}")
+
+
+def test_a_profile_emitting_an_undeclared_artifact_type_turns_the_gate_red(
+        tmp_path: pathlib.Path) -> None:
+    """The other direction: a new catalog is in scope the moment it exists.
+
+    Nothing has to be registered anywhere for this to be checked, which is the
+    difference between a scope derived from the tree and an enumeration someone
+    has to remember to update.
+    """
+    root = _sandbox(tmp_path)
+    examples = root / "docs/experiment-vm/examples"
+    source = next(iter(sorted(examples.glob(RECIPE_PROFILE_GLOB))))
+    catalog = json.loads(source.read_text(encoding="utf-8"))
+    recipe = catalog["recipes"][0]
+    recipe["key"] = {"name": "probe_undeclared_type", "version": "1"}
+    artifacts = recipe["template_document"]["spec"]["artifacts"]
+    artifacts[next(iter(artifacts))]["type"] = "telemetry_stream"
+    (examples / "probe.recipe-profiles.v1.json").write_text(
+        json.dumps({"api_version": "trainvm.recipe-profiles/v1",
+                    "recipes": [recipe]}, indent=2) + "\n",
+        encoding="utf-8")
+
+    completed = _run_gate(root)
+    assert completed.returncode != 0, (
+        f"a profile emitting an artifact type the schema does not declare was "
+        f"accepted:\n{completed.stdout}")
+    assert "telemetry_stream" in completed.stdout, (
+        f"the gate failed without naming the undeclared type:\n"
+        f"{completed.stdout}")
+
+
+def test_a_catalog_cannot_leave_the_gate_by_renaming_its_api_version(
+        tmp_path: pathlib.Path) -> None:
+    """Recognition is by filename AND api_version, and they must agree.
+
+    Either signal alone is escapable: keyed only on api_version, editing one
+    string drops a catalog out of scope silently; keyed only on the filename, a
+    catalog named anything else is never seen. Disagreement between the two is
+    therefore a failure rather than a skip.
+    """
+    root = _sandbox(tmp_path)
+    examples = root / "docs/experiment-vm/examples"
+    target = next(iter(sorted(examples.glob(RECIPE_PROFILE_GLOB))))
+    catalog = json.loads(target.read_text(encoding="utf-8"))
+    catalog["api_version"] = "trainvm.something-else/v1"
+    target.write_text(json.dumps(catalog, indent=2) + "\n", encoding="utf-8")
+
+    completed = _run_gate(root)
+    assert completed.returncode != 0, (
+        f"a recipe-profile catalog left this gate's scope by editing one "
+        f"string, and the gate stayed green:\n{completed.stdout}")
