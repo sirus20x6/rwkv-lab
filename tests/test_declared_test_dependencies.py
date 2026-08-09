@@ -30,6 +30,12 @@ ALLOWED_AD_HOC = {
     # The fla job exists precisely to run against the real published package,
     # so declaring it would defeat the point of the job.
     "flash-linear-attention": "the fla job exists to test the real package",
+    # The proto-binding gate's only Python need. uv is a launcher for the
+    # pinned grpcio-tools generator, not something the suite imports, and the
+    # binding bytes are fixed by that pin rather than by uv's own version --
+    # so declaring it in the test extra would install it into every test job
+    # to no effect and imply a version bound that governs nothing.
+    "uv": "launches the pinned grpcio-tools generator; the suite never imports it",
 }
 
 # Packages the suite imports at module scope, which therefore have to be
