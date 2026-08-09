@@ -25,6 +25,76 @@ only as current as your last fetch. Do not branch from `HEAD` — the primary
 checkout is not necessarily on main, and cannot always be, because git allows a
 branch in one worktree at a time and a sibling checkout may hold main.
 
+### This checkout is a worktree of `/thearray/git/moe-mla`. Do not use `EnterWorktree`
+
+`/thearray/git/moe-mla-dashboard-vm` is not a sibling clone of
+`/thearray/git/moe-mla`. It is a worktree of it, and the two names read as
+independent checkouts while sharing one git dir:
+
+```bash
+git rev-parse --git-dir         # /thearray/git/moe-mla/.git/worktrees/moe-mla-dashboard-vm
+git rev-parse --git-common-dir  # /thearray/git/moe-mla/.git
+```
+
+So anything resolving "the repository root" resolves to `/thearray/git/moe-mla`
+— the live checkout every dispatch says never to create, move or delete anything
+under. `EnterWorktree` does exactly that: called from here it creates
+`/thearray/git/moe-mla/.claude/worktrees/<name>`, reports success, and reveals
+the path only after it exists. **Do not use it in this repository.** Use the
+explicit form with an absolute path, and confirm where you landed before your
+first edit:
+
+```bash
+git -C /thearray/git/moe-mla-dashboard-vm worktree add \
+    /thearray/git/moe-mla-dashboard-vm/.claude/worktrees/<name> -b card/<slug> origin/main
+pwd   # must start with /thearray/git/moe-mla-dashboard-vm/
+```
+
+This happened on 2026-08-09. `ExitWorktree(action: "remove")` cleaned it up
+completely — directory gone, absent from `git worktree list`, no stray branch —
+so the incident is recoverable. Nothing tells you it needs recovering.
+
+**The same shared git dir makes `git worktree list` a listing of two
+repositories.** Entries under `/thearray/git/moe-mla/.claude/worktrees/` belong
+to the live checkout and are out of scope for any sweep from here — as of
+writing `qwen36-vision-key-audit`, `qwen36-vision-remap`,
+`recipe-metrics-artifact` and `registries-out-of-etc`, all created 2026-08-07.
+Filter the list before you act on it, rather than reading paths out of the raw
+output:
+
+```bash
+git worktree list | grep '^/thearray/git/moe-mla-dashboard-vm/\.claude/worktrees/'
+```
+
+That filter also excludes the legitimate siblings named at the top of this
+section — `/thearray/git/moe-mla-card-*`, `-parity-integration`,
+`-dashboard-vm-wt-*`. They are worktrees of the same git dir and are nobody's to
+sweep either.
+
+There is deliberately no automated guard here, and the alternatives were weighed
+rather than skipped:
+
+- **A hook cannot be landed by a pull request.** `core.hooksPath` points at
+  `/home/sirus/.config/git/hooks` — user-global, outside every repository. A
+  hook committed here would never run, and installing one globally would refuse
+  commits in `/thearray/git/moe-mla` itself, the checkout it exists to protect.
+- **The obvious predicate is false.** "Refuse when the working tree is not under
+  `moe-mla-dashboard-vm`" rejects `/thearray/git/moe-mla-card-*`,
+  `/thearray/git/moe-mla-parity-integration` and the live checkout, all of which
+  commit routinely through the same git dir. A guard that is wrong most of the
+  time gets bypassed, and a bypassed guard is worse than none.
+- **Commit and push time are both too late.** Creating the directory is the
+  violation; a refusal at commit arrives once it already exists. CI cannot see
+  it at all — a local worktree creation leaves nothing in the pushed tree for a
+  gate to inspect.
+
+The second-order hazard, a sweep reaching into the live checkout, is the one
+worth protecting because `rm` is not recoverable. What it needs is not a guard
+but a correct list: a sweep is an agent typing a command, and a check that runs
+after that protects nothing. That is what the filter above is for, on the same
+principle as the untracked-files command below — hand over the command, not the
+warning.
+
 ### Before you remove a worktree, look for untracked files
 
 A clean `git status` is not evidence that a worktree holds nothing. It reports
