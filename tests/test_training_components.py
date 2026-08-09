@@ -1,4 +1,5 @@
 import ast
+import dataclasses
 import json
 from pathlib import Path
 
@@ -39,7 +40,9 @@ from rwkv_lab.training_components import (
     PowerCoolConfiguration,
     PrecisionImplementation,
     RegisteredActivation,
+    RWKVMatrixOptimizerRoutingConfiguration,
     ScheduleImplementation,
+    SpectralMuonConfiguration,
     TerminalExpertRoutingConfiguration,
     WeightDecayScheduleImplementation,
     build_registered_activation,
@@ -612,6 +615,129 @@ def test_resolved_worker_component_dispatch_is_closed_and_typed():
     forged["runtime_import"] = "malicious.module"
     with pytest.raises(ValueError, match="unknown fields"):
         optimizer_from_resolved_component(forged, [parameter])
+
+
+def test_spectral_muon_factory_requires_explicit_topology_routes():
+    """Which tensors take the orthogonalised update is the router's decision.
+
+    A group that does not say is refused rather than defaulted. A silent
+    default would send every tensor down one arm and the run would still
+    complete, which is the failure this refusal exists to prevent.
+    """
+
+    from rwkv_lab.spectral_muon import SpectralMuon
+
+    matrix = torch.nn.Parameter(torch.randn(4, 4))
+    vector = torch.nn.Parameter(torch.randn(4))
+    configuration = SpectralMuonConfiguration(
+        learning_rate=0.02,
+        ns_steps=2,
+        rsav=True,
+    )
+    optimizer = build_registered_optimizer(
+        OptimizerImplementation.SPECTRAL_MUON_NO_DECAY_V1,
+        (
+            {"params": [matrix], "lr": 0.02, "use_muon": True},
+            {"params": [vector], "lr": 0.002, "use_muon": False},
+        ),
+        configuration,
+    )
+
+    assert isinstance(optimizer, SpectralMuon)
+    assert optimizer.param_groups[0]["use_muon"] is True
+    assert optimizer.param_groups[1]["use_muon"] is False
+    with pytest.raises(TypeError, match="explicitly select use_muon"):
+        build_registered_optimizer(
+            OptimizerImplementation.SPECTRAL_MUON_NO_DECAY_V1,
+            ({"params": [matrix], "lr": 0.02},),
+            configuration,
+        )
+
+
+def test_spectral_muon_is_registered_without_a_decay_of_its_own():
+    """The no-decay grade is the registration, not a caller's choice.
+
+    Decay is an independently selected weight-decay-schedule component, so an
+    optimizer carrying its own would apply it twice. The configuration surface
+    offers no weight_decay field at all, and the factory pins zero.
+    """
+
+    from rwkv_lab.spectral_muon import SpectralMuon
+
+    assert "weight_decay" not in {
+        field.name for field in dataclasses.fields(SpectralMuonConfiguration)
+    }
+    parameter = torch.nn.Parameter(torch.randn(4, 4))
+    optimizer = build_registered_optimizer(
+        OptimizerImplementation.SPECTRAL_MUON_NO_DECAY_V1,
+        ({"params": [parameter], "use_muon": True},),
+        SpectralMuonConfiguration(learning_rate=0.02, ns_steps=2),
+    )
+    assert isinstance(optimizer, SpectralMuon)
+    assert all(group["weight_decay"] == 0.0 for group in optimizer.param_groups)
+    # A group naming no rate inherits the component's, rather than silently
+    # taking whatever the optimizer class defaults to.
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.02)
+
+
+def test_spectral_muon_resolved_dispatch_is_exact_in_both_directions():
+    complete = {
+        field.name: getattr(SpectralMuonConfiguration(learning_rate=0.02), field.name)
+        for field in dataclasses.fields(SpectralMuonConfiguration)
+    }
+    assert SpectralMuonConfiguration.from_resolved(complete).learning_rate == 0.02
+    missing = {k: v for k, v in complete.items() if k != "ns_steps"}
+    with pytest.raises(ValueError, match="missing or unknown fields"):
+        SpectralMuonConfiguration.from_resolved(missing)
+    with pytest.raises(ValueError, match="missing or unknown fields"):
+        SpectralMuonConfiguration.from_resolved({**complete, "unheard_of": 1})
+
+
+def test_rwkv_matrix_router_partitions_every_trainable_tensor():
+    """Both routes are required, so nothing falls out of the optimizer.
+
+    The complement route is what makes the split exhaustive: a parameter named
+    in neither set would otherwise be trained by nobody, silently.
+    """
+
+    matrix = torch.nn.Parameter(torch.ones(4, 4))
+    vector = torch.nn.Parameter(torch.ones(4))
+    routing = build_registered_parameter_routing(
+        ParameterRouterImplementation.RWKV_MATRIX_OPTIMIZER_V1,
+        [("matrix", matrix), ("fallback", vector)],
+        {"muon": frozenset({id(matrix)})},
+        base_learning_rate=1.0e-4,
+        configuration=RWKVMatrixOptimizerRoutingConfiguration(
+            fallback_multiplier=0.1
+        ),
+    )
+    assert [group["group_name"] for group in routing.groups] == [
+        "muon",
+        "adam_fallback",
+    ]
+    assert [group["lr"] for group in routing.groups] == pytest.approx(
+        [1.0e-4, 1.0e-5]
+    )
+    assert [group["params"] for group in routing.groups] == [[matrix], [vector]]
+
+    # The role set is closed: an extra or renamed role is a topology the
+    # router cannot express, not something to route on a best effort.
+    with pytest.raises(ValueError, match="exactly the muon ownership role"):
+        build_registered_parameter_routing(
+            ParameterRouterImplementation.RWKV_MATRIX_OPTIMIZER_V1,
+            [("matrix", matrix), ("fallback", vector)],
+            {"muon": frozenset({id(matrix)}), "extra": frozenset()},
+            base_learning_rate=1.0e-4,
+            configuration=RWKVMatrixOptimizerRoutingConfiguration(),
+        )
+    with pytest.raises(TypeError, match="typed routing configuration"):
+        build_registered_parameter_routing(
+            ParameterRouterImplementation.RWKV_MATRIX_OPTIMIZER_V1,
+            [("matrix", matrix), ("fallback", vector)],
+            {"muon": frozenset({id(matrix)})},
+            base_learning_rate=1.0e-4,
+            configuration=FullBackboneRoutingConfiguration(),
+        )
 
 
 def test_registered_mageflow_routers_own_expert_backbone_and_repa_once():

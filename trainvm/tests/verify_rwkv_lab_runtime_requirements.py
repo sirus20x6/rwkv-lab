@@ -47,6 +47,14 @@ EXPECTED_ADAPTERS = (
     "rwkv-lab.vision-frozen-adapter",
     "rwkv-lab.vision-native-head",
     "rwkv-lab.vision-rwkv-student",
+    # Reviewed 2026-08-09 when the route was registered: it reaches
+    # flash-linear-attention and transformers through
+    # rwkv_finetune.load_g1g_fla, and numpy directly for its uint16 token
+    # memmap. It carries neither `accelerate` (nothing here calls it) nor
+    # `flash-attn` -- load_g1g_fla constructs the model inside
+    # _flash_attn_2_reported_unavailable(), so the kernel is deliberately out
+    # of reach. That is transformer-mla-rwkv8's stack minus those two.
+    "rwkv-lab.rwkv-optimizer-finetune",
     "rwkv-lab.rwkv-rlvr",
     "rwkv-lab.rwkv-scratch",
 )

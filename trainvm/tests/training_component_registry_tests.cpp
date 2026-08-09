@@ -441,7 +441,7 @@ void checked_in_component_catalog_matches_native_authority_contract() {
   const trainvm::TrainingComponentRegistry registry =
       trainvm::TrainingComponentRegistry::load_file(
           std::filesystem::absolute(path));
-  check(registry.document_json().at("components").size() == 62U &&
+  check(registry.document_json().at("components").size() == 64U &&
             registry.registry_digest().starts_with("sha256:") &&
             registry.registry_digest().size() == 71U,
         "checked-in cross-family component catalog is a canonical native authority document");
@@ -809,6 +809,47 @@ void checked_in_component_catalog_matches_native_authority_contract() {
           });
         }),
         "MageFlow-only FP32-master optimizer cannot route to a transformer family");
+  // Every lever the trainer will read has to arrive from the catalog with a
+  // default, or a composition that omits it silently gets whatever the Python
+  // dataclass happened to choose. Four are spot-checked across the three value
+  // kinds -- integer, enumeration, boolean -- rather than only the numeric one.
+  const auto spectral_muon = registry.resolve({
+      .key = {.category = trainvm::TrainingComponentCategory::optimizer,
+              .name = "spectral_muon_no_decay",
+              .version = "1.0.0"},
+      .model_family = "rwkv",
+      .configuration = {{"learning_rate", 0.0001}},
+  });
+  check(spectral_muon.descriptor.implementation ==
+                "rwkv_lab.optimizer.spectral_muon_no_decay.v1" &&
+            spectral_muon.descriptor.state_grade ==
+                trainvm::TrainingStateGrade::exact &&
+            spectral_muon.configuration.at("ns_steps") == 5 &&
+            spectral_muon.configuration.at("power_method") == "eigh" &&
+            spectral_muon.configuration.at("rsav") == false &&
+            spectral_muon.configuration.at("adam_update_interval") == 1,
+        "SpectralMuon resolves its closed optimizer levers and exact global state contract");
+  check(rejects([&] {
+          (void)registry.resolve({
+              .key = spectral_muon.descriptor.key,
+              .model_family = "transformer",
+              .configuration = {{"learning_rate", 0.0001}},
+          });
+        }),
+        "the RWKV-only SpectralMuon optimizer cannot route to a transformer family");
+  const auto matrix_router = registry.resolve({
+      .key = {.category = trainvm::TrainingComponentCategory::parameter_router,
+              .name = "rwkv_matrix_optimizer",
+              .version = "1.0.0"},
+      .model_family = "rwkv",
+      .configuration = nlohmann::json::object(),
+  });
+  check(matrix_router.descriptor.implementation ==
+                "rwkv_lab.parameter_router.rwkv_matrix_optimizer.v1" &&
+            matrix_router.descriptor.state_grade ==
+                trainvm::TrainingStateGrade::stateless &&
+            matrix_router.configuration.at("fallback_multiplier") == 0.1,
+        "the RWKV matrix router resolves its fallback multiplier as one stateless component");
   const auto router = registry.resolve({
       .key = {.category = trainvm::TrainingComponentCategory::parameter_router,
               .name = "mageflow_terminal_expert",

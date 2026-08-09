@@ -129,6 +129,22 @@ def _stage_canonical_json_artifact(
     return staging
 
 
+_RWKV_OPTIMIZER_FINETUNE_STATE: tuple[str, ...] = (
+    "component_composition",
+    "control_revision",
+    "data_cursor",
+    "input_content_identity",
+    "learning_rate_schedule",
+    "model",
+    "optimizer",
+    "parameter_routing",
+    "rng_accelerator",
+    "rng_numpy",
+    "rng_python",
+    "rng_torch",
+)
+
+
 AdapterKey = tuple[str, str, str, str]
 Handler = Callable[
     [
@@ -1210,6 +1226,137 @@ def _rwkv_scratch(
         {"reason": "training_complete"},
         optimizer_step=step,
         checkpoint_requests=requests,
+    )
+
+
+def _rwkv_optimizer_finetune(
+    invocation: WorkerInvocation,
+    components: WorkerTrainingComponents,
+    step_profiler: WorkerStepProfiler | None = None,
+    observability: WorkerObservability | None = None,
+    controls: WorkerControlRuntime | None = None,
+    execution_phases: WorkerExecutionPhases | None = None,
+) -> HandlerResult:
+    """Run a content-bound pretrained RWKV optimizer experiment."""
+
+    del execution_phases
+    if not declares_checkpoint(invocation) or not _declares_artifact_output(
+        invocation, "result"
+    ):
+        raise AdapterDispatchError(
+            "RWKV optimizer finetuning requires checkpoint and result outputs"
+        )
+    paths = WorkspacePathAuthority.from_workspace(
+        invocation.workspace, require_content=True
+    )
+    raw_config = read_inline_config(invocation.inputs)
+    model_path = paths.read_path(
+        _raw_config_path(raw_config, "model_path", required=True) or "",
+        label="model_path",
+        kind="file",
+    )
+    data_path = paths.read_path(
+        _raw_config_path(raw_config, "data_path", required=True) or "",
+        label="data_path",
+        kind="file",
+    )
+    if "output_dir" in raw_config:
+        raise AdapterDispatchError(
+            "RWKV optimizer finetuning output is node-authority selected"
+        )
+    run_directory = paths.node_run_directory(invocation.node_id)
+    content_identity = [
+        {
+            "path": identity.path,
+            "kind": identity.kind,
+            "file_count": identity.file_count,
+            "total_bytes": identity.total_bytes,
+            "tree_sha256": identity.tree_sha256,
+        }
+        for identity in sorted(paths.input_content_roots, key=lambda value: value.path)
+    ]
+    input_identity_digest = "sha256:" + hashlib.sha256(
+        json.dumps(
+            content_identity,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    resume_payload = _resume_payload(
+        invocation,
+        paths,
+        required_state=frozenset(_RWKV_OPTIMIZER_FINETUNE_STATE),
+    )
+    config_values = dict(raw_config)
+    config_values.update(
+        {
+            "model_path": str(model_path),
+            "data_path": str(data_path),
+            "output_dir": str(run_directory),
+            "input_identity_digest": input_identity_digest,
+            "resume_from": str(resume_payload) if resume_payload else None,
+        }
+    )
+    from rwkv_lab.rwkv_optimizer_finetune import RWKVOptimizerFinetuneConfig, train
+
+    config = RWKVOptimizerFinetuneConfig(**config_values)
+    train_result = train(
+        config,
+        worker_components=components,
+        worker_step_profiler=step_profiler or NullStepProfiler(),
+        worker_observability=observability,
+        worker_controls=controls,
+    )
+    if not isinstance(train_result, Mapping):
+        raise AdapterDispatchError("RWKV optimizer finetuning omitted its result")
+    request, step, status = completed_checkpoint_request(
+        invocation,
+        run_directory,
+        document_names=("complete.json", "interrupted.json"),
+        step_fields=("step",),
+        state_components=_RWKV_OPTIMIZER_FINETUNE_STATE,
+    )
+    if train_result.get("state") != status or train_result.get("step") != step:
+        raise AdapterDispatchError(
+            "RWKV optimizer finetuning result disagrees with its terminal document"
+        )
+    artifact_requests: tuple[ArtifactPublicationRequest, ...] = ()
+    if status == "complete":
+        eval_loss = train_result.get("eval_loss")
+        if (
+            isinstance(eval_loss, bool)
+            or not isinstance(eval_loss, (int, float))
+            or not math.isfinite(float(eval_loss))
+        ):
+            raise AdapterDispatchError(
+                "RWKV optimizer finetuning completed without finite eval loss"
+            )
+        result_directory = _stage_canonical_json_artifact(
+            run_directory,
+            attempt_id=getattr(invocation, "attempt_id", "attempt"),
+            stem="scalar-result",
+            filename="result.json",
+            document={
+                "api_version": "rwkv-lab.scalar-metric-result/v1",
+                "direction": "minimize",
+                "metric": "eval.loss",
+                "optimizer_step": step,
+                "subject": config.subject,
+                "value": float(eval_loss),
+            },
+        )
+        artifact_requests = (
+            ArtifactPublicationRequest(
+                source_directory=result_directory,
+                output_name="result",
+            ),
+        )
+    return HandlerResult(
+        "operation.failed" if status == "interrupted" else "worker.completed",
+        {"reason": completion_reason(status), "status": status},
+        optimizer_step=step,
+        checkpoint_requests=((request,) if request is not None else ()),
+        artifact_requests=artifact_requests,
     )
 
 
@@ -2799,6 +2946,12 @@ _HANDLERS: Mapping[AdapterKey, Handler] = {
         "decide",
         "rwkv_lab.scalar_metric_decision.v1.Decide",
     ): _scalar_metric_decision,
+    (
+        "rwkv-lab.rwkv-optimizer-finetune",
+        "1.0.0",
+        "train",
+        "rwkv_lab.rwkv_optimizer_finetune.v1.Train",
+    ): _rwkv_optimizer_finetune,
     (
         "rwkv-lab.rwkv-posttraining",
         "1.0.0",

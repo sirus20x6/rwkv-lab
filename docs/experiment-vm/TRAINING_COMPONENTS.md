@@ -69,10 +69,14 @@ The initial concrete cross-family catalog contains:
 
 - Torch AdamW;
 - FP32-master AdamW for lower-precision live model weights;
+- SpectralMuon with checkpointed per-parameter and global RSAV state, while decay remains an
+  independently selected schedule;
 - linear warmup followed by a cosine tail over optimizer steps;
 - warmup/plateau/PowerCool over optimizer steps for RWKV and transformers;
 - appearance-expert versus shared-backbone exclusive parameter routing;
 - terminal-expert versus shared-backbone versus VAE-REPA exclusive parameter routing;
+- RWKV matrix-Muon versus Adam-fallback exhaustive parameter routing with an independently
+  declared fallback learning-rate multiplier;
 - global-norm gradient clipping with independently declared norm, threshold, and nonfinite policy;
 - fixed optimizer-step-local gradient accumulation with an independent microbatch count and loss
   scaling policy; v1 is stateless because its supported worker resumes only at step boundaries;
@@ -161,7 +165,8 @@ when either the descriptor state grade or the policy's declared resume grade is 
 changing cadence or retention therefore changes the composition lock without changing trainer
 code.
 
-The three MageFlow training paths, RWKV AdamW path, and Qwen transformer AdamW/PowerCool path use
+The three MageFlow training paths, RWKV AdamW and pretrained optimizer-experiment paths, and Qwen
+transformer AdamW/PowerCool path use
 the common tensor boundary. The MageFlow appearance/terminal expert trainers and Qwen AO3
 continuation and the non-distributed scratch-RWKV path additionally consume authority-resolved
 worker compositions, including gradient clipping rather than trainer-local clipping construction;
