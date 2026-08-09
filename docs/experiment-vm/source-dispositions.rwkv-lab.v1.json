@@ -10,7 +10,7 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:51a0b8098c887815402cf6c12e8b67d158904788e36d2eae03874ab04c26ef7f",
+  "source_tree_digest": "sha256:fab316100a6cb8295d06cf3fb0457bfbc015b936400857c5eb90423f32bb9ed5",
   "entries": [
     {
       "source_path": "src/rwkv_lab/__init__.py",
@@ -1152,7 +1152,7 @@
       ],
       "resume_relevance": "none",
       "compatibility_workflow_id": "qualification.converted-forward",
-      "source_sha256": "sha256:6b7ad17e8fe9fcf8b47f31e4f975dac3dd80b576787b864575a693a4825f5697",
+      "source_sha256": "sha256:ce385cede39423288e26eef3bc00e691fa2adb1109e2cc5c7eaef22f2b2f23e7",
       "family": "evaluation_profile_export",
       "coverage": "direct",
       "consumers": [
@@ -1175,7 +1175,7 @@
       ],
       "resume_relevance": "consumer_owned",
       "compatibility_workflow_id": null,
-      "source_sha256": "sha256:6e7d6649591a6c36bfc723545e5b497956e6f5973c801887f0a331aae58cd5cf",
+      "source_sha256": "sha256:4e94dd7b8b2afca1a47c77242329b0e7a74c2983d8b91bfce22a23c93a6f8243",
       "family": "transformer",
       "coverage": "transitive",
       "consumers": [
@@ -2771,7 +2771,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "transformer.mla-train",
-      "source_sha256": "sha256:69b4ffc21336c048dd309cd6f169771420e4ef7c85eac135167fe585542488fb",
+      "source_sha256": "sha256:3cf289537f2084d800263747ea8588f9ddc457692eaee6f899ceb9af069241c2",
       "family": "transformer",
       "coverage": "direct",
       "consumers": [
@@ -2795,7 +2795,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "transformer.mla-engram-train",
-      "source_sha256": "sha256:9dc4972b08233b9e9625e649dfe8462f738b930312ed170c6459171ae5e6c354",
+      "source_sha256": "sha256:a785b9ef5eb46547cf47e930d0e96b4c3650290c6583036ed15c2308d232e6ad",
       "family": "transformer",
       "coverage": "direct",
       "compatibility_workflow_ids": [

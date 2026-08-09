@@ -1,4 +1,5 @@
 #include "trainvm/adapter_registry.hpp"
+#include "trainvm/document.hpp"
 #include "trainvm/recipe_profile.hpp"
 #include "trainvm/rwkv_lab_worker_contract.hpp"
 #include "trainvm/training_component_registry.hpp"
@@ -27,28 +28,43 @@ nlohmann::json read_json(const std::filesystem::path& path) {
   return nlohmann::json::parse(input);
 }
 
+// Catalog validation calls filesystem::exists on every field of type `path`.
 // The checked-in instances are deployment examples: they name the repository
-// and dataset of the host they were authored on. Component validation calls
-// filesystem::exists on every field of type `path`, so leaving those values in
-// place makes the suite assert the contents of whichever machine runs it -- it
-// passed on the deployment host and aborted in CI with "training component
-// configuration path is unavailable". The graph, the component selection and
-// the parity diffs are what this suite is about, and none of them depend on
-// which directory the paths name, so every path-typed override is pointed at
-// this checkout before expansion. That keeps the assertions identical on every
-// host instead of silently testing something different on each.
-void localize_paths(nlohmann::json& instance,
-                    const std::filesystem::path& root) {
+// and dataset directories of the host they were authored on, and the recipes
+// pin allowed_read_roots to that same host, so the paths cannot be redirected
+// in the instance -- expansion rejects that before validation is reached.
+// Validating the expansion verbatim therefore asserted the contents of
+// whichever machine ran the suite: it passed on the deployment host and
+// aborted in CI with "training component configuration path is unavailable".
+//
+// Redirecting the already-expanded plan is the same move the checked-in Qwen
+// example makes in recipe_profile_tests. The whole catalog and adapter check
+// still runs, on every host; the only thing it stops asserting is whether this
+// particular machine happens to have the fixture's directories.
+nlohmann::json locally_resolvable(const nlohmann::json& canonical_plan,
+                                  const std::filesystem::path& root) {
+  nlohmann::json local = canonical_plan;
   const std::string directory = std::filesystem::canonical(root).string();
   const std::string file =
       std::filesystem::canonical(root / "README.md").string();
-  auto& overrides = instance.at("overrides");
-  for (const char* name : {"model.path", "data.root"}) {
-    if (overrides.contains(name)) overrides[name] = directory;
-  }
-  for (const char* name : {"model.checkpoint_path", "model.target_manifest"}) {
-    if (overrides.contains(name)) overrides[name] = file;
-  }
+  const auto retarget = [&local](std::string_view pointer,
+                                 const std::string& value) {
+    const nlohmann::json::json_pointer at{std::string(pointer)};
+    if (local.contains(at)) local[at] = value;
+  };
+  retarget(
+      "/spec/workflow/nodes/train/invoke/training/components/model_loader/"
+      "configuration/model_path",
+      directory);
+  retarget(
+      "/spec/workflow/nodes/train/invoke/training/components/data/"
+      "configuration/dataset_root",
+      directory);
+  retarget(
+      "/spec/workflow/nodes/train/invoke/training/components/model_loader/"
+      "configuration/checkpoint_path",
+      file);
+  return local;
 }
 
 const nlohmann::json& training_components(
@@ -106,13 +122,19 @@ int main() {
             })
             .lifecycle.pause_release_resources,
         "HF trainer registry supports resource-releasing pause");
+  const auto validate_locally = [&](const trainvm::ExpandedRecipe& expanded) {
+    const auto compiled = trainvm::compile_document(
+        locally_resolvable(expanded.plan.canonical_plan, root));
+    if (!compiled.valid())
+      throw std::runtime_error("locally resolvable LM plan did not compile");
+    components.validate_plan(*compiled.plan);
+    adapters.validate_plan(*compiled.plan);
+  };
   const auto expand = [&](std::string_view name) {
-    auto instance = read_json(root / "docs/experiment-vm/examples" /
-                              std::string(name));
-    localize_paths(instance, root);
+    const auto instance = read_json(root / "docs/experiment-vm/examples" /
+                                    std::string(name));
     auto result = registry.expand_json(instance);
-    components.validate_plan(result.plan);
-    adapters.validate_plan(result.plan);
+    validate_locally(result);
     return result;
   };
 
@@ -187,23 +209,20 @@ int main() {
   const auto rwkv_registry = trainvm::RecipeProfileRegistry::load_file(
       root / "docs/experiment-vm/examples/rwkv-lm.recipe-profiles.v1.json");
   const auto expand_rwkv = [&](std::string_view name) {
-    auto instance = read_json(root / "docs/experiment-vm/examples" /
-                              std::string(name));
-    localize_paths(instance, root);
+    const auto instance = read_json(root / "docs/experiment-vm/examples" /
+                                    std::string(name));
     auto result = rwkv_registry.expand_json(instance);
-    components.validate_plan(result.plan);
-    adapters.validate_plan(result.plan);
+    validate_locally(result);
     return result;
   };
   const auto rwkv_scratch =
       expand_rwkv("rwkv-lm-scratch.recipe-instance.v1.json");
   auto continuation_instance = read_json(
       root / "docs/experiment-vm/examples/rwkv-lm-scratch.recipe-instance.v1.json");
-  localize_paths(continuation_instance, root);
   continuation_instance["recipe"]["name"] = "rwkv_lm_continuation";
   continuation_instance["run_identity"] = "rwkv-lm-continuation-test";
   continuation_instance["overrides"]["model.checkpoint_path"] =
-      std::filesystem::canonical(root / "README.md").string();
+      "/thearray/git/moe-mla/README.md";
   continuation_instance["overrides"]["model.activation"] = "silu@1.0.0";
   continuation_instance["overrides"]["hyperparameters.optimizer"] =
       "torch_adamw_no_decay@2.0.0";
@@ -211,8 +230,7 @@ int main() {
       "linear_warmup_cosine@1.0.0";
   const auto rwkv_continuation =
       rwkv_registry.expand_json(continuation_instance);
-  components.validate_plan(rwkv_continuation.plan);
-  adapters.validate_plan(rwkv_continuation.plan);
+  validate_locally(rwkv_continuation);
   for (const auto* recipe : {&rwkv_scratch, &rwkv_continuation}) {
     const auto& selected = training_components(*recipe);
     check(selected.at("data").at("key").at("name") ==

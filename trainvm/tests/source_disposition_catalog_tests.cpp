@@ -132,7 +132,7 @@ int main() {
       scripts_checked, std::nullopt, known_ids);
   check(scripts_catalog.entries().size() == 128U,
         "script disposition catalog covers all 128 reviewed scripts");
-  check(scripts_catalog.catalog_digest() == "sha256:f4c86a147116f44bf2d5057c39f6d0ee1b5dcc0be48492a238634ce6bdcc3a64",
+  check(scripts_catalog.catalog_digest() == "sha256:907c98b21235d96fc109b22c2fa1646dcaed5b4b9c9d091c91c3bc69acf4fe46",
         std::string("script catalog pins the exact reviewed canonical mapping") +
             " (computed " + scripts_catalog.catalog_digest() + ")");
   std::map<trainvm::SourceDispositionClass, std::size_t> classes;
@@ -196,7 +196,7 @@ int main() {
       rwkv_checked, std::nullopt, known_ids);
   check(rwkv_catalog.entries().size() == 165U,
         "RWKV disposition catalog covers all 165 reviewed modules");
-  check(rwkv_catalog.catalog_digest() == "sha256:d9a35833a46f9dda16860b3a6d0521f44fda6ffc867ee0a0071ab700daf6dfab",
+  check(rwkv_catalog.catalog_digest() == "sha256:dc0b14ae5668166d5c4f6fe3b03fe4ca9ce9b8013a661494ccb912693465e39c",
         std::string("RWKV catalog pins the exact reviewed canonical mapping") +
             " (computed " + rwkv_catalog.catalog_digest() + ")");
   classes.clear();
