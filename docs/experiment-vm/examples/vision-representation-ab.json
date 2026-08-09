@@ -161,6 +161,45 @@
             "training": {
               "model_family": "vision",
               "components": {
+                "artifact_renderer": {
+                  "key": {
+                    "category": "artifact_renderer",
+                    "name": "caption_triplet",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "modality": "multimodal",
+                    "schema": "trainvm.caption-triplet.v1"
+                  }
+                },
+                "evaluation_schedule": {
+                  "key": {
+                    "category": "evaluation_schedule",
+                    "name": "launch_gate_periodic",
+                    "version": "2.0.0"
+                  },
+                  "configuration": {
+                    "full_step_zero": true,
+                    "full_every_steps": 500,
+                    "qualitative_every_steps": 500,
+                    "final": true
+                  }
+                },
+                "evaluator": {
+                  "key": {
+                    "category": "evaluator",
+                    "name": "scalar_loss",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "split_slot": "",
+                    "metrics": [
+                      "eval.loss"
+                    ],
+                    "reduction": "weighted_mean",
+                    "maximum_examples": 0
+                  }
+                },
                 "gradient_clipping": {
                   "key": {
                     "category": "gradient_clipping",
@@ -200,6 +239,17 @@
                     "compute_dtype": "bfloat16",
                     "reduction_dtype": "float32",
                     "gradient_scaling": false
+                  }
+                },
+                "qualitative_samples": {
+                  "key": {
+                    "category": "qualitative_sample",
+                    "name": "fixed_held_out",
+                    "version": "2.0.0"
+                  },
+                  "configuration": {
+                    "identity_field": "image",
+                    "sample_count": 8
                   }
                 }
               }
@@ -253,6 +303,45 @@
             "training": {
               "model_family": "vision",
               "components": {
+                "artifact_renderer": {
+                  "key": {
+                    "category": "artifact_renderer",
+                    "name": "caption_triplet",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "modality": "multimodal",
+                    "schema": "trainvm.caption-triplet.v1"
+                  }
+                },
+                "evaluation_schedule": {
+                  "key": {
+                    "category": "evaluation_schedule",
+                    "name": "launch_gate_periodic",
+                    "version": "2.0.0"
+                  },
+                  "configuration": {
+                    "full_step_zero": true,
+                    "full_every_steps": 500,
+                    "qualitative_every_steps": 500,
+                    "final": true
+                  }
+                },
+                "evaluator": {
+                  "key": {
+                    "category": "evaluator",
+                    "name": "scalar_loss",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "split_slot": "",
+                    "metrics": [
+                      "eval.loss"
+                    ],
+                    "reduction": "weighted_mean",
+                    "maximum_examples": 0
+                  }
+                },
                 "gradient_clipping": {
                   "key": {
                     "category": "gradient_clipping",
@@ -292,6 +381,17 @@
                     "compute_dtype": "bfloat16",
                     "reduction_dtype": "float32",
                     "gradient_scaling": false
+                  }
+                },
+                "qualitative_samples": {
+                  "key": {
+                    "category": "qualitative_sample",
+                    "name": "fixed_held_out",
+                    "version": "2.0.0"
+                  },
+                  "configuration": {
+                    "identity_field": "image",
+                    "sample_count": 8
                   }
                 }
               }
