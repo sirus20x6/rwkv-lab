@@ -30,12 +30,27 @@ void require(bool condition, const std::string &message) {
     throw std::runtime_error(message);
 }
 
+// A case that expects a NAMED injected fault passes `expected_fragment`, and
+// the throw is only accepted when what() contains it. Matching on the exception
+// type alone cannot tell "failed for the reason I injected" from "failed for
+// some other reason entirely" — every failure in a subsystem tends to share one
+// exception type — so a stranger is otherwise absorbed and the run aborts later
+// at an unrelated boundary. See the same helper in hostd_transport_tests.cpp
+// and card-852efdc4. Cases that only care that something was refused leave the
+// fragment empty and keep type-only matching.
 template <typename Exception, typename Callable>
-void require_throws(Callable &&callable, const std::string &message) {
+void require_throws(Callable &&callable, const std::string &message,
+                    std::string_view expected_fragment = {}) {
   try {
     std::forward<Callable>(callable)();
-  } catch (const Exception &) {
-    return;
+  } catch (const Exception &error) {
+    const std::string actual(error.what() != nullptr ? error.what() : "");
+    if (expected_fragment.empty() ||
+        actual.find(expected_fragment) != std::string::npos)
+      return;
+    throw std::runtime_error(message + ": expected a failure containing \"" +
+                             std::string(expected_fragment) +
+                             "\" but caught \"" + actual + "\"");
   }
   throw std::runtime_error(message);
 }
@@ -831,7 +846,8 @@ void crash_after_commit_retries_by_exact_ledger_replay() {
     FakeAuditor auditor(report);
     require_throws<HostdStateError>(
         [&] { (void)coordinator.run_startup_audit(auditor, {30, 40}); },
-        "lost reply after durable commit fails the first coordinator");
+        "lost reply after durable commit fails the first coordinator",
+        "injected hostd ledger fault");
     require(coordinator.status().lifecycle == HostdLifecycle::poisoned &&
                 !coordinator.status().startup_audit,
             "first coordinator does not fabricate a receipt after lost reply");
@@ -1056,7 +1072,8 @@ void admission_finalize_lost_reply_and_async_poison_recover() {
       FakeAuditor auditor(report);
       require_throws<HostdStateError>(
           [&] { (void)coordinator.run_startup_audit(auditor, {30, 40}); },
-          "lost finalize reply fails the first local coordinator");
+          "lost finalize reply fails the first local coordinator",
+          "injected hostd ledger fault");
       require(coordinator.status().lifecycle == HostdLifecycle::poisoned,
               "lost finalize reply never fabricates a local admission latch");
     }

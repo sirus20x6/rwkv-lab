@@ -60,12 +60,34 @@ void require(bool condition, std::string_view message) {
     throw std::runtime_error(std::string(message));
 }
 
+// Matching on the exception TYPE alone is not a check here. Nearly every
+// fault-injection case below expects a HostdTransportError, and a
+// HostdTransportError is also what an entirely unrelated failure throws, so a
+// type-only catch cannot tell "failed for the reason I injected" from "failed
+// for some other reason". That is how card-852efdc4 hid: a stray "hostd
+// self-bind requires single-threaded startup", thrown by a startup race inside
+// a case that expected an injected bind-checkpoint fault, was accepted as a
+// pass. The run only aborted one case later at an unrelated boundary, so the
+// log pointed away from the defect.
+//
+// So a case that expects a NAMED failure passes `expected_fragment`, and the
+// throw is only accepted when what() contains it; a stranger fails that case,
+// quoting the message it actually caught. Cases that genuinely only care that
+// something was refused leave the fragment empty and keep type-only matching.
 template <typename Exception, typename Callable>
-void require_throws(Callable &&callable, std::string_view message) {
+void require_throws(Callable &&callable, std::string_view message,
+                    std::string_view expected_fragment = {}) {
   try {
     std::forward<Callable>(callable)();
-  } catch (const Exception &) {
-    return;
+  } catch (const Exception &error) {
+    const std::string actual(error.what() != nullptr ? error.what() : "");
+    if (expected_fragment.empty() ||
+        actual.find(expected_fragment) != std::string::npos)
+      return;
+    throw std::runtime_error(std::string(message) +
+                             ": expected a failure containing \"" +
+                             std::string(expected_fragment) +
+                             "\" but caught \"" + actual + "\"");
   }
   throw std::runtime_error(std::string(message));
 }
@@ -1072,7 +1094,8 @@ void authority_requires_external_singleton_and_pins_path() {
         (void)HostdSocketAuthority::self_bind(
             socket_config(directory), directory.parent_fd(), missing);
       },
-      "self-bind refuses a missing external singleton token");
+      "self-bind refuses a missing external singleton token",
+      "requires an already-held singleton token");
 
   auto held = std::make_shared<HeldToken>();
   auto authority = HostdSocketAuthority::self_bind(
@@ -1090,13 +1113,15 @@ void authority_requires_external_singleton_and_pins_path() {
         (void)HostdSocketAuthority::self_bind(
             socket_config(directory), directory.parent_fd(), held);
       },
-      "second live bind never unlinks the first socket pathname");
+      "second live bind never unlinks the first socket pathname",
+      "pathname already exists and is never blindly removed");
   require(authority.reattest() == identity,
           "failed second bind leaves original authority intact");
   held->held = false;
   require_throws<HostdTransportError>(
       [&] { (void)authority.reattest(); },
-      "authority poisons immediately when its retained singleton is lost");
+      "authority poisons immediately when its retained singleton is lost",
+      "hostd singleton token is no longer held");
   require(authority.poisoned(),
           "singleton loss remains observable through authority status");
 }
@@ -1124,7 +1149,8 @@ void startup_faults_rollback_and_restore_process_state() {
           (void)HostdSocketAuthority::self_bind(
               config, directory.parent_fd(), std::make_shared<HeldToken>());
         },
-        "post-bind checkpoint failure is normalized");
+        "post-bind checkpoint failure is normalized",
+        "hostd bind fault checkpoint failed");
     require(!std::filesystem::exists(config.socket_path),
             "captured post-bind failure exact-unlinks its own pathname");
   }
@@ -1181,7 +1207,8 @@ void startup_faults_rollback_and_restore_process_state() {
             threaded_config, directory.parent_fd(),
             std::make_shared<HeldToken>());
       },
-      "self-bind refuses to change cwd after another thread exists");
+      "self-bind refuses to change cwd after another thread exists",
+      "hostd self-bind requires single-threaded startup");
   require(!std::filesystem::exists(threaded_config.socket_path),
           "multi-thread rejection occurs before creating a pathname");
   sigset_t mask_after_thread_rejection{};
@@ -1256,7 +1283,8 @@ void path_replacement_poison_and_guarded_move_cleanup() {
   const int replacement = create_raw_listener(config);
   require_throws<HostdTransportError>(
       [&] { (void)authority.reattest(); },
-      "listener/path replacement poisons the authority");
+      "listener/path replacement poisons the authority",
+      "hostd socket pathname identity changed");
   require(authority.poisoned() && !authority.poison_reason().empty(),
           "path replacement poison remains observable");
   require(::close(replacement) == 0, "close replacement listener");
@@ -1373,7 +1401,8 @@ void status_only_lifecycle_and_endpoint_identity() {
         (void)poisoned_fixture.coordinator->run_startup_audit(failed_auditor,
                                                               {30, 40});
       },
-      "failed startup audit blocks coordinator");
+      "failed startup audit blocks coordinator",
+      "startup audit committed blocking or failed evidence");
   HostdStatusServer poisoned_server(poisoned_authority,
                                     poisoned_fixture.coordinator,
                                     peer_policy());
@@ -1404,7 +1433,7 @@ void status_only_lifecycle_and_endpoint_identity() {
         (void)invalid_text_fixture.coordinator->run_startup_audit(
             invalid_text_auditor, {30, 40});
       },
-      "invalid-text auditor poisons coordinator");
+      "invalid-text auditor poisons coordinator", "startup audit failed: ");
   HostdStatusServer invalid_text_server(invalid_text_authority,
                                         invalid_text_fixture.coordinator,
                                         peer_policy());
@@ -1763,7 +1792,8 @@ void malformed_packets_rights_and_deadlines_are_bounded() {
                  std::numeric_limits<std::int64_t>::max()});
         (void)invalid;
       },
-      "an extreme session timeout is rejected before deadline arithmetic");
+      "an extreme session timeout is rejected before deadline arithmetic",
+      "hostd status transport limits are invalid");
   HostdServeResult idle = HostdServeResult::served;
   std::jthread idle_server([&] { idle = server.serve_one(deadline()); });
   const int idle_client = connect_raw(authority->socket_path());
