@@ -1,7 +1,7 @@
 {
   "api_version": "trainvm.compatibility-workflows/v1",
   "authority": "compatibility_evidence_only",
-  "classification_surface_digest": "sha256:c1fe6fa4046760719a81f7cdcbf397da311ff062a8a5581046e0f83bba93a1ad",
+  "classification_surface_digest": "sha256:b5a227b757b872c4b8a5a00a62a9653c69aae14b89967a8b274f1ce2f21bb621",
   "source_digests": [
     {
       "source_path": "dashboard/internal/server/alerts_handlers.go",
@@ -485,7 +485,7 @@
     },
     {
       "source_path": "src/rwkv_lab/posttrain_train.py",
-      "source_sha256": "sha256:8809c5648a5a354264b5657cdc14223b667fe2a098f1e9d46ec8424accdbfdcc"
+      "source_sha256": "sha256:2df54c652e2dc1fac7b5900da6ab637edbb16ae3e5c5a0a36d9d0b97e843c683"
     },
     {
       "source_path": "src/rwkv_lab/production_kernels.py",
@@ -493,7 +493,7 @@
     },
     {
       "source_path": "src/rwkv_lab/qwen_ao3_cpt.py",
-      "source_sha256": "sha256:443efdedd607923b4d7145520ad8e7a11311b5f423d24b482e5568d4ffb3f61a"
+      "source_sha256": "sha256:2f1f495c4c57d171ff244221a8f9a5ec603c7a36f2fc0af7f754943b4d4d741c"
     },
     {
       "source_path": "src/rwkv_lab/reasoning_cache.py",
