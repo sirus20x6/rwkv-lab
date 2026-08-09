@@ -42,7 +42,7 @@ constexpr std::size_t kMaximumNotesBytes = 2048U;
 // entry's recorded classification, or the entrypoint/argument/checkpoint
 // surface of a referenced source, has actually changed.
 constexpr std::string_view kReviewedCatalogDigest =
-    "sha256:9427353edda661c9fe24d42ed7e8dce04760ee295bee1b366c28cac98df2ba30";
+    "sha256:300336658fcf3df58eb52ed996a38be6280c3b47a4cf97322a965e24a380837d";
 
 constexpr std::array<std::string_view, 156> kReviewedWorkflowIds = {
     "acquisition.civitai-anima",
