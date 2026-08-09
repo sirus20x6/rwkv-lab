@@ -175,6 +175,41 @@ not touch the same code, only any classified source. At one point on
 2026-08-09 all six open PRs were simultaneously green and conflicting, none of
 them blocked by anything in its own change.
 
+### Then check which head the verdict was computed against
+
+`mergeStateStatus` is not the only way check state can describe a commit other
+than the one you are about to merge. `gh pr view <n> --json statusCheckRollup`
+can return a conclusion computed against a **different head** than the PR
+currently points at, and the response carries no marker saying so.
+
+```bash
+gh pr view <n> --json headRefOid -q .headRefOid
+git rev-parse origin/<branch>
+```
+
+**If those two disagree, the check counts describe the other commit and must not
+be interpreted at all** — the same rule as DIRTY, for the same reason. Re-query;
+it settles in seconds to minutes.
+
+It goes wrong in both directions, and both were observed on 2026-08-09. PR #140
+reported `CLEAN, running=0, failed=0` while the last commit on its branch was
+fourteen seconds old; fourteen seconds later the same query returned
+`headRefOid 828d3526, UNSTABLE, running=7`. The first reading described the head
+from *before* the agent's push, and merging on it would have landed a commit
+whose CI never ran — silently, because nothing afterwards distinguishes that
+from a normal merge. In the other direction, PR #132 served a stale head for
+about ten minutes after it was squash-merged: `git ls-remote` showed the ref
+current the whole time, only `gh pr close` revealed the PR had already merged,
+and an agent spent those minutes diagnosing a sync problem that did not exist.
+
+Do not address this by polling harder or sleeping longer. The window was
+fourteen seconds in one case and ten minutes in the other, so no timeout is the
+right instrument; the OID comparison is exact and costs one command. Any tooling
+that merges on check state has to compare the OID first. A cheap secondary
+signal for a human reader: an "all checks complete" verdict on a branch whose
+last commit is seconds old is suspect on its face, because CI cannot have
+finished that fast.
+
 ## Running the gates locally
 
 ```bash
@@ -251,13 +286,56 @@ new base; check which you have before trusting either.) The pinned digests in
 — take one side, then let the ctest print the two correct values beside their
 names.
 
-There is deliberately no single `refresh-all` script yet. Writing one is filed,
-and the reason it is not a five-minute job is worth knowing before you start:
-`scripts/` is an exhaustively enumerated disposition scope, so *adding a script
-to `scripts/`* itself trips the gate — it needs a catalog entry and moves three
-pinned counts in `source_disposition_catalog_tests.cpp` (the entry count, its
-disposition-class count, and the catalog digest). The tool that would relieve
-the tax pays it on the way in.
+There is deliberately no single `refresh-all` script yet. Writing one is filed.
+
+### Adding a script to `scripts/` costs nothing today
+
+This file used to claim the opposite here — that `scripts/` is an exhaustively
+enumerated disposition scope, so *adding* a script to it trips the gate and
+moves three pinned counts in `source_disposition_catalog_tests.cpp`. Paying that
+is still welcome, but nothing requires it, and believing otherwise has already
+made agents restructure work around a gate that was not there.
+
+The enumeration is a property of the **legacy** `/thearray/git/moe-mla` checkout
+at the revision each catalog pins, not of this repository. Measured against
+`origin/main` at `3d39122`:
+
+- `source-dispositions.scripts.v1.json` pins `git-sha1:bae678b9`, and its 128
+  entries are *exactly* the 128 top-level `scripts/*.{py,sh}` files in the legacy
+  tree at that revision — set equality, and zero dangling entries. The same
+  scope in this repository holds 146 files, so **18 are unclassified**, among
+  them `scripts/acceptance.sh` and `scripts/generate_trainvm_proto.sh`.
+- `source-dispositions.rwkv-lab.v1.json` has the same shape: 165 entries against
+  171 files in scope here, so 6 are unclassified.
+- `source-dispositions.dashboard.v1.json` pins a different revision and is
+  complete for this tree.
+
+Nothing reports those gaps. `print_disposition_digests.py --check` only walks the
+entries the document lists and hashes the files they name, so a file with *no*
+entry is invisible to it. The C++ loader does enumerate the scope and reject
+missing paths (`enumerate_scope` in `source_disposition_catalog.cpp`), but only
+when `load_file` is handed a repository root — and
+`source_disposition_catalog_tests.cpp` guards that call behind
+`getenv("TRAINVM_LEGACY_SOURCE_ROOT")`, which is unset in CI. Confirmed from the
+other side as well: an uncatalogued script dropped into `scripts/` left all three
+`--check` runs, `ctest -R source_disposition_catalog`, and `validate-catalog`
+green.
+
+So **what binds in this repository is the content pins, not the enumeration.**
+Editing a classified source moves its digest and you must refresh the pins as
+above. Adding a new source is unclassified and ungated. The two halves point at
+different trees, and you can see the seam: 127 of the 128 scripts pins equal the
+legacy blob at `bae678b9`, while `scripts/supervisor_night.sh`'s equals this
+repository's copy — because the pins get regenerated here and the entry list
+never does.
+
+Closing the gap is real work rather than an oversight to tidy up in passing. One
+catalog cannot be complete for two trees at once, so an entry for a file that
+exists only here would break the `TRAINVM_LEGACY_SOURCE_ROOT` path the moment
+anyone sets it; it needs the live check parameterised by which root it validates,
+plus 24 honest classifications. That is filed as its own card. Until it lands, do
+not budget for a scripts-enumeration tax, and do not rely on the gate to catch an
+unclassified script.
 
 **Do not skip the build**, and do not assume a checkout that already has
 `trainvm/build/trainvm` has a current one. This is a real trap, not a caution:
