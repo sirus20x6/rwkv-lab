@@ -535,9 +535,30 @@ int lock_input_content_command(
   }
   if (content_cache) {
     (void)transaction->commit();
-    (void)content_cache->publish_persistent_digests(*content_cache_path);
   }
+  // The locked document is the whole product of this command, and by here it is
+  // measured, injected, and recompiled. Emit it before touching the store, and
+  // treat a store that cannot be written as a warning rather than a failure:
+  // the cache is an optimisation, and its next lock simply measures from bytes.
+  // Publishing first is how a full disk, a permission change, or a store that
+  // outgrew its publication bound used to discard a completed lock -- the throw
+  // reached the top-level handler and the document was never printed. Both
+  // halves matter: printing first bounds the damage, catching removes it.
   std::cout << experiment.dump(2) << '\n';
+  if (content_cache) {
+    try {
+      (void)content_cache->publish_persistent_digests(*content_cache_path);
+    } catch (const std::exception& error) {
+      std::cerr << "warning: the input content digest store was not published: "
+                << error.what() << '\n';
+    } catch (...) {
+      // Nothing below throws a non-`std::exception` today, so this clause is
+      // untestable from here and is not claimed to be covered. It is the half
+      // of the fix that printing first also protects: if publication ever
+      // fails in a way this cannot describe, the document is already on stdout.
+      std::cerr << "warning: the input content digest store was not published\n";
+    }
+  }
   return trainvm::kExitSuccess;
 }
 

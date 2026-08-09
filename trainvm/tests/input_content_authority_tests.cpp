@@ -788,6 +788,113 @@ void changed_bytes_cannot_reuse_a_digest_under_a_forged_mtime() {
           "changed bytes must be read again rather than served from the store");
 }
 
+// A store shared by successive locks over a churning tree must stay
+// proportional to the tree, not to every file that tree has ever held.
+//
+// The failure this pins is the publisher's, not the admitter's. Publication
+// used to write back every entry in the in-memory cache, and the cache holds
+// two disjoint populations after `admit_persistent_digests`: what this process
+// measured, and what an earlier process left behind. Copying the second forward
+// unconditionally makes the store an append-only log -- each round adds records
+// and removes none -- and at `kDigestStoreMaximumBytes` publication throws,
+// which (before this was split apart) failed the whole lock.
+//
+// Three rounds is enough to see the shape: monotonic growth would put 3, 6 and
+// 9 records in the store, and each round asserts the exact count offered back
+// by the *next* admission, which is the number that actually landed on disk.
+void a_churning_tree_does_not_grow_the_store_without_bound() {
+  TemporaryDirectory temporary;
+  const auto root = temporary.path() / "root";
+  const auto store = temporary.path() / "digests.store";
+  constexpr int files_per_round = 3;
+  constexpr int rounds = 3;
+
+  std::uint64_t expected_offer = 0U;
+  for (int round = 0; round < rounds; ++round) {
+    // Replace the tree wholesale. Every file the previous round measured is
+    // gone, so every record the previous store holds is dead.
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    for (int index = 0; index < files_per_round; ++index) {
+      write_file(root / ("round-" + std::to_string(round) + "-" +
+                         std::to_string(index) + ".bin"),
+                 "payload-" + std::to_string(round));
+    }
+    wait_for_timestamps_to_settle();
+
+    InputContentMeasurementCache cache;
+    const auto admitted = cache.admit_persistent_digests(store);
+    require(admitted.offered_entries == expected_offer,
+            "the store carries only the previous round's records");
+    InputContentMeasurementStats stats;
+    (void)measure_cached(cache, root, stats);
+    require(stats.cache_hits == 0U,
+            "a wholly replaced tree cannot hit any inherited record");
+    const auto published = cache.publish_persistent_digests(store);
+    require(published.accepted &&
+                published.offered_entries ==
+                    static_cast<std::uint64_t>(files_per_round),
+            "publication writes back exactly this round's measurements");
+    require(published.unused_entries == expected_offer,
+            "every inherited record this lock never consulted is dropped");
+    expected_offer = static_cast<std::uint64_t>(files_per_round);
+  }
+
+  // The claim stated as the operator sees it: what is on disk after N rounds of
+  // churn is one round's worth of records, not N.
+  InputContentMeasurementCache reader;
+  const auto final_admission = reader.admit_persistent_digests(store);
+  require(final_admission.present && final_admission.accepted &&
+              final_admission.offered_entries ==
+                  static_cast<std::uint64_t>(files_per_round),
+          "a store churned three times still holds one tree's worth of records");
+}
+
+// The complement, and the reason the flag is per-entry rather than a wholesale
+// "drop everything inherited": a record that *was* consulted is evidence this
+// lock relied on, and dropping it would make every second lock cold. A warm
+// lock measures nothing, so it must still republish what it read.
+void a_warm_lock_republishes_the_records_it_consulted() {
+  TemporaryDirectory temporary;
+  const auto root = temporary.path() / "root";
+  const auto store = temporary.path() / "digests.store";
+  std::filesystem::create_directories(root);
+  write_file(root / "kept.bin", "kept");
+  write_file(root / "dropped.bin", "dropped");
+  wait_for_timestamps_to_settle();
+
+  {
+    InputContentMeasurementCache cache;
+    InputContentMeasurementStats stats;
+    (void)measure_cached(cache, root, stats);
+    const auto published = cache.publish_persistent_digests(store);
+    require(published.offered_entries == 2U, "both files reach the store");
+  }
+
+  // Remove one subject. The surviving file is a pure cache hit -- nothing is
+  // measured this round -- so its record only survives if a consulted entry
+  // counts as used.
+  std::filesystem::remove(root / "dropped.bin");
+  InputContentMeasurementCache cache;
+  const auto admitted = cache.admit_persistent_digests(store);
+  require(admitted.admitted_entries == 2U, "both records are still admitted");
+  InputContentMeasurementStats stats;
+  (void)measure_cached(cache, root, stats);
+  require(stats.cache_hits == 1U && stats.bytes_hashed == 0U,
+          "the surviving file is served from the store");
+  const auto published = cache.publish_persistent_digests(store);
+  require(published.offered_entries == 1U && published.unused_entries == 1U,
+          "a consulted record is republished and only the dead one is dropped");
+
+  InputContentMeasurementCache reader;
+  InputContentMeasurementStats warm_stats;
+  require(reader.admit_persistent_digests(store).admitted_entries == 1U,
+          "the next lock inherits the record it will need");
+  (void)measure_cached(reader, root, warm_stats);
+  require(warm_stats.cache_hits == 1U && warm_stats.bytes_hashed == 0U,
+          "a twice-warm lock still reads no bytes");
+}
+
 // A store record outlives the file it describes: deleting a file does not
 // remove its record, so the next lock loads a key naming an inode that the
 // filesystem is free to hand to something else. That is the case an in-memory
@@ -1123,6 +1230,10 @@ int main() {
     std::cout << "PASS store-warm-reuse\n";
     changed_bytes_cannot_reuse_a_digest_under_a_forged_mtime();
     std::cout << "PASS store-forged-mtime\n";
+    a_churning_tree_does_not_grow_the_store_without_bound();
+    std::cout << "PASS store-churn-bounded\n";
+    a_warm_lock_republishes_the_records_it_consulted();
+    std::cout << "PASS store-consulted-republished\n";
     a_recreated_file_cannot_inherit_a_dead_records_digest();
     std::cout << "PASS store-recreated-inode\n";
     racily_recent_measurements_are_withheld();

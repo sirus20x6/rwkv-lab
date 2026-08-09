@@ -113,6 +113,58 @@ def main() -> int:
             raise SystemExit("a world-writable digest store was accepted")
         store.unlink()
 
+        # A store that cannot be written must not discard a lock that already
+        # succeeded. The command publishes after it has measured every root and
+        # recompiled the document, so a throw there costs the whole run: the
+        # operator saw an uncaught exception and lost a locked document that was
+        # already correct.
+        #
+        # Forced by occupying the name publication stages through. `O_CREAT |
+        # O_EXCL` against an existing directory fails with EEXIST for every uid,
+        # which is the point: an earlier version of this test revoked write
+        # permission on the containing directory instead, and passed only
+        # because the developer running it was not root. CI is, root ignores the
+        # mode bits, publication succeeded, and the test failed honestly rather
+        # than pretending to cover this. The authority's own permission rules
+        # read st_mode directly and so are uid-independent; a test that leans on
+        # the *kernel* enforcing those bits is not.
+        #
+        # This does couple the test to the ".staged" suffix in
+        # `write_store_file`. That is deliberate: if the staging name changes,
+        # this failing is the correct outcome, because the injection would
+        # otherwise stop reaching publication and quietly prove nothing.
+        sealed_directory = temporary / "sealed"
+        sealed_directory.mkdir()
+        sealed_store = sealed_directory / "digests.store"
+        (sealed_directory / "digests.store.staged").mkdir()
+        unpublishable = run(trainvm, experiment_path, roots_path, sealed_store)
+        # Check the precondition before the property, and report them as
+        # different facts. "The fault could not be arranged" and "the warning
+        # was missing" have the same symptom and opposite meanings, and the
+        # first version of this test conflated them -- it failed in CI saying
+        # the operator was not told, when the truth was that publication had
+        # succeeded and there was nothing to tell. That conflation is the same
+        # defect class this PR fixes one layer down, so it is worth the extra
+        # branch here.
+        if sealed_store.exists():
+            raise SystemExit(
+                "could not arrange an unpublishable store: publication succeeded "
+                "and wrote " + str(sealed_store) + ", so the case below is untested"
+            )
+        if unpublishable.returncode != 0:
+            raise SystemExit(
+                "an unpublishable digest store failed a lock that had succeeded: "
+                + unpublishable.stderr
+            )
+        if json.loads(unpublishable.stdout) != locked:
+            raise SystemExit(
+                "an unpublishable digest store changed or withheld the locked document"
+            )
+        if "not published" not in unpublishable.stderr:
+            raise SystemExit(
+                "a store that could not be written was not reported to the operator"
+            )
+
         roots_path.write_text(
             json.dumps(
                 {

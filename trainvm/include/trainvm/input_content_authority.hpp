@@ -90,11 +90,17 @@ struct InputContentMeasurementCacheCommitStats final {
 // timestamp too recent to be trusted. `withheld` counts measurements this
 // process declined to persist for that last reason. Both are ordinary, not
 // errors; the affected files are simply hashed again.
+//
+// `unused` counts records this process admitted from an earlier store and then
+// never consulted, which publication drops rather than copying forward. That
+// is what keeps the store proportional to the tree being locked instead of to
+// every file ever seen through it; see `publish_persistent_digests`.
 struct InputContentDigestStoreStats final {
   std::uint64_t offered_entries{};
   std::uint64_t admitted_entries{};
   std::uint64_t refused_entries{};
   std::uint64_t withheld_entries{};
+  std::uint64_t unused_entries{};
   bool present{};
   bool accepted{};
 
@@ -132,7 +138,15 @@ public:
   [[nodiscard]] std::string policy_digest() const;
 
   // Admit previously measured file digests from an owner-only store, and
-  // publish this cache's contents back to it. The store is trusted only
+  // publish back the subset of this cache that this process actually used: the
+  // measurements it took, plus the admitted records it consulted. A record
+  // admitted from the previous store and never looked up describes a file this
+  // lock did not visit, and copying it forward unconditionally would turn the
+  // store into an append-only log of every file ever seen through it -- which
+  // grows without bound and eventually exceeds the publication bound. It is
+  // dropped instead, so a store shared by locks over disjoint roots keeps only
+  // the most recent root's records rather than their union. The store is
+  // trusted only
   // because nothing but its owner can write it, exactly as the runtime-closure
   // evidence directory is; a store whose file or containing directory is
   // writable by anyone else, is not owned by this process, or carries more
