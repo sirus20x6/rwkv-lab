@@ -20,7 +20,40 @@ worktree is visible in one place rather than scattered through the parent
 directory.
 
 Branch from `origin/main`, not from a feature branch, unless the card says
-otherwise.
+otherwise. Run `git fetch origin` first: `origin/main` is a local ref and is
+only as current as your last fetch. Do not branch from `HEAD` — the primary
+checkout is not necessarily on main, and cannot always be, because git allows a
+branch in one worktree at a time and a sibling checkout may hold main.
+
+### If you do branch from unmerged work, you inherit its blockers
+
+The escape clause above is real — building on a colleague's branch to avoid
+duplicating it is sometimes right. But a commit travels between branches while
+the pull request it belongs to stays behind, and everything that says "not yet"
+is attached to the pull request: the draft flag, the review, the "do not merge
+until X" paragraph. Your merge carries the code and leaves all of that.
+
+This is not hypothetical. PR #92 was a draft whose body listed two conditions
+that had to hold before it landed. Its commit was rebased onto another card's
+branch, that branch merged main, and the work shipped in PR #99 with one
+condition still unmet — it is unmet today. Neither agent did anything wrong;
+the second one had no reason to read the first one's PR body.
+
+So, if your branch contains commits you did not write:
+
+- Enumerate them in your PR body and re-assert their blockers as your own. You
+  are the one merging them.
+- Better, do not rely on prose at all. **A blocker that matters belongs in a
+  failing check.** If something must not ship until a condition holds, write a
+  test that fails while it does not hold. A sentence in a PR description cannot
+  stop a merge; a red check can, and it survives being rebased onto someone
+  else's branch, which is the whole problem.
+
+There is deliberately no automated guard here. A merge-base age check would fire
+on legitimately long-lived branches, and a check for "contains another PR's
+commits" is unreliable once a rebase has rewritten them. Encoding the specific
+blocker as a test is the affordable mechanism, and it is the one that would have
+stopped PR #99.
 
 ## Layout does NOT tell you who owns a worktree
 
@@ -42,6 +75,32 @@ to distinguish your work from another agent's, it needs something that actually
 identifies the agent — every agent pushes as the same GitHub user, so PR author
 does not work either. This is genuinely unsolved here; do not paper over it with
 a path filter and a hopeful comment.
+
+## Before you start a card: read its comments, and read the docs it names
+
+Two failures cost real work on 2026-08-09, both the same shape — acting on a
+description of the world instead of the world.
+
+**A card body is a snapshot; its comments are the current state.** `card-4f3f56a2`
+was dispatched against its full five-item scope while roughly 80% of it had
+already merged. The body still described the original problem, three days stale.
+The comments recorded that two PRs had landed and that the card's own disposition
+had been *retracted*. Everything needed to avoid the wasted start was on the card
+— just not in the part that gets read first. Read the comments, oldest to newest,
+before claiming or delegating.
+
+**Read the document you are about to add to.** Three cards were filed proposing to
+write down rules that were already written down: two claimed this file did not
+state the base branch for new worktrees (it did, and had for some time), and one
+raised a question `docs/experiment-vm/SOURCE_DISPOSITIONS.md` already answered in
+its first paragraph. Each cost a full investigation to discover that nothing was
+wrong. Grep the docs for the thing you are about to assert is missing.
+
+The general form: **a finding is not real until it is checked against the thing
+itself.** That is the same rule the repository already applies to its own
+artifacts — a receipt names the commit it ran against, a catalog pins per-file
+hashes rather than trusting a revision string — and it applies to cards and
+documentation too.
 
 ## Finishing a card
 

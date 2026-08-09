@@ -1,0 +1,14 @@
+{
+  "api_version": "trainvm.recipe-instance/v1",
+  "recipe": {"name": "transformer_lm", "version": "1"},
+  "run_identity": "transformer-lm-full-example",
+  "overrides": {
+    "model.path": "/thearray/git/moe-mla",
+    "data.root": "/thearray/git/moe-mla",
+    "hyperparameters.learning_rate": 0.0003,
+    "hyperparameters.maximum_steps": 10000,
+    "data.batch_size": 8,
+    "data.maximum_sequence_length": 2048,
+    "evaluation.qualitative_sample_count": 8
+  }
+}

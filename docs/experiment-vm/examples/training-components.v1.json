@@ -227,6 +227,140 @@
     {
       "key": {
         "category": "model_loader",
+        "name": "rwkv_checkpoint",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.model_loader.rwkv_checkpoint.v1",
+      "model_families": [
+        "rwkv"
+      ],
+      "required_capabilities": [
+        "model_loader.rwkv_checkpoint.v1"
+      ],
+      "configuration": [
+        {
+          "name": "vocabulary_size",
+          "type": "integer",
+          "required": false,
+          "default": 65536,
+          "minimum": 2,
+          "maximum": 16777216
+        },
+        {
+          "name": "d_model",
+          "type": "integer",
+          "required": true,
+          "minimum": 64,
+          "maximum": 65536
+        },
+        {
+          "name": "n_layers",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 4096
+        },
+        {
+          "name": "head_size",
+          "type": "integer",
+          "required": false,
+          "default": 64,
+          "minimum": 16,
+          "maximum": 1024
+        },
+        {
+          "name": "seed",
+          "type": "integer",
+          "required": false,
+          "default": 0,
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        {
+          "name": "checkpoint_path",
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "checkpoint_fingerprint",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        }
+      ],
+      "state": [
+        {
+          "name": "base_checkpoint_fingerprint",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        }
+      ],
+      "state_grade": "compatible",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "model_loader",
+        "name": "rwkv_scratch",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.model_loader.rwkv_scratch.v1",
+      "model_families": [
+        "rwkv"
+      ],
+      "required_capabilities": [
+        "model_loader.rwkv_scratch.v1"
+      ],
+      "configuration": [
+        {
+          "name": "vocabulary_size",
+          "type": "integer",
+          "required": false,
+          "default": 65536,
+          "minimum": 2,
+          "maximum": 16777216
+        },
+        {
+          "name": "d_model",
+          "type": "integer",
+          "required": true,
+          "minimum": 64,
+          "maximum": 65536
+        },
+        {
+          "name": "n_layers",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 4096
+        },
+        {
+          "name": "head_size",
+          "type": "integer",
+          "required": false,
+          "default": 64,
+          "minimum": 16,
+          "maximum": 1024
+        },
+        {
+          "name": "seed",
+          "type": "integer",
+          "required": false,
+          "default": 0,
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        }
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "model_loader",
         "name": "hf_multimodal",
         "version": "2.0.0"
       },
@@ -355,6 +489,7 @@
       "backend": "python",
       "implementation": "rwkv_lab.trainability.full.v1",
       "model_families": [
+        "rwkv",
         "transformer",
         "vision"
       ],
@@ -841,6 +976,66 @@
     {
       "key": {
         "category": "data_source",
+        "name": "manifested_jsonl_token_splits",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.data_source.jsonl_frozen_token_splits.v1",
+      "model_families": [
+        "rwkv",
+        "transformer"
+      ],
+      "required_capabilities": [
+        "data_source.jsonl_frozen_token_splits.v1"
+      ],
+      "configuration": [
+        {
+          "name": "dataset_root",
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "content_fingerprint",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "declared_columns",
+          "type": "string_list",
+          "required": true,
+          "collection_semantics": "set"
+        },
+        {
+          "name": "token_column",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "id_column",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "state": [
+        {
+          "name": "content_fingerprint",
+          "type": "string",
+          "required": true,
+          "string_format": "sha256_digest"
+        },
+        {
+          "name": "cursor",
+          "type": "integer",
+          "required": true
+        }
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "data_source",
         "name": "jsonl_token_corpus",
         "version": "1.0.0"
       },
@@ -1273,6 +1468,66 @@
     },
     {
       "key": {
+        "category": "collator",
+        "name": "packed_tokens",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.collator.packed_tokens.v1",
+      "model_families": [
+        "rwkv",
+        "transformer"
+      ],
+      "required_capabilities": [
+        "collator.packed_tokens.v1"
+      ],
+      "configuration": [
+        {
+          "name": "pad_token_id",
+          "type": "integer",
+          "required": true,
+          "minimum": 0,
+          "maximum": 16777215
+        },
+        {
+          "name": "label_pad_token_id",
+          "type": "integer",
+          "required": false,
+          "default": -100,
+          "minimum": -1000000,
+          "maximum": 16777215
+        },
+        {
+          "name": "pad_to_multiple",
+          "type": "integer",
+          "required": false,
+          "default": 1,
+          "minimum": 1,
+          "maximum": 4096
+        },
+        {
+          "name": "maximum_sequence_length",
+          "type": "integer",
+          "required": true,
+          "minimum": 1,
+          "maximum": 1048576,
+          "unit": "tokens"
+        },
+        {
+          "name": "separator_token_id",
+          "type": "integer",
+          "required": false,
+          "default": 0,
+          "minimum": 0,
+          "maximum": 16777215
+        }
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
         "category": "sampler",
         "name": "deterministic",
         "version": "1.0.0"
@@ -1528,6 +1783,7 @@
       "backend": "python",
       "implementation": "rwkv_lab.split_selector.frozen_named.v1",
       "model_families": [
+        "rwkv",
         "transformer",
         "vision"
       ],
@@ -3084,6 +3340,7 @@
       "backend": "python",
       "implementation": "rwkv_lab.generation_policy.greedy.v1",
       "model_families": [
+        "rwkv",
         "transformer",
         "vision"
       ],

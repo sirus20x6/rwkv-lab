@@ -327,6 +327,18 @@ target_compile_definitions(recipe_profile_tests PRIVATE
 )
 target_link_libraries(recipe_profile_tests PRIVATE trainvm_core)
 add_test(NAME recipe_profile_tests COMMAND recipe_profile_tests)
+
+add_executable(lm_recipe_profiles_tests
+  tests/lm_recipe_profiles_tests.cpp
+)
+target_compile_options(lm_recipe_profiles_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_compile_definitions(lm_recipe_profiles_tests PRIVATE
+  TRAINVM_SOURCE_ROOT="${CMAKE_SOURCE_DIR}/.."
+)
+target_link_libraries(lm_recipe_profiles_tests PRIVATE trainvm_core)
+add_test(NAME lm_recipe_profiles_tests COMMAND lm_recipe_profiles_tests)
 add_executable(rwkv_lab_worker_contract_tests
   tests/rwkv_lab_worker_contract_tests.cpp
 )
