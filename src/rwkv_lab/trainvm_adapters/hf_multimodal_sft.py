@@ -43,6 +43,7 @@ from rwkv_lab.training_components import (
     RawSample,
     RegisteredCollator,
 )
+from rwkv_lab.training_runtime.evaluation_schedules import EvaluationKind
 
 _MULTIMODAL_TENSOR_KEYS = frozenset(
     {
@@ -65,6 +66,20 @@ _MULTIMODAL_TENSOR_KEYS = frozenset(
     }
 )
 _ENGINE_STATE_SCHEMA = "rwkv-lab.hf-multimodal-sft-state.v1"
+_CAPTION_PART_SCHEMA = "trainvm.caption-triplet.v1"
+# The universal eval-examples schema forbids line breaks inside a text part, so
+# a caption is folded onto one line rather than dropped. Only whitespace is
+# touched; no character of the evidence itself is rewritten or truncated.
+_IMAGE_MEDIA_TYPES = MappingProxyType(
+    {
+        ".bmp": "image/bmp",
+        ".gif": "image/gif",
+        ".jpeg": "image/jpeg",
+        ".jpg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+    }
+)
 _PENDING_PUBLICATION_DIGEST = (
     "sha256:"
     + hashlib.sha256(b"rwkv-lab.checkpoint-publication-pending/v1").hexdigest()
@@ -2207,6 +2222,25 @@ def _source_image_path(data: HFDataRuntime, sample: ProcessedSample) -> Path | N
     return path
 
 
+def _caption_evidence_part(role: str, text: str) -> Any:
+    """Return one typed eval-examples part carrying a caption.
+
+    An empty generation is real evidence and must survive to the controller, so
+    it becomes a structured part rather than an invalid empty text part.
+    """
+
+    from rwkv_lab.trainvm_worker import EvalEvidencePart
+
+    folded = " ".join(str(text).split())
+    if not folded:
+        return EvalEvidencePart(
+            kind="structured",
+            schema=_CAPTION_PART_SCHEMA,
+            value={"role": role, "caption": ""},
+        )
+    return EvalEvidencePart(kind="text", text=folded)
+
+
 def _text_card(path: Path, text: str) -> None:
     from PIL import Image, ImageDraw
 
@@ -3486,6 +3520,7 @@ def run_hf_multimodal_sft(
         )
 
     checkpoint_sequence = 0
+    attempt_baseline_examples_published = False
     def stage_checkpoint_request() -> Any:
         nonlocal checkpoint_sequence
         checkpoint_sequence += 1
@@ -3640,6 +3675,99 @@ def run_hf_multimodal_sft(
             checkpoint=checkpoint,
         )
 
+    # The universal, family-neutral pre-mutation evidence. The recipe declares a
+    # required `rwkv-lab.eval-examples.v1` publication, which is the only thing
+    # that arms `invocation_requires_step_zero_eval_gate` on the controller; from
+    # then on the controller refuses every optimizer step past this attempt's
+    # baseline, and refuses the attempt's completion, until this artifact is
+    # durable and bound to a same-attempt baseline checkpoint and scalar. The
+    # caption gallery cannot stand in: it is family-local and the controller
+    # cannot read it.
+    def publish_baseline_examples(
+        checkpoint: Any, generated: Sequence[tuple[str, str, str]]
+    ) -> None:
+        from rwkv_lab.trainvm_worker import (
+            EvalEvidencePart,
+            EvalExample,
+            EvalExamplesPublicationRequest,
+            EvalMedia,
+        )
+
+        samples = data.qualitative_samples()
+        examples: list[Any] = []
+        for sample, evidence in zip(samples, generated, strict=True):
+            teacher, current, prompt_digest = evidence
+            inputs: list[Any] = []
+            source_path = _source_image_path(data, sample)
+            media_type = (
+                _IMAGE_MEDIA_TYPES.get(source_path.suffix.lower())
+                if source_path is not None
+                else None
+            )
+            if source_path is not None and media_type is not None:
+                inputs.append(
+                    EvalEvidencePart(
+                        kind="image",
+                        media=EvalMedia(
+                            kind="image",
+                            path=source_path,
+                            media_type=media_type,
+                        ),
+                    )
+                )
+            inputs.append(
+                EvalEvidencePart(
+                    kind="structured",
+                    schema=_CAPTION_PART_SCHEMA,
+                    value={
+                        "eval_manifest_digest": eval_manifest_digest,
+                        "heldout_manifest_digest": str(
+                            data.split_membership_digest
+                        ),
+                        "prompt_or_condition_digest": prompt_digest,
+                    },
+                )
+            )
+            examples.append(
+                EvalExample(
+                    example_id=f"{sample.sample_id}:step:{step}",
+                    heldout_item_id=sample.sample_id,
+                    heldout_item_digest=prompt_digest,
+                    input=tuple(inputs),
+                    target=(_caption_evidence_part("teacher_target", teacher),),
+                    prediction=(_caption_evidence_part("current", current),),
+                )
+            )
+        nonlocal attempt_baseline_examples_published
+        controls.publish_evaluation_examples(
+            EvalExamplesPublicationRequest(
+                output_name="eval_examples",
+                optimizer_step=step,
+                # Milestone kinds stay distinct on the wire rather than being
+                # inferred from the step number; these are the four kinds in
+                # evaluation_schedules.EvaluationKind.
+                series_id=EvaluationKind.QUALITATIVE.value,
+                identity_field=(
+                    components.qualitative_samples().configuration.identity_field
+                ),
+                identities_digest=(
+                    data.qualitative_identities_digest
+                    or _digest(data.qualitative_ids)
+                ),
+                selector_digest=str(data.split_membership_digest),
+                evaluator_component_digest=components.composition.components[
+                    "evaluator"
+                ].descriptor_digest,
+                metric_names=tuple(evaluator.configuration.metrics),
+                checkpoint_artifact_id=checkpoint.artifact_id,
+                checkpoint_manifest_digest=checkpoint.manifest_sha256,
+                policy_digest=eval_manifest_digest,
+                examples=tuple(examples),
+                parent_artifact_ids=(checkpoint.artifact_id,),
+            )
+        )
+        attempt_baseline_examples_published = True
+
     # The frozen evaluation manifest: the split the evidence was read from,
     # the evaluator that read it, the held-out identities, the renderer, and
     # the decode policy. The cadence is deliberately absent — a schedule change
@@ -3739,6 +3867,7 @@ def run_hf_multimodal_sft(
             baseline_checkpoint_artifact_id = checkpoint.artifact_id
             baseline_checkpoint_manifest_digest = checkpoint.manifest_sha256
             publish_gallery(checkpoint, qualitative)
+            publish_baseline_examples(checkpoint, qualitative)
             launch_gallery_complete = True
         if not launch_gallery_complete:
             raise HFMultimodalSFTError("step-zero gallery gate was not completed")
@@ -3824,9 +3953,43 @@ def run_hf_multimodal_sft(
         elif not data.test_records:
             baseline_complete = True
 
+    if not attempt_baseline_examples_published:
+        # A resumed attempt is gated at its OWN baseline: the controller filters
+        # the evidence it will accept by attempt id, so the previous attempt's
+        # step-zero scalar, checkpoint and examples cannot satisfy this one. The
+        # replacement evidence is therefore produced here, at `step`, before the
+        # loop below can reach an optimizer mutation.
+        controls.evaluation(step, evaluation_cadence.apply)
+        resumed_qualitative = generate_hf_captions(
+            stack=stack,
+            codec=codec,
+            samples=data.qualitative_samples(),
+            device=selected_device,
+            maximum_new_tokens=maximum_new_tokens,
+            use_cache=use_generation_cache,
+        )
+        resumed_loss = evaluate_hf_scalar_loss(
+            stack=stack,
+            codec=codec,
+            data=data,
+            evaluator=evaluator,
+            device=selected_device,
+            maximum_examples=evaluator.configuration.maximum_examples,
+        )
+        observability.publish_if_declared("eval.loss", resumed_loss, step=step)
+        resumed_checkpoint = controls.publish_policy_checkpoint(
+            stage_checkpoint_request()
+        )
+        record_published_checkpoint(resumed_checkpoint)
+        publish_baseline_examples(resumed_checkpoint, resumed_qualitative)
+
     final_checkpoint: Any | None = None
     if resume_directory is not None and step == maximum_steps:
         assert resume_checkpoint_manifest_digest is not None
+        # Deliberately the resume checkpoint, not this attempt's freshly
+        # published baseline replacement: partial test-caption evidence from an
+        # interrupted finalization is keyed by this identity, so moving it would
+        # invalidate work that is meant to be resumable.
         final_checkpoint = PublishedCheckpoint(
             artifact_id=resume_parent_artifact_ids[0],
             manifest_path=resume_directory,

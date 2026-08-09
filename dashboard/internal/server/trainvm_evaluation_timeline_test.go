@@ -47,7 +47,18 @@ func TestEvaluationTimelineSeparatesEveryMilestoneKind(t *testing.T) {
 		{Name: "eval.loss", Step: 999, Value: 9.9, StepDomain: "sample"},
 	}
 
-	timeline := buildEvaluationTimeline(galleries, metrics, false)
+	// The universal pre-mutation evidence at the attempt baseline. It carries
+	// its own milestone kind in series_id rather than having one inferred.
+	examples := []trainVMEvalExamplesSummary{
+		{
+			ArtifactID: "eval-examples-0", Step: 0, SeriesID: "qualitative",
+			ExampleCount:             10,
+			CheckpointArtifactID:     "checkpoint-0",
+			CheckpointManifestDigest: "sha256:" + strings.Repeat("a", 64),
+		},
+	}
+
+	timeline := buildEvaluationTimeline(galleries, examples, metrics, false)
 
 	steps := make([]uint64, 0, len(timeline.Milestones))
 	kinds := map[uint64][]string{}
@@ -96,6 +107,19 @@ func TestEvaluationTimelineSeparatesEveryMilestoneKind(t *testing.T) {
 	if timeline.Observed["scalar_probe"] != 2 || timeline.Observed["qualitative"] != 2 {
 		t.Fatalf("observed milestone counts = %v", timeline.Observed)
 	}
+	// The baseline milestone names the eval-examples artifact and the exact
+	// checkpoint it was bound to, which is the pair the controller checked
+	// before it would record any optimizer step past this baseline.
+	if baseline.EvalExamplesArtifactID != "eval-examples-0" ||
+		baseline.EvalExamplesSeriesID != "qualitative" ||
+		baseline.EvalExampleCount != 10 ||
+		baseline.EvalExamplesCheckpointID != "checkpoint-0" {
+		t.Fatalf("step-zero milestone lost its eval-examples evidence: %+v", baseline)
+	}
+	if timeline.Milestones[2].EvalExamplesArtifactID != "" {
+		t.Fatalf("a milestone with no examples must not borrow another's: %+v",
+			timeline.Milestones[2])
+	}
 
 	encoded, err := json.Marshal(timeline)
 	if err != nil {
@@ -104,6 +128,8 @@ func TestEvaluationTimelineSeparatesEveryMilestoneKind(t *testing.T) {
 	for _, want := range []string{
 		`"step":0`, `"scalar_full"`, `"scalar_probe"`, `"qualitative"`, `"final_audit"`,
 		`"eval_manifest_digest"`, `"cadence_revision":1`,
+		`"eval_examples_artifact_id":"eval-examples-0"`,
+		`"eval_examples_series_id":"qualitative"`, `"eval_example_count":10`,
 	} {
 		if !strings.Contains(string(encoded), want) {
 			t.Fatalf("timeline JSON is missing %s: %s", want, encoded)
@@ -119,7 +145,7 @@ func TestEvaluationTimelineOmitsUnreadableAndEmptyMilestones(t *testing.T) {
 		evaluationMetric("eval.probe_examples", 20, float64(8)),
 		evaluationMetric("eval.probe_loss", 30, json.Number("0.5")),
 	}
-	timeline := buildEvaluationTimeline(nil, metrics, true)
+	timeline := buildEvaluationTimeline(nil, nil, metrics, true)
 	if len(timeline.Milestones) != 1 || timeline.Milestones[0].Step != 30 {
 		t.Fatalf("milestones = %+v", timeline.Milestones)
 	}

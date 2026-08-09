@@ -161,6 +161,19 @@ OperationAuthoringDeclaration hf_multimodal_sft_authoring() {
            .description =
                "Required terminal-checkpoint closure over every final output, scalar, and test member.",
        }},
+      // The universal pre-mutation gate. `required` is what arms
+      // `invocation_requires_step_zero_eval_gate` for this family; the
+      // family-local caption gate is not a substitute, because the controller
+      // cannot read it.
+      {"eval_examples",
+       OperationPortDescriptor{
+           .type = OperationPortType::artifact,
+           .required = true,
+           .artifact_type = ArtifactType::eval_examples,
+           .artifact_schema = "rwkv-lab.eval-examples.v1",
+           .description =
+               "Required same-attempt checkpoint-bound attempt-baseline caption evidence.",
+       }},
   };
   return authoring;
 }

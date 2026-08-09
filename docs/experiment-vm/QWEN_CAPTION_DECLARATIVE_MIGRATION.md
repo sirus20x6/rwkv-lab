@@ -51,9 +51,31 @@ authorize retiring that path.
 
 ## Universal step-zero dependency
 
-This route must consume the universal `rwkv-lab.eval-examples.v1` pre-mutation gate
-before production launch. The migration does not create a Qwen-only substitute:
-scalar step-zero evaluation, typed examples, checkpoint identity, and the controller
-acknowledgement must all be durable before optimizer mutation. Until that shared
-contract and a successful real run land, the migration remains open rather than
-claiming production completion.
+~~This route must consume the universal `rwkv-lab.eval-examples.v1` pre-mutation gate
+before production launch.~~ It does. The `hf_multimodal_sft` recipe documents declare
+a required `eval_examples` artifact in `spec.artifacts` and publish it from the train
+node, which is what arms `invocation_requires_step_zero_eval_gate`; the engine
+publishes typed `EvalExample`s at the attempt baseline, bound to the same-attempt
+baseline checkpoint and to the frozen `eval_manifest_digest`, with the milestone kind
+carried in `series_id`.
+
+~~The migration does not create a Qwen-only substitute: scalar step-zero evaluation,
+typed examples, checkpoint identity, and the controller acknowledgement must all be
+durable before optimizer mutation.~~ They are, and the ordering is proved against the
+controller rather than the adapter: `test_universal_step_zero_gate_orders_controller_mutation`
+in `trainvm/tests/trainvm_tests.cpp` drives the real service and uses the journal as
+the mutation sentinel — a refused step past the attempt baseline must leave the event
+count unchanged. It shows the step refused with no evidence, still refused with a
+durable baseline checkpoint and scalar but no examples, and admitted only once the
+typed examples are durable. A resumed attempt is gated at its own baseline and cannot
+be satisfied by the previous attempt's evidence.
+
+**Still open, and why this is not yet a claim of production completion.** A successful
+real run has not happened; CPU parity is still not real-run qualification. Two flags
+named `required` govern this and nothing cross-checks them: the operation port's
+`required` forces the node to publish the output, while only the experiment document's
+`spec.artifacts[<name>].required` arms the controller gate. Setting one without the
+other looks correct and gates nothing (recorded on `card-6331b63f`). The gate is also
+not yet universal in practice — arming is per-document, and only the `rwkv-lm`,
+`hf-multimodal-sft` and `lm-training` recipe documents declare an `eval_examples`
+artifact at all today.
