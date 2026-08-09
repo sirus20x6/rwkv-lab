@@ -11,7 +11,7 @@
       ".sh"
     ]
   },
-  "source_tree_digest": "sha256:9e469674309049d4d7911a09ad869f5759538a98df476f05f40587af40f1894b",
+  "source_tree_digest": "sha256:1df4d01692fb1eb1e0c5e1d351ba3da8c3b81efb9d77e0632798d2770cc46983",
   "entries": [
     {
       "source_path": "scripts/apply_qwen36_civitai_joy_recaptions.py",
@@ -1908,7 +1908,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "transformer.engram-staged-supervisor",
-      "source_sha256": "sha256:8a2a99acb06de61a94dad30997542ce28f68b8159b4552ccac251532a96fc0fd",
+      "source_sha256": "sha256:73f50687a5d03f34d76b2ff580a2e25eed92cbcf34f3a33c615878835b483bc3",
       "language": "shell",
       "compatibility_workflow_ids": [
         "transformer.engram-staged-supervisor"
