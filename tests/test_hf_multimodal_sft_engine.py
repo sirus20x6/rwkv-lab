@@ -434,6 +434,54 @@ def test_stack_initialization_applies_precision_after_trainability() -> None:
     ]
 
 
+def test_a_partially_loaded_base_is_refused_before_the_model_is_touched() -> None:
+    """A partial base load must be refused by the engine, not merely recorded.
+
+    `RegisteredModelLoader` raises on its own when a configured-exact load drifts,
+    so the loader-owned refusal is covered by
+    `test_exact_checkpoint_loader_rejects_loading_drift`. This test covers the
+    caller, which is a separate guarantee for a concrete reason: production hands
+    `initialize_training_stack` an already-loaded model (`run_hf_multimodal_sft`
+    passes `loaded=`), so the loader's raise never runs on that path and the
+    engine's own check at the top of this function is the only thing standing
+    between a randomly-initialized parameter family and an optimizer step.
+
+    The receipt below is the Qwen3.6 shape: a vision tower the checkpoint nests
+    where the model class never looks, so the whole family loads as missing while
+    the load itself reports success.
+    """
+
+    events: list[str] = []
+
+    class Trainability:
+        def apply(self, model):  # pragma: no cover - must never run
+            events.append("trainability")
+            raise AssertionError("trainability ran against a partial base")
+
+    class Components:
+        def model_loader(self, *, slot):  # pragma: no cover - must never run
+            events.append("model_loader")
+            raise AssertionError("a supplied model must not be reloaded")
+
+        def trainability(self):
+            return Trainability()
+
+    partial = SimpleNamespace(
+        model=torch.nn.Linear(2, 2),
+        receipt=SimpleNamespace(
+            exact=False,
+            missing_keys=("model.visual.blocks.0.attn.qkv.weight",),
+            unexpected_keys=("model.language_model.visual.blocks.0.attn.qkv.weight",),
+            ignored_unexpected_keys=(),
+        ),
+    )
+
+    with pytest.raises(HFMultimodalSFTError, match="exact base-load receipt"):
+        initialize_training_stack(Components(), "cpu", loaded=partial)
+    # Refusal precedes every mutation: nothing was applied to the model at all.
+    assert events == []
+
+
 def test_hf_gradient_checkpointing_receipts_exact_resume_policy() -> None:
     class Model(torch.nn.Module):
         is_gradient_checkpointing = False
