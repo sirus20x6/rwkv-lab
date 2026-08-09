@@ -335,13 +335,33 @@
   ],
   "dataset": "/thearray/git/datasets/captiontest/qwen36-caption-finetune-v1/validation-fixed-100.jsonl",
   "device": {
-    "free_gib": 84.85,
+    "free_gib": 87.88,
     "total_gib": 94.98
   },
-  "load_seconds": 186.0,
+  "generated_at": "2026-08-09T13:29:40Z",
+  "load_seconds": 56.1,
   "max_pixels": 200704,
   "missing_keys": 0,
+  "model_content_identity": {
+    "header_digest": "sha256:d36aae387a371102d3c0a0baf86a4ee7e6fa632c42c9017091ff89a1d9c95233",
+    "header_digest_covers": "tensor names, dtypes, shapes and shard offsets; NOT parameter values",
+    "index_sha256": "sha256:bc7f22e19bd386be3f126b8c8af7a1dff7ab70cf502e8b9f6dc26a5856289ad6",
+    "weight_digest": "sha256:85105aaa67e1ccd9d59a5919d0768311a6226180bd4a8494991ee33bdd790002",
+    "weight_digest_source": "merge-receipt.json"
+  },
   "model_dir": "/thearray/git/ob/text-generation-webui/models/Qwen3.6-35B-A3B-heretic-caption-step000745-merged-bf16",
   "randomized_vision_parameter_count": 333,
+  "repository": {
+    "commit": "6bf3f5bf5e0b004dd91775837266b23a5654c915",
+    "dirty_worktree": false
+  },
+  "runtime": {
+    "cuda": "13.0",
+    "device_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+    "python": "3.14.6",
+    "torch": "2.13.0+cu130",
+    "transformers": "5.14.1"
+  },
+  "shuffle_seed": 20260809,
   "unexpected_keys": 0
 }
