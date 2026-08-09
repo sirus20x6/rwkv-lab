@@ -457,11 +457,18 @@ venv created with a copied interpreter. The deployment directory and every closu
 be non-writable by the configured worker UID; materialization by that same UID is therefore not a
 production deployment boundary.
 
-Regenerate checked-in Python protobuf bindings after changing the protocol:
+Regenerate the checked-in protobuf bindings after changing the protocol. One script
+covers all four generated files — the Python pair under `src/trainvm/v1/` and the Go
+pair under `dashboard/gen/trainvm/v1/` — because regenerating only one language is how
+the Go client ended up without a `GetReconciliationStatus` method while CI stayed green:
 
 ```sh
-scripts/generate_trainvm_python_proto.sh
+scripts/generate_trainvm_proto.sh          # rewrite the bindings
+scripts/generate_trainvm_proto.sh --check  # fail if they no longer match the proto
 ```
+
+The `--check` form is what the `proto-bindings` CI job runs, so forgetting to
+regenerate is a red pull request rather than a missing method discovered months later.
 
 Hostd descriptor delegation and the stopped launcher now attest the bootstrap, install sealed
 Python code at fd 3 and the bootstrap at fd 4, and bind their combined identity into durable launch
