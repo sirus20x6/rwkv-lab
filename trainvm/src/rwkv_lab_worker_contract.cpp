@@ -417,6 +417,65 @@ TrainingCompositionContract vision_rwkv_student_composition() {
   return composition;
 }
 
+// A pretrained-RWKV optimizer experiment publishes two things and both are
+// required: a compatible-grade checkpoint so an interrupted arm resumes rather
+// than restarting, and one immutable scalar report so an authority-owned
+// decision node can compare two arms without reading either trainer's log.
+OperationAuthoringDeclaration rwkv_optimizer_finetune_authoring() {
+  OperationAuthoringDeclaration authoring = checkpoint_authoring();
+  auto& checkpoint = authoring.outputs.at("checkpoint");
+  checkpoint.required = true;
+  checkpoint.artifact_schema =
+      "rwkv-lab.rwkv-optimizer-finetune-checkpoint.v1";
+  checkpoint.description =
+      "Required compatible pretrained RWKV optimizer-experiment checkpoint.";
+  authoring.outputs.emplace(
+      "result",
+      OperationPortDescriptor{
+          .type = OperationPortType::artifact,
+          .required = true,
+          .artifact_type = ArtifactType::report,
+          .artifact_schema = "rwkv-lab.scalar-metric-result.v1",
+          .description =
+              "Required immutable final evaluation-loss scalar result.",
+      });
+  return authoring;
+}
+
+// The point of the route is which optimizer, so the optimizer slot is the only
+// one with two admissible components and the router slot is pinned to the one
+// that can express a matrix/fallback split. Everything else -- rate, decay,
+// clipping -- stays independently selected so an A/B varies exactly one thing.
+TrainingCompositionContract rwkv_optimizer_finetune_composition() {
+  // caption_triplet is withheld: the arms train a text-only RWKV language
+  // model, so there is no image half of a triple to render.
+  return with_evaluation_suite(
+      {
+      .model_family = "rwkv",
+      .slots = {
+          {"gradient_clipping", TrainingComponentCategory::gradient_clipping},
+          {"learning_rate",
+           TrainingComponentCategory::learning_rate_schedule},
+          {"optimizer", TrainingComponentCategory::optimizer},
+          {"parameter_router", TrainingComponentCategory::parameter_router},
+          {"weight_decay",
+           TrainingComponentCategory::weight_decay_schedule},
+      },
+      .allowed_components =
+          std::map<std::string, std::vector<TrainingComponentKey>>{
+              {"optimizer",
+               {{TrainingComponentCategory::optimizer,
+                 "spectral_muon_no_decay", "1.0.0"},
+                {TrainingComponentCategory::optimizer,
+                 "torch_adamw_no_decay", "2.0.0"}}},
+              {"parameter_router",
+               {{TrainingComponentCategory::parameter_router,
+                 "rwkv_matrix_optimizer", "1.0.0"}}},
+          },
+      },
+      false);
+}
+
 OperationAuthoringDeclaration rlvr_authoring() {
   OperationAuthoringDeclaration authoring = checkpoint_authoring();
   auto& checkpoint = authoring.outputs.at("checkpoint");
@@ -1112,6 +1171,12 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
       code_fingerprint, vision_rwkv_student_composition(),
       resumable_training_lifecycle(), vision_rwkv_student_authoring()));
   profiles.push_back(profile(
+      key("rwkv-lab.rwkv-optimizer-finetune",
+          "rwkv_lab.rwkv_optimizer_finetune.v1.Train"),
+      code_fingerprint, rwkv_optimizer_finetune_composition(),
+      resumable_training_lifecycle(),
+      rwkv_optimizer_finetune_authoring()));
+  profiles.push_back(profile(
       key("rwkv-lab.rwkv-rlvr", "rwkv_lab.rwkv_rlvr.v1.Train"),
       code_fingerprint, rlvr_composition(),
       {.stateful = true,
@@ -1180,12 +1245,14 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
           "objective.linear_head_cross_entropy.v1",
           "optimizer.fp32_master_adamw.v1",
           "optimizer.fp32_master_adamw_no_decay.v2",
+          "optimizer.spectral_muon_no_decay.v1",
           "optimizer.torch_adamw.v1",
           "optimizer.torch_adamw_no_decay.v2",
           "optimizer.torch_sparse_adam.v1",
           "parameter_router.mageflow_appearance_expert.v1",
           "parameter_router.mageflow_full_backbone.v1",
           "parameter_router.mageflow_terminal_expert.v1",
+          "parameter_router.rwkv_matrix_optimizer.v1",
           "precision.bf16_parameters_fp32_reductions.v1",
           "precision.fp32_parameters_bf16_compute.v1",
           "qualitative_sample.fixed_held_out.v1",
@@ -1291,6 +1358,10 @@ rwkv_lab_worker_runtime_requirements() {
       {"rwkv-lab.rwkv-rlvr",
        canonical_distributions(
            {"einops", "grpcio", "numpy", "pillow", "protobuf", "torch"})},
+      {"rwkv-lab.rwkv-optimizer-finetune",
+       canonical_distributions(
+           {"einops", "flash-linear-attention", "grpcio", "numpy",
+            "pillow", "protobuf", "safetensors", "torch", "transformers"})},
       {"rwkv-lab.scalar-metric-decision",
        canonical_distributions({"grpcio", "pillow", "protobuf", "torch"})},
       {"rwkv-lab.vision-teacher-compressor",

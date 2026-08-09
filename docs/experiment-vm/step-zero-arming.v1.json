@@ -69,6 +69,18 @@
       "eval_examples_output": null
     },
     {
+      "contract": "rwkv_lab.rwkv_optimizer_finetune.v1.Train",
+      "adapter": "rwkv-lab.rwkv-optimizer-finetune",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": null
+    },
+    {
       "contract": "rwkv_lab.rwkv_posttraining.v1.Train",
       "adapter": "rwkv-lab.rwkv-posttraining",
       "stateful": true,

@@ -76,8 +76,8 @@ bool declared(const OperationLifecycleCapabilities& lifecycle,
 // admitted. There is no third answer.
 void every_adapter_admits_exactly_what_it_declares() {
   const auto& profiles = registered_profiles();
-  require(profiles.size() == 21U,
-          "the contract registers the complete twenty-one-adapter catalog");
+  require(profiles.size() == 22U,
+          "the contract registers the complete twenty-two-adapter catalog");
   std::size_t admitted = 0U;
   std::size_t refused = 0U;
   for (const AdapterProfile& profile : profiles) {
@@ -167,8 +167,8 @@ void compatible_adapters_do_not_claim_exact_resume() {
               "checkpoint-first pause");
     }
   }
-  require(compatible == 16U,
-          "sixteen registered adapters resume from a compatible checkpoint");
+  require(compatible == 17U,
+          "seventeen registered adapters resume from a compatible checkpoint");
 }
 
 // A resource-releasing pause hands the accelerator to someone else, so the

@@ -1,7 +1,7 @@
 {
   "api_version": "trainvm.compatibility-workflows/v1",
   "authority": "compatibility_evidence_only",
-  "classification_surface_digest": "sha256:9c0e94e00b768e1017d7ce0c4264a6ab00246380273303cf2c587778b6b18291",
+  "classification_surface_digest": "sha256:b0c1fb79246593896ffc92fe293ad99de8fc43d68f47931001a765bdea88297d",
   "source_digests": [
     {
       "source_path": "dashboard/internal/server/alerts_handlers.go",
@@ -557,7 +557,7 @@
     },
     {
       "source_path": "src/rwkv_lab/trainvm_adapters/handlers.py",
-      "source_sha256": "sha256:f275943a33805c87cba54039ec5a3b246a77399c51c0f116ba29df0937ff0e4e"
+      "source_sha256": "sha256:cf4077afe28785394318fb6a87622e0a12819cd64f93320d75785dfdff954cb2"
     },
     {
       "source_path": "src/rwkv_lab/trainvm_adapters/io.py",

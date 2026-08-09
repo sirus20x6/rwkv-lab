@@ -540,12 +540,12 @@ void verify_every_stateful_profile_declares_one_evaluator(
                 profile.key.adapter);
     ++checked;
   }
-  // The authority declares twenty stateful profiles, which is the count
+  // The authority declares twenty-one stateful profiles, which is the count
   // tests/test_step_zero_interception_enumeration.py independently arrived at
   // from the Python handler table. Pinned so that a profile silently dropping
   // out of the registry cannot make this walk vacuous.
-  require(checked == 20U,
-          "the authority must declare twenty stateful training profiles");
+  require(checked == 21U,
+          "the authority must declare twenty-one stateful training profiles");
 }
 
 nlohmann::json load_mageflow_fixture() {
@@ -571,6 +571,18 @@ nlohmann::json load_vision_representation_ab_fixture() {
   return source;
 }
 
+nlohmann::json load_rwkv_optimizer_ab_fixture() {
+  const auto path = std::filesystem::path(TRAINVM_SOURCE_ROOT) /
+                    "docs/experiment-vm/examples/rwkv-optimizer-ab.json";
+  std::ifstream input(path);
+  if (!input) {
+    throw std::runtime_error("could not open RWKV optimizer A/B fixture");
+  }
+  nlohmann::json source;
+  input >> source;
+  return source;
+}
+
 }  // namespace
 
 int main() {
@@ -581,8 +593,8 @@ int main() {
     const trainvm::RwkvLabWorkerContract contract =
         trainvm::rwkv_lab_worker_contract(fingerprint);
     require(contract.adapter_registry.api_version == "trainvm.adapters/v2" &&
-                contract.adapter_registry.profiles.size() == 21U,
-            "rwkv_lab catalog must expose twenty-one exact adapter profiles");
+                contract.adapter_registry.profiles.size() == 22U,
+            "rwkv_lab catalog must expose twenty-two exact adapter profiles");
     require(std::ranges::is_sorted(contract.provided_capabilities) &&
                 std::ranges::adjacent_find(contract.provided_capabilities) ==
                     contract.provided_capabilities.end(),
@@ -592,7 +604,7 @@ int main() {
         trainvm::rwkv_lab_worker_runtime_requirements();
     require(runtime_requirements.api_version ==
                     "trainvm.rwkv-lab-worker-runtime-requirements/v1" &&
-                runtime_requirements.profiles.size() == 21U &&
+                runtime_requirements.profiles.size() == 22U &&
                 runtime_requirements.shared_root_distributions ==
                     std::vector<std::string>(
                         {"grpcio", "pillow", "protobuf", "torch"}),
@@ -624,6 +636,8 @@ int main() {
     const auto& posttraining =
         find_profile(contract, "rwkv-lab.rwkv-posttraining");
     const auto& rlvr = find_profile(contract, "rwkv-lab.rwkv-rlvr");
+    const auto& optimizer_finetune =
+        find_profile(contract, "rwkv-lab.rwkv-optimizer-finetune");
     const auto& rwkv = find_profile(contract, "rwkv-lab.rwkv-scratch");
     const auto& decision =
         find_profile(contract, "rwkv-lab.scalar-metric-decision");
@@ -745,6 +759,32 @@ int main() {
                 rlvr.training_composition->allowed_components->at(
                     "optimizer").front().name ==
                     "torch_adamw_no_decay" &&
+                optimizer_finetune.training_composition &&
+                optimizer_finetune.training_composition->model_family ==
+                    "rwkv" &&
+                // Five route slots plus the four-slot evaluation suite. The
+                // suite is what makes the profile admissible at all: a
+                // stateful profile with no evaluator slot can never satisfy
+                // the step-zero eval-examples gate.
+                optimizer_finetune.training_composition->slots.size() == 9U &&
+                optimizer_finetune.training_composition->slots.at(
+                    "parameter_router") ==
+                    trainvm::TrainingComponentCategory::parameter_router &&
+                optimizer_finetune.training_composition->slots.contains(
+                    "evaluator") &&
+                // The route exists to vary exactly one thing, so the optimizer
+                // slot is the only one offering a choice.
+                optimizer_finetune.training_composition->allowed_components->at(
+                    "optimizer").size() == 2U &&
+                optimizer_finetune.training_composition->allowed_components->at(
+                    "optimizer").front().name == "spectral_muon_no_decay" &&
+                optimizer_finetune.training_composition->allowed_components->at(
+                    "optimizer").back().name == "torch_adamw_no_decay" &&
+                optimizer_finetune.training_composition->allowed_components->at(
+                    "parameter_router").size() == 1U &&
+                optimizer_finetune.training_composition->allowed_components->at(
+                    "parameter_router").front().name ==
+                    "rwkv_matrix_optimizer" &&
                 vision.training_composition &&
                 vision.training_composition->model_family == "vision" &&
                 vision.training_composition->slots.size() == 9U &&
@@ -807,6 +847,10 @@ int main() {
                 terminal.lifecycle.warmup &&
                 qwen.lifecycle.resume_grade ==
                     trainvm::ResumeGrade::compatible &&
+                optimizer_finetune.lifecycle.resume_grade ==
+                    trainvm::ResumeGrade::compatible &&
+                optimizer_finetune.lifecycle.stateful &&
+                optimizer_finetune.lifecycle.checkpoint_now &&
                 hf.lifecycle.resume_grade == trainvm::ResumeGrade::exact &&
                 hf.lifecycle.checkpoint_now &&
                 hf.lifecycle.pause_keep_resources &&
@@ -858,7 +902,7 @@ int main() {
         operation_registry.operation_descriptors_json();
     require(operation_document.at("api_version") ==
                     "trainvm.operations/v1" &&
-                operation_document.at("operations").size() == 21U &&
+                operation_document.at("operations").size() == 22U &&
                 operation_registry.operation_descriptors_digest() ==
                     "sha256:" +
                         trainvm::sha256_hex(operation_document.dump()),
@@ -875,26 +919,28 @@ int main() {
                 operations.at(4).at("key").at("adapter") ==
                     "rwkv-lab.qwen-ao3" &&
                 operations.at(5).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-posttraining" &&
+                    "rwkv-lab.rwkv-optimizer-finetune" &&
                 operations.at(6).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-rlvr" &&
+                    "rwkv-lab.rwkv-posttraining" &&
                 operations.at(7).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-scratch" &&
+                    "rwkv-lab.rwkv-rlvr" &&
                 operations.at(8).at("key").at("adapter") ==
-                    "rwkv-lab.scalar-metric-decision" &&
+                    "rwkv-lab.rwkv-scratch" &&
                 operations.at(9).at("key").at("adapter") ==
+                    "rwkv-lab.scalar-metric-decision" &&
+                operations.at(10).at("key").at("adapter") ==
                     "rwkv-lab.transformer-mla" &&
-                operations.at(15).at("key").at("adapter") ==
-                    "rwkv-lab.transformer-mla-parallel" &&
                 operations.at(16).at("key").at("adapter") ==
-                    "rwkv-lab.transformer-mla-rwkv8" &&
+                    "rwkv-lab.transformer-mla-parallel" &&
                 operations.at(17).at("key").at("adapter") ==
-                    "rwkv-lab.vision-frozen-adapter" &&
+                    "rwkv-lab.transformer-mla-rwkv8" &&
                 operations.at(18).at("key").at("adapter") ==
-                    "rwkv-lab.vision-native-head" &&
+                    "rwkv-lab.vision-frozen-adapter" &&
                 operations.at(19).at("key").at("adapter") ==
-                    "rwkv-lab.vision-rwkv-student" &&
+                    "rwkv-lab.vision-native-head" &&
                 operations.at(20).at("key").at("adapter") ==
+                    "rwkv-lab.vision-rwkv-student" &&
+                operations.at(21).at("key").at("adapter") ==
                     "rwkv-lab.vision-teacher-compressor",
             "operation descriptors must use canonical exact-key ordering");
     for (const nlohmann::json& operation : operations) {
@@ -923,6 +969,9 @@ int main() {
               "rwkv-lab.mageflow-");
       const bool is_hf = operation.at("key").at("adapter") ==
                          "rwkv-lab.hf-multimodal-sft";
+      const bool is_optimizer_finetune =
+          operation.at("key").at("adapter") ==
+          "rwkv-lab.rwkv-optimizer-finetune";
       require((is_hf
                    ? operation.at("authoring").at("inputs").empty()
                    : operation.at("authoring").at("inputs").at("config").at(
@@ -975,7 +1024,7 @@ int main() {
                                      .at("required") ==
                                  (is_hf || is_vision_compressor || is_vision_native ||
                                   is_vision_student || is_vision_frozen ||
-                                  is_rlvr) &&
+                                  is_rlvr || is_optimizer_finetune) &&
                              operation.at("authoring")
                                      .at("outputs")
                                      .at("checkpoint")
@@ -1010,6 +1059,24 @@ int main() {
                                       .at("checkpoint")
                                       .at("artifact_schema") ==
                                   "rwkv-lab.vision-frozen-adapter-checkpoint.v1") &&
+                             // Both ports, not just the checkpoint: an arm
+                             // whose scalar report were optional would leave
+                             // the comparison node with nothing to read.
+                             (!is_optimizer_finetune ||
+                              (operation.at("authoring")
+                                       .at("outputs")
+                                       .at("checkpoint")
+                                       .at("artifact_schema") ==
+                                   "rwkv-lab.rwkv-optimizer-finetune-checkpoint.v1" &&
+                               operation.at("authoring")
+                                       .at("outputs")
+                                       .at("result")
+                                       .at("artifact_schema") ==
+                                   "rwkv-lab.scalar-metric-result.v1" &&
+                               operation.at("authoring")
+                                       .at("outputs")
+                                       .at("result")
+                                       .at("required") == true)) &&
                              (!is_hf ||
                               (operation.at("authoring")
                                        .at("outputs")
@@ -1342,6 +1409,28 @@ int main() {
     }
     require(vision_ab_plan_accepted,
             "declarative vision representation A/B fixture must validate against the production worker registry");
+
+    // The shipped optimizer A/B document is the only thing that proves the new
+    // route is reachable from authoring rather than merely registered: it must
+    // compile, and the production registry must accept the plan it lowers to.
+    const trainvm::CompileResult optimizer_ab_plan =
+        trainvm::compile_document(load_rwkv_optimizer_ab_fixture());
+    require(optimizer_ab_plan.valid(),
+            "declarative RWKV optimizer A/B fixture must compile");
+    bool optimizer_ab_plan_accepted = optimizer_ab_plan.valid();
+    if (optimizer_ab_plan.valid()) {
+      try {
+        trainvm::AdapterRegistry::load_file(
+            std::filesystem::absolute(registry_path))
+            .validate_plan(*optimizer_ab_plan.plan);
+      } catch (const std::exception& error) {
+        std::cerr << "RWKV optimizer A/B registry rejection: " << error.what()
+                  << '\n';
+        optimizer_ab_plan_accepted = false;
+      }
+    }
+    require(optimizer_ab_plan_accepted,
+            "declarative RWKV optimizer A/B fixture must validate against the production worker registry");
     std::filesystem::remove(registry_path);
 
     nlohmann::json posttraining_source = exact_source;
@@ -1507,7 +1596,7 @@ int main() {
         extended_registry.operation_descriptors_json();
     const auto& extended_operations =
         extended_document.at("operations");
-    require(extended_operations.size() == 22U &&
+    require(extended_operations.size() == 23U &&
                 std::ranges::any_of(
                     extended_operations, [](const nlohmann::json& operation) {
                       return operation.at("key").at("adapter") ==
@@ -1621,7 +1710,7 @@ int main() {
                     contract.provided_capabilities &&
                 deployment.host_launch_registry.api_version ==
                     "trainvm.host-launches/v4" &&
-                deployment.host_launch_registry.profiles.size() == 21U,
+                deployment.host_launch_registry.profiles.size() == 22U,
             "deployment lowering must retain the complete reflected worker catalog");
     for (const trainvm::HostLaunchProfile& launch :
          deployment.host_launch_registry.profiles) {
