@@ -45,7 +45,11 @@ void usage() {
       << "  trainvm compile  # read JSON from stdin; emit canonical preview JSON\n"
       << "  trainvm validate-catalog <compatibility.json> <repository-root>\n"
       << "  trainvm print-catalog-digests <compatibility.json> <repository-root>"
-         "  # compute the pinned digests; does not check them\n"
+         " [--write]\n"
+         "      # compute the pinned digests; does not check them.\n"
+         "      # --write splices the per-source pins and the classification\n"
+         "      # surface digest back into the catalog, leaving the rest of\n"
+         "      # the document alone.\n"
       << "  trainvm qualify-evidence"
          "  # read trainvm.cache-qualification-evidence/v1 JSON from stdin;"
          " exit 0 qualified, 3 rejected\n"
@@ -315,21 +319,59 @@ int validate_catalog_command(const std::filesystem::path& catalog_path,
 // review it was supposed to force.
 int print_catalog_digests_command(
     const std::filesystem::path& catalog_path,
-    const std::filesystem::path& repository_root) {
+    const std::filesystem::path& repository_root, bool write_back) {
   trainvm::CompatibilityCatalogComputedDigests computed;
+  const auto absolute_catalog =
+      std::filesystem::absolute(catalog_path).lexically_normal();
   try {
     computed = trainvm::CompatibilityCatalog::compute_digests(
-        std::filesystem::absolute(catalog_path).lexically_normal(),
+        absolute_catalog,
         std::filesystem::absolute(repository_root).lexically_normal());
   } catch (const std::invalid_argument& error) {
     return report_invalid_catalog(error);
   }
-  std::cout << nlohmann::json{
+  nlohmann::ordered_json source_digests = nlohmann::ordered_json::array();
+  for (const auto& pinned : computed.source_digests) {
+    source_digests.push_back({{"source_path", pinned.source_path},
+                              {"source_sha256", pinned.source_sha256}});
+  }
+  // Pasting 155 objects by hand is not a procedure anyone follows correctly, and
+  // the per-path pins only pay for themselves if refreshing them is one command.
+  // The rewrite is deliberately narrow: it replaces the two generated members of
+  // a document parsed in its existing key order and writes it back at the same
+  // indentation, so the diff is the pins that moved and nothing else.
+  if (write_back) {
+    nlohmann::ordered_json document;
+    try {
+      std::ifstream input(absolute_catalog, std::ios::binary);
+      if (!input) {
+        std::cerr << "trainvm: could not read " << absolute_catalog << '\n';
+        return trainvm::kExitMalformedInput;
+      }
+      document = nlohmann::ordered_json::parse(input);
+    } catch (const nlohmann::json::exception& error) {
+      std::cerr << "trainvm: " << error.what() << '\n';
+      return trainvm::kExitMalformedInput;
+    }
+    document.erase("source_tree_digest");
+    document["source_digests"] = source_digests;
+    document["classification_surface_digest"] =
+        computed.classification_surface_digest;
+    std::ofstream output(absolute_catalog, std::ios::binary | std::ios::trunc);
+    if (!output) {
+      std::cerr << "trainvm: could not write " << absolute_catalog << '\n';
+      return trainvm::kExitMalformedInput;
+    }
+    output << document.dump(2) << '\n';
+  }
+  std::cout << nlohmann::ordered_json{
                    {"source_tree_digest", computed.source_tree_digest},
+                   {"source_digests", source_digests},
                    {"classification_surface_digest",
                     computed.classification_surface_digest},
                    {"paths_with_empty_classification_surface",
                     computed.paths_with_empty_classification_surface},
+                   {"rewrote_catalog", write_back},
                }
                    .dump(2)
             << '\n';
@@ -913,8 +955,13 @@ int main(int argc, char** argv) {
     if (argc == 4 && std::string_view(argv[1]) == "validate-catalog") {
       return validate_catalog_command(argv[2], argv[3]);
     }
-    if (argc == 4 && std::string_view(argv[1]) == "print-catalog-digests") {
-      return print_catalog_digests_command(argv[2], argv[3]);
+    if ((argc == 4 || argc == 5) &&
+        std::string_view(argv[1]) == "print-catalog-digests") {
+      if (argc == 5 && std::string_view(argv[4]) != "--write") {
+        usage();
+        return trainvm::kExitUsage;
+      }
+      return print_catalog_digests_command(argv[2], argv[3], argc == 5);
     }
     if (argc == 3 &&
         std::string_view(argv[1]) == "inspect-training-components") {

@@ -87,10 +87,26 @@ struct CompatibilityWorkflowEntry {
   std::optional<std::string> legacy_invocation_display;
 };
 
+// One referenced source and the exact bytes the catalog was reviewed against.
+// The byte binding used to be a single whole-tree digest, which meant every
+// edit to any of the 155 referenced sources rewrote the same line -- so two
+// pull requests touching two unrelated files conflicted on it whether or not
+// their work overlapped. Per-path storage keeps the binding (each file is still
+// pinned to its exact bytes, and a mismatch now names the file) and lets git
+// merge two independent refreshes, because they are two different objects.
+struct CompatibilitySourceDigest {
+  std::string source_path;
+  std::string source_sha256;
+};
+
 struct CompatibilityCatalogDocument {
   std::string api_version;
   CompatibilityAuthority authority{};
-  std::string source_tree_digest;
+  // Exactly the union of every entry's source_paths, sorted, no duplicates and
+  // no extras. The whole-tree digest is derived from this at load time rather
+  // than stored: it is a pure function of these pairs, so a stored copy carried
+  // no information and cost every concurrent change a guaranteed conflict.
+  std::vector<CompatibilitySourceDigest> source_digests;
   // Binds only the part of each source that could change how the entry beside
   // it is classified: its entrypoint, its argument surface, and its checkpoint
   // and resume call sites. This, not source_tree_digest, is what the compiled
@@ -107,7 +123,13 @@ struct CompatibilityCatalogDocument {
 // review. Refreshing the byte digest is now mechanical, so the only thing left
 // that demands human judgement is a real classification change.
 struct CompatibilityCatalogComputedDigests {
+  // Reported for continuity -- `validate-catalog` and the loader still expose a
+  // whole-tree digest -- but it is derived from source_digests below, and no
+  // catalog stores it.
   std::string source_tree_digest;
+  // What actually gets written back into the catalog, one object per referenced
+  // path. `print-catalog-digests --write` splices exactly these.
+  std::vector<CompatibilitySourceDigest> source_digests;
   std::string classification_surface_digest;
   // Reported so a vacuous extraction is visible rather than inferred: a Python
   // file listed here exposes no entrypoint or argument surface at all.
@@ -142,6 +164,15 @@ class CompatibilityCatalog {
   // through a digest.
   [[nodiscard]] static std::string classification_surface_for_testing(
       std::string_view relative_path, std::string_view bytes);
+
+  // Exposed for the same reason. While the whole-tree digest was stored in the
+  // catalog, that stored constant incidentally pinned this fold: change a
+  // separator or a domain-separation prefix and the shipped catalog stopped
+  // loading. Deriving the digest removes that accident, so the fold needs a
+  // test that pins it directly -- over fixed pairs, so the pin does not move
+  // when a referenced source is edited.
+  [[nodiscard]] static std::string source_tree_digest_for_testing(
+      const std::vector<CompatibilitySourceDigest>& source_digests);
 
  private:
   explicit CompatibilityCatalog(CompatibilityCatalogDocument document,
