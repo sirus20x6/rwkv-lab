@@ -1,0 +1,262 @@
+{
+  "api_version": "trainvm.step-zero-arming/v1",
+  "authority": "trainvm inspect-rwkv-lab-worker -> adapter_registry.profiles",
+  "regenerated_by": "python scripts/print_step_zero_arming_pin.py TRAINVM --write",
+  "eval_examples_schema": "rwkv-lab.eval-examples.v1",
+  "profiles": [
+    {
+      "contract": "rwkv_lab.hf_multimodal_sft.v1.Train",
+      "adapter": "rwkv-lab.hf-multimodal-sft",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": {
+        "output_name": "eval_examples",
+        "required": true,
+        "artifact_schema": "rwkv-lab.eval-examples.v1"
+      }
+    },
+    {
+      "contract": "rwkv_lab.mageflow_appearance_expert.v1.Train",
+      "adapter": "rwkv-lab.mageflow-appearance-expert",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": null
+    },
+    {
+      "contract": "rwkv_lab.mageflow_full_backbone.v1.Train",
+      "adapter": "rwkv-lab.mageflow-full-backbone",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": null
+    },
+    {
+      "contract": "rwkv_lab.mageflow_terminal_expert.v1.Train",
+      "adapter": "rwkv-lab.mageflow-terminal-expert",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": null
+    },
+    {
+      "contract": "rwkv_lab.qwen_ao3.v1.Train",
+      "adapter": "rwkv-lab.qwen-ao3",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": null
+    },
+    {
+      "contract": "rwkv_lab.rwkv_posttraining.v1.Train",
+      "adapter": "rwkv-lab.rwkv-posttraining",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [],
+      "eval_examples_output": null
+    },
+    {
+      "contract": "rwkv_lab.rwkv_rlvr.v1.Train",
+      "adapter": "rwkv-lab.rwkv-rlvr",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": null
+    },
+    {
+      "contract": "rwkv_lab.rwkv_scratch.v1.Train",
+      "adapter": "rwkv-lab.rwkv-scratch",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": {
+        "output_name": "eval_examples",
+        "required": true,
+        "artifact_schema": "rwkv-lab.eval-examples.v1"
+      }
+    },
+    {
+      "contract": "rwkv_lab.scalar_metric_decision.v1.Decide",
+      "adapter": "rwkv-lab.scalar-metric-decision",
+      "stateful": false,
+      "evaluator_slots": [],
+      "checkpoint_outputs": [],
+      "eval_examples_output": null
+    },
+    {
+      "contract": "rwkv_lab.transformer_mla.v1.Train",
+      "adapter": "rwkv-lab.transformer-mla",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": null
+    },
+    {
+      "contract": "rwkv_lab.transformer_mla_engram.v1.Train",
+      "adapter": "rwkv-lab.transformer-mla-engram",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": null
+    },
+    {
+      "contract": "rwkv_lab.transformer_mla_fsp.v1.Train",
+      "adapter": "rwkv-lab.transformer-mla-fsp",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": null
+    },
+    {
+      "contract": "rwkv_lab.transformer_mla_full_backbone.v1.Train",
+      "adapter": "rwkv-lab.transformer-mla-full-backbone",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": null
+    },
+    {
+      "contract": "rwkv_lab.transformer_mla_mtp.v1.Train",
+      "adapter": "rwkv-lab.transformer-mla-mtp",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": null
+    },
+    {
+      "contract": "rwkv_lab.transformer_mla_mutor.v1.Train",
+      "adapter": "rwkv-lab.transformer-mla-mutor",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": null
+    },
+    {
+      "contract": "rwkv_lab.transformer_mla_parallel.v1.Train",
+      "adapter": "rwkv-lab.transformer-mla-parallel",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": null
+    },
+    {
+      "contract": "rwkv_lab.transformer_mla_rwkv8.v1.Train",
+      "adapter": "rwkv-lab.transformer-mla-rwkv8",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": null
+    },
+    {
+      "contract": "rwkv_lab.vision_frozen_adapter.v1.Train",
+      "adapter": "rwkv-lab.vision-frozen-adapter",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": null
+    },
+    {
+      "contract": "rwkv_lab.vision_native_head.v1.Train",
+      "adapter": "rwkv-lab.vision-native-head",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": null
+    },
+    {
+      "contract": "rwkv_lab.vision_rwkv_student.v1.Train",
+      "adapter": "rwkv-lab.vision-rwkv-student",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": null
+    },
+    {
+      "contract": "rwkv_lab.vision_teacher_compressor.v1.Train",
+      "adapter": "rwkv-lab.vision-teacher-compressor",
+      "stateful": true,
+      "evaluator_slots": [
+        "evaluator"
+      ],
+      "checkpoint_outputs": [
+        "checkpoint"
+      ],
+      "eval_examples_output": null
+    }
+  ]
+}
