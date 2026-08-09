@@ -984,6 +984,28 @@ def _prune_checkpoints(output_dir: Path, keep: int) -> None:
         shutil.rmtree(path)
 
 
+def attempt_baseline_step(worker_controls: WorkerControlRuntime | None) -> int:
+    """Return the step this attempt owes its baseline evidence at.
+
+    Not a literal zero. A replacement attempt resuming at step N is gated by the
+    controller at N: it owes its baseline scalar, checkpoint and examples at N,
+    and it will never re-enter a ``global_step == 0`` branch. A trainer that
+    keys baseline work to zero therefore skips it for the entire remaining life
+    of every resumed run — silently, because the branch simply does not fire.
+    That is the foundation bug PR #94 fixed on the controller and PR #115 fixed
+    on the RWKV route; see the warning on
+    ``WorkerControlRuntime.attempt_baseline_optimizer_step``.
+
+    Outside a worker session there is no controller and no attempt, so the
+    baseline stays at zero and a plain command-line resume behaves exactly as
+    it did before.
+    """
+
+    if worker_controls is None:
+        return 0
+    return int(worker_controls.attempt_baseline_optimizer_step)
+
+
 def _save_checkpoint(
     accelerator,
     output_dir: Path,
@@ -1638,8 +1660,9 @@ def train(
             synchronize=lambda: torch.cuda.synchronize(accelerator.device),
         )
 
+    baseline_step = attempt_baseline_step(worker_controls)
     if (
-        global_step == 0
+        global_step == baseline_step
         and eval_rows
         and config.eval_gen_samples
         and config.eval_gen_step_zero
@@ -1650,7 +1673,7 @@ def train(
                 {
                     "schema": RUN_SCHEMA,
                     "state": "evaluating_generation",
-                    "step": 0,
+                    "step": baseline_step,
                     "updated_at": _utc_now(),
                 },
             )
@@ -1661,7 +1684,7 @@ def train(
                 config,
                 accelerator.device,
                 output_dir,
-                step=0,
+                step=baseline_step,
                 baseline=True,
             )
         accelerator.wait_for_everyone()
