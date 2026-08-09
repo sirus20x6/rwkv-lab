@@ -20,7 +20,40 @@ worktree is visible in one place rather than scattered through the parent
 directory.
 
 Branch from `origin/main`, not from a feature branch, unless the card says
-otherwise.
+otherwise. Run `git fetch origin` first: `origin/main` is a local ref and is
+only as current as your last fetch. Do not branch from `HEAD` — the primary
+checkout is not necessarily on main, and cannot always be, because git allows a
+branch in one worktree at a time and a sibling checkout may hold main.
+
+### If you do branch from unmerged work, you inherit its blockers
+
+The escape clause above is real — building on a colleague's branch to avoid
+duplicating it is sometimes right. But a commit travels between branches while
+the pull request it belongs to stays behind, and everything that says "not yet"
+is attached to the pull request: the draft flag, the review, the "do not merge
+until X" paragraph. Your merge carries the code and leaves all of that.
+
+This is not hypothetical. PR #92 was a draft whose body listed two conditions
+that had to hold before it landed. Its commit was rebased onto another card's
+branch, that branch merged main, and the work shipped in PR #99 with one
+condition still unmet — it is unmet today. Neither agent did anything wrong;
+the second one had no reason to read the first one's PR body.
+
+So, if your branch contains commits you did not write:
+
+- Enumerate them in your PR body and re-assert their blockers as your own. You
+  are the one merging them.
+- Better, do not rely on prose at all. **A blocker that matters belongs in a
+  failing check.** If something must not ship until a condition holds, write a
+  test that fails while it does not hold. A sentence in a PR description cannot
+  stop a merge; a red check can, and it survives being rebased onto someone
+  else's branch, which is the whole problem.
+
+There is deliberately no automated guard here. A merge-base age check would fire
+on legitimately long-lived branches, and a check for "contains another PR's
+commits" is unreliable once a rebase has rewritten them. Encoding the specific
+blocker as a test is the affordable mechanism, and it is the one that would have
+stopped PR #99.
 
 ## Layout does NOT tell you who owns a worktree
 
