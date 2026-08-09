@@ -397,10 +397,66 @@ TrainingCompositionContract vision_frozen_adapter_composition() {
   };
 }
 
-TrainingCompositionContract mageflow_full_backbone_composition() {
+// The four evaluation slots every MageFlow route carries. They are declared
+// as a group because the training component registry refuses a partial
+// evaluation suite: an evaluator, an evaluation schedule, a fixed held-out
+// sample selector and an artifact renderer are admissible only together.
+//
+// The evaluator is what makes a valid rwkv-lab.eval-examples.v1 artifact
+// reachable at all. validate_eval_examples_gate_provenance requires the
+// resolved training composition to carry exactly one component of category
+// evaluator, and cross-checks its descriptor digest and configured metrics
+// against the manifest. Without this slot the family could publish nothing the
+// step-zero gate would accept, so arming the gate would deadlock every
+// attempt, fresh or resumed.
+std::map<std::string, TrainingComponentCategory> mageflow_evaluation_slots() {
+  return {
+      {"artifact_renderer", TrainingComponentCategory::artifact_renderer},
+      {"evaluation_schedule",
+       TrainingComponentCategory::evaluation_schedule},
+      {"evaluator", TrainingComponentCategory::evaluator},
+      {"qualitative_samples", TrainingComponentCategory::qualitative_sample},
+  };
+}
+
+// caption_triplet rendering and the frozen_named split selector are not
+// admissible for model_family mageflow, and the legacy launch_gate_periodic
+// 1.0.0 schedule couples its launch count to the sample count; none of the
+// three is offered here.
+std::map<std::string, std::vector<TrainingComponentKey>>
+mageflow_evaluation_allowances() {
+  return {
+      {"artifact_renderer",
+       {{TrainingComponentCategory::artifact_renderer, "evidence_envelope",
+         "1.0.0"}}},
+      {"evaluation_schedule",
+       {{TrainingComponentCategory::evaluation_schedule,
+         "launch_gate_periodic", "2.0.0"},
+        {TrainingComponentCategory::evaluation_schedule, "milestone_cadence",
+         "3.0.0"}}},
+      {"evaluator",
+       {{TrainingComponentCategory::evaluator, "scalar_loss", "1.0.0"}}},
+      {"qualitative_samples",
+       {{TrainingComponentCategory::qualitative_sample, "fixed_held_out",
+         "2.0.0"}}},
+  };
+}
+
+TrainingCompositionContract mageflow_composition(
+    std::map<std::string, TrainingComponentCategory> slots,
+    std::map<std::string, std::vector<TrainingComponentKey>> allowances) {
+  slots.merge(mageflow_evaluation_slots());
+  allowances.merge(mageflow_evaluation_allowances());
   return {
       .model_family = "mageflow",
-      .slots = {
+      .slots = std::move(slots),
+      .allowed_components = std::move(allowances),
+  };
+}
+
+TrainingCompositionContract mageflow_full_backbone_composition() {
+  return mageflow_composition(
+      {
           {"gradient_clipping", TrainingComponentCategory::gradient_clipping},
           {"learning_rate",
            TrainingComponentCategory::learning_rate_schedule},
@@ -409,16 +465,14 @@ TrainingCompositionContract mageflow_full_backbone_composition() {
           {"weight_decay",
            TrainingComponentCategory::weight_decay_schedule},
       },
-      .allowed_components =
-          std::map<std::string, std::vector<TrainingComponentKey>>{
-              {"optimizer",
-               {{TrainingComponentCategory::optimizer,
-                 "torch_adamw_no_decay", "2.0.0"}}},
-              {"parameter_router",
-               {{TrainingComponentCategory::parameter_router,
-                 "mageflow_full_backbone", "1.0.0"}}},
-          },
-  };
+      {
+          {"optimizer",
+           {{TrainingComponentCategory::optimizer, "torch_adamw_no_decay",
+             "2.0.0"}}},
+          {"parameter_router",
+           {{TrainingComponentCategory::parameter_router,
+             "mageflow_full_backbone", "1.0.0"}}},
+      });
 }
 
 TrainingCompositionContract transformer_mla_composition() {
@@ -776,16 +830,19 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
       key("rwkv-lab.mageflow-appearance-expert",
           "rwkv_lab.mageflow_appearance_expert.v1.Train"),
       code_fingerprint,
-      {.model_family = "mageflow",
-       .slots = {
-           {"gradient_clipping", TrainingComponentCategory::gradient_clipping},
-           {"learning_rate",
-            TrainingComponentCategory::learning_rate_schedule},
-           {"optimizer", TrainingComponentCategory::optimizer},
-           {"parameter_router", TrainingComponentCategory::parameter_router},
-           {"weight_decay",
-            TrainingComponentCategory::weight_decay_schedule},
-      }},
+      mageflow_composition(
+          {
+              {"gradient_clipping",
+               TrainingComponentCategory::gradient_clipping},
+              {"learning_rate",
+               TrainingComponentCategory::learning_rate_schedule},
+              {"optimizer", TrainingComponentCategory::optimizer},
+              {"parameter_router",
+               TrainingComponentCategory::parameter_router},
+              {"weight_decay",
+               TrainingComponentCategory::weight_decay_schedule},
+          },
+          {}),
       receipted_training_lifecycle(), mageflow_authoring()));
   profiles.push_back(profile(
       key("rwkv-lab.mageflow-full-backbone",
@@ -796,18 +853,21 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
       key("rwkv-lab.mageflow-terminal-expert",
           "rwkv_lab.mageflow_terminal_expert.v1.Train"),
       code_fingerprint,
-      {.model_family = "mageflow",
-       .slots = {
-           {"gradient_clipping", TrainingComponentCategory::gradient_clipping},
-           {"learning_rate",
-            TrainingComponentCategory::learning_rate_schedule},
-           {"loop_gate_gradient_clipping",
-            TrainingComponentCategory::gradient_clipping},
-           {"optimizer", TrainingComponentCategory::optimizer},
-           {"parameter_router", TrainingComponentCategory::parameter_router},
-           {"weight_decay",
-            TrainingComponentCategory::weight_decay_schedule},
-       }},
+      mageflow_composition(
+          {
+              {"gradient_clipping",
+               TrainingComponentCategory::gradient_clipping},
+              {"learning_rate",
+               TrainingComponentCategory::learning_rate_schedule},
+              {"loop_gate_gradient_clipping",
+               TrainingComponentCategory::gradient_clipping},
+              {"optimizer", TrainingComponentCategory::optimizer},
+              {"parameter_router",
+               TrainingComponentCategory::parameter_router},
+              {"weight_decay",
+               TrainingComponentCategory::weight_decay_schedule},
+          },
+          {}),
       receipted_training_lifecycle(), mageflow_authoring()));
   profiles.push_back(profile(
       key("rwkv-lab.rwkv-posttraining",

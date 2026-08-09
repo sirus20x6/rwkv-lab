@@ -125,6 +125,15 @@ before evaluating. The evaluator also names an in-composition `split_selector` s
 resolution requires that slot to select the deterministic held-out arm. Evaluation therefore
 cannot accidentally consume the training membership or invent a second split convention. This
 prevents a resumed or later evaluation from silently changing examples.
+
+That requirement applies wherever it is expressible, which means wherever the composition declares
+a data pipeline. A split-selector view is part of that pipeline, and the pipeline is admissible
+only as a whole — source, processor, mapper, collator, sampler and batching together — so a family
+whose dataset is not declared through components has no slot for the evaluator to name. MageFlow is
+that case: its dataset comes out of the adapter's own configuration object. Such a composition must
+declare `split_slot: ""`, stating that its held-out selection is adapter-owned; a dangling slot
+reference is refused rather than ignored, and a composition that does declare a data pipeline still
+has to wire the split views as above.
 The renderer binds each published evidence envelope to one of those identities and an optimizer
 step, so caption/image/video evidence remains aligned and dashboard-readable through time.
 

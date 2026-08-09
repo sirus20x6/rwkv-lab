@@ -13,6 +13,8 @@
 
 #include <unistd.h>
 
+#include "trainvm/eval_examples_contract.hpp"
+#include "trainvm/journal.hpp"
 #include "trainvm/reflection_json.hpp"
 #include "trainvm/training_component_registry.hpp"
 
@@ -34,6 +36,193 @@ const trainvm::AdapterProfile& find_profile(
     throw std::runtime_error("expected rwkv_lab adapter profile is absent");
   }
   return *profile;
+}
+
+trainvm::TrainingComponentSelection select(
+    trainvm::TrainingComponentCategory category, std::string name,
+    std::string version, nlohmann::json configuration) {
+  return {.key = {.category = category,
+                  .name = std::move(name),
+                  .version = std::move(version)},
+          .configuration = std::move(configuration)};
+}
+
+// One authorable composition per MageFlow route, chosen from each contract's
+// own allowlist. The four evaluation components are shared because the
+// component registry admits an evaluation suite only as a unit.
+trainvm::TrainingComposition mageflow_composition_for(
+    std::string_view router) {
+  using Category = trainvm::TrainingComponentCategory;
+  trainvm::TrainingComposition composition{
+      .model_family = "mageflow",
+      .components = {},
+      .topologies = std::nullopt,
+      .post_training = std::nullopt,
+  };
+  composition.components.emplace(
+      "artifact_renderer",
+      select(Category::artifact_renderer, "evidence_envelope", "1.0.0",
+             nlohmann::json{{"modality", "image"}}));
+  composition.components.emplace(
+      "evaluation_schedule",
+      select(Category::evaluation_schedule, "milestone_cadence", "3.0.0",
+             nlohmann::json::object()));
+  // split_slot is empty on purpose: MageFlow declares no data pipeline, so it
+  // has no split-selector slot for the evaluator to name. The registry
+  // refuses a dangling reference here rather than ignoring one.
+  composition.components.emplace(
+      "evaluator",
+      select(Category::evaluator, "scalar_loss", "1.0.0",
+             nlohmann::json{{"metrics", nlohmann::json::array({"eval.loss"})},
+                            {"split_slot", ""}}));
+  composition.components.emplace(
+      "qualitative_samples",
+      select(Category::qualitative_sample, "fixed_held_out", "2.0.0",
+             nlohmann::json{{"identity_field", "sample_id"},
+                            {"sample_count", 4}}));
+  composition.components.emplace(
+      "gradient_clipping",
+      select(Category::gradient_clipping, "global_norm", "1.0.0",
+             nlohmann::json{{"max_norm", 1.0}}));
+  composition.components.emplace(
+      "learning_rate",
+      select(Category::learning_rate_schedule, "linear_warmup_cosine", "1.0.0",
+             nlohmann::json{{"warmup_steps", 8}, {"max_steps", 128}}));
+  composition.components.emplace(
+      "optimizer",
+      select(Category::optimizer, "torch_adamw_no_decay", "2.0.0",
+             nlohmann::json{{"learning_rate", 0.0001}}));
+  composition.components.emplace(
+      "parameter_router",
+      select(Category::parameter_router, std::string(router), "1.0.0",
+             nlohmann::json::object()));
+  composition.components.emplace(
+      "weight_decay",
+      select(Category::weight_decay_schedule, "constant", "1.0.0",
+             nlohmann::json{{"weight_decay", 0.0}}));
+  if (router == "mageflow_terminal_expert") {
+    composition.components.emplace(
+        "loop_gate_gradient_clipping",
+        select(Category::gradient_clipping, "global_norm", "1.0.0",
+               nlohmann::json{{"max_norm", 0.5}}));
+  }
+  return composition;
+}
+
+nlohmann::json eval_examples_document(const std::string& component_digest) {
+  const std::string digest = "sha256:" + std::string(64U, 'a');
+  nlohmann::json body{
+      {"api_version", std::string(trainvm::kEvalExamplesSchema)},
+      {"run_id", "run-1"},
+      {"node_id", "train"},
+      {"attempt_id", "train@1"},
+      {"optimizer_step", 0U},
+      {"step_domain", "optimizer_step"},
+      {"series_id", "fixed-validation"},
+      {"heldout",
+       {{"identity_field", "sample_id"},
+        {"identities_digest", digest},
+        {"selector_digest", digest}}},
+      {"evaluator",
+       {{"component_digest", component_digest},
+        {"metric_names", nlohmann::json::array({"eval.loss"})}}},
+      {"checkpoint",
+       {{"artifact_id", "checkpoint-0"}, {"manifest_digest", digest}}},
+      {"policy_digest", digest},
+      {"examples",
+       {{{"example_id", "sample-1"},
+         {"heldout_item_id", "row-1"},
+         {"heldout_item_digest", digest},
+         {"input", {{{"kind", "text"}, {"text", "prompt"}}}},
+         {"target", {{{"kind", "text"}, {"text", "target"}}}},
+         {"prediction", {{{"kind", "text"}, {"text", "prediction"}}}}}}}};
+  body["canonical_manifest_digest"] =
+      "sha256:" + trainvm::sha256_hex(body.dump());
+  return body;
+}
+
+// The eval-examples step-zero gate cannot be satisfied by a family whose
+// resolved training composition carries no evaluator:
+// validate_eval_examples_gate_provenance demands exactly one, and cross-checks
+// its descriptor digest and configured metrics against the manifest. This
+// walks each MageFlow route end to end — contract slot, registry resolution,
+// manifest provenance — and then deletes the evaluator from the resolved
+// composition to prove the check is what makes the walk succeed.
+void verify_mageflow_evaluator_provenance(
+    const trainvm::RwkvLabWorkerContract& contract,
+    const trainvm::TrainingComponentRegistry& components) {
+  const std::vector<std::pair<std::string, std::string>> routes{
+      {"rwkv-lab.mageflow-appearance-expert", "mageflow_appearance_expert"},
+      {"rwkv-lab.mageflow-full-backbone", "mageflow_full_backbone"},
+      {"rwkv-lab.mageflow-terminal-expert", "mageflow_terminal_expert"},
+  };
+  for (const auto& [adapter, router] : routes) {
+    const trainvm::AdapterProfile& profile = find_profile(contract, adapter);
+    require(profile.training_composition.has_value(),
+            "each MageFlow route must own a training composition contract");
+    const auto slot = profile.training_composition->slots.find("evaluator");
+    require(slot != profile.training_composition->slots.end() &&
+                slot->second == trainvm::TrainingComponentCategory::evaluator,
+            "each MageFlow route must declare an evaluator slot");
+    const trainvm::TrainingComposition composition =
+        mageflow_composition_for(router);
+    require(composition.components.size() ==
+                profile.training_composition->slots.size(),
+            "the authored MageFlow composition must fill every declared slot");
+    const trainvm::ResolvedTrainingComposition resolved =
+        components.resolve_composition(composition);
+    std::size_t evaluators = 0U;
+    for (const auto& [name, component] : resolved.components) {
+      (void)name;
+      if (component.descriptor.key.category ==
+          trainvm::TrainingComponentCategory::evaluator)
+        ++evaluators;
+    }
+    require(evaluators == 1U,
+            "each MageFlow route must resolve exactly one evaluator");
+    const nlohmann::json resolved_training =
+        trainvm::resolved_training_composition_json(resolved);
+    const trainvm::EvalExamplesManifest manifest =
+        trainvm::validate_eval_examples_manifest(eval_examples_document(
+            resolved.components.at("evaluator").descriptor_digest));
+    const std::string authority_digest = "sha256:" + std::string(64U, 'a');
+    trainvm::Event checkpoint{};
+    checkpoint.run_id = "run-1";
+    checkpoint.node_id = "train";
+    checkpoint.attempt_id = "train@1";
+    checkpoint.event_type = "artifact.published";
+    checkpoint.optimizer_step = 0U;
+    checkpoint.payload = {{"artifact_id", "checkpoint-0"},
+                          {"kind", "checkpoint"},
+                          {"complete", true},
+                          {"fingerprint_algorithm", "manifest_sha256"},
+                          {"fingerprint", authority_digest}};
+    trainvm::Event metric{};
+    metric.run_id = "run-1";
+    metric.node_id = "train";
+    metric.attempt_id = "train@1";
+    metric.event_type = "metric.sampled";
+    metric.optimizer_step = 0U;
+    metric.payload = {{"name", "eval.loss"},
+                      {"step_domain", "optimizer_step"}};
+    trainvm::validate_eval_examples_gate_provenance(
+        manifest, resolved_training, {checkpoint, metric});
+
+    // The mutation that proves the walk above is load-bearing: strike the
+    // evaluator out of the resolved composition, exactly as a contract with no
+    // evaluator slot would, and the same manifest must be refused.
+    nlohmann::json without_evaluator = resolved_training;
+    without_evaluator.at("components").erase("evaluator");
+    bool refused = false;
+    try {
+      trainvm::validate_eval_examples_gate_provenance(
+          manifest, without_evaluator, {checkpoint, metric});
+    } catch (const std::invalid_argument&) {
+      refused = true;
+    }
+    require(refused,
+            "eval-examples provenance must refuse a MageFlow composition whose evaluator slot is absent");
+  }
 }
 
 nlohmann::json load_mageflow_fixture() {
@@ -168,17 +357,17 @@ int main() {
                 appearance.training_composition->model_family == "mageflow" &&
                 mageflow_full.training_composition &&
                 mageflow_full.training_composition->model_family == "mageflow" &&
-                mageflow_full.training_composition->slots.size() == 5U &&
+                mageflow_full.training_composition->slots.size() == 9U &&
                 mageflow_full.training_composition->allowed_components->at(
                     "optimizer").front().name ==
                     "torch_adamw_no_decay" &&
                 mageflow_full.training_composition->allowed_components->at(
                     "parameter_router").front().name ==
                     "mageflow_full_backbone" &&
-                appearance.training_composition->slots.size() == 5U &&
+                appearance.training_composition->slots.size() == 9U &&
                 terminal.training_composition &&
                 terminal.training_composition->model_family == "mageflow" &&
-                terminal.training_composition->slots.size() == 6U &&
+                terminal.training_composition->slots.size() == 10U &&
                 qwen.training_composition &&
                 qwen.training_composition->model_family == "transformer" &&
                 qwen.training_composition->slots.size() == 4U &&
@@ -645,6 +834,32 @@ int main() {
         {"model_family", "mageflow"},
         {"components",
          {
+             {"artifact_renderer",
+              {{"key",
+                {{"category", "artifact_renderer"},
+                 {"name", "evidence_envelope"},
+                 {"version", "1.0.0"}}},
+               {"configuration", {{"modality", "image"}}}}},
+             {"evaluation_schedule",
+              {{"key",
+                {{"category", "evaluation_schedule"},
+                 {"name", "milestone_cadence"},
+                 {"version", "3.0.0"}}},
+               {"configuration", nlohmann::json::object()}}},
+             {"evaluator",
+              {{"key",
+                {{"category", "evaluator"},
+                 {"name", "scalar_loss"},
+                 {"version", "1.0.0"}}},
+               {"configuration",
+                {{"metrics", {"eval.loss"}}, {"split_slot", ""}}}}},
+             {"qualitative_samples",
+              {{"key",
+                {{"category", "qualitative_sample"},
+                 {"name", "fixed_held_out"},
+                 {"version", "2.0.0"}}},
+               {"configuration",
+                {{"identity_field", "sample_id"}, {"sample_count", 4}}}}},
              {"gradient_clipping",
               {{"key",
                 {{"category", "gradient_clipping"},
@@ -1011,6 +1226,8 @@ int main() {
     require(std::ranges::includes(contract.provided_capabilities,
                                   component_capabilities),
             "sealed rwkv_lab worker contract must cover the checked-in component catalog");
+
+    verify_mageflow_evaluator_provenance(contract, components);
 
     std::vector<trainvm::RwkvLabWorkerRuntimeDeploymentSpec> runtimes;
     for (const trainvm::AdapterProfile& profile :
