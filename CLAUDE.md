@@ -282,6 +282,47 @@ The cost of not having this written down was five days: three cards recorded
 work as complete, citing shas, that had never reached main, and nobody noticed
 because the obvious check silently does not work here.
 
+### Before you cherry-pick anything a card calls "stranded"
+
+A sweep of all 239 cards on 2026-08-09 found 173 citing a sha: 125 present on
+main, 19 stranded, 16 partially present, and **13 superseded** — the identifier
+absent from main while its subsystem is present and *larger*. Superseded is the
+dangerous verdict, because the port applies cleanly, CI stays green, and a
+weaker mechanism lands beside the working one.
+
+Two numbers from that sweep are worth carrying:
+
+- An automated line-matching pass triaged all 173. Hand review of the 44
+  ambiguous ones **overturned 31 — 70% — in both directions.** Line-matching
+  triages; it cannot conclude.
+- 56 of 126 Done cards record no merged-PR reference at all, so for those the
+  citation is the only trail and it is the unreliable kind.
+
+**`1c91acd` must never be cherry-picked.** It is cited on two cards that both
+read as done. It sets, on `deploy/trainvm-hostd.service`:
+
+```ini
+CapabilityBoundingSet=CAP_BPF CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_KILL \
+  CAP_PERFMON CAP_SETGID CAP_SETUID CAP_SYS_ADMIN CAP_SYS_RESOURCE
+AmbientCapabilities=(the same nine)
+```
+
+Main deliberately carries both as **empty**, with `NoNewPrivileges=yes` and the
+comment *"Nothing left needs a privilege transition, and this makes the daemon's
+own guarantee match the one it demands of its workers."* Restoring that commit
+would re-privilege a daemon that was intentionally stripped — and it ships its
+own passing test (`test_hostd_can_drop_worker_credentials_inside_its_capability_bound`)
+which asserts those capabilities are *present*, so the regression arrives green.
+
+That is the general shape to fear: **a superseded commit brings its own tests,
+and those tests encode the old invariant.** A green suite after a port proves
+the port is self-consistent, not that it is wanted. Before porting anything that
+touches privileges, sandboxing, or a security boundary, diff the *current* file
+against the commit and read what main says about why it looks the way it does.
+
+`card-ab464dc6` holds the full do-not-port hazard list; `card-2ae29669` tracks
+making the merged-PR reference structural instead of a prose convention.
+
 ## Running the gates locally
 
 ```bash
