@@ -10,7 +10,7 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:18464bf1180f40de35467f3836971c6e9a56fdb5eaad22ecb4937a8b880c7c3c",
+  "source_tree_digest": "sha256:ac686edc6487f6f708470099ed8cce2362f0a84ce3a52337897825581e4bb4bf",
   "entries": [
     {
       "source_path": "src/rwkv_lab/__init__.py",
@@ -1393,7 +1393,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "mageflow.full-backbone-pretrain",
-      "source_sha256": "sha256:15a42f95e69e1f9b7b2a47446fd78ae16acc6670b87a7e08d042304a9702b406",
+      "source_sha256": "sha256:4ff6d22d29e46ac4373190f92e1e2f7f2e8d722fd84d60f2f7d18c714f0da684",
       "family": "mageflow_diffusion",
       "coverage": "direct",
       "consumers": [

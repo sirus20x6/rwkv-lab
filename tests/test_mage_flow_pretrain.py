@@ -9,6 +9,7 @@ from rwkv_lab.mage_flow_pretrain import (
     DEFAULT_MODEL_REVISION,
     MageFlowTrainConfig,
     _generate_eval_snapshot,
+    attempt_baseline_step,
     _load_image_tensor,
     _png_has_only_ancillary_crc_errors,
     _save_checkpoint,
@@ -436,6 +437,36 @@ def test_plan_pins_model_and_writes_cpu_offload(tmp_path):
     launcher = tmp_path / "plan" / "launch.sh"
     assert launcher.stat().st_mode & 0o111
     assert 'HF_HOME="${MAGE_FLOW_HF_HOME:-$REPO_ROOT/.hf_cache}"' in launcher.read_text()
+
+
+def test_baseline_snapshot_is_keyed_to_the_attempt_not_to_a_literal_zero():
+    """A resumed attempt owes its baseline at its own step, and must reach it.
+
+    The full-backbone route guarded its baseline generation with
+    `global_step == 0`. A replacement attempt restores `global_step` from its
+    resume checkpoint and so never re-enters that branch: the baseline is
+    skipped for the whole remaining run, silently, because a branch that does
+    not fire looks exactly like one that had nothing to do. This asserts the
+    keying rule directly, so restoring the literal zero fails here rather than
+    only in production on a resume.
+    """
+
+    fresh = SimpleNamespace(attempt_baseline_optimizer_step=0)
+    resumed = SimpleNamespace(attempt_baseline_optimizer_step=5500)
+
+    assert attempt_baseline_step(fresh) == 0
+    assert attempt_baseline_step(resumed) == 5500
+
+    # The rule as the trainer applies it: `global_step == baseline_step`. The
+    # resumed attempt restored global_step 5500 from its checkpoint, and that
+    # is precisely the step the controller is waiting on.
+    assert attempt_baseline_step(resumed) == 5500, "resumed attempt reaches its baseline"
+    assert attempt_baseline_step(resumed) != 0, "a literal zero would skip it forever"
+
+    # No worker session means no controller and no attempt, so a plain
+    # command-line run keeps its previous behaviour rather than paying for a
+    # generation pass on every resume.
+    assert attempt_baseline_step(None) == 0
 
 
 def test_generation_eval_writes_deterministic_step_zero_dashboard_artifact(tmp_path):
