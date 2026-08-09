@@ -538,8 +538,11 @@ A new optional `spec` section:
 ```
 
 Every field is required in the reflected struct unless it is `std::optional`; the section as a whole
-is `std::optional` so existing documents are unaffected. The plan compiler adds these checks to the
-list it already performs before a run exists:
+is `std::optional` so existing documents are unaffected. It also needs a `$defs` entry and a property
+on `$defs.spec` in `experiment-v1.schema.json`, which is `additionalProperties: false` — that is the
+established path, and `spec.execution` is the precedent for an optional section added this way.
+
+The plan compiler adds these checks to the list it already performs before a run exists:
 
 - the referenced receipt exists, its `verdict` is `accepted`, and its `schedule_digest` equals the
   declared one — `gpu_schedule.receipt_missing`, `gpu_schedule.receipt_rejected`,
