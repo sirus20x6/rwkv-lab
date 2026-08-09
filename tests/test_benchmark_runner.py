@@ -9,11 +9,13 @@ invented.
 
 from __future__ import annotations
 
+import datetime
 import importlib.util
 import json
 import os
 import pathlib
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -237,49 +239,254 @@ def test_parity_failure_is_rejected_by_native_authority():
         verdict.stdout)["rejection_reasons"]
 
 
-def test_ambient_accelerator_residency_is_within_default_allowance():
+GPU_GRADER_OBSERVATIONS = (
+    REPOSITORY / "docs/experiment-vm/gpu-grader-observations.v1.json"
+)
+
+
+def record_gpu_grader_observation(
+    grader: str, fixture: str, device_name: str, measurement: dict,
+) -> None:
+    """Write down that this grader produced a number, here, just now.
+
+    Rewrites the committed receipt in place. The caller is expected to commit
+    the result: the file being in the tree is what makes "never ran" visible,
+    and a run on a host without an accelerator leaves it untouched, which is
+    the state the receipt exists to expose.
+    """
+    document = json.loads(GPU_GRADER_OBSERVATIONS.read_text(encoding="utf-8"))
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True,
+        cwd=REPOSITORY, check=False)
+    document["graders"][grader] = {
+        "last_observed": datetime.datetime.now(
+            datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "commit": revision.stdout.strip() or "unknown",
+        "host": socket.gethostname(),
+        "accelerator_device_name": device_name,
+        "fixture": fixture,
+        "measurement": measurement,
+    }
+    GPU_GRADER_OBSERVATIONS.write_text(
+        json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+
+def gpu_marked_graders_in_this_module() -> set[str]:
+    """The gpu-marked test functions this module defines, by name."""
+    return {
+        name for name, value in globals().items()
+        if name.startswith("test_") and callable(value)
+        and any(mark.name == "gpu"
+                for mark in getattr(value, "pytestmark", []))
+    }
+
+
+def test_every_gpu_grader_records_when_it_last_produced_a_number():
+    """"Never ran" and "ran and passed" must not be the same colour.
+
+    Both GPU graders skip on a host without an accelerator, and a skip is
+    green, so their result carries no information about whether either has
+    ever run. This receipt carries it instead. The check is that the receipt
+    enumerates exactly the gpu-marked graders in this module, so adding one
+    without a receipt entry fails here rather than being silently unobserved.
+
+    Deliberately not a staleness assertion. An age threshold would fail in
+    hosted CI, which has no accelerator and can never satisfy it, for a reason
+    no author of any pull request could fix - and it would fire on changes
+    that have nothing to do with the graders. What a reviewer needs is the
+    date and the commit, stated; not a red check about the calendar.
+    """
+    document = json.loads(GPU_GRADER_OBSERVATIONS.read_text(encoding="utf-8"))
+    assert document["api_version"] == "trainvm.gpu-grader-observations/v1"
+    recorded = document["graders"]
+    assert set(recorded) == gpu_marked_graders_in_this_module(), (
+        "the observation receipt and the gpu-marked graders have drifted "
+        "apart; every gpu grader needs an entry, even an unobserved one")
+    for grader, entry in recorded.items():
+        observed = entry["last_observed"]
+        if observed is None:
+            # A grader that has never produced a number is a legitimate
+            # recorded state. It just must not be able to hide.
+            assert set(entry) == {"last_observed"}, grader
+            continue
+        assert observed.endswith("Z") and len(observed) == 20, grader
+        datetime.datetime.strptime(observed, "%Y-%m-%dT%H:%M:%SZ")
+        assert entry["commit"] and entry["host"], grader
+        assert entry["accelerator_device_name"], grader
+        assert entry["fixture"], grader
+        measurement = entry["measurement"]
+        assert measurement["steady_state_step_seconds"] > 0, grader
+        assert isinstance(measurement["qualified"], bool), grader
+
+
+def measured_conditions(compute_apps: str, *device_samples: str) -> dict:
+    """Parsed conditions carrying the ok status a live query would set."""
     conditions = benchmark_runner.parse_accelerator_conditions(
-        "1101, 376\n2202, 211\n",
-        "97887, 6912, 5\n",
-    )
+        compute_apps, device_samples[0], device_samples[1:])
     assert conditions is not None
-    assert conditions["resident_process_memory_mib"] == 587
-    assert conditions["device_memory_used_mib"] == 6912
-    assert conditions["device_memory_total_mib"] == 97887
-    assert conditions["device_utilization_percent"] == 5
-    assert not benchmark_runner.contention_exceeds_allowance(
-        conditions,
-        benchmark_runner.DEFAULT_ACCELERATOR_RESIDENT_MEMORY_ALLOWANCE_MIB,
-    )
-    assert benchmark_runner.contention_exceeds_allowance(conditions, 0)
+    return {"status": benchmark_runner.NVIDIA_SMI_OK, **conditions}
 
 
-def test_large_accelerator_residency_exceeds_default_allowance():
-    conditions = benchmark_runner.parse_accelerator_conditions(
-        "3303, 8192\n",
-        "97887, 14336, 82\n",
+def test_idle_desktop_residency_does_not_count_as_contention():
+    """The exact host state this guard used to refuse, and why it must not.
+
+    Measured 2026-08-09: an idle logged-in workstation holds 1057 MiB of
+    compute residency (Wayland compositor 491, an inference daemon 550, a
+    Steam helper 16) at 0-3% utilisation. Running this repository's own
+    accelerator workload against 41.7 GiB of resident-but-quiet memory moved
+    its median step by 1.5%, inside the idle sample spread. Residency is not
+    what the benchmark is sensitive to, so it must not be what bounds it.
+    """
+    conditions = measured_conditions(
+        "7432, 491\n1723668, 550\n3387531, 16\n",
+        "97887, 6452, 0\n",
     )
-    assert conditions is not None
-    assert benchmark_runner.contention_exceeds_allowance(
-        conditions,
-        benchmark_runner.DEFAULT_ACCELERATOR_RESIDENT_MEMORY_ALLOWANCE_MIB,
+    assert conditions["resident_process_memory_mib"] == 1057
+    assert conditions["device_memory_free_mib"] == 97887 - 6452
+    verdict, explanation = benchmark_runner.classify_accelerator_conditions(
+        conditions)
+    assert verdict == benchmark_runner.ACCELERATOR_AVAILABLE, explanation
+
+    # Forty times the retired 1024 MiB allowance, still quiet, still runnable.
+    heavily_resident = measured_conditions(
+        "7432, 491\n1723668, 550\n999999, 42691\n",
+        "97887, 48000, 1\n",
     )
-    assert benchmark_runner.contention_exceeds_allowance(
-        {},
-        benchmark_runner.DEFAULT_ACCELERATOR_RESIDENT_MEMORY_ALLOWANCE_MIB,
-    )
+    assert benchmark_runner.classify_accelerator_conditions(
+        heavily_resident)[0] == benchmark_runner.ACCELERATOR_AVAILABLE
 
 
-def test_unparseable_accelerator_conditions_fail_closed():
-    conditions = benchmark_runner.parse_accelerator_conditions(
-        "not-a-pid, unknown\n",
-        "97887, 6912, 5\n",
+def test_small_process_saturating_compute_is_refused():
+    """The false negative the retired residency bound admitted.
+
+    Measured 2026-08-09: a process holding 900 MiB — inside the old 1024 MiB
+    allowance on a headless host — while saturating compute slowed the
+    accelerator workload's median step by 1.40x. A residency bound would have
+    graded that device. A utilisation bound refuses it.
+    """
+    conditions = measured_conditions("908461, 900\n", "97887, 1814, 100\n")
+    assert conditions["resident_process_memory_mib"] == 900
+    verdict, explanation = benchmark_runner.classify_accelerator_conditions(
+        conditions)
+    assert verdict == benchmark_runner.ACCELERATOR_CONTENDED
+    assert "busy" in explanation and "100%" in explanation
+
+
+def test_the_three_situations_are_reported_as_three_situations():
+    """No GPU, a busy GPU, and an idle GPU short of memory are not one thing."""
+    absent = benchmark_runner.classify_accelerator_conditions(
+        {"status": benchmark_runner.NVIDIA_SMI_ABSENT})
+    assert absent[0] == benchmark_runner.ACCELERATOR_ABSENT
+    assert "no accelerator on this host" in absent[1]
+    assert "waiting will not change it" in absent[1]
+
+    busy = benchmark_runner.classify_accelerator_conditions(
+        measured_conditions("4404, 60000\n", "97887, 64000, 96\n"))
+    assert busy[0] == benchmark_runner.ACCELERATOR_CONTENDED
+    assert "utilisation 96%" in busy[1]
+
+    starved = benchmark_runner.classify_accelerator_conditions(
+        measured_conditions("4404, 96000\n", "97887, 97000, 0\n"))
+    assert starved[0] == benchmark_runner.ACCELERATOR_MEMORY_EXHAUSTED
+    assert "idle" in starved[1]
+    assert "887 MiB of 97887 MiB is free" in starved[1]
+
+    # The three explanations must not be interchangeable prose.
+    assert len({absent[1], busy[1], starved[1]}) == 3
+
+
+def test_unparseable_and_absent_telemetry_are_told_apart():
+    """Both refuse, but only one of them is a broken driver."""
+    assert benchmark_runner.parse_accelerator_conditions(
+        "not-a-pid, unknown\n", "97887, 6912, 5\n") is None
+    unavailable = benchmark_runner.classify_accelerator_conditions(None)
+    assert unavailable[0] == benchmark_runner.ACCELERATOR_TELEMETRY_UNAVAILABLE
+
+    failed = benchmark_runner.classify_accelerator_conditions(
+        {"status": benchmark_runner.NVIDIA_SMI_FAILED})
+    assert failed[0] == benchmark_runner.ACCELERATOR_TELEMETRY_UNAVAILABLE
+    assert "treating the device as busy" in failed[1]
+
+    # Missing or nonsensical fields still fail closed rather than being read.
+    for broken in ({"status": benchmark_runner.NVIDIA_SMI_OK},
+                   {"status": benchmark_runner.NVIDIA_SMI_OK,
+                    "device_utilization_percent": True,
+                    "device_memory_free_mib": 4096,
+                    "device_memory_total_mib": 97887,
+                    "resident_process_memory_mib": 0,
+                    "resident_processes": []}):
+        assert benchmark_runner.classify_accelerator_conditions(broken)[0] == (
+            benchmark_runner.ACCELERATOR_TELEMETRY_UNAVAILABLE)
+
+
+def test_utilisation_is_the_maximum_over_samples():
+    """A quiet instant inside a busy run must not read as a free device."""
+    conditions = measured_conditions(
+        "4404, 4096\n",
+        "97887, 8192, 0\n",
+        "97887, 8192, 99\n",
+        "97887, 8192, 0\n",
     )
-    assert conditions is None
-    assert benchmark_runner.contention_exceeds_allowance(
-        conditions,
-        benchmark_runner.DEFAULT_ACCELERATOR_RESIDENT_MEMORY_ALLOWANCE_MIB,
+    assert conditions["device_utilization_percent"] == 99
+    assert conditions["utilization_samples"] == [[0], [99], [0]]
+    assert benchmark_runner.classify_accelerator_conditions(
+        conditions)[0] == benchmark_runner.ACCELERATOR_CONTENDED
+
+
+def test_free_memory_is_the_least_free_device_not_the_sum():
+    """One busy device on a multi-GPU host must not be hidden by a free one."""
+    conditions = measured_conditions(
+        "4404, 40000\n",
+        "40960, 40000, 0\n40960, 100, 0\n",
     )
+    assert conditions["device_memory_free_mib"] == 960
+    assert benchmark_runner.classify_accelerator_conditions(
+        conditions)[0] == benchmark_runner.ACCELERATOR_MEMORY_EXHAUSTED
+
+
+def test_residency_allowance_is_opt_in_and_only_ever_tightens():
+    """Kept for an operator who wants strict idle; never the default."""
+    conditions = measured_conditions(
+        "7432, 491\n1723668, 550\n3387531, 16\n", "97887, 6452, 0\n")
+    assert benchmark_runner.classify_accelerator_conditions(
+        conditions)[0] == benchmark_runner.ACCELERATOR_AVAILABLE
+    assert benchmark_runner.classify_accelerator_conditions(
+        conditions, resident_memory_allowance_mib=1024)[0] == (
+            benchmark_runner.ACCELERATOR_RESIDENCY_OVER_ALLOWANCE)
+    strict = benchmark_runner.classify_accelerator_conditions(
+        conditions, resident_memory_allowance_mib=0)
+    assert strict[0] == benchmark_runner.ACCELERATOR_RESIDENCY_OVER_ALLOWANCE
+    assert "strict idle" in strict[1]
+    # A generous allowance cannot admit a device the utilisation bound refuses.
+    busy = measured_conditions("908461, 900\n", "97887, 1814, 100\n")
+    assert benchmark_runner.classify_accelerator_conditions(
+        busy, resident_memory_allowance_mib=99999)[0] == (
+            benchmark_runner.ACCELERATOR_CONTENDED)
+
+
+def test_no_flag_can_grade_a_contended_device():
+    """There must be no way to spend an argument and measure contention.
+
+    The guard is a refusal, not a warning. Every accelerator-facing argument
+    the parser accepts is checked here: none of them may turn a contended
+    device into a graded one.
+    """
+    source = RUNNER.read_text(encoding="utf-8")
+    for forbidden in ("--force", "--ignore-contention", "--skip-guard",
+                      "--no-accelerator-guard"):
+        assert forbidden not in source, (
+            f"{forbidden} would grade a contended device")
+    busy = measured_conditions("908461, 900\n", "97887, 1814, 100\n")
+    for utilization_allowance in (0, 10, 50, 99, 100, 1000):
+        for free_memory in (0, 2048, 99999):
+            for residency in (None, 0, 1024, 10 ** 9):
+                verdict, _ = benchmark_runner.classify_accelerator_conditions(
+                    busy, utilization_allowance, free_memory, residency)
+                if utilization_allowance >= 100:
+                    # Only an allowance that admits a fully saturated device
+                    # can pass it, which is a setting that says what it does.
+                    continue
+                assert verdict != benchmark_runner.ACCELERATOR_AVAILABLE
 
 
 def test_missing_accelerator_usage_marker_prevents_evidence(
@@ -310,7 +517,8 @@ def test_missing_accelerator_usage_marker_prevents_evidence(
     evidence = tmp_path / "must-not-exist.json"
     monkeypatch.setattr(
         benchmark_runner, "query_accelerator_conditions",
-        lambda: {
+        lambda *_arguments, **_keywords: {
+            "status": benchmark_runner.NVIDIA_SMI_OK,
             "resident_processes": [],
             "resident_process_memory_mib": 0,
             "devices": [{
@@ -321,7 +529,9 @@ def test_missing_accelerator_usage_marker_prevents_evidence(
             }],
             "device_memory_used_mib": 0,
             "device_memory_total_mib": 97887,
+            "device_memory_free_mib": 97887,
             "device_utilization_percent": 0,
+            "utilization_samples": [[0]],
         },
     )
     monkeypatch.setattr(
@@ -488,8 +698,14 @@ def test_accelerator_fixture_emits_evidence_the_gate_accepts(tmp_path):
         assert cell["peak_memory_bytes"] > 0
         assert cell["peak_memory_kind"] == "cuda_max_memory_allocated"
         conditions = cell["accelerator_conditions"]
-        assert conditions["resident_process_memory_mib"] <= conditions[
-            "resident_memory_allowance_mib"]
+        # The cell must carry the conditions it was measured under, and they
+        # must be the conditions the guard actually admitted it on.
+        assert conditions["contention_verdict"] == (
+            benchmark_runner.ACCELERATOR_AVAILABLE)
+        assert conditions["device_utilization_percent"] <= conditions[
+            "utilization_allowance_percent"]
+        assert conditions["device_memory_free_mib"] >= conditions[
+            "free_memory_requirement_mib"]
         assert conditions["device_memory_total_mib"] > 0
         assert conditions["device_memory_used_mib"] >= 0
         assert 0 <= conditions["device_utilization_percent"] <= 100
@@ -504,6 +720,17 @@ def test_accelerator_fixture_emits_evidence_the_gate_accepts(tmp_path):
     )
     assert verdict.returncode == 0, verdict.stdout + verdict.stderr
     assert json.loads(verdict.stdout)["qualified"] is True
+
+    record_gpu_grader_observation(
+        "test_accelerator_fixture_emits_evidence_the_gate_accepts",
+        ACCELERATOR_FIXTURE,
+        report["cells"][0]["accelerator_device_name"],
+        {
+            "steady_state_step_seconds": report["cells"][0][
+                "steady_state_step_seconds"],
+            "qualified": True,
+        },
+    )
 
 
 @pytest.mark.slow
@@ -557,6 +784,17 @@ def test_compiled_accelerator_candidate_is_judged_by_authority(tmp_path):
     authority_receipt = json.loads(verdict.stdout)
     assert authority_receipt["evidence"] == json.loads(evidence.read_text())
     assert authority_receipt["qualified"] is (verdict.returncode == 0)
+
+    record_gpu_grader_observation(
+        "test_compiled_accelerator_candidate_is_judged_by_authority",
+        ACCELERATOR_FIXTURE,
+        report["cells"][0]["accelerator_device_name"],
+        {
+            "steady_state_step_seconds": report["cells"][0][
+                "steady_state_step_seconds"],
+            "qualified": authority_receipt["qualified"],
+        },
+    )
 
 
 def test_ao3_document_selection_is_deterministic(tmp_path):
