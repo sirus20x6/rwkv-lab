@@ -132,10 +132,25 @@ only as a whole — source, processor, mapper, collator, sampler and batching to
 whose dataset is not declared through components has no slot for the evaluator to name. MageFlow is
 that case: its dataset comes out of the adapter's own configuration object. So are the eight
 Transformer MLA routes, which name a packed token file in their own configuration rather than
-through a data source. Such a composition must
+through a data source. So are the four vision routes, RLVR, Qwen AO3 and RWKV posttraining, each of
+which names its held-out arm in the adapter's own configuration — an `--eval-data` manifest, a
+separate eval pack directory, split-tagged rows, or a seeded disjoint task split. Such a
+composition must
 declare `split_slot: ""`, stating that its held-out selection is adapter-owned; a dangling slot
 reference is refused rather than ignored, and a composition that does declare a data pipeline still
 has to wire the split views as above.
+
+Every stateful profile in the authority's registry now declares exactly one `evaluator`-category
+slot, and `rwkv_lab_worker_contract_tests.cpp` asserts that over the registry rather than over a
+list of route names, so a newly registered trainer is covered the moment it exists. Exactly one,
+not at least one: `eval_examples_contract.cpp` requires the resolved composition to carry a unique
+evaluator, so a second one is as broken as none. That uniqueness is specific to this category — a
+category is a kind and a slot is a role, and the engram route legitimately fills two
+`optimizer`-category slots while `split`, the evaluator's held-out view and `test_split` are three
+`split_selector` components.
+
+Declaring the slot is necessary and nowhere near sufficient. It makes valid step-zero evidence
+*reachable*; producing it is the trainer's work, and no route acquires a gate by acquiring a slot.
 The renderer binds each published evidence envelope to one of those identities and an optimizer
 step, so caption/image/video evidence remains aligned and dashboard-readable through time.
 

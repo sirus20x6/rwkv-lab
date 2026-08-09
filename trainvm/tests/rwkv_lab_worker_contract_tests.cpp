@@ -144,10 +144,86 @@ nlohmann::json eval_examples_document(const std::string& component_digest) {
 // The eval-examples step-zero gate cannot be satisfied by a family whose
 // resolved training composition carries no evaluator:
 // validate_eval_examples_gate_provenance demands exactly one, and cross-checks
-// its descriptor digest and configured metrics against the manifest. This
-// walks each MageFlow route end to end — contract slot, registry resolution,
-// manifest provenance — and then deletes the evaluator from the resolved
-// composition to prove the check is what makes the walk succeed.
+// its descriptor digest and configured metrics against the manifest.
+//
+// This is the walk every family's check performs — contract slot, registry
+// resolution, exactly-one-evaluator, manifest provenance — followed by the
+// mutation that proves the walk is load-bearing: strike the evaluator out of
+// the resolved composition, exactly as a contract with no evaluator slot
+// would, and the same manifest must be refused.
+//
+// It is one function rather than one per family because the rule it checks is
+// one rule. `label` names the route in a failure so a red assertion still says
+// which contract is wrong.
+void walk_evaluator_provenance(
+    const trainvm::RwkvLabWorkerContract& contract,
+    const trainvm::TrainingComponentRegistry& components,
+    std::string_view adapter, const trainvm::TrainingComposition& composition,
+    std::string_view label) {
+  const trainvm::AdapterProfile& profile = find_profile(contract, adapter);
+  require(profile.training_composition.has_value(),
+          std::string(label) + " must own a training composition contract");
+  const auto slot = profile.training_composition->slots.find("evaluator");
+  require(slot != profile.training_composition->slots.end() &&
+              slot->second == trainvm::TrainingComponentCategory::evaluator,
+          std::string(label) + " must declare an evaluator slot");
+  require(composition.components.size() ==
+              profile.training_composition->slots.size(),
+          std::string(label) +
+              ": the authored composition must fill every declared slot");
+  const trainvm::ResolvedTrainingComposition resolved =
+      components.resolve_composition(composition);
+  std::size_t evaluators = 0U;
+  for (const auto& [name, component] : resolved.components) {
+    (void)name;
+    if (component.descriptor.key.category ==
+        trainvm::TrainingComponentCategory::evaluator)
+      ++evaluators;
+  }
+  require(evaluators == 1U,
+          std::string(label) + " must resolve exactly one evaluator");
+  const nlohmann::json resolved_training =
+      trainvm::resolved_training_composition_json(resolved);
+  const trainvm::EvalExamplesManifest manifest =
+      trainvm::validate_eval_examples_manifest(eval_examples_document(
+          resolved.components.at("evaluator").descriptor_digest));
+  const std::string authority_digest = "sha256:" + std::string(64U, 'a');
+  trainvm::Event checkpoint{};
+  checkpoint.run_id = "run-1";
+  checkpoint.node_id = "train";
+  checkpoint.attempt_id = "train@1";
+  checkpoint.event_type = "artifact.published";
+  checkpoint.optimizer_step = 0U;
+  checkpoint.payload = {{"artifact_id", "checkpoint-0"},
+                        {"kind", "checkpoint"},
+                        {"complete", true},
+                        {"fingerprint_algorithm", "manifest_sha256"},
+                        {"fingerprint", authority_digest}};
+  trainvm::Event metric{};
+  metric.run_id = "run-1";
+  metric.node_id = "train";
+  metric.attempt_id = "train@1";
+  metric.event_type = "metric.sampled";
+  metric.optimizer_step = 0U;
+  metric.payload = {{"name", "eval.loss"}, {"step_domain", "optimizer_step"}};
+  trainvm::validate_eval_examples_gate_provenance(manifest, resolved_training,
+                                                  {checkpoint, metric});
+
+  nlohmann::json without_evaluator = resolved_training;
+  without_evaluator.at("components").erase("evaluator");
+  bool refused = false;
+  try {
+    trainvm::validate_eval_examples_gate_provenance(
+        manifest, without_evaluator, {checkpoint, metric});
+  } catch (const std::invalid_argument&) {
+    refused = true;
+  }
+  require(refused,
+          std::string(label) +
+              ": eval-examples provenance must refuse a composition whose "
+              "evaluator slot is absent");
+}
+
 void verify_mageflow_evaluator_provenance(
     const trainvm::RwkvLabWorkerContract& contract,
     const trainvm::TrainingComponentRegistry& components) {
@@ -157,71 +233,8 @@ void verify_mageflow_evaluator_provenance(
       {"rwkv-lab.mageflow-terminal-expert", "mageflow_terminal_expert"},
   };
   for (const auto& [adapter, router] : routes) {
-    const trainvm::AdapterProfile& profile = find_profile(contract, adapter);
-    require(profile.training_composition.has_value(),
-            "each MageFlow route must own a training composition contract");
-    const auto slot = profile.training_composition->slots.find("evaluator");
-    require(slot != profile.training_composition->slots.end() &&
-                slot->second == trainvm::TrainingComponentCategory::evaluator,
-            "each MageFlow route must declare an evaluator slot");
-    const trainvm::TrainingComposition composition =
-        mageflow_composition_for(router);
-    require(composition.components.size() ==
-                profile.training_composition->slots.size(),
-            "the authored MageFlow composition must fill every declared slot");
-    const trainvm::ResolvedTrainingComposition resolved =
-        components.resolve_composition(composition);
-    std::size_t evaluators = 0U;
-    for (const auto& [name, component] : resolved.components) {
-      (void)name;
-      if (component.descriptor.key.category ==
-          trainvm::TrainingComponentCategory::evaluator)
-        ++evaluators;
-    }
-    require(evaluators == 1U,
-            "each MageFlow route must resolve exactly one evaluator");
-    const nlohmann::json resolved_training =
-        trainvm::resolved_training_composition_json(resolved);
-    const trainvm::EvalExamplesManifest manifest =
-        trainvm::validate_eval_examples_manifest(eval_examples_document(
-            resolved.components.at("evaluator").descriptor_digest));
-    const std::string authority_digest = "sha256:" + std::string(64U, 'a');
-    trainvm::Event checkpoint{};
-    checkpoint.run_id = "run-1";
-    checkpoint.node_id = "train";
-    checkpoint.attempt_id = "train@1";
-    checkpoint.event_type = "artifact.published";
-    checkpoint.optimizer_step = 0U;
-    checkpoint.payload = {{"artifact_id", "checkpoint-0"},
-                          {"kind", "checkpoint"},
-                          {"complete", true},
-                          {"fingerprint_algorithm", "manifest_sha256"},
-                          {"fingerprint", authority_digest}};
-    trainvm::Event metric{};
-    metric.run_id = "run-1";
-    metric.node_id = "train";
-    metric.attempt_id = "train@1";
-    metric.event_type = "metric.sampled";
-    metric.optimizer_step = 0U;
-    metric.payload = {{"name", "eval.loss"},
-                      {"step_domain", "optimizer_step"}};
-    trainvm::validate_eval_examples_gate_provenance(
-        manifest, resolved_training, {checkpoint, metric});
-
-    // The mutation that proves the walk above is load-bearing: strike the
-    // evaluator out of the resolved composition, exactly as a contract with no
-    // evaluator slot would, and the same manifest must be refused.
-    nlohmann::json without_evaluator = resolved_training;
-    without_evaluator.at("components").erase("evaluator");
-    bool refused = false;
-    try {
-      trainvm::validate_eval_examples_gate_provenance(
-          manifest, without_evaluator, {checkpoint, metric});
-    } catch (const std::invalid_argument&) {
-      refused = true;
-    }
-    require(refused,
-            "eval-examples provenance must refuse a MageFlow composition whose evaluator slot is absent");
+    walk_evaluator_provenance(contract, components, adapter,
+                              mageflow_composition_for(router), adapter);
   }
 }
 
@@ -316,27 +329,20 @@ void verify_transformer_mla_evaluator_provenance(
       "rwkv-lab.transformer-mla-rwkv8",
   };
   for (const auto& adapter : routes) {
-    const trainvm::AdapterProfile& profile = find_profile(contract, adapter);
-    require(profile.training_composition.has_value(),
-            "each Transformer MLA route must own a training composition contract");
-    const auto slot = profile.training_composition->slots.find("evaluator");
-    require(slot != profile.training_composition->slots.end() &&
-                slot->second == trainvm::TrainingComponentCategory::evaluator,
-            "each Transformer MLA route must declare an evaluator slot");
     const bool engram = adapter == "rwkv-lab.transformer-mla-engram";
     const trainvm::TrainingComposition composition =
         transformer_mla_composition_for(engram);
-    require(composition.components.size() ==
-                profile.training_composition->slots.size(),
-            "the authored Transformer MLA composition must fill every declared slot");
-    const trainvm::ResolvedTrainingComposition resolved =
-        components.resolve_composition(composition);
+    walk_evaluator_provenance(contract, components, adapter, composition,
+                              adapter);
     // The engram route fills two optimizer-category slots: a dense AdamW over
     // the model and a sparse one over the Engram host embedding tables. It
     // walks with the other seven rather than being pinned as unresolvable,
     // which is what says validate_optimizer_decay_relationships now selects
     // the optimizer its rule is about by the weight_decay it carries instead
-    // of by being the only member of its category.
+    // of by being the only member of its category. The evaluator constraint is
+    // a uniqueness rule; this one is not.
+    const trainvm::ResolvedTrainingComposition resolved =
+        components.resolve_composition(composition);
     require(std::ranges::count_if(
                 resolved.components,
                 [](const auto& item) {
@@ -344,55 +350,202 @@ void verify_transformer_mla_evaluator_provenance(
                          trainvm::TrainingComponentCategory::optimizer;
                 }) == (engram ? 2 : 1),
             "the engram route must resolve both of its optimizer slots and every other route exactly one");
-    std::size_t evaluators = 0U;
-    for (const auto& [name, component] : resolved.components) {
-      (void)name;
-      if (component.descriptor.key.category ==
-          trainvm::TrainingComponentCategory::evaluator)
-        ++evaluators;
-    }
-    require(evaluators == 1U,
-            "each Transformer MLA route must resolve exactly one evaluator");
-    const nlohmann::json resolved_training =
-        trainvm::resolved_training_composition_json(resolved);
-    const trainvm::EvalExamplesManifest manifest =
-        trainvm::validate_eval_examples_manifest(eval_examples_document(
-            resolved.components.at("evaluator").descriptor_digest));
-    const std::string authority_digest = "sha256:" + std::string(64U, 'a');
-    trainvm::Event checkpoint{};
-    checkpoint.run_id = "run-1";
-    checkpoint.node_id = "train";
-    checkpoint.attempt_id = "train@1";
-    checkpoint.event_type = "artifact.published";
-    checkpoint.optimizer_step = 0U;
-    checkpoint.payload = {{"artifact_id", "checkpoint-0"},
-                          {"kind", "checkpoint"},
-                          {"complete", true},
-                          {"fingerprint_algorithm", "manifest_sha256"},
-                          {"fingerprint", authority_digest}};
-    trainvm::Event metric{};
-    metric.run_id = "run-1";
-    metric.node_id = "train";
-    metric.attempt_id = "train@1";
-    metric.event_type = "metric.sampled";
-    metric.optimizer_step = 0U;
-    metric.payload = {{"name", "eval.loss"},
-                      {"step_domain", "optimizer_step"}};
-    trainvm::validate_eval_examples_gate_provenance(
-        manifest, resolved_training, {checkpoint, metric});
-
-    nlohmann::json without_evaluator = resolved_training;
-    without_evaluator.at("components").erase("evaluator");
-    bool refused = false;
-    try {
-      trainvm::validate_eval_examples_gate_provenance(
-          manifest, without_evaluator, {checkpoint, metric});
-    } catch (const std::invalid_argument&) {
-      refused = true;
-    }
-    require(refused,
-            "eval-examples provenance must refuse a Transformer MLA composition whose evaluator slot is absent");
   }
+}
+
+// The evaluation half of a composition, identical for every route because the
+// registry admits the suite only as a unit. `renderer` differs only in which
+// component and modality the route can honestly render: a caption route can
+// render an image-caption-prediction triple, a feature-distillation route
+// cannot, and a text route has no image at all.
+void add_evaluation_components(trainvm::TrainingComposition& composition,
+                               std::string_view renderer,
+                               std::string_view modality) {
+  using Category = trainvm::TrainingComponentCategory;
+  composition.components.emplace(
+      "artifact_renderer",
+      select(Category::artifact_renderer, std::string(renderer), "1.0.0",
+             nlohmann::json{{"modality", std::string(modality)}}));
+  composition.components.emplace(
+      "evaluation_schedule",
+      select(Category::evaluation_schedule, "milestone_cadence", "3.0.0",
+             nlohmann::json::object()));
+  // split_slot is empty on purpose, for all seven routes: each names its
+  // held-out data in the adapter's own configuration -- an --eval-data
+  // manifest, an eval pack directory, a split-tagged row set, or a seeded
+  // stratified task selection -- rather than through a declarative data
+  // pipeline, so there is no split-selector slot for the evaluator to name.
+  composition.components.emplace(
+      "evaluator",
+      select(Category::evaluator, "scalar_loss", "1.0.0",
+             nlohmann::json{{"metrics", nlohmann::json::array({"eval.loss"})},
+                            {"split_slot", ""}}));
+  composition.components.emplace(
+      "qualitative_samples",
+      select(Category::qualitative_sample, "fixed_held_out", "2.0.0",
+             nlohmann::json{{"identity_field", "sample_id"},
+                            {"sample_count", 4}}));
+}
+
+// One authorable composition per route whose contract this change gave an
+// evaluation suite, chosen from that route's own allowlist.
+trainvm::TrainingComposition step_zero_composition_for(
+    std::string_view adapter) {
+  using Category = trainvm::TrainingComponentCategory;
+  const bool vision = adapter.starts_with("rwkv-lab.vision-");
+  trainvm::TrainingComposition composition{
+      .model_family = vision                          ? "vision"
+                      : adapter == "rwkv-lab.qwen-ao3" ? "transformer"
+                                                       : "rwkv",
+      .components = {},
+      .topologies = std::nullopt,
+      .post_training = std::nullopt,
+  };
+  // The teacher compressor distils frozen teacher features and produces no
+  // text, so it renders an image envelope rather than a caption triple; the
+  // three caption-producing vision routes render the triple their contract
+  // offers, which is what proves the caption_triplet allowance is real.
+  if (adapter == "rwkv-lab.vision-teacher-compressor")
+    add_evaluation_components(composition, "evidence_envelope", "image");
+  else if (vision)
+    add_evaluation_components(composition, "caption_triplet", "multimodal");
+  else
+    add_evaluation_components(composition, "evidence_envelope", "text");
+
+  composition.components.emplace(
+      "gradient_clipping",
+      select(Category::gradient_clipping, "global_norm", "1.0.0",
+             nlohmann::json{{"max_norm", 1.0}}));
+  // torch_adamw 1.0.0 carries its own initial weight_decay, and
+  // validate_optimizer_decay_relationships refuses a composition that states
+  // one decay in two places and means two things -- so where both the legacy
+  // optimizer and a decay schedule are declared, they must agree.
+  const bool legacy_optimizer =
+      adapter == "rwkv-lab.vision-teacher-compressor" ||
+      adapter == "rwkv-lab.vision-frozen-adapter";
+  composition.components.emplace(
+      "optimizer",
+      select(Category::optimizer,
+             legacy_optimizer ? "torch_adamw" : "torch_adamw_no_decay",
+             legacy_optimizer ? "1.0.0" : "2.0.0",
+             legacy_optimizer
+                 ? nlohmann::json{{"learning_rate", 0.0001},
+                                  {"weight_decay", 0.0}}
+                 : nlohmann::json{{"learning_rate", 0.0001}}));
+  // The frozen-adapter route trains only an adapter over a frozen backbone, so
+  // its contract declares neither a learning-rate schedule nor a weight-decay
+  // schedule. Every other route here declares both.
+  if (adapter != "rwkv-lab.vision-frozen-adapter") {
+    if (adapter == "rwkv-lab.rwkv-rlvr")
+      composition.components.emplace(
+          "learning_rate",
+          select(Category::learning_rate_schedule, "linear_warmup_constant",
+                 "1.0.0", nlohmann::json{{"warmup_steps", 8}}));
+    else if (vision)
+      composition.components.emplace(
+          "learning_rate", select(Category::learning_rate_schedule, "constant",
+                                  "1.0.0", nlohmann::json::object()));
+    else
+      composition.components.emplace(
+          "learning_rate",
+          select(Category::learning_rate_schedule, "linear_warmup_cosine",
+                 "1.0.0",
+                 nlohmann::json{{"warmup_steps", 8}, {"max_steps", 128}}));
+    composition.components.emplace(
+        "weight_decay",
+        select(Category::weight_decay_schedule, "constant", "1.0.0",
+               nlohmann::json{{"weight_decay", 0.0}}));
+  }
+  if (vision)
+    composition.components.emplace(
+        "precision",
+        select(Category::precision,
+               adapter == "rwkv-lab.vision-rwkv-student"
+                   ? "bf16_parameters_fp32_reductions"
+                   : "fp32_parameters_bf16_compute",
+               "1.0.0", nlohmann::json::object()));
+  return composition;
+}
+
+// The seven profiles that reached 2026-08-09 with no evaluator slot: four
+// vision routes, RLVR, Qwen AO3 and RWKV posttraining. Each has a real
+// held-out arm already computed by its producer -- a required --eval-data
+// manifest, an image-disjoint sha256-bucketed split, a separate eval pack
+// directory whose manifest digest is pinned into the receipt, split-tagged
+// rows, or a disjoint seeded task split -- so declaring an evaluator for each
+// is a statement about evidence that exists, not a formality that satisfies
+// the contract with nothing behind it.
+//
+// Arming the step-zero gate for any of them is deliberately NOT done here and
+// is owned by card-876f5d8a, card-6243098f and card-b7c0d65b: every one of
+// these routes still lacks a producer and a pre-mutation boundary, and
+// tests/test_step_zero_interception_enumeration.py's UNMAPPED_INTERCEPTION
+// allowlist is unchanged because nothing here makes a profile reach the
+// boundary.
+void verify_step_zero_evaluator_provenance(
+    const trainvm::RwkvLabWorkerContract& contract,
+    const trainvm::TrainingComponentRegistry& components) {
+  const std::vector<std::string> routes{
+      "rwkv-lab.qwen-ao3",
+      "rwkv-lab.rwkv-posttraining",
+      "rwkv-lab.rwkv-rlvr",
+      "rwkv-lab.vision-frozen-adapter",
+      "rwkv-lab.vision-native-head",
+      "rwkv-lab.vision-rwkv-student",
+      "rwkv-lab.vision-teacher-compressor",
+  };
+  for (const auto& adapter : routes) {
+    walk_evaluator_provenance(contract, components, adapter,
+                              step_zero_composition_for(adapter), adapter);
+  }
+}
+
+// The property the seven routes above were the last exception to, stated over
+// the registry rather than over a list: EVERY stateful profile that owns a
+// training composition declares exactly one evaluator-category slot.
+//
+// This is the check that does not go stale. A list of route names would have
+// to be edited when a profile is added, and the edit that is forgotten is the
+// one that matters -- a new stateful trainer with no evaluator slot is exactly
+// the deadlock this change removed, and it would land silently. Deriving the
+// set from `contract.adapter_registry.profiles` means a new profile is covered
+// the moment it is registered.
+//
+// Exactly one, not at least one: eval_examples_contract.cpp requires the
+// resolved composition to carry a unique evaluator, so a second one is as
+// broken as none. That is a uniqueness rule about one category and does not
+// generalise -- the engram route legitimately holds two optimizer-category
+// components in different slots, and split/test_split are three split
+// selectors. A category is a kind; a slot is a role.
+void verify_every_stateful_profile_declares_one_evaluator(
+    const trainvm::RwkvLabWorkerContract& contract) {
+  std::size_t checked = 0U;
+  for (const trainvm::AdapterProfile& profile :
+       contract.adapter_registry.profiles) {
+    if (!profile.lifecycle.stateful) continue;
+    require(profile.training_composition.has_value(),
+            "a stateful profile must own a training composition contract: " +
+                profile.key.adapter);
+    const std::size_t evaluators = static_cast<std::size_t>(
+        std::ranges::count_if(profile.training_composition->slots,
+                              [](const auto& slot) {
+                                return slot.second ==
+                                       trainvm::TrainingComponentCategory::
+                                           evaluator;
+                              }));
+    require(evaluators == 1U,
+            "every stateful profile must declare exactly one evaluator slot, "
+            "or the step-zero eval-examples gate can never be satisfied for "
+            "it: " +
+                profile.key.adapter);
+    ++checked;
+  }
+  // The authority declares twenty stateful profiles, which is the count
+  // tests/test_step_zero_interception_enumeration.py independently arrived at
+  // from the Python handler table. Pinned so that a profile silently dropping
+  // out of the registry cannot make this walk vacuous.
+  require(checked == 20U,
+          "the authority must declare twenty stateful training profiles");
 }
 
 nlohmann::json load_mageflow_fixture() {
@@ -541,7 +694,7 @@ int main() {
                 terminal.training_composition->slots.size() == 10U &&
                 qwen.training_composition &&
                 qwen.training_composition->model_family == "transformer" &&
-                qwen.training_composition->slots.size() == 4U &&
+                qwen.training_composition->slots.size() == 8U &&
                 hf.training_composition &&
                 hf.training_composition->model_family == "transformer" &&
                 hf.training_composition->slots.size() == 25U &&
@@ -573,7 +726,7 @@ int main() {
                         .name == "full" &&
                 posttraining.training_composition &&
                 posttraining.training_composition->model_family == "rwkv" &&
-                posttraining.training_composition->slots.size() == 4U &&
+                posttraining.training_composition->slots.size() == 8U &&
                 posttraining.training_composition->allowed_components->at(
                     "optimizer").size() == 1U &&
                 posttraining.training_composition->allowed_components->at(
@@ -585,7 +738,7 @@ int main() {
                     "optimizer").front().version == "2.0.0" &&
                 rlvr.training_composition &&
                 rlvr.training_composition->model_family == "rwkv" &&
-                rlvr.training_composition->slots.size() == 4U &&
+                rlvr.training_composition->slots.size() == 8U &&
                 rlvr.training_composition->allowed_components->at(
                     "learning_rate").front().name ==
                     "linear_warmup_constant" &&
@@ -594,7 +747,7 @@ int main() {
                     "torch_adamw_no_decay" &&
                 vision.training_composition &&
                 vision.training_composition->model_family == "vision" &&
-                vision.training_composition->slots.size() == 5U &&
+                vision.training_composition->slots.size() == 9U &&
                 vision.training_composition->allowed_components->at(
                     "learning_rate").front().name == "constant" &&
                 vision.training_composition->allowed_components->at(
@@ -604,7 +757,7 @@ int main() {
                     "fp32_parameters_bf16_compute" &&
                 vision_frozen.training_composition &&
                 vision_frozen.training_composition->model_family == "vision" &&
-                vision_frozen.training_composition->slots.size() == 3U &&
+                vision_frozen.training_composition->slots.size() == 7U &&
                 vision_frozen.training_composition->allowed_components->at(
                     "optimizer").front().name == "torch_adamw" &&
                 vision_frozen.training_composition->allowed_components->at(
@@ -612,7 +765,7 @@ int main() {
                     "fp32_parameters_bf16_compute" &&
                 vision_native.training_composition &&
                 vision_native.training_composition->model_family == "vision" &&
-                vision_native.training_composition->slots.size() == 5U &&
+                vision_native.training_composition->slots.size() == 9U &&
                 vision_native.training_composition->allowed_components->at(
                     "learning_rate").front().name == "constant" &&
                 vision_native.training_composition->allowed_components->at(
@@ -623,7 +776,7 @@ int main() {
                     "fp32_parameters_bf16_compute" &&
                 vision_student.training_composition &&
                 vision_student.training_composition->model_family == "vision" &&
-                vision_student.training_composition->slots.size() == 5U &&
+                vision_student.training_composition->slots.size() == 9U &&
                 vision_student.training_composition->allowed_components->at(
                     "learning_rate").front().name == "constant" &&
                 vision_student.training_composition->allowed_components->at(
@@ -1232,6 +1385,37 @@ int main() {
         {"model_family", "rwkv"},
         {"components",
          {
+             // The evaluation suite the posttraining contract now declares.
+             // posttrain_train.py already scores a held-out arm -- rows tagged
+             // eval/test, or a separate evaluation file -- so this states
+             // which evaluator produces the scalar the step-zero gate will
+             // one day require, not a placeholder that emits nothing.
+             {"artifact_renderer",
+              {{"key",
+                {{"category", "artifact_renderer"},
+                 {"name", "evidence_envelope"},
+                 {"version", "1.0.0"}}},
+               {"configuration", {{"modality", "text"}}}}},
+             {"evaluation_schedule",
+              {{"key",
+                {{"category", "evaluation_schedule"},
+                 {"name", "milestone_cadence"},
+                 {"version", "3.0.0"}}},
+               {"configuration", nlohmann::json::object()}}},
+             {"evaluator",
+              {{"key",
+                {{"category", "evaluator"},
+                 {"name", "scalar_loss"},
+                 {"version", "1.0.0"}}},
+               {"configuration",
+                {{"metrics", {"eval.loss"}}, {"split_slot", ""}}}}},
+             {"qualitative_samples",
+              {{"key",
+                {{"category", "qualitative_sample"},
+                 {"name", "fixed_held_out"},
+                 {"version", "2.0.0"}}},
+               {"configuration",
+                {{"identity_field", "id"}, {"sample_count", 8}}}}},
              {"gradient_clipping",
               {{"key",
                 {{"category", "gradient_clipping"},
@@ -1400,6 +1584,8 @@ int main() {
 
     verify_mageflow_evaluator_provenance(contract, components);
     verify_transformer_mla_evaluator_provenance(contract, components);
+    verify_step_zero_evaluator_provenance(contract, components);
+    verify_every_stateful_profile_declares_one_evaluator(contract);
 
     std::vector<trainvm::RwkvLabWorkerRuntimeDeploymentSpec> runtimes;
     for (const trainvm::AdapterProfile& profile :

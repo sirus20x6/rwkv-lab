@@ -282,33 +282,133 @@ OperationAuthoringDeclaration vision_rwkv_student_authoring() {
   return authoring;
 }
 
-TrainingCompositionContract vision_native_head_composition() {
+// The four evaluation slots a route needs before the step-zero eval-examples
+// gate is reachable for it at all. They are declared as a group because the
+// training component registry refuses a partial evaluation suite:
+// validate_evaluation_checkpoint_relationships counts the evaluator, the
+// evaluation schedule, the fixed held-out sample selector and the artifact
+// renderer, and admits zero of the four or all four.
+//
+// The evaluator is what makes a valid rwkv-lab.eval-examples.v1 artifact
+// reachable. validate_eval_examples_gate_provenance requires the resolved
+// training composition to carry exactly one component of category evaluator,
+// and cross-checks its descriptor digest and configured metrics against the
+// manifest. Without this slot a family could publish nothing the step-zero
+// gate would accept, so arming the gate for it would deadlock every attempt,
+// fresh or resumed: the step refused for want of evidence the publication
+// path itself refuses to emit.
+//
+// This is one map rather than one per family on purpose. MageFlow (d217949)
+// and the Transformer MLA routes (90f3711) each grew a private copy of the
+// identical map, and every family that has since needed the suite has needed
+// exactly these four categories — the registry's own unit-of-admission is
+// what fixes the set, not any family's taste.
+std::map<std::string, TrainingComponentCategory> evaluation_slots() {
   return {
-      .model_family = "vision",
-      .slots = {
-          {"gradient_clipping", TrainingComponentCategory::gradient_clipping},
-          {"learning_rate",
-           TrainingComponentCategory::learning_rate_schedule},
-          {"optimizer", TrainingComponentCategory::optimizer},
-          {"precision", TrainingComponentCategory::precision},
-          {"weight_decay",
-           TrainingComponentCategory::weight_decay_schedule},
-      },
-      .allowed_components =
-          std::map<std::string, std::vector<TrainingComponentKey>>{
-              {"learning_rate",
-               {{TrainingComponentCategory::learning_rate_schedule,
-                 "constant", "1.0.0"}}},
-              {"optimizer",
-               {{TrainingComponentCategory::optimizer,
-                 "torch_adamw_no_decay", "2.0.0"}}},
-              {"precision",
-               {{TrainingComponentCategory::precision,
-                 "fp32_parameters_bf16_compute", "1.0.0"}}},
-          },
+      {"artifact_renderer", TrainingComponentCategory::artifact_renderer},
+      {"evaluation_schedule",
+       TrainingComponentCategory::evaluation_schedule},
+      {"evaluator", TrainingComponentCategory::evaluator},
+      {"qualitative_samples", TrainingComponentCategory::qualitative_sample},
   };
 }
 
+// The components a route may fill those slots with.
+//
+// evaluator/scalar_loss 1.0.0, evaluation_schedule/milestone_cadence 3.0.0,
+// qualitative_sample/fixed_held_out 2.0.0 and
+// artifact_renderer/evidence_envelope 1.0.0 all declare model_families ["*"],
+// so no family needs a registry change to carry the suite.
+//
+// Two components are withheld from every caller. The legacy
+// evaluation_schedule/launch_gate_periodic 1.0.0 couples its launch count to
+// the sample count, which makes the held-out selection and the schedule
+// impossible to change independently. The frozen_named split selector is part
+// of the declarative data pipeline, which none of these families declares.
+//
+// artifact_renderer/caption_triplet 1.0.0 renders an image-caption-prediction
+// triple, and is admissible only for model_family transformer and vision. It
+// is offered only where the route actually produces such a triple, which is a
+// per-route judgement rather than a family-wide one: three of the four vision
+// routes emit captions, and the fourth distils teacher features with no text
+// anywhere in its objective.
+std::map<std::string, std::vector<TrainingComponentKey>>
+evaluation_allowances(bool caption_triplet) {
+  // An allowlist must be sorted and unique, and `caption_triplet` sorts
+  // before `evidence_envelope`, so it goes in front rather than on the end.
+  std::vector<TrainingComponentKey> renderers;
+  if (caption_triplet)
+    renderers.push_back({TrainingComponentCategory::artifact_renderer,
+                         "caption_triplet", "1.0.0"});
+  renderers.push_back({TrainingComponentCategory::artifact_renderer,
+                       "evidence_envelope", "1.0.0"});
+  return {
+      {"artifact_renderer", std::move(renderers)},
+      {"evaluation_schedule",
+       {{TrainingComponentCategory::evaluation_schedule,
+         "launch_gate_periodic", "2.0.0"},
+        {TrainingComponentCategory::evaluation_schedule, "milestone_cadence",
+         "3.0.0"}}},
+      {"evaluator",
+       {{TrainingComponentCategory::evaluator, "scalar_loss", "1.0.0"}}},
+      {"qualitative_samples",
+       {{TrainingComponentCategory::qualitative_sample, "fixed_held_out",
+         "2.0.0"}}},
+  };
+}
+
+// Merge the evaluation suite into a composition contract that is otherwise
+// already complete. Written once so a family cannot acquire half of it.
+TrainingCompositionContract with_evaluation_suite(
+    TrainingCompositionContract composition, bool caption_triplet) {
+  composition.slots.merge(evaluation_slots());
+  if (!composition.allowed_components.has_value())
+    composition.allowed_components =
+        std::map<std::string, std::vector<TrainingComponentKey>>{};
+  composition.allowed_components->merge(evaluation_allowances(caption_triplet));
+  return composition;
+}
+
+// The native vision head predicts a caption from cached teacher features, so
+// caption_triplet rendering describes evidence it really produces. Its
+// held-out arm is a separate evaluation manifest
+// (vision_native_train.py --eval-data), scored as token-weighted caption
+// cross-entropy, and the corpus is named in the adapter's own configuration
+// rather than through a data_source — so the evaluator names an empty
+// split_slot and the registry's no-pipeline branch applies.
+TrainingCompositionContract vision_native_head_composition() {
+  return with_evaluation_suite(
+      {
+          .model_family = "vision",
+          .slots = {
+              {"gradient_clipping",
+               TrainingComponentCategory::gradient_clipping},
+              {"learning_rate",
+               TrainingComponentCategory::learning_rate_schedule},
+              {"optimizer", TrainingComponentCategory::optimizer},
+              {"precision", TrainingComponentCategory::precision},
+              {"weight_decay",
+               TrainingComponentCategory::weight_decay_schedule},
+          },
+          .allowed_components =
+              std::map<std::string, std::vector<TrainingComponentKey>>{
+                  {"learning_rate",
+                   {{TrainingComponentCategory::learning_rate_schedule,
+                     "constant", "1.0.0"}}},
+                  {"optimizer",
+                   {{TrainingComponentCategory::optimizer,
+                     "torch_adamw_no_decay", "2.0.0"}}},
+                  {"precision",
+                   {{TrainingComponentCategory::precision,
+                     "fp32_parameters_bf16_compute", "1.0.0"}}},
+              },
+      },
+      true);
+}
+
+// Inherits the evaluation suite along with everything else, which is the whole
+// point of deriving rather than restating: the raw-pixel student emits the
+// same caption evidence from its own held-out manifest.
 TrainingCompositionContract vision_rwkv_student_composition() {
   TrainingCompositionContract composition = vision_native_head_composition();
   composition.allowed_components->at("precision") = {
@@ -327,131 +427,117 @@ OperationAuthoringDeclaration rlvr_authoring() {
   return authoring;
 }
 
+// RLVR's held-out arm is a disjoint `eval` task split — rlvr_train.py refuses
+// overlapping ids between the two splits — narrowed to one stratified, seeded
+// `fixed_eval` selection that baseline, periodic and final evaluation all
+// reuse. Its scalar is a verifier score on that frozen prompt set rather than
+// a label loss; evaluator/scalar_loss configures its own metric names, so the
+// contract does not need to know which. caption_triplet is not admissible for
+// model_family rwkv, and this route emits no image evidence anyway.
 TrainingCompositionContract rlvr_composition() {
-  return {
-      .model_family = "rwkv",
-      .slots = {
-          {"gradient_clipping", TrainingComponentCategory::gradient_clipping},
-          {"learning_rate",
-           TrainingComponentCategory::learning_rate_schedule},
-          {"optimizer", TrainingComponentCategory::optimizer},
-          {"weight_decay",
-           TrainingComponentCategory::weight_decay_schedule},
-      },
-      .allowed_components =
-          std::map<std::string, std::vector<TrainingComponentKey>>{
+  return with_evaluation_suite(
+      {
+          .model_family = "rwkv",
+          .slots = {
+              {"gradient_clipping",
+               TrainingComponentCategory::gradient_clipping},
               {"learning_rate",
-               {{TrainingComponentCategory::learning_rate_schedule,
-                 "linear_warmup_constant", "1.0.0"}}},
-              {"optimizer",
-               {{TrainingComponentCategory::optimizer,
-                 "torch_adamw_no_decay", "2.0.0"}}},
+               TrainingComponentCategory::learning_rate_schedule},
+              {"optimizer", TrainingComponentCategory::optimizer},
+              {"weight_decay",
+               TrainingComponentCategory::weight_decay_schedule},
           },
-  };
+          .allowed_components =
+              std::map<std::string, std::vector<TrainingComponentKey>>{
+                  {"learning_rate",
+                   {{TrainingComponentCategory::learning_rate_schedule,
+                     "linear_warmup_constant", "1.0.0"}}},
+                  {"optimizer",
+                   {{TrainingComponentCategory::optimizer,
+                     "torch_adamw_no_decay", "2.0.0"}}},
+              },
+      },
+      false);
 }
 
+// The teacher compressor is the one vision route with no text anywhere in it:
+// it distils frozen teacher features and scores a held-out manifest
+// (vision_teacher_compressor.py --eval-data, required) on reconstruction and
+// relational error. There is no caption to render, so caption_triplet is
+// withheld even though the vision family admits it — a renderer that would
+// have to invent the text half of its triple is exactly the synthetic
+// evidence the step-zero gate exists to refuse.
 TrainingCompositionContract vision_compressor_composition() {
-  return {
-      .model_family = "vision",
-      .slots = {
-          {"gradient_clipping", TrainingComponentCategory::gradient_clipping},
-          {"learning_rate",
-           TrainingComponentCategory::learning_rate_schedule},
-          {"optimizer", TrainingComponentCategory::optimizer},
-          {"precision", TrainingComponentCategory::precision},
-          {"weight_decay",
-           TrainingComponentCategory::weight_decay_schedule},
-      },
-      .allowed_components =
-          std::map<std::string, std::vector<TrainingComponentKey>>{
+  return with_evaluation_suite(
+      {
+          .model_family = "vision",
+          .slots = {
+              {"gradient_clipping",
+               TrainingComponentCategory::gradient_clipping},
               {"learning_rate",
-               {{TrainingComponentCategory::learning_rate_schedule,
-                 "constant", "1.0.0"}}},
-              {"optimizer",
-               {{TrainingComponentCategory::optimizer, "torch_adamw",
-                 "1.0.0"}}},
-              {"precision",
-               {{TrainingComponentCategory::precision,
-                 "fp32_parameters_bf16_compute", "1.0.0"}}},
+               TrainingComponentCategory::learning_rate_schedule},
+              {"optimizer", TrainingComponentCategory::optimizer},
+              {"precision", TrainingComponentCategory::precision},
+              {"weight_decay",
+               TrainingComponentCategory::weight_decay_schedule},
           },
-  };
-}
-
-TrainingCompositionContract vision_frozen_adapter_composition() {
-  return {
-      .model_family = "vision",
-      .slots = {
-          {"gradient_clipping", TrainingComponentCategory::gradient_clipping},
-          {"optimizer", TrainingComponentCategory::optimizer},
-          {"precision", TrainingComponentCategory::precision},
+          .allowed_components =
+              std::map<std::string, std::vector<TrainingComponentKey>>{
+                  {"learning_rate",
+                   {{TrainingComponentCategory::learning_rate_schedule,
+                     "constant", "1.0.0"}}},
+                  {"optimizer",
+                   {{TrainingComponentCategory::optimizer, "torch_adamw",
+                     "1.0.0"}}},
+                  {"precision",
+                   {{TrainingComponentCategory::precision,
+                     "fp32_parameters_bf16_compute", "1.0.0"}}},
+              },
       },
-      .allowed_components =
-          std::map<std::string, std::vector<TrainingComponentKey>>{
-              {"optimizer",
-               {{TrainingComponentCategory::optimizer, "torch_adamw",
-                 "1.0.0"}}},
-              {"precision",
-               {{TrainingComponentCategory::precision,
-                 "fp32_parameters_bf16_compute", "1.0.0"}}},
+      false);
+}
+
+// The frozen-adapter route scores held-out caption cross-entropy, over either
+// an explicit evaluation manifest or the image-disjoint sha256-bucketed split
+// vision_train.py derives deterministically from the training manifest. Both
+// are stable across revisions, which is what the frozen held-out selector
+// needs; the implicit one is identified by the run's dataset fingerprint
+// rather than by a file path.
+TrainingCompositionContract vision_frozen_adapter_composition() {
+  return with_evaluation_suite(
+      {
+          .model_family = "vision",
+          .slots = {
+              {"gradient_clipping",
+               TrainingComponentCategory::gradient_clipping},
+              {"optimizer", TrainingComponentCategory::optimizer},
+              {"precision", TrainingComponentCategory::precision},
           },
-  };
+          .allowed_components =
+              std::map<std::string, std::vector<TrainingComponentKey>>{
+                  {"optimizer",
+                   {{TrainingComponentCategory::optimizer, "torch_adamw",
+                     "1.0.0"}}},
+                  {"precision",
+                   {{TrainingComponentCategory::precision,
+                     "fp32_parameters_bf16_compute", "1.0.0"}}},
+              },
+      },
+      true);
 }
 
-// The four evaluation slots every MageFlow route carries. They are declared
-// as a group because the training component registry refuses a partial
-// evaluation suite: an evaluator, an evaluation schedule, a fixed held-out
-// sample selector and an artifact renderer are admissible only together.
-//
-// The evaluator is what makes a valid rwkv-lab.eval-examples.v1 artifact
-// reachable at all. validate_eval_examples_gate_provenance requires the
-// resolved training composition to carry exactly one component of category
-// evaluator, and cross-checks its descriptor digest and configured metrics
-// against the manifest. Without this slot the family could publish nothing the
-// step-zero gate would accept, so arming the gate would deadlock every
-// attempt, fresh or resumed.
-std::map<std::string, TrainingComponentCategory> mageflow_evaluation_slots() {
-  return {
-      {"artifact_renderer", TrainingComponentCategory::artifact_renderer},
-      {"evaluation_schedule",
-       TrainingComponentCategory::evaluation_schedule},
-      {"evaluator", TrainingComponentCategory::evaluator},
-      {"qualitative_samples", TrainingComponentCategory::qualitative_sample},
-  };
-}
-
-// caption_triplet rendering and the frozen_named split selector are not
-// admissible for model_family mageflow, and the legacy launch_gate_periodic
-// 1.0.0 schedule couples its launch count to the sample count; none of the
-// three is offered here.
-std::map<std::string, std::vector<TrainingComponentKey>>
-mageflow_evaluation_allowances() {
-  return {
-      {"artifact_renderer",
-       {{TrainingComponentCategory::artifact_renderer, "evidence_envelope",
-         "1.0.0"}}},
-      {"evaluation_schedule",
-       {{TrainingComponentCategory::evaluation_schedule,
-         "launch_gate_periodic", "2.0.0"},
-        {TrainingComponentCategory::evaluation_schedule, "milestone_cadence",
-         "3.0.0"}}},
-      {"evaluator",
-       {{TrainingComponentCategory::evaluator, "scalar_loss", "1.0.0"}}},
-      {"qualitative_samples",
-       {{TrainingComponentCategory::qualitative_sample, "fixed_held_out",
-         "2.0.0"}}},
-  };
-}
-
+// caption_triplet rendering is not admissible for model_family mageflow, so
+// the flag is false here for a stronger reason than taste.
 TrainingCompositionContract mageflow_composition(
     std::map<std::string, TrainingComponentCategory> slots,
     std::map<std::string, std::vector<TrainingComponentKey>> allowances) {
-  slots.merge(mageflow_evaluation_slots());
-  allowances.merge(mageflow_evaluation_allowances());
-  return {
-      .model_family = "mageflow",
-      .slots = std::move(slots),
-      .allowed_components = std::move(allowances),
-  };
+  return with_evaluation_suite(
+      {
+          .model_family = "mageflow",
+          .slots = std::move(slots),
+          .allowed_components = std::move(allowances),
+      },
+      false);
 }
 
 TrainingCompositionContract mageflow_full_backbone_composition() {
@@ -475,69 +561,40 @@ TrainingCompositionContract mageflow_full_backbone_composition() {
       });
 }
 
-// The same four evaluation slots the MageFlow routes carry, for the same
-// reason: validate_eval_examples_gate_provenance requires the resolved
-// training composition to carry exactly one component of category evaluator,
-// and the component registry admits an evaluation suite only as a unit. The
-// eight Transformer MLA routes share one composition contract, so declaring
-// the suite once covers every profile.
-//
-// The Transformer MLA family, unlike MageFlow, reads its corpus out of the
-// adapter's own configuration too — there is no data_source slot — so the
-// evaluator names an empty split_slot and the registry's no-pipeline branch
-// applies. caption_triplet rendering is admissible for model_family
-// transformer but describes an image-caption triple these text routes never
-// produce, and launch_gate_periodic 1.0.0 couples its launch count to the
-// sample count; neither is offered here.
-std::map<std::string, TrainingComponentCategory>
-transformer_mla_evaluation_slots() {
-  return {
-      {"artifact_renderer", TrainingComponentCategory::artifact_renderer},
-      {"evaluation_schedule",
-       TrainingComponentCategory::evaluation_schedule},
-      {"evaluator", TrainingComponentCategory::evaluator},
-      {"qualitative_samples", TrainingComponentCategory::qualitative_sample},
-  };
-}
-
+// The eight Transformer MLA routes share one composition contract, so
+// declaring the evaluation suite once covers every profile. Like MageFlow,
+// they read their corpus out of the adapter's own configuration rather than
+// through a data_source, so the evaluator names an empty split_slot and the
+// registry's no-pipeline branch applies. caption_triplet is admissible for
+// model_family transformer but describes an image-caption triple these text
+// routes never produce, so it is not offered.
 TrainingCompositionContract transformer_mla_composition() {
-  TrainingCompositionContract composition{
-      .model_family = "transformer",
-      .slots = {
-          {"gradient_accumulation",
-           TrainingComponentCategory::gradient_accumulation},
-          {"gradient_clipping", TrainingComponentCategory::gradient_clipping},
-          {"learning_rate",
-           TrainingComponentCategory::learning_rate_schedule},
-          {"objective", TrainingComponentCategory::objective},
-          {"optimizer", TrainingComponentCategory::optimizer},
-          {"precision", TrainingComponentCategory::precision},
-          {"weight_decay",
-           TrainingComponentCategory::weight_decay_schedule},
+  return with_evaluation_suite(
+      {
+          .model_family = "transformer",
+          .slots = {
+              {"gradient_accumulation",
+               TrainingComponentCategory::gradient_accumulation},
+              {"gradient_clipping",
+               TrainingComponentCategory::gradient_clipping},
+              {"learning_rate",
+               TrainingComponentCategory::learning_rate_schedule},
+              {"objective", TrainingComponentCategory::objective},
+              {"optimizer", TrainingComponentCategory::optimizer},
+              {"precision", TrainingComponentCategory::precision},
+              {"weight_decay",
+               TrainingComponentCategory::weight_decay_schedule},
+          },
+          .allowed_components =
+              std::map<std::string, std::vector<TrainingComponentKey>>{
+                  {"optimizer",
+                   {{TrainingComponentCategory::optimizer, "torch_adamw",
+                     "1.0.0"},
+                    {TrainingComponentCategory::optimizer,
+                     "torch_adamw_no_decay", "2.0.0"}}},
+              },
       },
-  };
-  composition.slots.merge(transformer_mla_evaluation_slots());
-  composition.allowed_components =
-      std::map<std::string, std::vector<TrainingComponentKey>>{
-          {"artifact_renderer",
-           {{TrainingComponentCategory::artifact_renderer, "evidence_envelope",
-             "1.0.0"}}},
-          {"evaluation_schedule",
-           {{TrainingComponentCategory::evaluation_schedule,
-             "launch_gate_periodic", "2.0.0"},
-            {TrainingComponentCategory::evaluation_schedule,
-             "milestone_cadence", "3.0.0"}}},
-          {"evaluator",
-           {{TrainingComponentCategory::evaluator, "scalar_loss", "1.0.0"}}},
-          {"optimizer",
-           {{TrainingComponentCategory::optimizer, "torch_adamw", "1.0.0"},
-            {TrainingComponentCategory::optimizer, "torch_adamw_no_decay",
-             "2.0.0"}}},
-          {"qualitative_samples",
-           {{TrainingComponentCategory::qualitative_sample, "fixed_held_out",
-             "2.0.0"}}},
-      };
-  return composition;
+      false);
 }
 
 TrainingCompositionContract transformer_mla_engram_composition() {
@@ -912,21 +969,30 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
       key("rwkv-lab.rwkv-posttraining",
           "rwkv_lab.rwkv_posttraining.v1.Train"),
       code_fingerprint,
-      {.model_family = "rwkv",
-       .slots = {
-           {"gradient_clipping", TrainingComponentCategory::gradient_clipping},
-           {"learning_rate",
-            TrainingComponentCategory::learning_rate_schedule},
-           {"optimizer", TrainingComponentCategory::optimizer},
-           {"weight_decay",
-            TrainingComponentCategory::weight_decay_schedule},
-       },
-       .allowed_components =
-           std::map<std::string, std::vector<TrainingComponentKey>>{
-               {"optimizer",
-                {{TrainingComponentCategory::optimizer,
-                  "torch_adamw_no_decay", "2.0.0"}}},
-           }},
+      // posttrain_train.py evaluates on rows tagged `eval`/`test`, or on a
+      // separate evaluation file, under model.eval() and no_grad. Its scalar
+      // is whichever held-out objective loss the run configures — SFT cross
+      // entropy, preference loss, KTO feedback, PRM step supervision — and
+      // evaluator/scalar_loss names its own metrics, so the contract does not
+      // have to choose. caption_triplet is not admissible for rwkv.
+      with_evaluation_suite(
+          {.model_family = "rwkv",
+           .slots = {
+               {"gradient_clipping",
+                TrainingComponentCategory::gradient_clipping},
+               {"learning_rate",
+                TrainingComponentCategory::learning_rate_schedule},
+               {"optimizer", TrainingComponentCategory::optimizer},
+               {"weight_decay",
+                TrainingComponentCategory::weight_decay_schedule},
+           },
+           .allowed_components =
+               std::map<std::string, std::vector<TrainingComponentKey>>{
+                   {"optimizer",
+                    {{TrainingComponentCategory::optimizer,
+                      "torch_adamw_no_decay", "2.0.0"}}},
+               }},
+          false),
       restart_only_training_lifecycle(), posttraining_authoring()));
   profiles.push_back({
       .key = key("rwkv-lab.scalar-metric-decision",
@@ -953,15 +1019,24 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
   profiles.push_back(profile(
       key("rwkv-lab.qwen-ao3", "rwkv_lab.qwen_ao3.v1.Train"),
       code_fingerprint,
-      {.model_family = "transformer",
-       .slots = {
-           {"gradient_clipping", TrainingComponentCategory::gradient_clipping},
-           {"learning_rate",
-            TrainingComponentCategory::learning_rate_schedule},
-           {"optimizer", TrainingComponentCategory::optimizer},
-           {"weight_decay",
-            TrainingComponentCategory::weight_decay_schedule},
-      }},
+      // qwen_ao3_cpt.py requires a separate pre-packed eval shard directory
+      // beside its training one, pins that shard's manifest sha256 into the
+      // receipt so a resume cannot silently change the held-out set, and
+      // scores held-out causal LM cross-entropy with the auxiliary router
+      // term switched off. caption_triplet is admissible for transformer but
+      // this route emits no image evidence.
+      with_evaluation_suite(
+          {.model_family = "transformer",
+           .slots = {
+               {"gradient_clipping",
+                TrainingComponentCategory::gradient_clipping},
+               {"learning_rate",
+                TrainingComponentCategory::learning_rate_schedule},
+               {"optimizer", TrainingComponentCategory::optimizer},
+               {"weight_decay",
+                TrainingComponentCategory::weight_decay_schedule},
+           }},
+          false),
       resumable_training_lifecycle()));
   profiles.push_back(profile(
       key("rwkv-lab.hf-multimodal-sft",
