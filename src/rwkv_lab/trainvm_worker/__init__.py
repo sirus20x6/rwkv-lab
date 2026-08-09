@@ -119,6 +119,7 @@ from .profiling import (
     step_profiler_from_invocation,
     trace_request_from_invocation,
 )
+from .publication import WorkerPublicationError, WorkerPublicationRuntime
 from .runtime_policy import (
     EffectiveWorkerRuntimePolicy,
     WorkerRuntimePolicy,
@@ -234,6 +235,8 @@ __all__ = [
     "WorkerInvocation",
     "WorkerObservability",
     "WorkerObservabilityError",
+    "WorkerPublicationError",
+    "WorkerPublicationRuntime",
     "WorkerReceipt",
     "WorkerResourcesReleasedPause",
     "WorkerRuntimePolicy",

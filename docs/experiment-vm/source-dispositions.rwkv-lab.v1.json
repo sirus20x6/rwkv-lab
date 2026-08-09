@@ -1347,7 +1347,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "mageflow.routed-expert-train",
-      "source_sha256": "sha256:bd4ab30b12523aeebb46d2e2daf3d1ddad0818df9c59ea1b65297d9e07e46190",
+      "source_sha256": "sha256:24e8297dc00ff4ec9a7fb27fa5461fd9b9e8c0a9f882a19952ec3bcc9d8a2af9",
       "family": "mageflow_diffusion",
       "coverage": "direct",
       "consumers": [
@@ -1392,7 +1392,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "mageflow.full-backbone-pretrain",
-      "source_sha256": "sha256:4ff6d22d29e46ac4373190f92e1e2f7f2e8d722fd84d60f2f7d18c714f0da684",
+      "source_sha256": "sha256:9526e13a50fdcfd5fe972d26bc22a90a9b54f3b54f347291c5e222aeffca080f",
       "family": "mageflow_diffusion",
       "coverage": "direct",
       "consumers": [
@@ -1443,7 +1443,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "mageflow.terminal-tread-train",
-      "source_sha256": "sha256:ea05f4c59af776a7e08d320f7be886b6e9cfceff4f01ae34d909304fca47fbe2",
+      "source_sha256": "sha256:819a70d91050a40c10d8e3068d47459cfd6b470d3ee24c5585da266d80620527",
       "family": "mageflow_diffusion",
       "coverage": "direct",
       "consumers": [

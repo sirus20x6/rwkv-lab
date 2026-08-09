@@ -22,6 +22,7 @@ from rwkv_lab.trainvm_worker import (
     WorkerExecutionPhases,
     WorkerInvocation,
     WorkerObservability,
+    WorkerPublicationRuntime,
     WorkerStepProfiler,
     load_input_artifact_json,
     resolve_input_artifact,
@@ -177,6 +178,48 @@ def _resume_payload(
     )
 
 
+def _mageflow_live_eval_publisher(
+    invocation: WorkerInvocation,
+    runtime: WorkerPublicationRuntime | None,
+    run_directory: Path,
+    eval_manifest: Path | None,
+    *,
+    state_components: tuple[str, ...],
+) -> Callable[[Path, int], None] | None:
+    """Give a MageFlow trainer only a same-step publication callback."""
+
+    if (
+        runtime is None
+        or eval_manifest is None
+        or not _declares_artifact_output(invocation, "eval_gallery")
+    ):
+        return None
+
+    def publish(checkpoint_directory: Path, step: int) -> None:
+        checkpoint = checkpoint_request(
+            invocation,
+            run_directory,
+            str(checkpoint_directory),
+            step,
+            resume_grade="compatible",
+            state_components=state_components,
+        )
+        gallery = completed_mageflow_gallery_request(
+            invocation,
+            run_directory,
+            eval_manifest,
+            step=step,
+            checkpoint_request_index=0,
+        )
+        if gallery is None:
+            raise AdapterDispatchError(
+                "MageFlow live eval publication omitted its gallery request"
+            )
+        runtime.publish_eval_revision(checkpoint, gallery)
+
+    return publish
+
+
 def _appearance_expert(
     invocation: WorkerInvocation,
     components: WorkerTrainingComponents,
@@ -184,6 +227,7 @@ def _appearance_expert(
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
     execution_phases: WorkerExecutionPhases | None = None,
+    publications: WorkerPublicationRuntime | None = None,
 ) -> HandlerResult:
     paths = WorkspacePathAuthority.from_workspace(
         invocation.workspace, require_content=True
@@ -262,6 +306,19 @@ def _appearance_expert(
             paths, config.encoder_cache_dir, config.encoder_cache_mode
         ),
     )
+    checkpoint_state = (
+        "component_composition",
+        "control_revision",
+        "data_cursor",
+        "lr_schedule",
+        "model",
+        "optimizer",
+        "parameter_routing",
+        "rng_accelerator",
+        "rng_numpy",
+        "rng_python",
+        "rng_torch",
+    )
     train(
         config,
         worker_components=components,
@@ -269,25 +326,20 @@ def _appearance_expert(
         worker_observability=observability,
         worker_controls=controls,
         worker_execution_phases=execution_phases,
+        worker_eval_publication=_mageflow_live_eval_publisher(
+            invocation,
+            publications,
+            Path(config.output_dir),
+            eval_manifest,
+            state_components=checkpoint_state,
+        ),
     )
     request, step, status = completed_checkpoint_request(
         invocation,
         Path(config.output_dir),
         document_names=("complete.json", "status.json"),
         step_fields=("global_step", "step"),
-        state_components=(
-            "component_composition",
-            "control_revision",
-            "data_cursor",
-            "lr_schedule",
-            "model",
-            "optimizer",
-            "parameter_routing",
-            "rng_accelerator",
-            "rng_numpy",
-            "rng_python",
-            "rng_torch",
-        ),
+        state_components=checkpoint_state,
     )
     gallery = None
     if status == "complete" and eval_manifest is not None and _declares_artifact_output(
@@ -320,6 +372,7 @@ def _mageflow_full_backbone(
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
     execution_phases: WorkerExecutionPhases | None = None,
+    publications: WorkerPublicationRuntime | None = None,
 ) -> HandlerResult:
     """Run the sealed, full NR-MMDiT continued-pretraining profile."""
 
@@ -395,6 +448,18 @@ def _mageflow_full_backbone(
             )
         ),
     )
+    checkpoint_state = (
+        "component_composition",
+        "control_revision",
+        "data_cursor",
+        "lr_schedule",
+        "model",
+        "optimizer",
+        "parameter_routing",
+        "rng_accelerator",
+        "rng_python",
+        "rng_torch",
+    )
     train(
         config,
         worker_components=components,
@@ -402,24 +467,20 @@ def _mageflow_full_backbone(
         worker_observability=observability,
         worker_controls=controls,
         worker_execution_phases=execution_phases,
+        worker_eval_publication=_mageflow_live_eval_publisher(
+            invocation,
+            publications,
+            Path(config.output_dir),
+            eval_manifest,
+            state_components=checkpoint_state,
+        ),
     )
     request, step, status = completed_checkpoint_request(
         invocation,
         Path(config.output_dir),
         document_names=("complete.json", "interrupted.json", "status.json"),
         step_fields=("global_step", "step"),
-        state_components=(
-            "component_composition",
-            "control_revision",
-            "data_cursor",
-            "lr_schedule",
-            "model",
-            "optimizer",
-            "parameter_routing",
-            "rng_accelerator",
-            "rng_python",
-            "rng_torch",
-        ),
+        state_components=checkpoint_state,
     )
     gallery = None
     if status == "complete" and eval_manifest is not None and _declares_artifact_output(
@@ -452,6 +513,7 @@ def _terminal_expert(
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
     execution_phases: WorkerExecutionPhases | None = None,
+    publications: WorkerPublicationRuntime | None = None,
 ) -> HandlerResult:
     paths = WorkspacePathAuthority.from_workspace(
         invocation.workspace, require_content=True
@@ -567,6 +629,19 @@ def _terminal_expert(
         ),
         expert_checkpoints=expert_checkpoints,
     )
+    checkpoint_state = (
+        "component_composition",
+        "control_revision",
+        "data_cursor",
+        "expert_routing",
+        "lr_schedule",
+        "model",
+        "optimizer",
+        "parameter_routing",
+        "rng_accelerator",
+        "rng_python",
+        "rng_torch",
+    )
     train(
         config,
         worker_components=components,
@@ -574,25 +649,20 @@ def _terminal_expert(
         worker_observability=observability,
         worker_controls=controls,
         worker_execution_phases=execution_phases,
+        worker_eval_publication=_mageflow_live_eval_publisher(
+            invocation,
+            publications,
+            Path(config.output_dir),
+            eval_manifest,
+            state_components=checkpoint_state,
+        ),
     )
     request, step, status = completed_checkpoint_request(
         invocation,
         Path(config.output_dir),
         document_names=("status.json",),
         step_fields=("step",),
-        state_components=(
-            "component_composition",
-            "control_revision",
-            "data_cursor",
-            "expert_routing",
-            "lr_schedule",
-            "model",
-            "optimizer",
-            "parameter_routing",
-            "rng_accelerator",
-            "rng_python",
-            "rng_torch",
-        ),
+        state_components=checkpoint_state,
     )
     gallery = None
     if status == "complete" and eval_manifest is not None and _declares_artifact_output(
@@ -2778,6 +2848,7 @@ def execute_invocation(
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
     execution_phases: WorkerExecutionPhases | None = None,
+    publications: WorkerPublicationRuntime | None = None,
 ) -> HandlerResult:
     adapter = invocation.adapter
     key = (
@@ -2846,7 +2917,7 @@ def execute_invocation(
         )
     if controls is None:
         raise AdapterDispatchError("training adapter has no worker control authority")
-    return handler(
+    arguments = (
         invocation,
         components,
         step_profiler or NullStepProfiler(),
@@ -2854,3 +2925,9 @@ def execute_invocation(
         controls,
         execution_phases,
     )
+    # Only the MageFlow handlers accept a publication runtime. Passing it to
+    # every handler would make an unwired one a TypeError at dispatch rather
+    # than at import, so the set is named here explicitly.
+    if handler in {_appearance_expert, _mageflow_full_backbone, _terminal_expert}:
+        return handler(*arguments, publications)
+    return handler(*arguments)

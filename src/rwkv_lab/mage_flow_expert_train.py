@@ -18,7 +18,7 @@ import shutil
 import signal
 import time
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2016,6 +2016,7 @@ def train(
     worker_observability: WorkerObservability | None = None,
     worker_controls: WorkerControlRuntime | None = None,
     worker_execution_phases: WorkerExecutionPhases | None = None,
+    worker_eval_publication: Callable[[Path, int], None] | None = None,
 ) -> None:
     """Run single-GPU routed expert/shared-backbone optimization."""
     config.validate()
@@ -2801,7 +2802,8 @@ def train(
             update_window_started = time.perf_counter()
             input_wait_started = update_window_started
 
-            if eval_rows and global_step % config.eval_every == 0:
+            evaluated = bool(eval_rows and global_step % config.eval_every == 0)
+            if evaluated:
                 if mutable_controls is not None:
                     worker_controls.evaluation(global_step, mutable_controls.apply)
                 run_unified_evaluation(
@@ -2819,7 +2821,20 @@ def train(
                 worker_controls is not None
                 and worker_controls.checkpoint_boundary_requested
             )
-            if global_step % config.checkpoint_every == 0 or checkpoint_requested:
+            # The live revision freezes the *same* step's checkpoint beside the
+            # gallery this evaluation just wrote, so a due evaluation forces a
+            # checkpoint the plain cadence would not have taken. The terminal
+            # step is excluded: it publishes through the ordinary terminal path.
+            publish_eval_revision = bool(
+                worker_eval_publication is not None
+                and evaluated
+                and global_step < config.max_steps
+            )
+            if (
+                global_step % config.checkpoint_every == 0
+                or checkpoint_requested
+                or publish_eval_revision
+            ):
                 if mutable_controls is not None:
                     worker_controls.checkpoint(global_step, mutable_controls.apply)
                 checkpoint = save_training_checkpoint(
@@ -2862,6 +2877,9 @@ def train(
                             "rng_torch",
                         ),
                     )
+                if publish_eval_revision:
+                    assert worker_eval_publication is not None
+                    worker_eval_publication(checkpoint, global_step)
             if stop_requested["value"]:
                 if mutable_controls is not None:
                     worker_controls.checkpoint(global_step, mutable_controls.apply)

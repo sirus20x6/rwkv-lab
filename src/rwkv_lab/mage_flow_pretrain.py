@@ -32,7 +32,7 @@ import struct
 import threading
 import time
 import zlib
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -1353,6 +1353,7 @@ def train(
     worker_observability: WorkerObservability | None = None,
     worker_controls: WorkerControlRuntime | None = None,
     worker_execution_phases: WorkerExecutionPhases | None = None,
+    worker_eval_publication: Callable[[Path, int], None] | None = None,
 ) -> None:
     """Execute a full NR-MMDiT continued-pretraining run."""
     config.validate()
@@ -1932,7 +1933,26 @@ def train(
                 worker_controls is not None
                 and worker_controls.checkpoint_boundary_requested
             )
-            if global_step % config.checkpoint_every == 0 or checkpoint_requested:
+            generation_due = bool(
+                eval_rows
+                and config.eval_gen_samples
+                and global_step % config.eval_gen_every == 0
+            )
+            # The live revision freezes the *same* step's checkpoint beside its
+            # gallery, so a due generation forces a checkpoint that the plain
+            # cadence would not have taken. The terminal step is excluded: it
+            # publishes through the ordinary terminal path below.
+            publish_eval_revision = bool(
+                worker_eval_publication is not None
+                and generation_due
+                and global_step < config.max_steps
+            )
+            checkpoint = None
+            if (
+                global_step % config.checkpoint_every == 0
+                or checkpoint_requested
+                or publish_eval_revision
+            ):
                 if mutable_controls is not None:
                     worker_controls.checkpoint(global_step, mutable_controls.apply)
                 checkpoint = _save_checkpoint(
@@ -1975,11 +1995,7 @@ def train(
                             "rng_torch",
                         ),
                     )
-            if (
-                eval_rows
-                and config.eval_gen_samples
-                and global_step % config.eval_gen_every == 0
-            ):
+            if generation_due:
                 accelerator.wait_for_everyone()
                 if accelerator.is_main_process:
                     _json_dump(
@@ -2000,6 +2016,13 @@ def train(
                         output_dir,
                         step=global_step,
                     )
+                    if publish_eval_revision:
+                        if checkpoint is None:
+                            raise RuntimeError(
+                                "live eval publication omitted its checkpoint"
+                            )
+                        assert worker_eval_publication is not None
+                        worker_eval_publication(checkpoint, global_step)
                     _json_dump(
                         output_dir / "status.json",
                         {
