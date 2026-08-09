@@ -617,3 +617,39 @@ trainvm/build/trainvm journal show /tmp/trainvm.db RUN_ID
 
 The CLI is diagnostic scaffolding. Runtime mutations are available only through typed controller
 operations; there is intentionally no raw event-append command on an authority journal.
+
+## CLI exit status
+
+Every `trainvm` subcommand returns one of six statuses, and each value means the
+same thing in every subcommand. The values are named in
+[`include/trainvm/exit_status.hpp`](include/trainvm/exit_status.hpp); nothing in
+`src/main.cpp` returns a bare integer.
+
+| Status | Name | Meaning |
+| --- | --- | --- |
+| 0 | `kExitSuccess` | The command ran and its answer was affirmative. |
+| 1 | `kExitUncaughtException` | An exception reached `main`. A defect in trainvm or an unmodelled environment failure — **not** a statement about the input. |
+| 2 | `kExitMalformedInput` | The document could not be read as what it claims to be: unparseable, schema-rejected, or parsed-but-does-not-compile. |
+| 3 | `kExitNegativeVerdict` | The document was read and the answer is no: evidence rejected, preflight failed, journal chain unverified, run failed. |
+| 4 | `kExitNotFound` | The document was read and the thing it named does not exist. |
+| 64 | `kExitUsage` | The argument vector itself was wrong: unknown subcommand, wrong arity, unknown or repeated flag. `EX_USAGE` from `sysexits.h`. |
+
+The distinction the vocabulary exists to protect is **2 versus 3**: a document
+that could not be read, against a verdict reached by reading it. A rejection is
+a normal, reportable outcome and a wrapper should be able to act on it without
+also swallowing a broken document.
+
+The second distinction is **1 versus everything else**. Status 1 is reserved for
+the top-level catch. If a subcommand can recognize a bad document it catches the
+failure itself and answers 2, so that 1 continues to mean only "trainvm broke".
+`validate-catalog` and `print-catalog-digests` catch `std::invalid_argument`
+locally for exactly this reason — every way a catalog can be wrong, including a
+`kReviewedCatalogDigest` mismatch, used to exit 1 through the top-level catch and
+so was indistinguishable from a crash. They still print the same message to
+stderr, which is what the pin-refresh procedure in the repository-root
+`CLAUDE.md` reads the value to pin out of.
+
+Two of these disagreed before they were named: `validate` answered 2 for a
+document that would not compile while `qualify-evidence` answered 1 for evidence
+that would not decode, even though its own comment required a malformed document
+to be distinguishable from a rejection. Malformed is 2 everywhere now.
