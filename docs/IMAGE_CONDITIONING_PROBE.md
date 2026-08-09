@@ -98,8 +98,31 @@ It lives under `docs/` rather than `/evidence/`, which #101 gitignored. The rule
 there is right and this is not an exception to it: `/evidence/` holds receipts
 **about this repository at a commit**, and a committed one goes stale the moment
 the next commit lands, making a confident wrong claim. This file is a
-measurement of an **external model artifact**, identified by its own path and
-merge receipt. It does not describe the repo, so it does not decay with it.
+measurement of an **external model artifact**. It does not describe the repo, so
+it does not decay with it.
+
+That only holds if the artifact is identified by something better than a path,
+because `...step000745-merged-bf16` names a *merged* checkpoint — the kind that
+gets regenerated in place. So the document binds itself to what it measured:
+
+- `model_content_identity` in three layers — the weight map's digest, a digest
+  over every shard's safetensors header (tensor names, dtypes, shapes, offsets),
+  and per-shard content digests lifted from the publisher's `merge-receipt.json`.
+  Each records what it covers; the third is the only one that catches weights
+  edited in place without a shape change, and it says so when unavailable rather
+  than going quiet.
+- `generated_at`, the `repository` commit the probe ran from with a
+  `dirty_worktree` flag, and a `probe_source_digest` over the probe's own
+  sources. The digest is the durable one: squash-merge rewrites the commit,
+  so the recorded SHA can become unreachable, and the field says so instead
+  of leaving a reader to discover it.
+- `runtime`: torch, transformers, python, CUDA, and the device name.
+- `shuffle_seed` at top level, so the perturbation is reproducible across runs
+  and not merely deterministic within one.
+
+The probe was run three times, from different commits and worktrees, and every
+figure below reproduced to four decimal places. The numbers are a property of
+the model, not of one process.
 
 Subject: `Qwen3.6-35B-A3B-heretic-caption-step000745-merged-bf16` — the merged
 corrected-v3 caption model. Five validation images (deterministic: the frozen
