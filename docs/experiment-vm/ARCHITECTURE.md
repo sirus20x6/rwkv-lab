@@ -333,6 +333,17 @@ one gap a metadata key cannot see: a write landing inside the timestamp tick the
 against. The store is bound to the boot identity, because the mount incarnation is unique only for
 the life of one boot.
 
+A record outlives the file it describes -- deleting a file does not remove its record -- so the
+remaining question is whether a *different* file handed the same recycled inode number could satisfy
+that record's key. It cannot: the replacement is created after the record was sealed, so its ctime is
+later, and no unprivileged interface sets ctime. Note that this is an argument rather than a test.
+Inode reuse is not reproducible on the filesystems available here (tmpfs allocates inode numbers from
+a monotonic counter; ZFS did not recycle one in 2000 delete/create cycles) and cannot be arranged,
+because the cache bypasses itself outside its filesystem allowlist and so would ignore a FUSE
+filesystem written to recycle on demand. `store-recreated-inode` in the native tests covers the
+store-lifecycle half and attempts the inode half opportunistically, reporting which it got; it is the
+ctime implication above, not that test, that carries the recycled-inode case on this host.
+
 **The store's authority is filesystem permission, not cryptography.** Its per-record seal and its
 trailing digest are unkeyed SHA-256: they detect corruption, truncation, and edits, and they do not
 detect forgery by anything running as the owning uid. The loader therefore refuses -- loudly, rather
