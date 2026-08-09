@@ -134,6 +134,37 @@ nlohmann::json parse_document(std::string_view source,
   reject("author-run source_format must be json or yaml");
 }
 
+// A CompileResult carries warnings alongside errors in one vector, ordered by
+// whichever validation pass emitted them, and `valid()` is false only because
+// of the errors. Naming diagnostics.front() therefore names whichever
+// diagnostic sorts first, which is regularly a warning about a field that is
+// not why the compile failed — an observed failure reported
+// "/spec/resources/accelerators a concrete accelerator vendor with count 0 is
+// unusual" when the cause was two workspace.concurrency_authority errors
+// further down, pointing the reader at a correct field.
+//
+// Report every error rather than the first one. The compiler emits related
+// errors together (the concurrency case emits one per resource node), so a
+// single error is as capable of being the misleading half of a pair as a
+// warning is, and the surrounding reporting surfaces — `print_diagnostics` in
+// main.cpp, the service's proposal paths — already show the whole set.
+std::string compile_failure_detail(const std::vector<Diagnostic> &diagnostics) {
+  std::string detail;
+  const auto append = [&detail](const Diagnostic &diagnostic) {
+    if (!detail.empty()) detail += "; ";
+    detail += diagnostic.path + " " + diagnostic.message;
+  };
+  for (const auto &diagnostic : diagnostics) {
+    if (diagnostic.severity == Diagnostic::Severity::error) append(diagnostic);
+  }
+  // No error-severity diagnostic, yet the compile produced no plan. Report
+  // whatever the compiler did say instead of discarding it.
+  if (detail.empty()) {
+    for (const auto &diagnostic : diagnostics) append(diagnostic);
+  }
+  return detail.empty() ? "unknown compiler failure" : detail;
+}
+
 template <typename T>
 T decode_closed(const nlohmann::json &document, std::string_view description) {
   T result;
@@ -545,11 +576,8 @@ ResolvedAuthorRun resolve_and_lock_author_run(
   } else {
     const CompileResult compiled = compile_document(*document.source.experiment);
     if (!compiled.valid() || !compiled.plan) {
-      const std::string detail = compiled.diagnostics.empty()
-                                     ? "unknown compiler failure"
-                                     : compiled.diagnostics.front().path + " " +
-                                           compiled.diagnostics.front().message;
-      reject("author-run experiment validation failed: " + detail);
+      reject("author-run experiment validation failed: " +
+             compile_failure_detail(compiled.diagnostics));
     }
     plan = *compiled.plan;
   }

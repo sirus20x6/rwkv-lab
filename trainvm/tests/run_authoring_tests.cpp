@@ -4,6 +4,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -11,6 +12,7 @@
 #include <string>
 #include <string_view>
 
+#include "trainvm/document.hpp"
 #include "trainvm/json.hpp"
 
 namespace {
@@ -184,6 +186,64 @@ void resolves_locks_and_reuses_exact_lock() {
         "trusted non-training lock reuse does not invent cache telemetry");
   check(second.plan.plan_hash == first.plan.plan_hash,
         "reusing an exact content lock preserves the compiled plan");
+}
+
+// A failed compile must be reported by the diagnostics that failed it. The
+// compiler emits warnings into the same vector as errors, and the authoring
+// fixture keeps a concrete accelerator vendor at count 0 on purpose, which
+// warns. Reporting the first diagnostic therefore named that correct field
+// and hid the drift that actually failed the compile.
+void compile_failure_names_errors_not_a_leading_warning() {
+  TemporaryDirectory temporary;
+  auto experiment = authorable_fixture(temporary);
+  // Rename the workspace concurrency fence without following the resource
+  // literals that restate it: an error unrelated to the accelerator warning.
+  experiment["spec"]["workspace"]["concurrency_key"] = "authoring-drift";
+
+  const CompileResult compiled = compile_document(experiment);
+  const auto is_error = [](const Diagnostic &diagnostic) {
+    return diagnostic.severity == Diagnostic::Severity::error;
+  };
+  const auto first_error =
+      std::ranges::find_if(compiled.diagnostics, is_error);
+  const auto masking_warning =
+      std::ranges::find_if(compiled.diagnostics, [](const Diagnostic &value) {
+        return value.severity == Diagnostic::Severity::warning &&
+               value.message.find("count 0 is unusual") != std::string::npos;
+      });
+  check(!compiled.valid() && first_error != compiled.diagnostics.end() &&
+            masking_warning != compiled.diagnostics.end() &&
+            masking_warning < first_error,
+        "the document carries a warning ordered ahead of the unrelated error "
+        "that fails it");
+
+  const nlohmann::json document{
+      {"api_version", kAuthorRunApiVersion},
+      {"source", {{"experiment", experiment}}},
+      {"input_content",
+       {{"api_version", kInputContentRootSetApiVersion},
+        {"paths",
+         nlohmann::json::array({(temporary.path() / "input").string()})}}},
+      {"author", "authoring-test"},
+      {"reason", "carry a warning alongside an unrelated error"},
+  };
+  const AuthorRunDocument authored =
+      decode_author_run_document(document.dump(), "json");
+  std::string reported;
+  try {
+    (void)resolve_and_lock_author_run(authored);
+  } catch (const RunAuthoringError &error) {
+    reported = error.what();
+  }
+  check(!reported.empty(), "an invalid author-run experiment is rejected");
+  check(reported.find("a concrete accelerator vendor with count 0 is unusual") ==
+            std::string::npos,
+        "a compile failure never reports a warning about a correct field");
+  check(reported.find("/spec/workflow/nodes/acquire_gpu/invoke/inputs/"
+                      "concurrency_key") != std::string::npos &&
+            reported.find("/spec/workflow/nodes/release_gpu/invoke/inputs/"
+                          "concurrency_key") != std::string::npos,
+        "a compile failure reports every error diagnostic, not just the first");
 }
 
 void rejected_paths_never_publish_cache_entries() {
@@ -522,6 +582,7 @@ int main() {
     rejects_duplicate_keys_recursively();
     passive_lora_selector_matches_python_module_semantics();
     resolves_locks_and_reuses_exact_lock();
+    compile_failure_names_errors_not_a_leading_warning();
     rejected_paths_never_publish_cache_entries();
     provisioning_rolls_back_then_retries();
     direct_training_rejects_forged_content_lock();
