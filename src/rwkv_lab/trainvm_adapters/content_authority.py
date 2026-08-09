@@ -355,7 +355,7 @@ def measure_input_content_root(
         raise
     except (OSError, OverflowError, struct.error) as error:
         raise ContentAuthorityError(
-            "content root could not be measured safely"
+            f"content root could not be measured safely: {canonical!r}: {error}"
         ) from error
     if measured.kind == "directory" and measured.file_count == 0:
         raise ContentAuthorityError("content root directory is empty")
@@ -432,17 +432,26 @@ def verify_input_content_roots(raw: object) -> tuple[InputContentRootIdentity, .
     if type(raw) is not list or not 1 <= len(raw) <= MAXIMUM_ROOT_COUNT:
         raise ContentAuthorityError("input content roots must be a nonempty list")
     decoded = tuple(_decode_identity(item) for item in raw)
-    path_bytes = tuple(item.path.encode("utf-8") for item in decoded)
-    if any(left >= right for left, right in pairwise(path_bytes)):
-        raise ContentAuthorityError("input content roots are not strictly path-sorted")
+    for left, right in pairwise(decoded):
+        if left.path.encode("utf-8") >= right.path.encode("utf-8"):
+            raise ContentAuthorityError(
+                "input content roots are not strictly path-sorted: "
+                f"{right.path!r} does not sort after {left.path!r}"
+            )
     for index, left in enumerate(decoded):
-        if any(_paths_overlap(left.path, right.path) for right in decoded[index + 1 :]):
-            raise ContentAuthorityError("input content root paths overlap")
+        for right in decoded[index + 1 :]:
+            if _paths_overlap(left.path, right.path):
+                raise ContentAuthorityError(
+                    "input content root paths overlap: "
+                    f"{left.path!r} and {right.path!r} are not disjoint"
+                )
     verified: list[InputContentRootIdentity] = []
     for declared in decoded:
         measured = measure_input_content_root(declared.path)
         if measured != declared:
-            raise ContentAuthorityError("input content root identity no longer matches")
+            raise ContentAuthorityError(
+                f"input content root identity no longer matches: {declared.path!r}"
+            )
         verified.append(measured)
     return tuple(verified)
 

@@ -128,8 +128,12 @@ def test_paths_must_be_sorted_unique_and_nonoverlapping(tmp_path: Path) -> None:
     right_raw = asdict(measure_input_content_root(right))
 
     assert verify_input_content_roots([left_raw, right_raw])
-    with pytest.raises(ContentAuthorityError, match="strictly path-sorted"):
+    with pytest.raises(ContentAuthorityError, match="strictly path-sorted") as unsorted:
         verify_input_content_roots([right_raw, left_raw])
+    # The refusal must name which pair is out of order; the bare sentence sent a
+    # reader looking for corrupted content when only the list order was wrong.
+    assert str(left) in str(unsorted.value)
+    assert str(right) in str(unsorted.value)
     with pytest.raises(ContentAuthorityError, match="strictly path-sorted"):
         verify_input_content_roots([left_raw, left_raw])
 
@@ -139,8 +143,10 @@ def test_paths_must_be_sorted_unique_and_nonoverlapping(tmp_path: Path) -> None:
     child.write_bytes(b"child")
     parent_raw = asdict(measure_input_content_root(parent))
     child_raw = asdict(measure_input_content_root(child))
-    with pytest.raises(ContentAuthorityError, match="overlap"):
+    with pytest.raises(ContentAuthorityError, match="overlap") as overlapping:
         verify_input_content_roots([parent_raw, child_raw])
+    assert str(parent) in str(overlapping.value)
+    assert str(child) in str(overlapping.value)
 
 
 def test_raw_container_and_canonical_path_are_strict(tmp_path: Path) -> None:

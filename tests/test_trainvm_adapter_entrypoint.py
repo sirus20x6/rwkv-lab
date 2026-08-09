@@ -281,6 +281,107 @@ def test_workspace_path_authority_accepts_the_production_invocation_freeze(
     )
 
 
+def _content_root_workspace(read_root, run_directory, content_roots):
+    return {
+        "run_directory": str(run_directory),
+        "allowed_read_roots": [str(read_root)],
+        "allowed_write_roots": [str(run_directory.parent)],
+        "input_content_roots": content_roots,
+    }
+
+
+def test_unsorted_content_roots_are_refused_by_order_not_by_integrity(
+    tmp_path,
+) -> None:
+    """The message must name ordering, and must not read as content corruption.
+
+    An unsorted-but-otherwise-perfect root list is refused by
+    `verify_input_content_roots`, and the wrapper used to relabel that as
+    "worker input content identity verification failed" with no cause. A reader
+    then hunts a digest mismatch that does not exist. Asserting only that
+    `AdapterInputError` was raised cannot see the difference: it passes against
+    the old code, and would pass if an unrelated check nearby refused the same
+    input.
+    """
+
+    read_root = tmp_path / "read"
+    run_root = tmp_path / "write"
+    for directory in (read_root, run_root):
+        directory.mkdir()
+    first = read_root / "a.bin"
+    second = read_root / "b.bin"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    identities = [
+        asdict(measure_input_content_root(second)),
+        asdict(measure_input_content_root(first)),
+    ]
+
+    with pytest.raises(AdapterInputError) as raised:
+        WorkspacePathAuthority.from_workspace(
+            _content_root_workspace(read_root, run_root / "run", identities),
+            require_content=True,
+        )
+
+    message = str(raised.value)
+    assert "not strictly path-sorted" in message
+    assert str(first) in message and str(second) in message
+    assert "no longer matches" not in message
+    assert "No such file" not in message
+
+
+def test_missing_content_root_is_refused_as_missing_not_as_misordered(
+    tmp_path,
+) -> None:
+    """A genuinely absent root must say so, and must not mention ordering."""
+
+    read_root = tmp_path / "read"
+    run_root = tmp_path / "write"
+    for directory in (read_root, run_root):
+        directory.mkdir()
+    vanished = read_root / "dataset.bin"
+    vanished.write_bytes(b"payload")
+    identities = [asdict(measure_input_content_root(vanished))]
+    vanished.unlink()
+
+    with pytest.raises(AdapterInputError) as raised:
+        WorkspacePathAuthority.from_workspace(
+            _content_root_workspace(read_root, run_root / "run", identities),
+            require_content=True,
+        )
+
+    message = str(raised.value)
+    assert "could not be measured safely" in message
+    assert "No such file or directory" in message
+    assert str(vanished) in message
+    assert "path-sorted" not in message
+
+
+def test_mutated_content_root_is_refused_as_a_digest_mismatch(tmp_path) -> None:
+    """The third cause must be distinguishable from the other two by message."""
+
+    read_root = tmp_path / "read"
+    run_root = tmp_path / "write"
+    for directory in (read_root, run_root):
+        directory.mkdir()
+    mutated = read_root / "dataset.bin"
+    mutated.write_bytes(b"before")
+    identities = [asdict(measure_input_content_root(mutated))]
+    mutated.write_bytes(b"after!")
+
+    with pytest.raises(AdapterInputError) as raised:
+        WorkspacePathAuthority.from_workspace(
+            _content_root_workspace(read_root, run_root / "run", identities),
+            require_content=True,
+        )
+
+    message = str(raised.value)
+    assert "identity no longer matches" in message
+    assert str(mutated) in message
+    assert "path-sorted" not in message
+    assert "could not be measured safely" not in message
+
+
 def test_workspace_path_authority_confines_reads_writes_and_symlinks(tmp_path) -> None:
     read_root = tmp_path / "read"
     write_root = tmp_path / "write"
