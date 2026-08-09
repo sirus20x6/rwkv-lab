@@ -335,11 +335,11 @@
   ],
   "dataset": "/thearray/git/datasets/captiontest/qwen36-caption-finetune-v1/validation-fixed-100.jsonl",
   "device": {
-    "free_gib": 87.88,
+    "free_gib": 87.92,
     "total_gib": 94.98
   },
-  "generated_at": "2026-08-09T13:29:40Z",
-  "load_seconds": 56.1,
+  "generated_at": "2026-08-09T13:40:01Z",
+  "load_seconds": 125.8,
   "max_pixels": 200704,
   "missing_keys": 0,
   "model_content_identity": {
@@ -352,8 +352,14 @@
   "model_dir": "/thearray/git/ob/text-generation-webui/models/Qwen3.6-35B-A3B-heretic-caption-step000745-merged-bf16",
   "randomized_vision_parameter_count": 333,
   "repository": {
-    "commit": "6bf3f5bf5e0b004dd91775837266b23a5654c915",
-    "dirty_worktree": false
+    "commit": "667d027ff24e00a1976a0a216ffab5e1a95329b9",
+    "commit_note": "pre-squash branch commit; rewritten by the merge, so it may not be reachable from main -- use probe_source_digest to identify the code",
+    "dirty_worktree": false,
+    "probe_source_digest": "sha256:25eaf11e063f69d4233d477cd2b5b9c7775539c857709fd1b75fd1e633d396d8",
+    "probe_sources": [
+      "image_conditioning_probe.py",
+      "probe_image_conditioning.py"
+    ]
   },
   "runtime": {
     "cuda": "13.0",

@@ -111,15 +111,18 @@ gets regenerated in place. So the document binds itself to what it measured:
   Each records what it covers; the third is the only one that catches weights
   edited in place without a shape change, and it says so when unavailable rather
   than going quiet.
-- `generated_at`, and the `repository` commit the probe ran from with a
-  `dirty_worktree` flag.
+- `generated_at`, the `repository` commit the probe ran from with a
+  `dirty_worktree` flag, and a `probe_source_digest` over the probe's own
+  sources. The digest is the durable one: squash-merge rewrites the commit,
+  so the recorded SHA can become unreachable, and the field says so instead
+  of leaving a reader to discover it.
 - `runtime`: torch, transformers, python, CUDA, and the device name.
 - `shuffle_seed` at top level, so the perturbation is reproducible across runs
   and not merely deterministic within one.
 
-Re-running the probe at a later commit reproduced every figure below to four
-decimal places, so the numbers are a property of the model rather than of one
-process.
+The probe was run three times, from different commits and worktrees, and every
+figure below reproduced to four decimal places. The numbers are a property of
+the model, not of one process.
 
 Subject: `Qwen3.6-35B-A3B-heretic-caption-step000745-merged-bf16` — the merged
 corrected-v3 caption model. Five validation images (deterministic: the frozen
