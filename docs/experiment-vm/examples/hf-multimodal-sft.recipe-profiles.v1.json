@@ -1159,14 +1159,33 @@
                       "evaluation_schedule": {
                         "key": {
                           "category": "evaluation_schedule",
-                          "name": "launch_gate_periodic",
-                          "version": "2.0.0"
+                          "name": "milestone_cadence",
+                          "version": "3.0.0"
                         },
                         "configuration": {
                           "full_step_zero": true,
-                          "qualitative_every_steps": 100,
+                          "final": true,
                           "full_every_steps": 100,
-                          "final": true
+                          "probe_every_steps": 0,
+                          "qualitative_every_steps": 100,
+                          "full_milestone_steps": [],
+                          "probe_milestone_steps": [],
+                          "qualitative_milestone_steps": [],
+                          "full_milestone_fractions": [],
+                          "probe_milestone_fractions": [
+                            "0.1",
+                            "0.2",
+                            "0.3",
+                            "0.4",
+                            "0.5",
+                            "0.6",
+                            "0.7",
+                            "0.8",
+                            "0.9"
+                          ],
+                          "qualitative_milestone_fractions": [],
+                          "probe_examples": 64,
+                          "mutable_cadence": true
                         }
                       },
                       "qualitative_samples": {
@@ -1275,9 +1294,9 @@
             "heartbeat_seconds": 5,
             "metrics": [
               {
-                "name": "eval.loss",
+                "name": "eval.cadence_revision",
                 "type": "gauge",
-                "unit": "dimensionless",
+                "unit": "count",
                 "step_domain": "optimizer_step",
                 "aggregation": "last"
               },
@@ -1306,6 +1325,48 @@
                 "name": "eval.caption_wall_seconds",
                 "type": "gauge",
                 "unit": "second",
+                "step_domain": "optimizer_step",
+                "aggregation": "last"
+              },
+              {
+                "name": "eval.loss",
+                "type": "gauge",
+                "unit": "dimensionless",
+                "step_domain": "optimizer_step",
+                "aggregation": "last"
+              },
+              {
+                "name": "eval.planned_qualitative_milestones",
+                "type": "gauge",
+                "unit": "count",
+                "step_domain": "optimizer_step",
+                "aggregation": "last"
+              },
+              {
+                "name": "eval.planned_scalar_full_milestones",
+                "type": "gauge",
+                "unit": "count",
+                "step_domain": "optimizer_step",
+                "aggregation": "last"
+              },
+              {
+                "name": "eval.planned_scalar_probe_milestones",
+                "type": "gauge",
+                "unit": "count",
+                "step_domain": "optimizer_step",
+                "aggregation": "last"
+              },
+              {
+                "name": "eval.probe_examples",
+                "type": "gauge",
+                "unit": "count",
+                "step_domain": "optimizer_step",
+                "aggregation": "last"
+              },
+              {
+                "name": "eval.probe_loss",
+                "type": "gauge",
+                "unit": "dimensionless",
                 "step_domain": "optimizer_step",
                 "aggregation": "last"
               },
@@ -1471,6 +1532,15 @@
           "domain": "evaluation",
           "type": "integer",
           "target": "/spec/workflow/nodes/train/invoke/training/components/evaluation_schedule/configuration/full_every_steps",
+          "required": false,
+          "minimum": 0,
+          "maximum": 10000000
+        },
+        {
+          "name": "evaluation.probe_every_steps",
+          "domain": "evaluation",
+          "type": "integer",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/evaluation_schedule/configuration/probe_every_steps",
           "required": false,
           "minimum": 0,
           "maximum": 10000000

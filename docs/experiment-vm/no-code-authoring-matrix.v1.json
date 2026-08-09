@@ -77,7 +77,8 @@
           "axis": "evaluation_schedule",
           "override_fields": [
             "evaluation.qualitative_every_steps",
-            "evaluation.full_every_steps"
+            "evaluation.full_every_steps",
+            "evaluation.probe_every_steps"
           ]
         }
       ],

@@ -1008,10 +1008,21 @@ TrainingNodeProbe make_hf_multimodal_sft_training_node_probe(
           expected_category == "qualitative_sample" &&
           expected_name == "fixed_held_out" && expected_version == "2.0.0" &&
           selected_name == "fixed_manifest" && selected_version == "1.0.0";
-      const bool name_matches =
-          selected_name == expected_name || fixed_manifest_alternative;
+      // The milestone cadence is a strict superset of the periodic schedule:
+      // it keeps every `*_every_steps` key and adds explicit and fractional
+      // milestones, so the probe accepts it wherever it accepts the periodic
+      // one and validates the same step-zero and final guarantees below.
+      const bool milestone_cadence_alternative =
+          expected_category == "evaluation_schedule" &&
+          expected_name == "launch_gate_periodic" &&
+          expected_version == "2.0.0" &&
+          selected_name == "milestone_cadence" && selected_version == "3.0.0";
+      const bool name_matches = selected_name == expected_name ||
+                                fixed_manifest_alternative ||
+                                milestone_cadence_alternative;
       const bool version_matches =
           selected_version == expected_version || fixed_manifest_alternative ||
+          milestone_cadence_alternative ||
           (expected_category == "model_loader" &&
            expected_name == "hf_multimodal" &&
            expected_version == "1.0.0" &&

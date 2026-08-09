@@ -875,8 +875,14 @@ def test_exact_checkpoint_refuses_mid_accumulation_boundary(tmp_path):
     assert not (tmp_path / "checkpoint").exists()
 
 
-def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_path):
-    from collections import namedtuple
+def _engine_harness(tmp_path, *, schedule_configuration=None, maximum_steps=1):
+    """One self-contained fake object graph for the generic HF SFT engine.
+
+    Extracted so more than one test can drive the same engine over the same
+    doubles. The cadence and the run length are the only parameters: every test
+    that varies them is asserting something about evaluation scheduling against
+    an otherwise byte-identical training setup.
+    """
 
     from rwkv_lab.training_runtime.data_pipeline import (
         BatchingImplementation,
@@ -887,6 +893,10 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         RegisteredSampler,
         SamplerImplementation,
         SplitSelection,
+    )
+    from rwkv_lab.training_runtime.evaluation_schedules import (
+        EvaluationSchedule,
+        EvaluationScheduleConfiguration,
     )
     from rwkv_lab.training_runtime.gradient_accumulation import (
         FixedGradientAccumulation,
@@ -976,11 +986,17 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         def restore_component_state(self, state):
             assert state == self.component_state()
 
+    consumed: dict[str, list[str]] = {"train": [], "validation": [], "test": []}
+
     class Processor:
         configuration = object()
 
+        def __init__(self, selection):
+            self.selection = selection
+
         def process(self, sample, *, image_root):
             assert image_root is None
+            consumed[self.selection].append(sample.sample_id)
             return ProcessedSample(
                 sample.sample_id,
                 sample.ordinal,
@@ -1004,7 +1020,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
     class Pipeline:
         def __init__(self, selection):
             self.source = Source()
-            self.processor = Processor()
+            self.processor = Processor(selection)
             self.mapper = SimpleNamespace(
                 configuration=CausalTokensMapperConfiguration(
                     token_column="tokens", maximum_tokens=8
@@ -1113,6 +1129,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
                         "data",
                         "generation_policy",
                         "processor",
+                        "qualitative_samples",
                         "sample_mapping",
                         "test_split",
                     )
@@ -1121,10 +1138,6 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
 
         def validate_resume_state(self, state):
             return state
-
-    Decision = namedtuple(
-        "Decision", "qualitative full_scalar launch_gate defer_full_scalar"
-    )
 
     class Components:
         composition = Composition()
@@ -1231,13 +1244,12 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
             )
 
         def evaluation_schedule(self):
-            return SimpleNamespace(
-                configuration=SimpleNamespace(final=True),
-                for_step=lambda step, final=False: Decision(
-                    qualitative=step == 0 or final,
-                    full_scalar=step == 0 or final,
-                    launch_gate=step == 0,
+            return EvaluationSchedule(
+                schedule_configuration
+                or EvaluationScheduleConfiguration(
                     defer_full_scalar=False,
+                    full_step_zero=True,
+                    final=True,
                 )
             )
 
@@ -1261,7 +1273,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
             )
 
         def learning_rate_configuration(self):
-            return None, SimpleNamespace(max_steps=1)
+            return None, SimpleNamespace(max_steps=maximum_steps)
 
         def gradient_clipping(self, parameters):
             return torch.nn.utils.clip_grad_norm_(tuple(parameters), 1.0)
@@ -1270,11 +1282,37 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         checkpoint_boundary_requested = False
         checkpoint_completion_requested = False
 
-        def __init__(self, *, fail_gallery=False, fail_artifact=False):
+        def __init__(
+            self,
+            *,
+            fail_gallery=False,
+            fail_artifact=False,
+            fail_before_step=0,
+            patch=None,
+            patch_at=None,
+        ):
             self.events = []
             self.safe_points = []
+            self.trajectory = []
             self.fail_gallery = fail_gallery
             self.fail_artifact = fail_artifact
+            # Interrupts the loop at the start of the named optimizer step, so
+            # a test can resume from a checkpoint that is genuinely mid-run
+            # rather than from the launch or the final one.
+            self.fail_before_step = fail_before_step
+            # Delivers one control patch at exactly one (phase, step) safe
+            # point, so a test can show which safe points accept a live
+            # cadence change and which refuse it.
+            self.patch = dict(patch or {})
+            self.patch_at = patch_at
+
+        def _assignments(self, phase, step):
+            # One-shot, like a real control command: the authority pops each
+            # patch once, and a safe point can be re-entered at the same step.
+            if self.patch_at == (phase, step):
+                self.patch_at = None
+                return dict(self.patch)
+            return {}
 
         def checkpoint_state(self):
             return {"effective_control_revision": 0, "effective_controls": {}}
@@ -1284,20 +1322,33 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
             self.safe_points.append(("initialization", 0))
 
         def microbatch(self, step, applier):
+            if self.fail_before_step and step == self.fail_before_step:
+                raise RuntimeError("simulated crash before optimizer step")
             self.safe_points.append(("microbatch", step))
-            applier({}, {})
+            applier({}, self._assignments("microbatch", step))
 
         def optimizer_step(self, step, applier):
             self.safe_points.append(("optimizer_step", step))
-            applier({}, {})
+            # Sampled immediately after the optimizer mutated, so a trajectory
+            # comparison sees the exact post-update state at every step.
+            self.trajectory.append(
+                (
+                    step,
+                    model.head.weight.detach().clone(),
+                    model.embedding.weight.detach().clone(),
+                    torch.random.get_rng_state().clone(),
+                    random.getstate(),
+                )
+            )
+            applier({}, self._assignments("optimizer_step", step))
 
         def evaluation(self, step, applier):
             self.safe_points.append(("evaluation", step))
-            applier({}, {})
+            applier({}, self._assignments("evaluation", step))
 
         def checkpoint(self, step, applier):
             self.safe_points.append(("checkpoint", step))
-            applier({}, {})
+            applier({}, self._assignments("checkpoint", step))
 
         def verify_checkpoint_state(self, state):
             assert state == self.checkpoint_state()
@@ -1347,6 +1398,28 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
 
         def optimizer_step(self, step, phase):
             return None
+
+    return SimpleNamespace(
+        Components=Components,
+        Controls=Controls,
+        Observability=Observability,
+        consumed=consumed,
+        generation_weights=generation_weights,
+        initial=initial,
+        model=model,
+        timeline=timeline,
+    )
+
+
+def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_path):
+    harness = _engine_harness(tmp_path)
+    Components = harness.Components
+    Controls = harness.Controls
+    Observability = harness.Observability
+    model = harness.model
+    initial = harness.initial
+    timeline = harness.timeline
+    generation_weights = harness.generation_weights
 
     failed_controls = Controls(fail_gallery=True)
     failed_observability = Observability()
@@ -1454,23 +1527,34 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         step_zero_item.sampling_attributes["baseline"]
         == step_zero_item.sampling_attributes["current"]
     )
+    frozen_eval_manifest = step_zero_item.sampling_attributes["eval_manifest_digest"]
+    assert frozen_eval_manifest.startswith("sha256:")
     assert step_zero_item.sampling_attributes == {
         "teacher_target": "8 9",
         "baseline": "7",
         "current": "7",
         "ordered_identities_digest": "sha256:" + "4" * 64,
+        "eval_manifest_digest": frozen_eval_manifest,
     }
     final_item = final_controls.events[1][1].items[0]
     assert final_item.heldout_item_id == step_zero_item.heldout_item_id
     assert final_item.prompt_or_condition_digest == (
         step_zero_item.prompt_or_condition_digest
     )
+    # Same frozen evaluation manifest at both ends of the run: the step-zero
+    # baseline and the final gallery are comparable because they were read
+    # from the identical declared subset with the identical decode policy.
     assert final_item.sampling_attributes == {
         "teacher_target": "8 9",
         "baseline": "7",
         "current": "7",
         "ordered_identities_digest": "sha256:" + "4" * 64,
+        "eval_manifest_digest": frozen_eval_manifest,
     }
+    assert controls.events[1][1].evaluator_profile_digest == frozen_eval_manifest
+    assert (
+        final_controls.events[1][1].evaluator_profile_digest == frozen_eval_manifest
+    )
     assert not torch.equal(model.head.weight, initial)
     assert timeline.index("generate") < timeline.index("optimizer")
     assert timeline.index("initialization") < timeline.index("data_pipeline:split")
@@ -1530,8 +1614,22 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
     assert quarantined_baseline.is_dir()
     assert quarantined_baseline.stat().st_mode & 0o077 == 0
     assert all(path.stat().st_mode & 0o277 == 0 for path in quarantined_baseline.iterdir())
-    assert failed_observability.metrics[0][0] == "eval.loss"
-    assert failed_observability.metrics[0][2] == 0
+    # The declared milestone plan is published before any milestone is paid
+    # for, and the first loss the run reports is still the step-zero baseline.
+    assert [name for name, _value, _step in failed_observability.metrics[:4]] == [
+        "eval.planned_scalar_full_milestones",
+        "eval.planned_scalar_probe_milestones",
+        "eval.planned_qualitative_milestones",
+        "eval.cadence_revision",
+    ]
+    assert all(step == 0 for _name, _value, step in failed_observability.metrics[:4])
+    first_loss = next(
+        (name, value, step)
+        for name, value, step in failed_observability.metrics
+        if name.endswith("loss")
+    )
+    assert first_loss[0] == "eval.loss"
+    assert first_loss[2] == 0
     assert all(
         not (name == "eval.test_loss" and at_step == 0)
         for name, _value, at_step in (
