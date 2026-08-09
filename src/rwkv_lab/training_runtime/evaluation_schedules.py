@@ -136,8 +136,6 @@ class EvaluationScheduleConfiguration:
                 raise ValueError(f"{label} must be a nonnegative integer")
         if self.probe_examples > 1_000_000_000:
             raise ValueError("probe_examples must be a nonnegative integer")
-        if not isinstance(self.mutable_cadence, bool):
-            raise ValueError("mutable_cadence must be a boolean")
         for values, label in (
             (self.full_milestone_steps, "full_milestone_steps"),
             (self.probe_milestone_steps, "probe_milestone_steps"),

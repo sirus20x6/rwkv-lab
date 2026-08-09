@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from test_hf_multimodal_sft_engine import _engine_harness
 
 from rwkv_lab.training_runtime.evaluation_schedules import (
     EVALUATION_CADENCE_CONTROLS,
@@ -25,8 +26,6 @@ from rwkv_lab.training_runtime.evaluation_schedules import (
     EvaluationScheduleConfiguration,
     evaluation_schedule_from_resolved_component,
 )
-
-from test_hf_multimodal_sft_engine import _engine_harness
 
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG = json.loads(
@@ -217,9 +216,10 @@ def test_an_immutable_schedule_refuses_every_live_cadence_patch():
 
 
 def _run(harness_directory, *, schedule_configuration, maximum_steps):
-    from rwkv_lab.trainvm_adapters.hf_multimodal_sft import run_hf_multimodal_sft
     from contextlib import nullcontext
     from types import SimpleNamespace
+
+    from rwkv_lab.trainvm_adapters.hf_multimodal_sft import run_hf_multimodal_sft
 
     harness_directory.mkdir(parents=True, exist_ok=True)
     harness = _engine_harness(
