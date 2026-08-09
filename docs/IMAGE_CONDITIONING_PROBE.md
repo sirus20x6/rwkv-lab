@@ -71,7 +71,7 @@ sensitivity alone.
 python scripts/probe_image_conditioning.py \
   --model-dir <checkpoint> \
   --dataset <caption split>.jsonl \
-  --output evidence/image-conditioning-<name>.json
+  --output docs/evidence/image-conditioning-<name>.json
 ```
 
 The script measures the same loaded model twice:
@@ -91,7 +91,15 @@ checkpoint directory.
 
 ## Measured result
 
-See `evidence/image-conditioning-qwen36-caption.json` for the full record.
+See `docs/evidence/image-conditioning-qwen36-caption.json` for the full record,
+including per-example variant scores.
+
+It lives under `docs/` rather than `/evidence/`, which #101 gitignored. The rule
+there is right and this is not an exception to it: `/evidence/` holds receipts
+**about this repository at a commit**, and a committed one goes stale the moment
+the next commit lands, making a confident wrong claim. This file is a
+measurement of an **external model artifact**, identified by its own path and
+merge receipt. It does not describe the repo, so it does not decay with it.
 
 Subject: `Qwen3.6-35B-A3B-heretic-caption-step000745-merged-bf16` — the merged
 corrected-v3 caption model. Five validation images (deterministic: the frozen

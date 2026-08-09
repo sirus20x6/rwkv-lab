@@ -289,7 +289,7 @@ class TestImageVariants:
 # "test that could not run here" are different claims about coverage.
 #
 # The recorded on-hardware result this reproduces lives in
-# evidence/image-conditioning-qwen36-caption.json.
+# docs/evidence/image-conditioning-qwen36-caption.json.
 _MERGED_CAPTION_MODEL = (
     "/thearray/git/ob/text-generation-webui/models/"
     "Qwen3.6-35B-A3B-heretic-caption-step000745-merged-bf16"
