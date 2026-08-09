@@ -288,6 +288,49 @@ names.
 
 There is deliberately no single `refresh-all` script yet. Writing one is filed.
 
+**Do not skip the build**, and do not assume a checkout that already has
+`trainvm/build/trainvm` has a current one. This is a real trap, not a caution:
+the binary in the primary checkout was months old and predated
+`print-catalog-digests` entirely, so it answered with a usage dump — which reads
+as "you typed the command wrong", not "your binary is old". A slightly newer
+stale binary is worse: it knows the subcommand, refuses the catalog's schema,
+and sends you off debugging a catalog that is fine. Either way the digest you
+are chasing never appears. The build takes several minutes and needs GCC 16
+with `-freflection`; that is expected.
+
+Two things to know before you paste a new value in:
+
+`source_tree_digest` moving is mechanical — regenerate it and move on. But if
+`classification_surface_digest` also moves, that is a **real** signal: something
+changed a file's entrypoint, argument surface, or checkpoint/resume call sites.
+Read the catalog entry before bumping `kReviewedCatalogDigest`; that bump is the
+review the gate exists to force. It stayed put across an eight-commit port and
+moved for a one-module one, so it does discriminate.
+
+That discrimination is **Python-only**, which is not obvious and will otherwise
+surprise you mid-card. The extractor keeps only classification-bearing lines
+from a Python source; for every other referenced file — `trainvm/src/main.cpp`
+is one — the surface is the whole file. So a comment or a help string in
+`main.cpp` moves `classification_surface_digest` exactly as far as a new
+subcommand would, and you will be bumping `kReviewedCatalogDigest` for it. That
+is a property of the extractor, not a signal about your change; say which it was
+in the commit message so the next reader does not have to re-derive it.
+
+`trainvm/tests/source_disposition_catalog_tests.cpp` holds **two** pins, scripts
+and RWKV. A regex on the first `sha256` in that file changes the wrong one. The
+test catches it only because it prints each computed digest beside its name.
+
+The native suite needs GCC 16 with `-freflection`:
+
+```bash
+cmake -S trainvm -B trainvm/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build trainvm/build -j "$(nproc)"
+ctest --test-dir trainvm/build -j 4 --output-on-failure
+```
+
+`trainvm/build/` is gitignored; other build directory names are not, and
+`git add -A` will happily commit several gigabytes of object files.
+
 ### Adding a script to `scripts/` costs nothing today
 
 This file used to claim the opposite here — that `scripts/` is an exhaustively
@@ -336,49 +379,6 @@ anyone sets it; it needs the live check parameterised by which root it validates
 plus 24 honest classifications. That is filed as its own card. Until it lands, do
 not budget for a scripts-enumeration tax, and do not rely on the gate to catch an
 unclassified script.
-
-**Do not skip the build**, and do not assume a checkout that already has
-`trainvm/build/trainvm` has a current one. This is a real trap, not a caution:
-the binary in the primary checkout was months old and predated
-`print-catalog-digests` entirely, so it answered with a usage dump — which reads
-as "you typed the command wrong", not "your binary is old". A slightly newer
-stale binary is worse: it knows the subcommand, refuses the catalog's schema,
-and sends you off debugging a catalog that is fine. Either way the digest you
-are chasing never appears. The build takes several minutes and needs GCC 16
-with `-freflection`; that is expected.
-
-Two things to know before you paste a new value in:
-
-`source_tree_digest` moving is mechanical — regenerate it and move on. But if
-`classification_surface_digest` also moves, that is a **real** signal: something
-changed a file's entrypoint, argument surface, or checkpoint/resume call sites.
-Read the catalog entry before bumping `kReviewedCatalogDigest`; that bump is the
-review the gate exists to force. It stayed put across an eight-commit port and
-moved for a one-module one, so it does discriminate.
-
-That discrimination is **Python-only**, which is not obvious and will otherwise
-surprise you mid-card. The extractor keeps only classification-bearing lines
-from a Python source; for every other referenced file — `trainvm/src/main.cpp`
-is one — the surface is the whole file. So a comment or a help string in
-`main.cpp` moves `classification_surface_digest` exactly as far as a new
-subcommand would, and you will be bumping `kReviewedCatalogDigest` for it. That
-is a property of the extractor, not a signal about your change; say which it was
-in the commit message so the next reader does not have to re-derive it.
-
-`trainvm/tests/source_disposition_catalog_tests.cpp` holds **two** pins, scripts
-and RWKV. A regex on the first `sha256` in that file changes the wrong one. The
-test catches it only because it prints each computed digest beside its name.
-
-The native suite needs GCC 16 with `-freflection`:
-
-```bash
-cmake -S trainvm -B trainvm/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build trainvm/build -j "$(nproc)"
-ctest --test-dir trainvm/build -j 4 --output-on-failure
-```
-
-`trainvm/build/` is gitignored; other build directory names are not, and
-`git add -A` will happily commit several gigabytes of object files.
 
 ## C++ diagnostics: trust them only after you have configured a build
 
