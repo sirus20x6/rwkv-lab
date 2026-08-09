@@ -70,6 +70,67 @@ void require_throws(Callable &&callable, std::string_view message) {
   throw std::runtime_error(std::string(message));
 }
 
+// Number of tasks the kernel currently lists for this process, or 0 if the
+// listing could not be read. 0 is never a legitimate answer, so a transient
+// enumeration error reads as "not settled yet" to the bounded wait below.
+std::size_t process_task_count() noexcept {
+  try {
+    std::size_t tasks = 0U;
+    for (const auto &entry :
+         std::filesystem::directory_iterator("/proc/self/task")) {
+      (void)entry;
+      ++tasks;
+    }
+    return tasks;
+  } catch (...) {
+    return 0U;
+  }
+}
+
+// Joins `thread`, then waits for the kernel to stop listing it under
+// /proc/self/task.
+//
+// join() alone is NOT sufficient, and this is the whole point of the helper.
+// glibc's pthread_join returns as soon as the kernel clears the exiting
+// thread's child-TID futex in mm_release(); the task is only unhashed from
+// procfs later, in release_task(). Between those two points the thread is
+// finished as far as join() is concerned and still visible as a directory
+// entry. Measured on an idle host — create a jthread, synchronise with it,
+// join, immediately count /proc/self/task, 20,000 trials — 94 trials (~0.5%)
+// still saw more than one task. A loaded CI runner is worse.
+//
+// That matters because HostdSocketAuthority::self_bind counts those same
+// entries and refuses to bind unless the process is single-threaded. That
+// assertion is correct and must not be relaxed or caught: real hostd self-binds
+// before it has any threads, and the guard is the only thing that would catch a
+// library or a static initializer silently making every trainvm binary
+// multi-threaded before main(). The unsynchronised read of a lagging kernel
+// interface belongs to the test, so the test waits for procfs to catch up.
+//
+// A spurious rejection is also nearly invisible, which is why this went unseen
+// for so long: several binds that follow a join here sit in fault-injection
+// cases that already expect a HostdTransportError, so the extra one is
+// absorbed, and the failure only surfaces in a later case that expects a bind
+// to succeed — one case downstream of its cause.
+//
+// Call this after any join that must leave the process single-threaded before
+// the next self_bind. Do NOT call it while another thread is still running: it
+// waits for exactly one task. The wait is bounded, so a thread that is never
+// reaped fails loudly instead of hanging CI forever.
+void join_and_await_task_reap(std::jthread &thread, std::string_view context) {
+  thread.join();
+  constexpr auto reap_limit = std::chrono::seconds(10);
+  const auto deadline = std::chrono::steady_clock::now() + reap_limit;
+  std::size_t tasks = process_task_count();
+  while (tasks != 1U && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::microseconds(200));
+    tasks = process_task_count();
+  }
+  require(tasks == 1U,
+          std::string("joined thread never left /proc/self/task: ") +
+              std::string(context));
+}
+
 class TemporaryDirectory final {
 public:
   TemporaryDirectory() {
@@ -980,7 +1041,7 @@ HostdServeResult send_raw(HostdStatusServer &server,
   require(::sendmsg(client, &message, MSG_NOSIGNAL) ==
               static_cast<ssize_t>(packet.size()),
           "send raw transport packet");
-  serving.join();
+  join_and_await_task_reap(serving, "send_raw serving thread");
   if (expect_silence) {
     std::array<std::byte, 256U> response{};
     const ssize_t received =
@@ -1136,7 +1197,8 @@ void startup_faults_rollback_and_restore_process_state() {
     thread_stop = true;
     thread_changed.notify_all();
   }
-  extra_thread.join();
+  join_and_await_task_reap(extra_thread,
+                           "startup-faults multi-thread rejection probe");
 
   auto capture_failstop_config =
       socket_config(directory, "capture-failstop.sock");
@@ -1287,7 +1349,8 @@ void status_only_lifecycle_and_endpoint_identity() {
   require_throws<HostdTransportError>(
       [&] { (void)hostd_request_status(client, 14U, deadline()); },
       "status server closes a peer outside explicit UID/GID policy");
-  unauthorized_thread.join();
+  join_and_await_task_reap(unauthorized_thread,
+                           "status unauthorized peer server");
   require(unauthorized_result == HostdServeResult::rejected,
           "wrong peer credentials are rejected before packet authority");
 
@@ -1319,7 +1382,8 @@ void status_only_lifecycle_and_endpoint_identity() {
       [&] { poisoned_result = poisoned_server.serve_one(deadline()); });
   const auto poisoned = hostd_request_status(
       client_config(*poisoned_authority), 16U, deadline());
-  poisoned_thread.join();
+  join_and_await_task_reap(poisoned_thread,
+                           "status poisoned coordinator server");
   require(poisoned_result == HostdServeResult::served && poisoned.status &&
               poisoned.status->lifecycle == HostdLifecycle::startup_blocked &&
               poisoned.status->startup_audit.has_value() &&
@@ -1353,7 +1417,8 @@ void status_only_lifecycle_and_endpoint_identity() {
                                    deadline());
       },
       "server refuses unsafe status text before JSON serialization");
-  invalid_text_thread.join();
+  join_and_await_task_reap(invalid_text_thread,
+                           "status invalid-text auditor server");
   require(invalid_text_result == HostdServeResult::rejected,
           "server normalizes invalid status serialization state to rejection");
 }
@@ -1614,7 +1679,8 @@ void authority_status_round_trips_receipt_derived_health() {
                                    deadline());
       },
       "MIG parent and child cannot both be allocation-eligible observations");
-  overlap_thread.join();
+  join_and_await_task_reap(overlap_thread,
+                           "authority-status overlapping-partitions server");
   require(overlap_rejected == HostdServeResult::rejected,
           "MIG passive evidence cannot double-count overlapping resources");
 }
@@ -1701,7 +1767,7 @@ void malformed_packets_rights_and_deadlines_are_bounded() {
   HostdServeResult idle = HostdServeResult::served;
   std::jthread idle_server([&] { idle = server.serve_one(deadline()); });
   const int idle_client = connect_raw(authority->socket_path());
-  idle_server.join();
+  join_and_await_task_reap(idle_server, "framing idle-peer server");
   require(idle == HostdServeResult::rejected,
           "per-session receive deadline rejects an idle peer");
   require(::close(idle_client) == 0, "close idle client");
@@ -1883,7 +1949,8 @@ void client_rejects_corruption_delegation_and_no_children_exist() {
   require_throws<HostdTransportError>(
       [&] { (void)hostd_request_status(client, 33U, deadline()); },
       "client rejects SCM_RIGHTS delegation from an otherwise valid server");
-  rights_server.join();
+  join_and_await_task_reap(rights_server,
+                           "client-hardening SCM_RIGHTS server");
   require(open_fd_count() == before,
           "client closes every rejected response-side descriptor");
   require(::close(harmless) == 0, "close delegated response descriptor");
@@ -2324,7 +2391,8 @@ void mutation_transport_dispatches_replays_and_disconnects() {
       }
     });
     const HostdServeResult served = server.serve_one(deadline());
-    client_thread.join();
+    join_and_await_task_reap(client_thread,
+                             "mutation rejected-exchange client");
     require(served == HostdServeResult::rejected && client_error != nullptr &&
                 fixture.coordinator->status().live_sessions == 0U,
             "rejected mutation closes transport and coordinator session");
