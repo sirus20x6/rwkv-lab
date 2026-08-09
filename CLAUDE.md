@@ -367,6 +367,7 @@ python scripts/ci_catalog_doc_counts_gate.py
 python scripts/validate_benchmark_matrix.py
 python scripts/validate_experiment_documents.py
 python scripts/validate_native_ci_exclusions.py
+python scripts/ci_compatibility_pin_gate.py
 for c in docs/experiment-vm/source-dispositions.*.v1.json; do
   python scripts/print_disposition_digests.py "$c" --check
 done
@@ -429,6 +430,26 @@ for c in docs/experiment-vm/source-dispositions.*.v1.json; do
   python scripts/print_disposition_digests.py "$c" --write
 done
 ```
+
+**You do not need any of this to find out whether you owe a refresh.** Both
+catalogs' per-source pins have a seconds-fast check that needs no compiler, and
+both run in CI's schema job ahead of the native build:
+
+```bash
+python scripts/ci_compatibility_pin_gate.py          # compatibility-workflows
+for c in docs/experiment-vm/source-dispositions.*.v1.json; do
+  python scripts/print_disposition_digests.py "$c" --check
+done
+```
+
+`ci_compatibility_pin_gate.py` names the drifted path in the same sentence the
+binary uses (`compatibility source <path> does not match its pinned bytes`), so
+the same grep finds either report. It checks the per-source pins **only** —
+neither the tree digest nor `classification_surface_digest` is recomputed in
+Python, because a mirror of a C++ fold is a second implementation to keep in
+agreement, and step 2 above is still what regenerates all three. Running it
+tells you whether you owe a refresh; it does not perform one, and a green run is
+not a substitute for the four steps when you have edited a classified source.
 
 Step 4 usually stops there now. The two digests pinned in
 `trainvm/tests/source_disposition_catalog_tests.cpp` cover the *classification*

@@ -245,6 +245,24 @@ jobs:
             python scripts/print_disposition_digests.py "$catalog" --check
           done
 
+      # The same argument, now for the catalog whose pins had no cheap check at
+      # all. The native loader enforces them and enforces them well -- it fails
+      # closed and names the file -- but on PR #186 it said so at step 98 of 99,
+      # after 85 translation units had compiled and the executable had linked.
+      # Comparing 155 sha256 values against a stored list is sub-second work,
+      # and it was reachable only through an 8-14 minute C++26 build that the
+      # PR-tier classifier can skip entirely.
+      #
+      # It checks the per-source pins only. Neither fold -- the source tree
+      # digest nor the classification surface digest -- is recomputed here:
+      # both stay the C++ implementation's business, because a Python mirror of
+      # a C++ fold is a second implementation that has to be kept in agreement
+      # with the first, and PR #180 already paid that cost on the disposition
+      # catalogs. Nothing is lost, since both folds are computed from the same
+      # file bytes this gate hashes.
+      - name: Compatibility catalog source pins match the files on disk
+        run: python scripts/ci_compatibility_pin_gate.py
+
   # The four generated protobuf bindings are committed, and until this job
   # existed nothing compared them against proto/trainvm/v1/trainvm.proto. They
   # drifted: `GetReconciliationStatus` was added to the service and neither grpc
