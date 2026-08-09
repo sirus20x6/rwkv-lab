@@ -13388,6 +13388,123 @@ void test_host_grant_saga() {
   std::filesystem::remove_all(directory);
 }
 
+// The supervisor's recovery scan is the only way a run re-enters reconciliation
+// after a controller restart: nothing survives the process except the journal,
+// so a run the scan cannot select is a run no in-process release path will ever
+// be offered.
+//
+// A run can reach a terminal state while it still holds host authority. The
+// workflow's `$failed` target clears the current node outright, so the run never
+// visits its `release_resources` node and its logical lease is never released.
+// That is an orphan grant with no live process record, and before this test the
+// scan's `observed_state IN ('queued','acquiring','running','pausing',
+// 'cancelling')` predicate excluded exactly that run.
+//
+// Rediscovery is conditioned on held authority rather than on terminality: a
+// finished run holding nothing must stay out of the scan, or the supervisor's
+// steady-state work would grow with total run history forever. Both directions
+// are asserted here, along with the paging bounds the scan is required to keep.
+void test_reconciliation_scan_rediscovers_terminal_held_authority() {
+  const auto compiled = trainvm::compile_document(cache_qualification_fixture());
+  check(compiled.valid(), "terminal held-authority scan fixture compiles");
+  if (!compiled.plan) return;
+
+  const std::string run_id = "cache-qualification-run";
+  auto orphaned = start_cache_qualification_run(*compiled.plan, "orphan-scan");
+
+  // The declared rejection path routes this workflow to `$failed`.
+  auto rejecting_evidence = passing_cache_evidence();
+  rejecting_evidence.candidate_throughput = 101.0;
+  rejecting_evidence.resumed_trajectory_parity = {
+      .verdict = trainvm::TrajectoryParityVerdict::diverged,
+      .criterion = trainvm::TrajectoryEquivalenceCriterion::bit_identical,
+      .effect_class = trainvm::TrajectoryEffectClass::optimizer_update,
+      .candidate_divergence = {{.step = 1U, .relative_deviation = 1.6e-07},
+                               {.step = 2U, .relative_deviation = 1.7e-06},
+                               {.step = 5U, .relative_deviation = 1.3e-03}},
+      .reference_divergence = {},
+      .checkpoint_quality = {},
+      .analysis_seed = 0U,
+  };
+  const trainvm::CacheQualificationReceipt rejection =
+      trainvm::qualify_cache_artifact(rejecting_evidence);
+  const auto& terminal = orphaned.controller->complete_cache_qualification(
+      rejection, test_time(1'500));
+
+  const auto projection = orphaned.journal->projection(run_id);
+  const auto held = orphaned.journal->active_lease(
+      orphaned.lease.concurrency_key, test_time(1'500));
+  check(terminal.status == trainvm::ExecutionStatus::failed && projection &&
+            projection->observed_state == "failed" && held &&
+            held->owner_run_id == run_id,
+        "a rejected verdict leaves the run terminal while its logical lease is "
+        "still held");
+  if (!projection || !held) {
+    std::filesystem::remove_all(orphaned.directory);
+    return;
+  }
+
+  const auto contains_run = [&run_id](
+                                const std::vector<trainvm::RunProjection>& page) {
+    return std::ranges::any_of(page, [&run_id](const trainvm::RunProjection&
+                                                   candidate) {
+      return candidate.run_id == run_id;
+    });
+  };
+
+  // The gap this test was written for: a fresh controller scanning the journal
+  // it inherited must be able to see the run that still owes a release.
+  const auto held_page = orphaned.journal->reconcilable_projections({}, 16U);
+  check(contains_run(held_page),
+        "the recovery scan rediscovers a terminal run that still holds its "
+        "logical lease");
+
+  // The card's exact condition: an orphan that outlives its logical lease.
+  // `active_lease` filters on the current boot and on liveness, so once the
+  // lease expires it reports nothing — but the lease was never *released*, so
+  // the authority is still owed and the run must stay rediscoverable. A scan
+  // that leaned on `active_lease` would drop precisely the leaked row here.
+  const auto after_expiry =
+      test_time(orphaned.lease.expires_boottime_ns + 1'000'000'000LL);
+  check(!orphaned.journal->active_lease(orphaned.lease.concurrency_key,
+                                        after_expiry)
+             .has_value(),
+        "the held lease is expired, not released, once its deadline passes");
+  check(contains_run(orphaned.journal->reconcilable_projections({}, 16U)),
+        "the recovery scan still rediscovers the orphan after its logical "
+        "lease expires");
+
+  // The scan stays paged. A terminal run is selected by the same cursor and
+  // limit as a live one, never by a separate unbounded sweep.
+  const auto cursor_exhausted =
+      orphaned.journal->reconcilable_projections(run_id, 16U);
+  bool zero_limit_rejected = false;
+  try {
+    (void)orphaned.journal->reconcilable_projections({}, 0U);
+  } catch (const std::invalid_argument&) {
+    zero_limit_rejected = true;
+  }
+  check(cursor_exhausted.empty() && zero_limit_rejected &&
+            orphaned.journal->reconcilable_projections({}, 1U).size() == 1U,
+        "terminal rediscovery keeps the scan's cursor and limit bounds");
+
+  // Held authority, not terminality, is what keeps a run in the scan. Once the
+  // lease is released the finished run drops out and stops costing anything.
+  check(orphaned.journal->release_lease(held->concurrency_key, run_id,
+                                        held->lease_id, held->fencing_token,
+                                        test_time(1'600)),
+        "the held logical lease releases against its exact fence");
+  const auto released_page =
+      orphaned.journal->reconcilable_projections({}, 16U);
+  check(!contains_run(released_page),
+        "a terminal run that holds nothing leaves the recovery scan");
+
+  std::string chain_reason;
+  check(orphaned.journal->verify_chain(&chain_reason),
+        "terminal rediscovery leaves the journal chain intact");
+  std::filesystem::remove_all(orphaned.directory);
+}
+
 void test_service_reconciliation_supervisor() {
   auto source = load_fixture();
   source["spec"]["resources"]["lease_timeout_seconds"] = 5;
@@ -15470,6 +15587,8 @@ int main() {
       {"service_registry_and_reconciliation", test_service_registry_and_reconciliation},
       {"adapter_registry_and_reconciler", test_adapter_registry_and_reconciler},
       {"host_grant_saga", test_host_grant_saga},
+      {"reconciliation_scan_rediscovers_terminal_held_authority",
+       test_reconciliation_scan_rediscovers_terminal_held_authority},
       {"service_reconciliation_supervisor", test_service_reconciliation_supervisor},
       {"service_supervisor_settles_after_terminal_worker", test_service_supervisor_settles_after_terminal_worker},
       {"service_supervisor_idle_soak", test_service_supervisor_idle_soak},

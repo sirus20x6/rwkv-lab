@@ -4019,6 +4019,22 @@ std::vector<RunProjection> Journal::reconcilable_projections(
     throw std::invalid_argument(
         "reconcilable projection page is outside its bounds");
   }
+  // A run that reached a terminal state while it still held host authority is
+  // rediscovered too. The workflow's `$failed` and `$cancelled` targets clear
+  // the current node outright, so such a run never reaches its
+  // `release_resources` node and its lease or physical bundle stays owed. The
+  // supervisor's in-process release paths are still correct; they were simply
+  // never offered the run again, because nothing but this scan survives a
+  // controller restart.
+  //
+  // Terminality alone is not the condition — held authority is. A finished run
+  // that owes nothing must leave the scan, or the supervisor's steady-state
+  // work would grow with total run history forever.
+  //
+  // Neither existence test may reuse `active_lease`'s liveness filters. That
+  // query requires the current boot and an unexpired deadline, which is exactly
+  // wrong here: a lease that expired unreleased is the leak, not evidence that
+  // there is none. Release is proved by a receipt, never by a deadline.
   Statement query(database_, R"sql(
     SELECT run_id, experiment_name, plan_hash, desired_state, observed_state,
            current_node_id, current_attempt_id, run_revision, optimizer_step,
@@ -4026,7 +4042,35 @@ std::vector<RunProjection> Journal::reconcilable_projections(
     FROM run_projection
     WHERE run_id > ?
       AND desired_state IN ('queued', 'running', 'paused', 'cancelled')
-      AND observed_state IN ('queued', 'acquiring', 'running', 'pausing', 'cancelling')
+      AND (
+        observed_state IN ('queued', 'acquiring', 'running', 'pausing', 'cancelling')
+        OR (
+          observed_state IN ('completed', 'failed', 'cancelled')
+          AND (
+            EXISTS(
+              SELECT 1 FROM resource_leases AS lease
+              WHERE lease.owner_run_id=run_projection.run_id
+                AND lease.released_wall_time_ns IS NULL
+                AND NOT EXISTS(
+                  SELECT 1 FROM resource_lease_releases AS release
+                  WHERE release.concurrency_key=lease.concurrency_key
+                    AND release.owner_run_id=lease.owner_run_id
+                    AND release.lease_id=lease.lease_id
+                    AND release.fencing_token=lease.fencing_token
+                )
+            )
+            OR EXISTS(
+              SELECT 1 FROM host_resource_requests AS request
+              JOIN host_resource_grants AS grant
+                ON grant.request_id=request.request_id
+              LEFT JOIN host_resource_release_receipts AS receipt
+                ON receipt.request_id=request.request_id
+              WHERE request.run_id=run_projection.run_id
+                AND receipt.request_id IS NULL
+            )
+          )
+        )
+      )
     ORDER BY run_id
     LIMIT ?
   )sql");
