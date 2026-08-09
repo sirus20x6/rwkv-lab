@@ -9002,13 +9002,21 @@ JournalLogicalFenceSnapshot Journal::journal_logical_fence_snapshot(
         "journal logical fence is missing or superseded");
   if (!scalar_types_exact || retained.concurrency_key != concurrency_key ||
       retained.clock_domain != ResourceLease::kBootTimeDomain ||
-      retained.boot_id != now.boot_id || retained.acquired_boottime_ns < 0 ||
+      !canonical_boot_id(retained.boot_id) ||
+      retained.acquired_boottime_ns < 0 ||
       retained.expires_boottime_ns <= retained.acquired_boottime_ns ||
       retained.acquired_wall_time_ns < 0 ||
       retained.expires_wall_time_ns < 0 ||
       (row_released && row_released_wall_time_ns < 0) ||
       sqlite3_step(lease.get()) != SQLITE_DONE)
     corrupt("journal logical fence projection is malformed");
+  // Boot-scoped leases are intentionally not live after reboot. A valid row
+  // retained from another boot is stale authority, not evidence of database
+  // corruption, and must not poison unrelated dashboard reads or new runs.
+  if (retained.boot_id != now.boot_id) {
+    throw OperationPreconditionError(
+        "journal logical fence belongs to another boot");
+  }
 
   const std::string authority_key =
       lease_authority_metadata_key(concurrency_key, fencing_token);

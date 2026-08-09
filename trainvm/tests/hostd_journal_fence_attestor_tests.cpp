@@ -773,6 +773,29 @@ void long_lived_renewal_head_has_no_lifetime_scan_cap() {
           "authenticated O(1) renewal head supports more than 4096 renewals");
 }
 
+void prior_boot_fence_is_stale_without_poisoning_journal() {
+  Fixture fixture;
+  fixture.attestor.reset();
+  fixture.journal.reset();
+  constexpr std::string_view next_boot =
+      "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  fixture.journal = std::make_unique<Journal>(
+      fixture.authority.database(), fixture.authority.identity(),
+      HostGrantEnforcement::required,
+      HostIdentity{.host_id = "host-001", .boot_id = std::string(next_boot)});
+  AuthorityTimeSample after_reboot = authority_time(1'300'000'000LL);
+  after_reboot.boot_id = std::string(next_boot);
+  require_throws<OperationPreconditionError>(
+      [&] {
+        (void)fixture.journal->journal_logical_fence_snapshot(
+            "gpu:0", "run-001", "lease-001",
+            fixture.controller.logical_fencing_token, after_reboot);
+      },
+      "a prior-boot logical fence is rejected as stale");
+  require(!fixture.journal->journal_id().empty(),
+          "a stale prior-boot fence does not poison unrelated journal reads");
+}
+
 void restart_rotates_controller_generation_without_losing_fence() {
   Fixture fixture;
   const HostdSessionChallengeClaim old_claim = fixture.attestor->claim();
@@ -843,6 +866,8 @@ int main() {
     std::cout << "PASS authority-head-rollback\n";
     long_lived_renewal_head_has_no_lifetime_scan_cap();
     std::cout << "PASS long-lived-renewal-head\n";
+    prior_boot_fence_is_stale_without_poisoning_journal();
+    std::cout << "PASS prior-boot-stale-fence\n";
     restart_rotates_controller_generation_without_losing_fence();
     std::cout << "PASS restart-generation\n";
     dynamic_attestor_tracks_current_scoped_controller_read_only();
