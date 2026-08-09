@@ -342,6 +342,13 @@ reproducible stale-default failure, the claimed 7,160-case driver is absent from
 large graphs can skip RAW/WAW proofs. Any TrainVM megakernel work must close those fail-open and
 reproducibility gaps and use fenced live host identity before device qualification.
 
+[`GPU_SCHEDULE_AUTHORITY.md`](GPU_SCHEDULE_AUTHORITY.md) is the design that closes them: a versioned
+schedule IR whose entity identity is array position rather than a value, exact hazard proofs that
+reject rather than warn when a graph outgrows them, per-SM queue ordering proven on the graph
+augmented with the queues' own edges, and a receipt that enumerates which invariants it actually
+discharged. It names six open questions rather than guessing at them, and it deliberately specifies
+no CUDA.
+
 - Make `compile`, `warmup`, `qualify`, `train`, `eval`, and `profile` explicit graph phases. Warm a
   bounded adapter-declared shape set and schedule transitions in a disposable worker, destroy it,
   then launch a fresh timed worker from the same checkpoint. In-process state restoration is not a
