@@ -310,12 +310,19 @@ bound survives as an opt-in tightening for an operator who wants a strictly quie
 is not the default, because it rejects idle hosts for no measured reason. There is
 deliberately no flag that grades a contended device.
 
-`docs/experiment-vm/gpu-grader-observations.v1.json` records when each GPU-marked grader last
-actually produced a number, on what host and against which commit. Both graders skip without
-an accelerator and a skip is green, so their result alone cannot distinguish "never ran" from
-"ran and passed"; the receipt carries that distinction instead. It is not a staleness
-assertion — an age threshold would fail in hosted CI, which has no accelerator and could never
-satisfy it, for a reason no pull request could fix.
+`docs/experiment-vm/gpu-test-observations.v2.json` records when each gpu-marked test last
+actually ran on a device, on what host and against which commit, and — for the two that grade a
+measurement — what the number was. Every gpu-marked test skips without an accelerator and a skip
+is green, so their results alone cannot distinguish "never ran" from "ran and passed"; the
+receipt carries that distinction instead. It is not a staleness assertion — an age threshold
+would fail in hosted CI, which has no accelerator and could never satisfy it, for a reason no
+pull request could fix.
+
+It supersedes `gpu-grader-observations.v1.json`, which was enforced by reading the `globals()`
+of one test module and so governed 2 of the 34 gpu-marked tests while its name claimed all of
+them. `scripts/ci_gpu_observation_gate.py` now enumerates them with pytest's own collection and
+runs both in CI and from inside the suite; as of this writing 32 of the 34 entries are
+`{"last_observed": null}`, which is the finding rather than a blank to be filled in.
 
 ### Consumer-Blackwell attention candidate
 

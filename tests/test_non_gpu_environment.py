@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts import ci_gpu_observation_gate
 from scripts.non_gpu_environment import (
     ACCELERATOR_ACCESS_ENV,
     NON_GPU_ENVIRONMENT,
@@ -161,6 +162,15 @@ def test_the_portable_benchmark_receipt_reports_the_devices_it_opened():
     assert all(name.startswith("/dev/") for name in opened)
     assert report["accelerator"] is False
     assert report["execution_device"] == "cpu"
+
+    # An observation entry, not a graded one. This test opened device files and
+    # proved a field is measured; it has no fixture and no qualification
+    # verdict, and the receipt schema forbids it from claiming either.
+    ci_gpu_observation_gate.record_observation(
+        "tests/test_non_gpu_environment.py::"
+        "test_the_portable_benchmark_receipt_reports_the_devices_it_opened",
+        ", ".join(opened),
+    )
 
 
 _COLLECTION_CACHE: dict[str, list[str]] = {}

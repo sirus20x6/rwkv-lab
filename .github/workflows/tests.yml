@@ -88,6 +88,20 @@ jobs:
         # run is the reason the original defect was invisible to CI.
         run: python scripts/non_gpu_environment.py python scripts/ci_coverage_gate.py -m "not gpu"
 
+      # The mirror image of the step above, and it lives here for the same
+      # reason: this is the only job that installs enough to collect the whole
+      # suite. The coverage gate asks whether a test file contributes anything
+      # to the run; this one asks whether a gpu-marked test -- which contributes
+      # nothing to any hosted run, because vars.TRAINVM_SELF_HOSTED is unset and
+      # the gpu job below reports "skipping" -- has any record of ever having
+      # run anywhere. A skip is green, so without the receipt those two states
+      # are the same colour.
+      #
+      # Masked like every other non-GPU invocation. Collection needs no device,
+      # which is the point: this is provable on a runner that has none.
+      - name: Every gpu-marked test has an observation entry
+        run: python scripts/non_gpu_environment.py python scripts/ci_gpu_observation_gate.py
+
   python-cpu:
     name: CPU tests (Python ${{ matrix.python }})
     runs-on: ubuntu-latest

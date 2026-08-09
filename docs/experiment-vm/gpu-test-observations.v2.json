@@ -1,0 +1,128 @@
+{
+  "api_version": "trainvm.gpu-test-observations/v2",
+  "purpose": "A skip is green. Without this file a gpu-marked test that has never run on any host and one that ran and passed are the same colour, and nothing anywhere records which one happened. Each entry states when its test last actually ran on a device, on what host, against which commit, and - for a test that grades a measurement - what the number was. A null last_observed means the test has never been observed doing anything, which is a real finding, not a blank.",
+  "scope": "Every gpu-marked test collected by `pytest tests --collect-only -m gpu`, enumerated by pytest itself rather than by any re-reading of markers. Superseded trainvm.gpu-grader-observations/v1, whose enforcement read the globals() of one module and therefore governed 2 of the 34 gpu-marked tests in the suite while its name claimed all of them.",
+  "entry_kinds": "graded - last_observed, commit, host, accelerator_device_name, fixture, measurement. observation - the first four and nothing more, for a gpu-marked test that produces evidence rather than a number; it may not carry fixture or measurement, because inventing them is the failure this shape exists to prevent. Which kind an entry must be is derived from the test's source by scripts/ci_gpu_observation_gate.py - a test is graded exactly when it calls record_gpu_grader_observation - and is deliberately not declared here, where it could disagree with the code.",
+  "maintenance": "Running a gpu-marked test that records rewrites this file in place. Commit the change; it is the receipt. Nothing regenerates it on a host without an accelerator, which is exactly why the recorded commit and host are part of the entry. Adding a gpu-marked test without an entry fails scripts/ci_gpu_observation_gate.py.",
+  "not_covered": "Staleness is never asserted: an age threshold can never be satisfied in hosted CI and would fail for a reason no pull request could fix. The truth of a recorded number is the benchmark authority's question. The native suites under trainvm/tests/ carry no pytest markers and are out of scope. A test marked gpu that never touches a device is enrolled like any other.",
+  "tests": {
+    "tests/test_benchmark_runner.py::test_accelerator_fixture_emits_evidence_the_gate_accepts": {
+      "last_observed": "2026-08-09T15:51:53Z",
+      "commit": "d33f19321dfec6ddb49c12f3ab3fbfb2dd31a589",
+      "host": "neuromancer",
+      "accelerator_device_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "fixture": "rwkv.pretrained-continuation",
+      "measurement": {
+        "steady_state_step_seconds": 0.3284774229978211,
+        "qualified": true
+      }
+    },
+    "tests/test_benchmark_runner.py::test_compiled_accelerator_candidate_is_judged_by_authority": {
+      "last_observed": "2026-08-09T15:52:54Z",
+      "commit": "d33f19321dfec6ddb49c12f3ab3fbfb2dd31a589",
+      "host": "neuromancer",
+      "accelerator_device_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "fixture": "rwkv.pretrained-continuation",
+      "measurement": {
+        "steady_state_step_seconds": 0.27133326401235536,
+        "qualified": false
+      }
+    },
+    "tests/test_experiment_toolkit.py::test_powercool_tolerates_a_warmup_longer_than_the_budget": {
+      "last_observed": null
+    },
+    "tests/test_experiment_toolkit.py::test_train_eval_accepts_the_auto_warmup_default": {
+      "last_observed": null
+    },
+    "tests/test_fused_optimizer_qualification.py::test_fused_is_not_slower_than_the_reference": {
+      "last_observed": null
+    },
+    "tests/test_fused_optimizer_qualification.py::test_optimizer_state_round_trips_in_both_directions": {
+      "last_observed": null
+    },
+    "tests/test_fused_optimizer_qualification.py::test_single_step_update_matches_the_reference": {
+      "last_observed": null
+    },
+    "tests/test_fused_optimizer_qualification.py::test_trajectory_divergence_starts_at_epsilon_and_grows": {
+      "last_observed": null
+    },
+    "tests/test_image_conditioning_probe.py::test_real_checkpoint_consumes_image_content": {
+      "last_observed": null
+    },
+    "tests/test_megakernel.py::test_albatross_folded_embedding_preserves_recurrent_model": {
+      "last_observed": null
+    },
+    "tests/test_megakernel.py::test_combined_state_epilogue_matches_two_stage_oracle": {
+      "last_observed": null
+    },
+    "tests/test_megakernel.py::test_cuda_graph_plan_is_token_exact_across_replays": {
+      "last_observed": null
+    },
+    "tests/test_megakernel.py::test_fused_rwkv_transition_matches_fp32_oracle": {
+      "last_observed": null
+    },
+    "tests/test_megakernel.py::test_fused_time_mix_epilogue_matches_groupnorm_bonus_gate": {
+      "last_observed": null
+    },
+    "tests/test_megakernel.py::test_megakernel_fails_closed_without_cuda": {
+      "last_observed": null
+    },
+    "tests/test_megakernel.py::test_persisted_adoption_is_bound_to_checkpoint_and_runtime": {
+      "last_observed": null
+    },
+    "tests/test_megakernel.py::test_serving_embedding_finalization_reclaims_duplicate_and_preserves_logits": {
+      "last_observed": null
+    },
+    "tests/test_megakernel.py::test_state_codec_round_trips_tensor_only_recurrent_abi": {
+      "last_observed": null
+    },
+    "tests/test_megakernel_linear.py::test_cuda_candidates_and_qualification": {
+      "last_observed": null
+    },
+    "tests/test_megakernel_linear.py::test_packed_rkv_and_exact_ffn_cpu_fallback": {
+      "last_observed": null
+    },
+    "tests/test_megakernel_linear.py::test_prepared_row_weight_layouts_and_cpu_fallback": {
+      "last_observed": null
+    },
+    "tests/test_megakernel_linear.py::test_validation_and_fail_closed_cpu_qualification": {
+      "last_observed": null
+    },
+    "tests/test_megakernel_multitoken.py::test_fixed_budget_greedy_graph_is_exact_cached_and_eos_safe": {
+      "last_observed": null
+    },
+    "tests/test_megakernel_ops.py::test_boundary_ops_are_torch_compile_visible": {
+      "last_observed": null
+    },
+    "tests/test_megakernel_ops.py::test_boundary_ops_functional_fallback_and_guards": {
+      "last_observed": null
+    },
+    "tests/test_megakernel_ops.py::test_triton_boundaries_match_fp32_oracle": {
+      "last_observed": null
+    },
+    "tests/test_muon_levers.py::test_compiled_aro_matches_eager_when_cuda_available": {
+      "last_observed": null
+    },
+    "tests/test_non_gpu_environment.py::test_the_portable_benchmark_receipt_reports_the_devices_it_opened": {
+      "last_observed": null
+    },
+    "tests/test_optimizer_speedups.py::test_cached_fp8_channelmix_forward_and_bf16_backward_are_close": {
+      "last_observed": null
+    },
+    "tests/test_optimizer_speedups.py::test_channelmix_qualification_initializes_and_checks_cached_fp8": {
+      "last_observed": null
+    },
+    "tests/test_precision_qualification.py::test_sm120_is_qualified_without_importing_scaled_backends": {
+      "last_observed": null
+    },
+    "tests/test_rosa_cuda.py::test_cuda_suffix_automaton_matches_cpu_oracle": {
+      "last_observed": null
+    },
+    "tests/test_sm120_kernels.py::test_sm120_l2_window_round_trip": {
+      "last_observed": null
+    },
+    "tests/test_sm120_kernels.py::test_sm120_persistent_state_matches_reference": {
+      "last_observed": null
+    }
+  }
+}
