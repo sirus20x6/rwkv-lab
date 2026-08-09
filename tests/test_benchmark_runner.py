@@ -9,13 +9,11 @@ invented.
 
 from __future__ import annotations
 
-import datetime
 import importlib.util
 import json
 import os
 import pathlib
 import shutil
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -30,6 +28,7 @@ import ztok_binary
 # runner masks portable children with, and the module whose physical check the
 # portable receipt now carries.
 from scripts import non_gpu_environment
+from scripts import ci_gpu_observation_gate
 
 REPOSITORY = pathlib.Path(__file__).resolve().parents[1]
 RUNNER = REPOSITORY / "scripts/run_benchmark_fixture.py"
@@ -245,84 +244,50 @@ def test_parity_failure_is_rejected_by_native_authority():
         verdict.stdout)["rejection_reasons"]
 
 
-GPU_GRADER_OBSERVATIONS = (
-    REPOSITORY / "docs/experiment-vm/gpu-grader-observations.v1.json"
-)
-
-
 def record_gpu_grader_observation(
     grader: str, fixture: str, device_name: str, measurement: dict,
 ) -> None:
     """Write down that this grader produced a number, here, just now.
 
-    Rewrites the committed receipt in place. The caller is expected to commit
-    the result: the file being in the tree is what makes "never ran" visible,
-    and a run on a host without an accelerator leaves it untouched, which is
-    the state the receipt exists to expose.
+    Thin alias for the receipt writer in
+    ``scripts/ci_gpu_observation_gate.py``. The name is load-bearing: that gate
+    decides which entry shape a test owes by looking for a call to this name in
+    the test's own source, so a grader records a measurement and a test that
+    does not call it cannot claim one.
     """
-    document = json.loads(GPU_GRADER_OBSERVATIONS.read_text(encoding="utf-8"))
-    revision = subprocess.run(
-        ["git", "rev-parse", "HEAD"], capture_output=True, text=True,
-        cwd=REPOSITORY, check=False)
-    document["graders"][grader] = {
-        "last_observed": datetime.datetime.now(
-            datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "commit": revision.stdout.strip() or "unknown",
-        "host": socket.gethostname(),
-        "accelerator_device_name": device_name,
-        "fixture": fixture,
-        "measurement": measurement,
-    }
-    GPU_GRADER_OBSERVATIONS.write_text(
-        json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    ci_gpu_observation_gate.record_measurement(
+        f"tests/test_benchmark_runner.py::{grader}",
+        fixture, device_name, measurement)
 
 
-def gpu_marked_graders_in_this_module() -> set[str]:
-    """The gpu-marked test functions this module defines, by name."""
-    return {
-        name for name, value in globals().items()
-        if name.startswith("test_") and callable(value)
-        and any(mark.name == "gpu"
-                for mark in getattr(value, "pytestmark", []))
-    }
-
-
-def test_every_gpu_grader_records_when_it_last_produced_a_number():
+def test_every_gpu_marked_test_records_when_it_last_ran_on_a_device():
     """"Never ran" and "ran and passed" must not be the same colour.
 
-    Both GPU graders skip on a host without an accelerator, and a skip is
-    green, so their result carries no information about whether either has
-    ever run. This receipt carries it instead. The check is that the receipt
-    enumerates exactly the gpu-marked graders in this module, so adding one
-    without a receipt entry fails here rather than being silently unobserved.
+    Every gpu-marked test in the suite skips on a host without an accelerator,
+    and a skip is green, so their results carry no information about whether
+    any of them has ever run. ``docs/experiment-vm/gpu-test-observations.v2.json``
+    carries it instead, and this is that receipt enforced from inside the suite
+    so a pull request that adds a gpu-marked test without an entry goes red
+    here as well as in the schema job.
 
-    Deliberately not a staleness assertion. An age threshold would fail in
-    hosted CI, which has no accelerator and can never satisfy it, for a reason
-    no author of any pull request could fix - and it would fire on changes
-    that have nothing to do with the graders. What a reviewer needs is the
-    date and the commit, stated; not a red check about the calendar.
+    The predecessor of this test enumerated the tests it governed from
+    ``globals()`` of this module, so it enforced the receipt over 2 of the 34
+    gpu-marked tests in ``tests/`` and was named as though it enforced it over
+    all of them. The enumeration now comes from pytest's own collection, via
+    ``scripts/ci_gpu_observation_gate.py``, which is also what the schema job
+    runs -- one mechanism, two entry points, rather than two implementations
+    free to disagree.
+
+    Deliberately not a staleness assertion; see that module's docstring for
+    the full list of what this does not cover.
     """
-    document = json.loads(GPU_GRADER_OBSERVATIONS.read_text(encoding="utf-8"))
-    assert document["api_version"] == "trainvm.gpu-grader-observations/v1"
-    recorded = document["graders"]
-    assert set(recorded) == gpu_marked_graders_in_this_module(), (
-        "the observation receipt and the gpu-marked graders have drifted "
-        "apart; every gpu grader needs an entry, even an unobserved one")
-    for grader, entry in recorded.items():
-        observed = entry["last_observed"]
-        if observed is None:
-            # A grader that has never produced a number is a legitimate
-            # recorded state. It just must not be able to hide.
-            assert set(entry) == {"last_observed"}, grader
-            continue
-        assert observed.endswith("Z") and len(observed) == 20, grader
-        datetime.datetime.strptime(observed, "%Y-%m-%dT%H:%M:%SZ")
-        assert entry["commit"] and entry["host"], grader
-        assert entry["accelerator_device_name"], grader
-        assert entry["fixture"], grader
-        measurement = entry["measurement"]
-        assert measurement["steady_state_step_seconds"] > 0, grader
-        assert isinstance(measurement["qualified"], bool), grader
+    tests_directory = REPOSITORY / "tests"
+    failures = ci_gpu_observation_gate.check(
+        ci_gpu_observation_gate.load(),
+        ci_gpu_observation_gate.collect_gpu_tests(tests_directory),
+        ci_gpu_observation_gate.graded_tests(tests_directory),
+    )
+    assert not failures, "\n".join(failures)
 
 
 def measured_conditions(compute_apps: str, *device_samples: str) -> dict:
