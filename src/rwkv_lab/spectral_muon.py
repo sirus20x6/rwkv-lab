@@ -23,9 +23,9 @@ stability damper that costs one extra reduction over the grads per step. NOTE:
 this is the gradient-energy variant (self-contained — the optimizer already sees
 every grad), NOT the paper's faithful loss-energy SAV; the r-update chain rule is
 therefore heuristic (exact only when E is the loss). `rsav_cap=0` forces ξ≡1
-(inert = vanilla). `r` is a global scalar kept on `self` (not per-param state), so
-it re-initialises from the first post-resume step rather than persisting across
-checkpoints — fine for a scalar that re-equilibrates in one step.
+(inert = vanilla). `r` is a global scalar kept on `self` rather than per-parameter
+state; the optimizer's versioned state dictionary persists it and rejects a
+resume whose global RSAV configuration differs.
 
 The per-matrix lever knobs live in each param group, so a trainer may live-tune
 them by setting e.g. opt.param_groups[i]["spectral_power"] = v between steps; the
@@ -42,6 +42,7 @@ import torch
 from torch.optim.optimizer import Optimizer
 
 _QUINTIC = (3.4445, -4.7750, 2.0315)  # Keller-Jordan Muon NS coefficients
+_GLOBAL_STATE_KEY = "spectral_muon_global_state_v1"
 
 
 def _ns_quintic(X, steps):
@@ -260,6 +261,26 @@ class SpectralMuon(Optimizer):
         self._compiled_ns: dict[tuple[int, bool], object] = {}
         self._compile_ns_failed = False
 
+    def state_dict(self):
+        result = super().state_dict()
+        rsav_r = self._rsav_r
+        rsav_xi = self._rsav_last_xi
+        result[_GLOBAL_STATE_KEY] = {
+            "rsav": self.rsav,
+            "rsav_c": self.rsav_c,
+            "rsav_cap": self.rsav_cap,
+            "rsav_relax": self.rsav_relax,
+            "rsav_r": (
+                rsav_r.detach().clone() if torch.is_tensor(rsav_r) else None
+            ),
+            "rsav_last_xi": (
+                rsav_xi.detach().clone()
+                if torch.is_tensor(rsav_xi)
+                else float(rsav_xi)
+            ),
+        }
+        return result
+
     def load_state_dict(self, state_dict):
         # Optimizer.load_state_dict casts float state to each param's dtype (bf16 for a
         # bf16 model) BEFORE any post-hook can run, silently re-quantizing the fp32
@@ -267,7 +288,35 @@ class SpectralMuon(Optimizer):
         # re-install the ORIGINAL tensors (as fp32, on the param's device) after the
         # parent load. Old bf16-state ckpts upcast losslessly through the same path.
         saved_state = {k: dict(v) for k, v in state_dict.get("state", {}).items()}
-        super().load_state_dict(state_dict)
+        global_state = state_dict.get(_GLOBAL_STATE_KEY)
+        if global_state is not None:
+            if not isinstance(global_state, dict) or set(global_state) != {
+                "rsav",
+                "rsav_c",
+                "rsav_cap",
+                "rsav_relax",
+                "rsav_r",
+                "rsav_last_xi",
+            }:
+                raise ValueError("SpectralMuon global checkpoint state is invalid")
+            expected = {
+                "rsav": self.rsav,
+                "rsav_c": self.rsav_c,
+                "rsav_cap": self.rsav_cap,
+                "rsav_relax": self.rsav_relax,
+            }
+            if any(global_state[key] != value for key, value in expected.items()):
+                raise ValueError(
+                    "SpectralMuon checkpoint RSAV configuration is incompatible"
+                )
+        elif self.rsav:
+            raise ValueError("SpectralMuon RSAV checkpoint omits global state")
+        super().load_state_dict(
+            {
+                "state": state_dict["state"],
+                "param_groups": state_dict["param_groups"],
+            }
+        )
         id_map = {
             old_id: p
             for old_ids, g in zip(
@@ -282,6 +331,33 @@ class SpectralMuon(Optimizer):
             for k, v in st.items():
                 if torch.is_tensor(v) and v.is_floating_point():
                     self.state[p][k] = v.to(device=p.device, dtype=torch.float32)
+        if global_state is not None:
+            first_parameter = next(
+                (
+                    parameter
+                    for group in self.param_groups
+                    for parameter in group["params"]
+                ),
+                None,
+            )
+            device = first_parameter.device if first_parameter is not None else "cpu"
+            saved_r = global_state["rsav_r"]
+            if saved_r is not None and not torch.is_tensor(saved_r):
+                raise ValueError("SpectralMuon RSAV scalar state is invalid")
+            self._rsav_r = (
+                saved_r.to(device=device, dtype=torch.float32)
+                if saved_r is not None
+                else None
+            )
+            saved_xi = global_state["rsav_last_xi"]
+            if torch.is_tensor(saved_xi):
+                self._rsav_last_xi = saved_xi.to(device=device, dtype=torch.float32)
+            elif isinstance(saved_xi, (int, float)) and not isinstance(
+                saved_xi, bool
+            ):
+                self._rsav_last_xi = float(saved_xi)
+            else:
+                raise ValueError("SpectralMuon RSAV diagnostic state is invalid")
 
     @staticmethod
     def _is_muon(grp, p):
