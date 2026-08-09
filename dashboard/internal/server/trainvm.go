@@ -916,7 +916,11 @@ type trainVMLifecycleRequestPayload struct {
 // returned identity, so attributing the wrong one is worse than failing closed.
 func (s *Server) reconcileTrainVMLifecycleCommand(r *http.Request, runID string,
 	input trainVMRunActionRequest, cause error) (trainvmstore.RunActionResult, bool) {
-	if s.trainvm == nil || strings.TrimSpace(input.IdempotencyKey) == "" {
+	// Match on the key as the authority journalled it. The commander trims before
+	// it sends, so comparing the raw field would miss a padded key and fail
+	// closed on a command that is genuinely this caller's.
+	idempotencyKey := strings.TrimSpace(input.IdempotencyKey)
+	if s.trainvm == nil || idempotencyKey == "" {
 		return trainvmstore.RunActionResult{}, false
 	}
 	if code := status.Code(cause); code != codes.DeadlineExceeded {
@@ -951,7 +955,7 @@ func (s *Server) reconcileTrainVMLifecycleCommand(r *http.Request, runID string,
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
 			continue
 		}
-		if payload.CommandID == "" || payload.IdempotencyKey != input.IdempotencyKey ||
+		if payload.CommandID == "" || payload.IdempotencyKey != idempotencyKey ||
 			payload.Kind != action || payload.ExpectedRunRevision != input.ExpectedRunRevision {
 			continue
 		}

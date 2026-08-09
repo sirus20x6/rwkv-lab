@@ -1501,9 +1501,13 @@ func trainVMJournalledPause(idempotencyKey, kind string, expectedRunRevision int
 }
 
 func newTrainVMPauseActionRequest() *http.Request {
+	return newTrainVMPauseActionRequestWithKey("tab-action-intent")
+}
+
+func newTrainVMPauseActionRequestWithKey(idempotencyKey string) *http.Request {
 	request := newTrainVMActionRequest(`{
 		"expected_run_revision":7,
-		"idempotency_key":"tab-action-intent",
+		"idempotency_key":"` + idempotencyKey + `",
 		"reason":"release GPU for interactive work",
 		"action":"pause",
 		"checkpoint_first":true,
@@ -1518,11 +1522,25 @@ func newTrainVMPauseActionRequest() *http.Request {
 // durably journalled the request before our context expired, the submission must
 // report that command's identity rather than a failure the authority never gave.
 func TestTrainVMLifecycleDeadlineReconcilesDurableCommand(t *testing.T) {
+	// The commander trims the key before it sends, so the journal holds the
+	// trimmed form. A padded key is still this caller's command and must match.
+	for name, submitted := range map[string]string{
+		"exact key":  "tab-action-intent",
+		"padded key": "  tab-action-intent  ",
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertTrainVMDeadlineReconciles(t, submitted)
+		})
+	}
+}
+
+func assertTrainVMDeadlineReconciles(t *testing.T, submittedKey string) {
+	t.Helper()
 	commander := &fakeTrainVMCommander{err: status.Error(codes.DeadlineExceeded, "context deadline exceeded")}
 	srv := New(Config{Commander: commander, TrainVM: trainVMFixtureWithJournal(t,
 		trainVMJournalledPause("tab-action-intent", "pause", 7))})
 	response := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(response, newTrainVMPauseActionRequest())
+	srv.Handler().ServeHTTP(response, newTrainVMPauseActionRequestWithKey(submittedKey))
 
 	body := response.Body.String()
 	if response.Code != http.StatusAccepted {
