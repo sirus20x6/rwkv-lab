@@ -412,9 +412,31 @@ jobs:
       #   trainvm_dashboard_live_e2e           spawns the live stack
       #   rwkv_lab_worker_artifact             builds a sealed worker artifact
       #
-      # All four run in scripts/acceptance.sh on a real host, which is where
-      # they are meaningful. Excluding them keeps this job a signal: a
-      # permanently red job is one everybody learns to ignore.
+      # All four are covered by scripts/acceptance.sh on a real host, which is
+      # where they are meaningful. Read "covered" as runnable, not running:
+      # nothing schedules that script. No workflow invokes it, there is no
+      # Makefile, and nothing in CMake calls it -- it runs when a person types
+      # the command. This comment used to say the four "run in" acceptance,
+      # which read as a cadence that did not exist.
+      #
+      # scripts/acceptance.sh now appends one line per run to
+      # docs/experiment-vm/acceptance-attestations.v1.jsonl, recording the
+      # commit, the host, the time, and each of these four suites pass or fail.
+      # Failures are appended too, so an absent line means "never run" and
+      # nothing else. To find out whether these four have been checked against
+      # anything close to current main:
+      #
+      #   tail -1 docs/experiment-vm/acceptance-attestations.v1.jsonl
+      #   git log --oneline <that commit>..origin/main | wc -l
+      #
+      # An empty log, or a commit hundreds behind, means these suites are
+      # unchecked right now -- by this job, which excludes them, and by
+      # acceptance, which nobody ran. Nothing fails on a stale attestation
+      # deliberately: no hosted runner can produce one, so the check could only
+      # ever be red, and see below for why that is the outcome to avoid.
+      #
+      # Excluding them still keeps this job a signal: a permanently red job is
+      # one everybody learns to ignore.
       #
       # An exclusion still costs coverage, though, so it is worth checking what
       # rides along inside an excluded test. rwkv_lab_worker_artifact also held
