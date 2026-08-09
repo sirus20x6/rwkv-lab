@@ -25,10 +25,15 @@ from .load_converted import (
     MODEL_DIR_ENV, PATCH_DIR_ENV, default_model_dir, default_patch_dir,
     load_converted_model,
 )
-from .engram_integration import install_engram, offload_engram_embedding
+from .engram_integration import (
+    install_engram, offload_engram_embedding, require_engram_ext,
+)
 from .safe_torch import safe_torch_load
 
-from engram_ext.engram_module import EngramConfig
+# engram_ext is imported at the point of use inside load_mla_engram(), via
+# rwkv_lab.engram_integration.require_engram_ext. See the note there: importing
+# it here made this module unimportable on every machine without the attested
+# runtime, which is every machine CI runs on.
 
 
 def _read_patch(patch_path: Path) -> dict[str, torch.Tensor]:
@@ -123,6 +128,11 @@ def load_mla_engram(
         field="engram_patch_dir", env_var=ENGRAM_PATCH_DIR_ENV,
     )
 
+    # Resolve the Engram runtime before the multi-minute backbone load below:
+    # this function cannot finish without it, so discovering that afterwards
+    # only costs the caller the load.
+    engram_module = require_engram_ext()
+
     # 1. MLA load (SVD-init + optional trained state)
     model, mla_modules = load_converted_model(
         model_dir=model_dir, patch_dir=mla_patch_dir,
@@ -137,7 +147,7 @@ def load_mla_engram(
 
     # 2. Engram install + load
     eng_manifest = json.loads((Path(engram_patch_dir) / "manifest.json").read_text())
-    eng_cfg = EngramConfig(**eng_manifest["engram_config"])
+    eng_cfg = engram_module.EngramConfig(**eng_manifest["engram_config"])
     host_offload = bool(eng_manifest.get("host_offload", False))
     engram_modules = install_engram(
         model,

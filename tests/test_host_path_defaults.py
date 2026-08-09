@@ -55,44 +55,11 @@ def _import(name: str):
     return pytest.importorskip(name)
 
 
-@pytest.fixture
-def engram_runtime_stub(monkeypatch):
-    """Make the Engram modules importable without the engram-ext distribution.
-
-    ``rwkv_lab.engram_integration`` imports ``engram_ext`` at module scope, and
-    that package is a separately attested runtime nothing in CI installs. Both
-    Engram path defaults would therefore go untested on exactly the machines
-    this file exists to speak for. The stub only has to satisfy the import: the
-    assertions below fail long before any Engram module is constructed.
-    """
-    import sys
-    import types
-
-    if "engram_ext.engram_module" in sys.modules:
-        yield
-        return
-
-    package = types.ModuleType("engram_ext")
-    module = types.ModuleType("engram_ext.engram_module")
-
-    class _EngramConfig:  # pragma: no cover - never constructed here
-        def __init__(self, **fields):
-            self.__dict__.update(fields)
-
-    class _EngramModule:  # pragma: no cover - never constructed here
-        pass
-
-    module.EngramConfig = _EngramConfig
-    module.EngramModule = _EngramModule
-    package.engram_module = module
-    monkeypatch.setitem(sys.modules, "engram_ext", package)
-    monkeypatch.setitem(sys.modules, "engram_ext.engram_module", module)
-    yield
-    # Anything imported against the stub must not stay cached for the rest of
-    # the session, or a later test gets a module holding a fake Engram type.
-    for name in list(sys.modules):
-        if name.startswith("rwkv_lab.") and "engram" in name:
-            del sys.modules[name]
+# The Engram modules used to need an ``engram_ext`` stub here just to be
+# importable, because rwkv_lab.engram_integration imported that separately
+# attested runtime at module scope. The import is now deferred to its point of
+# use, so the two Engram tests below exercise the real modules with no stub at
+# all. tests/test_engram_entry_points.py is what keeps it that way.
 
 
 @pytest.fixture
@@ -251,9 +218,7 @@ def test_the_historical_path_is_still_used_where_it_exists(
     assert train_mla.TrainConfig(model_dir="/m").patch_dir == str(cached)
 
 
-def test_engram_train_config_default_is_not_one_machines_path(
-    engram_runtime_stub, clean_machine
-):
+def test_engram_train_config_default_is_not_one_machines_path(clean_machine):
     engram = _import("rwkv_lab.train_mla_engram")
 
     config = engram.EngramTrainConfig(model_dir="/m")
@@ -281,9 +246,7 @@ def test_load_converted_model_names_the_argument_on_a_clean_machine(
     assert "patch_dir" in str(failure.value)
 
 
-def test_load_mla_engram_names_the_argument_on_a_clean_machine(
-    engram_runtime_stub, clean_machine
-):
+def test_load_mla_engram_names_the_argument_on_a_clean_machine(clean_machine):
     loader = _import("rwkv_lab.load_mla_engram")
 
     assert loader.default_engram_patch_dir() is None

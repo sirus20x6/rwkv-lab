@@ -20,12 +20,69 @@ from inside that scope.
 from __future__ import annotations
 
 import warnings
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import torch
 import torch.nn as nn
 
-from engram_ext.engram_module import EngramConfig, EngramModule
+if TYPE_CHECKING:  # pragma: no cover - types only, never imported at runtime
+    from engram_ext.engram_module import EngramConfig, EngramModule
+
+# ---------------------------------------------------------------------------
+# The engram-ext runtime distribution is imported at the point of use, not here.
+#
+# It is a separately attested distribution built outside this repository, and
+# nothing in this repository or in CI installs it. Importing it at module scope
+# meant `import rwkv_lab.load_mla_engram` and `import rwkv_lab.train_mla_engram`
+# raised on every machine that is not the training host, so neither module could
+# be tested anywhere — and nothing reported that. train_mla.py already defers
+# the same import to its `if cfg.engram_enabled:` branch; this follows it.
+#
+# Deferring moves the failure from "importing an unrelated module" to "asking
+# for Engram without the runtime", which is the only place the absence matters.
+# ---------------------------------------------------------------------------
+
+ENGRAM_EXT_DISTRIBUTION = "engram_ext"
+
+ENGRAM_EXT_MISSING_MESSAGE = (
+    "engram_ext is not importable, so Engram cannot be installed. It is the "
+    "separately attested engram-ext runtime distribution, built outside this "
+    "repository and deliberately not a dependency of rwkv-lab: only the Engram "
+    "entry points need it. To make it importable, build the extension from the "
+    "engram checkout and install its Python distribution into this "
+    "environment, e.g.\n"
+    "    pip install /path/to/engram/python\n"
+    "Do not prepend a machine-local checkout to sys.path instead -- that "
+    "bypasses the dependency attestation the sealed runtime relies on. See the "
+    "README section \"The engram-ext runtime dependency\"."
+)
+
+
+class EngramExtensionUnavailable(ModuleNotFoundError):
+    """Raised when Engram is requested but engram_ext cannot be imported.
+
+    A ModuleNotFoundError subclass so callers with an existing
+    ``except ImportError`` still catch it, while the message names the
+    distribution and how to get it rather than pointing at an import line in a
+    module the caller never asked about.
+    """
+
+
+def require_engram_ext():
+    """Import and return ``engram_ext.engram_module``, or explain its absence.
+
+    Every use of an engram-ext symbol in this package goes through here, so a
+    missing runtime produces one message naming ``engram_ext`` instead of an
+    ImportError traceback whose top frame is an unrelated import.
+    """
+    try:
+        from engram_ext import engram_module
+    except ImportError as error:
+        raise EngramExtensionUnavailable(
+            ENGRAM_EXT_MISSING_MESSAGE, name=ENGRAM_EXT_DISTRIBUTION
+        ) from error
+    return engram_module
+
 
 # Once-per-run flag: warn loudly (once) when a forward carries no token ids
 # and Engram is therefore silently inactive for that forward.
@@ -165,6 +222,10 @@ def install_engram(
     if getattr(model, "_engram_installed", False):
         raise RuntimeError("Engram already installed; call uninstall_engram first.")
 
+    # The point of use for the deferred engram-ext import: fail here, naming the
+    # distribution, rather than at `import rwkv_lab.load_mla_engram`.
+    engram_module = require_engram_ext()
+
     # ---- Stash input_ids at the backbone module whose forward iterates layers ----
     base, layers = _resolve_layers(model)
     orig_base_forward: Callable[..., Any] = base.forward
@@ -204,7 +265,8 @@ def install_engram(
     engram_modules: list[EngramModule] = []
     for li in layer_indices:
         layer = layers[li]
-        em = EngramModule(layer_id=li, cfg=engram_cfg, hidden_size=hidden_size)
+        em = engram_module.EngramModule(
+            layer_id=li, cfg=engram_cfg, hidden_size=hidden_size)
         target_dtype = next(layer.parameters()).dtype
         target_device = next(layer.parameters()).device
 

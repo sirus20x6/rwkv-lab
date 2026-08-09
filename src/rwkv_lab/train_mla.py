@@ -1301,8 +1301,11 @@ def train(
             raise ValueError("--engram-enabled=1 requires --engram-patch-dir=<dir>")
         # The sealed runtime deployment owns this import. Never prepend a
         # machine-local checkout: that would bypass dependency attestation.
-        from engram_ext.engram_module import EngramConfig as _EngramConfig
-        from .engram_integration import install_engram
+        # require_engram_ext turns a bare "No module named 'engram_ext'" into a
+        # message naming the distribution and how to install it.
+        from .engram_integration import install_engram, require_engram_ext
+
+        _EngramConfig = require_engram_ext().EngramConfig
         from .load_mla_engram import _apply_engram_patch, _read_patch
 
         eng_manifest = json.loads((Path(cfg.engram_patch_dir) / "manifest.json").read_text())
