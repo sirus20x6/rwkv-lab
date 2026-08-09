@@ -324,6 +324,25 @@ boundary: it measures those paths, canonicalizes and injects the identities, and
 whole experiment before emitting a runnable snapshot. Measurement remains outside the pure compiler,
 and neither the template nor the root-set file is mutated.
 
+Measuring a large root means reading it, and the command is a fresh process per lock, so
+`--content-cache <store>` carries per-file digests between locks in an owner-only file. A record is
+reusable only under the key the in-memory cache already computes -- mount incarnation, device,
+inode, mode, link count, ownership, size, mtime and ctime to the nanosecond -- so changed bytes move
+ctime and miss. Records younger than one second are neither written nor read back, which closes the
+one gap a metadata key cannot see: a write landing inside the timestamp tick the record was sealed
+against. The store is bound to the boot identity, because the mount incarnation is unique only for
+the life of one boot.
+
+**The store's authority is filesystem permission, not cryptography.** Its per-record seal and its
+trailing digest are unkeyed SHA-256: they detect corruption, truncation, and edits, and they do not
+detect forgery by anything running as the owning uid. The loader therefore refuses -- loudly, rather
+than falling back to a cold measurement -- a store that is not a single-linked regular file owned by
+the effective uid with no group or other mode bits, in a directory owned by that uid and writable by
+no one else. A store that is merely absent, truncated, edited, sealed against a different cache
+policy, or written before this boot is ignored and the lock reads bytes. Anything that can already
+write as that uid can mint a digest for bytes that were never read; that is the boundary this
+feature accepts, and it is the same one the runtime-closure evidence directory accepts.
+
 Required capabilities from all selected components are unioned with the adapter operation's
 capabilities before the launch intent is committed. The immutable `trainvm.host-launches/v4`
 profile for the exact sealed code bytes independently declares its provided capabilities; host
