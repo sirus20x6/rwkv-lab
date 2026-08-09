@@ -10,7 +10,7 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:f48b7898002500e18daef5caf2a540662bd2b0832025db11596b9fea6f585194",
+  "source_tree_digest": "sha256:18464bf1180f40de35467f3836971c6e9a56fdb5eaad22ecb4937a8b880c7c3c",
   "entries": [
     {
       "source_path": "src/rwkv_lab/__init__.py",
@@ -239,7 +239,7 @@
       ],
       "resume_relevance": "none",
       "compatibility_workflow_id": "conversion.memory-target-cache",
-      "source_sha256": "sha256:0e58332828042169d3fa1fe1fcd1ea434f745db6472f695836cd14506a04907a",
+      "source_sha256": "sha256:125d29a4c9c491b626e90f79ee5094a228eef3f1bbd01df966a62029aebb208d",
       "family": "conversion_distillation",
       "coverage": "direct",
       "consumers": [
@@ -926,7 +926,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "transformer.engram-prefill",
-      "source_sha256": "sha256:f3d483d80956be191b87a48ce4bac49940f835563dae15eb79360bcfce4e7f3a",
+      "source_sha256": "sha256:fab2ff186778f2ef4775812a58abc19564aa2f0447ab8052c840d7ac8682faaf",
       "family": "transformer",
       "coverage": "direct",
       "compatibility_workflow_ids": [
@@ -2869,7 +2869,7 @@
       ],
       "resume_relevance": "none",
       "compatibility_workflow_id": "qualification.engram-integration",
-      "source_sha256": "sha256:7c58c9ad7e5c788ffc93e1c38d6734a88addc795cda0e976ec702e8df95ef00d",
+      "source_sha256": "sha256:fabb5549f3d780965734a7ff7f6bed387f8cfa30dd84ddc753ac3fc4424f5adf",
       "family": "evaluation_profile_export",
       "coverage": "direct",
       "compatibility_workflow_ids": [

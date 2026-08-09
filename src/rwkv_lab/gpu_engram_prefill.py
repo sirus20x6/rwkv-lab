@@ -35,10 +35,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import time
 from pathlib import Path
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 import numpy as np
 import torch
@@ -46,13 +45,42 @@ import torch.nn as nn
 import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 
+from .engram_integration import require_engram_ext
+from .host_paths import require_host_path, resolve_host_path
+from .load_converted import MODEL_DIR_ENV, default_model_dir
+from .load_mla_engram import ENGRAM_PATCH_DIR_ENV
 from .safe_torch import safe_torch_load
 
-_ENGRAM_PATH = Path("/thearray/git/engram/python")
-if str(_ENGRAM_PATH) not in sys.path:
-    sys.path.insert(0, str(_ENGRAM_PATH))
+if TYPE_CHECKING:  # pragma: no cover - annotations only
+    from engram_ext.engram_module import (
+        EngramConfig, EngramModule, NgramHashMapping,
+    )
 
-from engram_ext.engram_module import EngramConfig, EngramModule, NgramHashMapping  # noqa: E402
+
+# Host-specific artifact locations; see rwkv_lab.host_paths for the resolution
+# policy and the README section "Host-specific path defaults". The base model
+# is the same 35B checkpoint load_converted names, and the Engram patch is the
+# same artifact load_mla_engram consumes, so both share those variables rather
+# than inventing near-duplicates that could disagree. The prefill output is
+# this module's own, so it gets its own.
+ENGRAM_PATCH_DIR_HISTORICAL_PATH = "/thearray/git/moe-mla/engram_converted_l3_l19"
+PREFILL_OUT_ENV = "MOE_MLA_ENGRAM_PREFILL_OUT"
+PREFILL_OUT_HISTORICAL_PATH = "/thearray/git/moe-mla/engram_prefilled"
+PREFILL_OUT_HISTORICAL_ROOT = "/thearray/git/moe-mla"
+
+
+def default_engram_patch_dir() -> str | None:
+    return resolve_host_path(
+        ENGRAM_PATCH_DIR_ENV, ENGRAM_PATCH_DIR_HISTORICAL_PATH
+    )
+
+
+def default_prefill_out() -> str | None:
+    """The output directory does not exist yet, so judge the root it sits in."""
+    return resolve_host_path(
+        PREFILL_OUT_ENV, PREFILL_OUT_HISTORICAL_PATH,
+        probe=PREFILL_OUT_HISTORICAL_ROOT,
+    )
 
 
 def _parse_corpus_arg(s: str) -> tuple[Path, int]:
@@ -275,9 +303,9 @@ def train_on_corpus(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model-dir", default="/thearray/git/moe-mla/Qwen3.6-35B-A3B")
+    ap.add_argument("--model-dir", default=default_model_dir())
     ap.add_argument("--engram-patch-dir",
-                    default="/thearray/git/moe-mla/engram_converted_l3_l19",
+                    default=default_engram_patch_dir(),
                     help="patch that defines the Engram architecture "
                          "(vocab sizes, dim, layer ids, hash config).")
     ap.add_argument("--resume-from-ckpt", default="",
@@ -300,11 +328,25 @@ def main() -> None:
     ap.add_argument("--save-every", type=int, default=2000,
                     help="save a checkpoint every N steps within a corpus.")
     ap.add_argument("--seed", type=int, default=4242)
-    ap.add_argument("--out", default="/thearray/git/moe-mla/engram_prefilled")
+    ap.add_argument("--out", default=default_prefill_out())
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default="bf16",
                     help="dtype for Engram tables. bf16 halves memory; fp32 is safer.")
     args = ap.parse_args()
+
+    # Resolved rather than defaulted, so a host without these artifacts is told
+    # which flag to pass instead of failing on a path it never chose.
+    args.model_dir = require_host_path(
+        args.model_dir, field="model_dir", env_var=MODEL_DIR_ENV,
+        flag="model-dir",
+    )
+    args.engram_patch_dir = require_host_path(
+        args.engram_patch_dir, field="engram_patch_dir",
+        env_var=ENGRAM_PATCH_DIR_ENV, flag="engram-patch-dir",
+    )
+    args.out = require_host_path(
+        args.out, field="out", env_var=PREFILL_OUT_ENV, flag="out",
+    )
 
     if not args.corpus:
         raise SystemExit("at least one --corpus is required")
@@ -313,8 +355,9 @@ def main() -> None:
     corpora = [_parse_corpus_arg(c) for c in args.corpus]
 
     # ---- Engram config ----
+    engram_module = require_engram_ext()
     manifest = json.loads((Path(args.engram_patch_dir) / "manifest.json").read_text())
-    cfg = EngramConfig(**manifest["engram_config"])
+    cfg = engram_module.EngramConfig(**manifest["engram_config"])
     hidden_size = manifest["hidden_size"]
     if args.seq_len < cfg.max_ngram_size:
         raise SystemExit(f"--seq-len ({args.seq_len}) must be >= max_ngram_size "
@@ -329,7 +372,8 @@ def main() -> None:
     engram_modules: dict[int, EngramModule] = {}
     hasher_per_layer: dict[int, NgramHashMapping] = {}
     for li in cfg.layer_ids:
-        em = EngramModule(layer_id=li, cfg=cfg, hidden_size=hidden_size)
+        em = engram_module.EngramModule(
+            layer_id=li, cfg=cfg, hidden_size=hidden_size)
         em = em.to(device=args.device, dtype=dtype)
         engram_modules[li] = em
         hasher_per_layer[li] = em.hash_mapping

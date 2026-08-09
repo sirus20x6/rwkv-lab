@@ -15,17 +15,52 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .load_mla_engram import load_mla_engram
+from .host_paths import require_host_path, resolve_host_path
+from .load_mla_engram import ENGRAM_PATCH_DIR_ENV, load_mla_engram
 from .train_mla import chunked_ce
+
+
+# Host-specific artifact locations; see rwkv_lab.host_paths for the resolution
+# policy and the README section "Host-specific path defaults".
+#
+# The Engram patch is the same artifact load_mla_engram loads — this module
+# only hands its own flag to that loader — so it shares that loader's variable
+# and keeps only its own historical vintage. The MLA checkpoint is a run
+# output, one particular trained step under the maintainer's run root, so it
+# gets a variable of its own; nothing else in the tree names it.
+ENGRAM_PATCH_DIR_HISTORICAL_PATH = "/thearray/git/moe-mla/engram_converted_v2"
+MLA_CKPT_ENV = "MOE_MLA_CKPT"
+MLA_CKPT_HISTORICAL_PATH = (
+    "/thearray/git/moe-mla/runs/mla_ft_50m_v4/step_001735/ckpt.pt"
+)
+
+
+def default_engram_patch_dir() -> str | None:
+    return resolve_host_path(
+        ENGRAM_PATCH_DIR_ENV, ENGRAM_PATCH_DIR_HISTORICAL_PATH
+    )
+
+
+def default_mla_ckpt() -> str | None:
+    return resolve_host_path(MLA_CKPT_ENV, MLA_CKPT_HISTORICAL_PATH)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mla-ckpt", default="/thearray/git/moe-mla/runs/mla_ft_50m_v4/step_001735/ckpt.pt")
-    ap.add_argument("--engram-patch-dir", default="/thearray/git/moe-mla/engram_converted_v2")
+    ap.add_argument("--mla-ckpt", default=default_mla_ckpt())
+    ap.add_argument("--engram-patch-dir", default=default_engram_patch_dir())
     ap.add_argument("--seq-len", type=int, default=512)
     ap.add_argument("--batch-size", type=int, default=1)
     args = ap.parse_args()
+
+    args.mla_ckpt = require_host_path(
+        args.mla_ckpt, field="mla_ckpt", env_var=MLA_CKPT_ENV,
+        flag="mla-ckpt",
+    )
+    args.engram_patch_dir = require_host_path(
+        args.engram_patch_dir, field="engram_patch_dir",
+        env_var=ENGRAM_PATCH_DIR_ENV, flag="engram-patch-dir",
+    )
 
     print("Loading MLA + Engram model...")
     t0 = time.time()
