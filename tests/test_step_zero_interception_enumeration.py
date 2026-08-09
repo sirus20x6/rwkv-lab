@@ -120,8 +120,6 @@ UNMAPPED_INTERCEPTION: dict[str, str] = {
         "mage_flow_terminal_train.py mutates without reaching the boundary",
     "rwkv_lab.qwen_ao3.v1.Train":
         "qwen_ao3_cpt.py mutates without reaching the boundary",
-    "rwkv_lab.hf_multimodal_sft.v1.Train":
-        "hf_multimodal_sft.py mutates via stack.optimizer.step() with no boundary",
     "rwkv_lab.rwkv_posttraining.v1.Train":
         "posttrain_train.py mutates without reaching the boundary",
     "rwkv_lab.rwkv_rlvr.v1.Train":

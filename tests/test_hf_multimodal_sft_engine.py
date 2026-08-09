@@ -1290,10 +1290,19 @@ def _engine_harness(tmp_path, *, schedule_configuration=None, maximum_steps=1):
             fail_before_step=0,
             patch=None,
             patch_at=None,
+            step_zero_eval_gate_required=True,
+            step_zero_eval_gate_satisfied=False,
+            attempt_baseline_optimizer_step=0,
         ):
             self.events = []
             self.safe_points = []
-            self.trajectory = []
+            # The gate the controller arms for a recipe that declares an
+            # eval-examples output. `satisfied` starts false: this attempt owes
+            # its own baseline evidence, and the fake flips it when the engine
+            # publishes, exactly as the controller does from its journal.
+            self.step_zero_eval_gate_required = step_zero_eval_gate_required
+            self.step_zero_eval_gate_satisfied = step_zero_eval_gate_satisfied
+            self.attempt_baseline_optimizer_step = attempt_baseline_optimizer_step
             self.fail_gallery = fail_gallery
             self.fail_artifact = fail_artifact
             # Interrupts the loop at the start of the named optimizer step, so
@@ -1327,27 +1336,19 @@ def _engine_harness(tmp_path, *, schedule_configuration=None, maximum_steps=1):
             self.safe_points.append(("microbatch", step))
             applier({}, self._assignments("microbatch", step))
 
-        def optimizer_step(self, step, applier):
-            # Mutation sentinel. The real controller refuses an optimizer step
-            # past the attempt baseline until the typed evidence is durable, so
-            # an engine that reached this point without having published it is
-            # already wrong here rather than only in production.
-            assert any(
-                kind == "eval_examples" for kind, *_ in self.events
+        def pre_optimizer_step(self, step, applier):
+            # The real controller refuses an optimizer step past the attempt
+            # baseline until the typed evidence is durable, so an engine that
+            # reached this point without having published it is already wrong
+            # here rather than only in production.
+            # Satisfaction comes either from this attempt publishing above or
+            # from the controller having replayed durable evidence on reconnect,
+            # which is what the real gate accepts too.
+            assert not self.step_zero_eval_gate_required or (
+                self.step_zero_eval_gate_satisfied
             ), "optimizer step reached before attempt-baseline eval-examples"
-            self.safe_points.append(("optimizer_step", step))
-            # Sampled immediately after the optimizer mutated, so a trajectory
-            # comparison sees the exact post-update state at every step.
-            self.trajectory.append(
-                (
-                    step,
-                    model.head.weight.detach().clone(),
-                    model.embedding.weight.detach().clone(),
-                    torch.random.get_rng_state().clone(),
-                    random.getstate(),
-                )
-            )
-            applier({}, self._assignments("optimizer_step", step))
+            self.safe_points.append(("pre_optimizer_step", step))
+            applier({}, self._assignments("pre_optimizer_step", step))
 
         def evaluation(self, step, applier):
             self.safe_points.append(("evaluation", step))
@@ -1380,6 +1381,7 @@ def _engine_harness(tmp_path, *, schedule_configuration=None, maximum_steps=1):
             self.events.append(
                 ("eval_examples", request, model.head.weight.detach().clone())
             )
+            self.step_zero_eval_gate_satisfied = True
             return SimpleNamespace(
                 artifact_id=f"eval-examples-{request.optimizer_step}",
                 manifest_sha256="sha256:" + "e" * 64,
@@ -1406,6 +1408,7 @@ def _engine_harness(tmp_path, *, schedule_configuration=None, maximum_steps=1):
     class Observability:
         def __init__(self):
             self.metrics = []
+            self.trajectory = []
 
         def publish_if_declared(self, name, value, *, step):
             if name == "eval.test_loss":
@@ -1413,6 +1416,19 @@ def _engine_harness(tmp_path, *, schedule_configuration=None, maximum_steps=1):
             self.metrics.append((name, value, step))
 
         def optimizer_step(self, step, phase):
+            # The engine's first call after the optimizer mutated, so a
+            # trajectory comparison sees the exact post-update state at every
+            # step. It is sampled here rather than at the controller safe point
+            # because that point is now crossed *before* the mutation.
+            self.trajectory.append(
+                (
+                    step,
+                    model.head.weight.detach().clone(),
+                    model.embedding.weight.detach().clone(),
+                    torch.random.get_rng_state().clone(),
+                    random.getstate(),
+                )
+            )
             return None
 
     return SimpleNamespace(
@@ -1481,7 +1497,9 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
     )
     assert final_checkpoint_state["runtime_state"]["finalization_pending"] is True
     before_eval_only_recovery = model.head.weight.detach().clone()
-    final_controls = Controls()
+    # The finalization attempt resumes the step-1 checkpoint, so the controller
+    # gates it there rather than at zero.
+    final_controls = Controls(attempt_baseline_optimizer_step=1)
     final_observability = Observability()
     step = run_hf_multimodal_sft(
         invocation=SimpleNamespace(
@@ -1684,7 +1702,7 @@ def test_generic_causal_loop_publishes_step_zero_before_optimizer_mutation(tmp_p
         ("evaluation", 0),
         ("evaluation", 0),
         ("microbatch", 1),
-        ("optimizer_step", 1),
+        ("pre_optimizer_step", 1),
         ("evaluation", 1),
         ("checkpoint", 1),
         ("evaluation", 1),
