@@ -1,5 +1,7 @@
 #include "trainvm/linux_nvidia_inventory.hpp"
 
+#include "trainvm/document.hpp"
+
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -1071,7 +1073,9 @@ public:
         proc.read("driver/nvidia/version", kMaximumFileBytes);
     const auto boot_end = proc.read("sys/kernel/random/boot_id", 256U);
     const auto host_end = root.read("etc/machine-id", 256U);
-    result.host_id = host ? trim_ascii(*host) : std::string{};
+    result.host_id = host
+                         ? "sha256:" + sha256_hex(trim_ascii(*host))
+                         : std::string{};
     result.boot_id = boot_begin ? trim_ascii(*boot_begin) : std::string{};
     result.nvml_loaded = first.loaded;
     result.nvml_complete = first.complete && second.complete;
@@ -1349,7 +1353,16 @@ LinuxNvidiaInventoryCollector::LinuxNvidiaInventoryCollector(
       config.maximum_capture_duration_ns == 0U ||
       config.maximum_capture_duration_ns > 60'000'000'000ULL ||
       config.maximum_snapshot_age_ns == 0U ||
-      config.maximum_snapshot_age_ns > 60'000'000'000ULL)
+      config.maximum_snapshot_age_ns > 60'000'000'000ULL ||
+      config.authorized_display_gpu_ids.size() > config.maximum_devices ||
+      !std::ranges::is_sorted(config.authorized_display_gpu_ids) ||
+      std::adjacent_find(config.authorized_display_gpu_ids.begin(),
+                         config.authorized_display_gpu_ids.end()) !=
+          config.authorized_display_gpu_ids.end() ||
+      !std::ranges::all_of(config.authorized_display_gpu_ids,
+                           [](std::string_view value) {
+                             return canonical_uuid(value, "GPU-");
+                           }))
     throw HostResourceError("Linux NVIDIA inventory config is invalid");
   implementation_->config = std::move(config);
   implementation_->kernel =
@@ -1581,6 +1594,15 @@ HostKernelSnapshot LinuxNvidiaInventoryCollector::capture_inventory() {
         resource.labels.emplace("display", "active");
       else if (device.display_mode_enabled && *device.display_mode_enabled)
         resource.labels.emplace("display", "mode-enabled");
+      if (((device.display_active && *device.display_active) ||
+           (device.display_mode_enabled && *device.display_mode_enabled)) &&
+          std::ranges::binary_search(
+              implementation_->config.authorized_display_gpu_ids,
+              device.uuid)) {
+        resource.labels.emplace(
+            std::string(kLinuxNvidiaDisplaySharingLabel),
+            std::string(kLinuxNvidiaDisplaySharingAuthorized));
+      }
       if (device.current_mig_mode && *device.current_mig_mode != 0U)
         resource.labels.emplace("partition-parent", "nonselectable");
       if (resource.disposition == ResourceObservationDisposition::occupied)

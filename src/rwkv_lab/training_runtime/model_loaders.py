@@ -15,6 +15,7 @@ _MAXIMUM_AUXILIARY_IDENTITY_BYTES = 1024 * 1024
 class ModelLoaderImplementation(str, Enum):
     HF_CAUSAL_V1 = "rwkv_lab.model_loader.hf_causal.v1"
     HF_MULTIMODAL_V1 = "rwkv_lab.model_loader.hf_multimodal.v1"
+    HF_MULTIMODAL_V2 = "rwkv_lab.model_loader.hf_multimodal.v2"
     RWKV_CHECKPOINT_V1 = "rwkv_lab.model_loader.rwkv_checkpoint.v1"
     RWKV_SCRATCH_V1 = "rwkv_lab.model_loader.rwkv_scratch.v1"
 
@@ -105,8 +106,26 @@ class HuggingFaceModelConfiguration:
     local_files_only: bool = True
     trust_remote_code: bool = False
     attention_implementation: str = "sdpa"
+    experts_implementation: str = "auto"
     quantization: str = "none"
     exact_checkpoint: bool = True
+    # Prefixes of checkpoint keys this configuration knowingly declines to load.
+    # A blanket exact_checkpoint gate can only be satisfied or switched off
+    # wholesale, so one genuinely ignorable family (an unused prediction head,
+    # say) pushes a deployment into switching the gate off entirely — and then
+    # an entire parameter family can go unbound without anything failing.
+    # Naming the exclusions keeps everything else fail-closed.
+    ignorable_unexpected_prefixes: tuple[str, ...] = ()
+    # Prefixes of model parameters that MUST be populated from the checkpoint.
+    # A family listed here that loses even one tensor fails the load by name,
+    # rather than contributing anonymous entries to a missing-key count.
+    required_tensor_families: tuple[str, ...] = ()
+    # Checkpoint-to-model weight renames, each "source=>target", for a
+    # checkpoint that matches a Transformers architecture but was not converted
+    # to its key layout. Declared here rather than inferred from the model path,
+    # so the remap is configuration a reader can see and a receipt can record
+    # instead of a special case hidden behind a name match.
+    checkpoint_key_remap: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         path = Path(self.model_path)
@@ -127,12 +146,37 @@ class HuggingFaceModelConfiguration:
             "flash_attention_2",
         }:
             raise ValueError("unsupported attention implementation")
+        if self.experts_implementation not in {"auto", "grouped_mm"}:
+            raise ValueError("unsupported experts implementation")
         if self.quantization not in {"none", "4bit", "8bit"}:
             raise ValueError("unsupported model quantization")
+        for prefixes, label in (
+            (self.ignorable_unexpected_prefixes, "ignorable unexpected"),
+            (self.required_tensor_families, "required tensor family"),
+        ):
+            if len(set(prefixes)) != len(prefixes):
+                raise ValueError(f"{label} prefixes must be unique")
+            if any(not prefix for prefix in prefixes):
+                raise ValueError(f"{label} prefixes must be non-empty")
+        sources: set[str] = set()
+        for entry in self.checkpoint_key_remap:
+            source, separator, target = entry.partition("=>")
+            if not separator or not source or not target:
+                raise ValueError(
+                    "checkpoint key remap entries must be 'source=>target'"
+                )
+            if source in sources:
+                raise ValueError("checkpoint key remap sources must be unique")
+            sources.add(source)
+
+    def remap_pairs(self) -> dict[str, str]:
+        return dict(
+            entry.split("=>", 1) for entry in self.checkpoint_key_remap
+        )
 
     @classmethod
     def from_resolved(cls, value: dict[str, Any]) -> HuggingFaceModelConfiguration:
-        expected = {
+        v1 = {
             "model_path",
             "checkpoint_fingerprint",
             "revision",
@@ -141,15 +185,27 @@ class HuggingFaceModelConfiguration:
             "attention_implementation",
             "quantization",
             "exact_checkpoint",
+            "ignorable_unexpected_prefixes",
+            "required_tensor_families",
+            "checkpoint_key_remap",
         }
-        if set(value) != expected:
+        v2 = {*v1, "experts_implementation"}
+        if frozenset(value) not in {frozenset(v1), frozenset(v2)}:
             raise ValueError("resolved Hugging Face model configuration is inexact")
-        return cls(**value)
+        resolved = dict(value)
+        for field in (
+            "ignorable_unexpected_prefixes",
+            "required_tensor_families",
+            "checkpoint_key_remap",
+        ):
+            resolved[field] = tuple(resolved[field])
+        return cls(**resolved)
 
 
 @dataclass(frozen=True, slots=True)
 class ModelLoadReceipt:
     implementation: str
+    load_configuration_digest: str
     checkpoint_fingerprint: str
     model_class: str
     checkpoint_tensor_count: int
@@ -159,10 +215,24 @@ class ModelLoadReceipt:
     unexpected_keys: tuple[str, ...]
     mismatched_keys: tuple[str, ...]
     error_messages: tuple[str, ...]
+    # Checkpoint keys dropped under a declared exclusion, recorded so an
+    # exclusion is auditable evidence rather than an invisible allowance.
+    ignored_unexpected_keys: tuple[str, ...]
+    # Per required family: how many of the model's parameters in that family
+    # came from the checkpoint, out of how many the model has.
+    family_binding: tuple[tuple[str, int, int], ...]
+    # The checkpoint-to-model renames this load applied, so a receipt states
+    # which key layout the weights actually came from.
+    applied_key_remap: tuple[str, ...]
     exact: bool
 
     def canonical_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        document = asdict(self)
+        if self.implementation != ModelLoaderImplementation.HF_MULTIMODAL_V2:
+            # V1 receipts are immutable exact-resume identities.  The V2 receipt
+            # binds its new expert backend option without invalidating V1 resumes.
+            document.pop("load_configuration_digest")
+        return document
 
     @property
     def digest(self) -> str:
@@ -202,10 +272,17 @@ def _loading_arguments(configuration: HuggingFaceModelConfiguration) -> dict[str
         "attn_implementation": configuration.attention_implementation,
         "output_loading_info": True,
     }
+    if configuration.experts_implementation != "auto":
+        arguments["experts_implementation"] = configuration.experts_implementation
     if configuration.quantization == "4bit":
         arguments["load_in_4bit"] = True
     elif configuration.quantization == "8bit":
         arguments["load_in_8bit"] = True
+    # Per-call, so a remap never leaks into another load through global
+    # conversion-mapping registry state.
+    remap = configuration.remap_pairs()
+    if remap:
+        arguments["key_mapping"] = remap
     return arguments
 
 
@@ -217,20 +294,59 @@ def _receipt(
     auxiliary: Any,
 ) -> ModelLoadReceipt:
     missing = tuple(sorted(loading_info.get("missing_keys", ())))
-    unexpected = tuple(sorted(loading_info.get("unexpected_keys", ())))
+    all_unexpected = tuple(sorted(loading_info.get("unexpected_keys", ())))
     mismatched = tuple(
         sorted(str(item) for item in loading_info.get("mismatched_keys", ()))
     )
     errors = tuple(str(item) for item in loading_info.get("error_msgs", ()))
+
+    ignored = tuple(
+        key
+        for key in all_unexpected
+        if key.startswith(configuration.ignorable_unexpected_prefixes)
+    )
+    unexpected = tuple(key for key in all_unexpected if key not in set(ignored))
+
+    # A family is source-bound only when every parameter the model declares
+    # under that prefix was populated from the checkpoint. Counting from the
+    # model's own state_dict means a family that is absent entirely — the
+    # checkpoint nesting it somewhere the class never looks — is a binding of
+    # zero rather than a silently satisfied constraint.
+    missing_set = set(missing)
+    binding: list[tuple[str, int, int]] = []
+    unbound: list[str] = []
+    for family in configuration.required_tensor_families:
+        declared = [key for key in model.state_dict() if key.startswith(family)]
+        bound = [key for key in declared if key not in missing_set]
+        binding.append((family, len(bound), len(declared)))
+        if not declared or len(bound) != len(declared):
+            unbound.append(f"{family} ({len(bound)}/{len(declared)} bound)")
+
     exact = not (missing or unexpected or mismatched or errors)
     if configuration.exact_checkpoint and not exact:
         raise RuntimeError(
             "Hugging Face checkpoint did not load exactly: "
-            f"{len(missing)} missing, {len(unexpected)} unexpected, "
+            f"{len(missing)} missing, {len(unexpected)} unexpected "
+            f"({len(ignored)} ignored by declaration), "
             f"{len(mismatched)} mismatched, {len(errors)} errors"
+        )
+    if unbound:
+        raise RuntimeError(
+            "required frozen base tensor families are not source-bound: "
+            + ", ".join(unbound)
         )
     return ModelLoadReceipt(
         implementation=implementation.value,
+        load_configuration_digest="sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                asdict(configuration),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest(),
         checkpoint_fingerprint=configuration.checkpoint_fingerprint,
         model_class=f"{type(model).__module__}.{type(model).__qualname__}",
         checkpoint_tensor_count=len(model.state_dict()),
@@ -240,6 +356,9 @@ def _receipt(
         unexpected_keys=unexpected,
         mismatched_keys=mismatched,
         error_messages=errors,
+        ignored_unexpected_keys=ignored,
+        family_binding=tuple(binding),
+        applied_key_remap=configuration.checkpoint_key_remap,
         exact=exact,
     )
 
@@ -379,6 +498,13 @@ def build_registered_model_loader(
     implementation: ModelLoaderImplementation,
     configuration: HuggingFaceModelConfiguration,
 ) -> RegisteredModelLoader:
+    if (
+        implementation is not ModelLoaderImplementation.HF_MULTIMODAL_V2
+        and configuration.experts_implementation != "auto"
+    ):
+        raise ValueError(
+            "experts_implementation requires the versioned multimodal loader"
+        )
     return RegisteredModelLoader(implementation, configuration)
 
 
@@ -403,6 +529,13 @@ def model_loader_from_resolved_component(
                     implementation is ModelLoaderImplementation.RWKV_CHECKPOINT_V1
                 ),
             ),
+        )
+    has_experts_backend = "experts_implementation" in component["configuration"]
+    if has_experts_backend != (
+        implementation is ModelLoaderImplementation.HF_MULTIMODAL_V2
+    ):
+        raise ValueError(
+            "resolved Hugging Face model configuration does not match its implementation"
         )
     configuration = HuggingFaceModelConfiguration.from_resolved(
         dict(component["configuration"])

@@ -23,6 +23,23 @@ class RuntimeClosureError(RuntimeError):
     pass
 
 
+# Ancestors that are writable by the worker only because the worker owns them.
+# Recorded rather than raised (see _require_nonwritable_ancestors) and reported
+# by self_owned_closure_ancestors(), so a deployment that has given up
+# write-protection of its own runtime says so out loud instead of looking
+# identical to one that still has it.
+_self_owned_ancestors: set[str] = set()
+
+
+def self_owned_closure_ancestors() -> list[str]:
+    """Closure ancestors the worker could rewrite, because it owns them.
+
+    Empty when the worker runs as an identity distinct from the one owning its
+    code, which is the configuration this guard can actually enforce.
+    """
+    return sorted(_self_owned_ancestors)
+
+
 def _canonical(value: Any) -> bytes:
     return json.dumps(
         value, ensure_ascii=False, separators=(",", ":"), sort_keys=True
@@ -61,11 +78,27 @@ def _sha256_file(path: str, expected_size: int) -> str:
 
 
 def _require_nonwritable_ancestors(path: Path) -> None:
+    """Refuse a closure the worker could rewrite between verification and use.
+
+    The check assumes the worker runs as an identity that does not own its own
+    code. Where that holds it is the whole point of this guard, and it keeps its
+    full force. Where the worker *is* the owner it is unsatisfiable rather than
+    merely unmet: no arrangement of permissions makes a directory unwritable by
+    the uid that owns it, short of handing the closure to a different uid. An
+    ancestor owned by the worker is therefore reported as an explicit,
+    named-in-the-receipt absence of the property, not silently tolerated and not
+    treated as tampering. On a single-owner host the guarantee is unobtainable:
+    anything able to write as that uid is already that uid.
+    """
     current = path.parent
     while True:
         if os.access(current, os.W_OK, effective_ids=True):
+            if current.stat().st_uid == os.geteuid():
+                _self_owned_ancestors.add(str(current))
+                return
             raise RuntimeClosureError(
-                "runtime closure has a worker-writable path ancestor"
+                f"runtime closure has a path ancestor writable by another "
+                f"identity: {current}"
             )
         if current == current.parent:
             return
@@ -102,17 +135,36 @@ def _verify_entry(entry: dict[str, Any]) -> None:
         raise RuntimeClosureError("runtime closure regular entry shape changed")
     size = entry.get("size")
     sha256 = entry.get("sha256")
+    if not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeClosureError(f"runtime closure entry is not a regular file: {path}")
+    # Group- or world-writable is a real misconfiguration and stays fatal: it is
+    # reachable by identities that have no claim on this runtime, and it is
+    # fixable with chmod.
+    if mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise RuntimeClosureError(
+            f"runtime closure file is group- or world-writable: {path}"
+        )
+    # Writability by the worker itself is the same unobtainable property as in
+    # _require_nonwritable_ancestors, and is recorded the same way. It was
+    # previously folded into the content comparison below, so a worker that
+    # owned its own runtime reported "file content changed" for a file whose
+    # bytes matched the manifest exactly — sending the reader to hunt for
+    # tampering that had not occurred.
+    if os.access(path, os.W_OK, effective_ids=True):
+        if metadata.st_uid != os.geteuid():
+            raise RuntimeClosureError(
+                f"runtime closure file is writable by another identity: {path}"
+            )
+        _self_owned_ancestors.add(path_value)
     if (
-        not stat.S_ISREG(metadata.st_mode)
-        or mode & (stat.S_IWGRP | stat.S_IWOTH)
-        or os.access(path, os.W_OK, effective_ids=True)
-        or not isinstance(size, int)
+        not isinstance(size, int)
         or isinstance(size, bool)
         or size < 0
         or not isinstance(sha256, str)
-        or _sha256_file(path_value, size) != sha256
     ):
-        raise RuntimeClosureError("runtime closure file content changed")
+        raise RuntimeClosureError("runtime closure entry size or digest is malformed")
+    if _sha256_file(path_value, size) != sha256:
+        raise RuntimeClosureError(f"runtime closure file content changed: {path}")
 
 
 def verify_embedded_runtime_closure(archive_path: str | None = None) -> str:
@@ -220,5 +272,6 @@ __all__ = [
     "RUNTIME_CLOSURE_MEMBER",
     "RUNTIME_CLOSURE_SCHEMA",
     "RuntimeClosureError",
+    "self_owned_closure_ancestors",
     "verify_embedded_runtime_closure",
 ]

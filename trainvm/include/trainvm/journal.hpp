@@ -152,6 +152,18 @@ struct JournalAuthoritySnapshot final {
   bool operator==(const JournalAuthoritySnapshot&) const = default;
 };
 
+// Whether a value is a journal event hash: 64 lowercase hex characters, with
+// no algorithm prefix. This is the form the journal writes and enforces on its
+// own chain head, and it is deliberately not the namespaced "sha256:..." form
+// used for content digests such as host_id.
+//
+// Exported because a consumer that validates this field must use the producer's
+// rule. hostd's logical-fence verifier applied the namespaced predicate to it
+// and rejected every well-formed hash, which failed each host grant with
+// "journal logical-fence evidence is stale or inexact" until the controller's
+// lease expired.
+[[nodiscard]] bool journal_event_hash_valid(std::string_view value);
+
 // One consistent SQLite read snapshot of the retained authority and one live
 // boot-scoped logical fence. It cannot be constructed from an arbitrary path.
 struct JournalLogicalFenceSnapshot final {
@@ -228,6 +240,15 @@ enum class HostGrantEnforcement {
   legacy_process_free_test,
 };
 
+// A privileged observer such as hostd must be able to attest the established
+// journal without becoming a second journal writer.  Read-only access refuses
+// creation and migration, requires the current exact schema and authority
+// metadata, and verifies the durable event/projection chains before use.
+enum class JournalAccessMode {
+  read_write,
+  read_only,
+};
+
 class Journal {
 public:
   explicit Journal(
@@ -238,7 +259,8 @@ public:
       std::optional<HostIdentity> expected_host_grant_authority =
           std::nullopt,
       std::shared_ptr<SqliteFilesystemAuthority> filesystem_authority = {},
-      bool require_exclusive_wal = false);
+      bool require_exclusive_wal = false,
+      JournalAccessMode access_mode = JournalAccessMode::read_write);
   ~Journal();
 
   Journal(const Journal&) = delete;
@@ -415,6 +437,7 @@ public:
   std::optional<JournalFileIdentity> expected_file_;
   std::shared_ptr<SqliteFilesystemAuthority> filesystem_authority_;
   bool exclusive_wal_{};
+  JournalAccessMode access_mode_{JournalAccessMode::read_write};
   HostGrantEnforcement host_grant_enforcement_;
   std::optional<HostIdentity> expected_host_grant_authority_;
   mutable std::atomic<bool> authority_poisoned_{false};
@@ -432,6 +455,7 @@ public:
                          const std::string& result_event_id,
                          const std::vector<Event>& events);
   void initialize();
+  void initialize_read_only();
   void require_file_identity(const JournalFileIdentity& expected) const;
   void require_namespace_identity(const JournalFileIdentity& expected) const;
   void require_attested_authority() const;

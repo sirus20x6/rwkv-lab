@@ -2,6 +2,7 @@
 #include "trainvm/controller.hpp"
 #include "trainvm/control.hpp"
 #include "trainvm/document.hpp"
+#include "trainvm/eval_examples_contract.hpp"
 #include "trainvm/fake_worker.hpp"
 #include "trainvm/fsm.hpp"
 #include "trainvm/host_launch.hpp"
@@ -41,6 +42,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -3148,6 +3150,47 @@ void test_authority_lock_file_identity() {
   std::filesystem::remove_all(directory);
 }
 
+void test_read_only_journal_observer() {
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-journal-read-only-observer-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  std::filesystem::permissions(
+      directory, std::filesystem::perms::owner_all,
+      std::filesystem::perm_options::replace);
+  const auto database = directory / "journal.db";
+  {
+    trainvm::AuthorityLock authority(database);
+    trainvm::Journal writer(authority.journal_path(),
+                            authority.journal_identity());
+    const std::string identity = writer.journal_id();
+
+    trainvm::Journal observer(
+        authority.journal_path(), authority.journal_identity(),
+        trainvm::HostGrantEnforcement::required,
+        trainvm::HostIdentity{
+            .host_id = "sha256:" + std::string(64U, 'a'),
+            .boot_id = kTestBootId},
+        {}, false, trainvm::JournalAccessMode::read_only);
+    const auto snapshot = observer.journal_authority_snapshot();
+    check(observer.journal_id() == identity && observer.event_count() == 0U &&
+              snapshot.journal_id == identity,
+          "read-only journal observer attests an established live writer");
+
+    bool mutation_refused = false;
+    try {
+      (void)observer.rebuild_projections();
+    } catch (const std::runtime_error&) {
+      mutation_refused = true;
+    }
+    check(mutation_refused && observer.event_count() == 0U,
+          "read-only journal observer cannot mutate projections");
+  }
+  std::filesystem::remove_all(directory);
+}
+
 void test_control_command_journal() {
   auto compiled = trainvm::compile_document(load_fixture());
   check(compiled.valid(), "fixture required by control command journal compiles");
@@ -4678,8 +4721,11 @@ void test_worker_control_service_boundary() {
                 !connection.welcome.canonical_invocation_json().empty() &&
                 connection.welcome.invocation_digest().starts_with(
                     "sha256:") &&
+                connection.attempt_baseline_optimizer_step == 0U &&
+                connection.welcome.attempt_baseline_optimizer_step() == 0U &&
                 observer.event_count() == 13U,
-            "WorkerControl returns Welcome only after readiness and dispatch are durable");
+            "WorkerControl returns Welcome with a fresh-attempt baseline only "
+            "after readiness and dispatch are durable");
     }
     if (!open.ok()) {
       std::filesystem::remove_all(directory);
@@ -4699,6 +4745,24 @@ void test_worker_control_service_boundary() {
           check(status.error_code() == expected && after.event_count() == count,
                 message);
         };
+
+    const nlohmann::json ordinary_publishes = connection.publishes;
+    connection.publishes = {
+        {"eval_examples",
+         {{"logical_name", "eval_examples"},
+          {"declaration",
+           {{"required", true},
+            {"type", "eval_examples"},
+            {"schema", trainvm::kEvalExamplesSchema}}}}},
+    };
+    auto baseline_completion = canonical;
+    baseline_completion.set_optimizer_step(
+        connection.attempt_baseline_optimizer_step);
+    reject_without_mutation(
+        baseline_completion, grpc::StatusCode::FAILED_PRECONDITION,
+        "WorkerControl blocks successful completion at the attempt baseline "
+        "until its evaluation evidence is durable");
+    connection.publishes = ordinary_publishes;
 
     auto malformed = canonical;
     malformed.set_canonical_json_payload("{not-json");
@@ -13166,11 +13230,76 @@ void test_service_orders_physical_before_logical_release() {
             invocation.at("resume").at("checkpoint")
                     .at("producer_attempt_id") == pause_launch.attempt_id &&
             invocation.at("resume").at("optimizer_step") == 9U &&
+            replacement_connection.attempt_baseline_optimizer_step == 9U &&
+            replacement_connection.welcome
+                    .attempt_baseline_optimizer_step() == 9U &&
             invocation.at("resume").at("pause_command_id") ==
                 pause_command.command.command_id &&
             invocation.at("resume").at("resume_command_id") ==
                 resume_command.command.command_id,
         "replacement worker welcome is bound to the exact pause checkpoint and command lineage");
+
+  const nlohmann::json replacement_publishes =
+      replacement_connection.publishes;
+  replacement_connection.publishes["eval_examples"] = {
+      {"logical_name", "eval_examples"},
+      {"declaration",
+       {{"required", true},
+        {"type", "eval_examples"},
+        {"schema", trainvm::kEvalExamplesSchema}}},
+  };
+  const auto baseline_heartbeat = [&](std::uint64_t optimizer_step) {
+    trainvm::v1::WorkerHeartbeat heartbeat;
+    heartbeat.set_worker_sequence(1U);
+    heartbeat.set_optimizer_step(optimizer_step);
+    heartbeat.set_phase("train");
+    heartbeat.mutable_observed_at()->set_seconds(11);
+    std::uint64_t acknowledged = 0U;
+    const std::size_t before = service.journal_.event_count();
+    const grpc::Status status = service.record_worker_heartbeat(
+        heartbeat, replacement_connection, acknowledged);
+    return std::tuple{status, acknowledged, before,
+                      service.journal_.event_count()};
+  };
+  const auto [backward_status, backward_ack, before_backward,
+              after_backward] = baseline_heartbeat(8U);
+  const auto [premature_status, premature_ack, before_premature,
+              after_premature] = baseline_heartbeat(10U);
+  trainvm::v1::MetricSample baseline_metric;
+  baseline_metric.set_worker_sequence(1U);
+  baseline_metric.set_name("train.loss");
+  baseline_metric.mutable_value()->set_number_value(1.0);
+  baseline_metric.set_unit("dimensionless");
+  baseline_metric.set_step_domain("optimizer_step");
+  baseline_metric.set_step(9U);
+  baseline_metric.set_sample_weight(1.0);
+  baseline_metric.mutable_observed_at()->set_seconds(11);
+  std::uint64_t baseline_ack = 0U;
+  const grpc::Status baseline_status = service.record_worker_metric(
+      baseline_metric, replacement_connection, baseline_ack);
+  trainvm::v1::WorkerHeartbeat still_premature;
+  still_premature.set_worker_sequence(2U);
+  still_premature.set_optimizer_step(10U);
+  still_premature.set_phase("train");
+  still_premature.mutable_observed_at()->set_seconds(11);
+  std::uint64_t still_premature_ack = 0U;
+  const std::size_t before_still_premature = service.journal_.event_count();
+  const grpc::Status still_premature_status = service.record_worker_heartbeat(
+      still_premature, replacement_connection, still_premature_ack);
+  const std::size_t after_still_premature = service.journal_.event_count();
+  check(backward_status.error_code() == grpc::StatusCode::FAILED_PRECONDITION &&
+            backward_ack == 0U && before_backward == after_backward &&
+            premature_status.error_code() ==
+                grpc::StatusCode::FAILED_PRECONDITION &&
+            premature_ack == 0U && before_premature == after_premature &&
+            baseline_status.ok() && baseline_ack == 1U &&
+            still_premature_status.error_code() ==
+                grpc::StatusCode::FAILED_PRECONDITION &&
+            still_premature_ack == 0U &&
+            before_still_premature == after_still_premature,
+        "replacement workers may publish at the immutable baseline but cannot "
+        "regress below it or advance beyond it before gate closure");
+  replacement_connection.publishes = replacement_publishes;
 
   const auto publish_resume_child =
       [&](std::uint64_t worker_sequence, std::string artifact_id,
@@ -13198,7 +13327,7 @@ void test_service_orders_physical_before_logical_release() {
             artifact, replacement_connection, acknowledged);
       };
   const grpc::Status gallery_status = publish_resume_child(
-      1U, "service-resume-gallery", "eval_gallery",
+      2U, "service-resume-gallery", "eval_gallery",
       trainvm::v1::ARTIFACT_KIND_IMAGE_GALLERY,
       "rwkv-lab.eval-gallery.v2");
 
@@ -13213,7 +13342,7 @@ void test_service_orders_physical_before_logical_release() {
   resumed_completion.set_node_id(replacement_connection.identity.node_id);
   resumed_completion.set_attempt_id(
       replacement_connection.identity.attempt_id);
-  resumed_completion.set_worker_sequence(2U);
+  resumed_completion.set_worker_sequence(3U);
   resumed_completion.set_event_type("worker.completed");
   resumed_completion.set_event_version(1U);
   resumed_completion.mutable_wall_time()->set_seconds(11);
@@ -13229,10 +13358,10 @@ void test_service_orders_physical_before_logical_release() {
   const std::size_t after_missing_report = service.journal_.event_count();
 
   const grpc::Status report_status = publish_resume_child(
-      2U, "service-resume-test-eval", "test_eval",
+      3U, "service-resume-test-eval", "test_eval",
       trainvm::v1::ARTIFACT_KIND_REPORT,
       "rwkv-lab.hf-test-caption-evidence-bundle.v1");
-  resumed_completion.set_worker_sequence(3U);
+  resumed_completion.set_worker_sequence(4U);
   trainvm::v1::WorkerReceipt resumed_receipt;
   const std::size_t before_undeclared_terminal =
       service.journal_.event_count();
@@ -13275,6 +13404,7 @@ int main() {
     test_lease_renewal_authority();
     test_authority_clock_integration();
     test_authority_lock_file_identity();
+    test_read_only_journal_observer();
     test_control_command_journal();
     test_command_service();
     test_submission_and_queue_boundary();

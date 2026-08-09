@@ -17,6 +17,11 @@ namespace {
 
 constexpr std::uintmax_t kMaximumDocumentBytes = 256U << 10U;
 
+// Mirrors the exclusion the strict SQLite authority already applies: `nobody`
+// is a shared throwaway identity, so owning an authority as that uid asserts
+// nothing about who the owner is.
+constexpr std::uint64_t kNobodyAuthorityUid = 65534U;
+
 [[noreturn]] void reject(std::string message) {
   throw HostdDaemonConfigurationError(std::move(message));
 }
@@ -112,18 +117,36 @@ nlohmann::json strict_json(std::string text) {
 HostdDaemonConfiguration::HostdDaemonConfiguration(
     HostdDaemonConfigurationDocument document)
     : document_(std::move(document)) {
+  // The authority is deliberately unprivileged. Root bought exactly two things
+  // here — spawning a worker under a foreign uid and installing a BPF device
+  // allowlist — and neither survives on a single-user host, while uid 0's
+  // permission override let hostd write into the controller's journal it is
+  // designed only to observe. Rejecting uid 0 outright keeps a privileged
+  // daemon unrepresentable rather than merely unconfigured.
+  const bool shared_worker_identity =
+      document_.worker_identity.uid == document_.authority_uid &&
+      document_.worker_identity.gid == document_.authority_gid;
+  const bool separated_worker_identity =
+      document_.worker_identity.uid != document_.authority_uid &&
+      document_.worker_identity.gid != document_.authority_gid;
   if (document_.api_version != kHostdDaemonConfigurationApiVersion ||
       !identifier(document_.host_id) || !boot_uuid(document_.boot_id) ||
       !identifier(document_.broker_epoch) ||
       !identifier(document_.broker_instance_id) ||
+      document_.authority_uid == 0U || document_.authority_gid == 0U ||
+      document_.authority_uid == kNobodyAuthorityUid ||
       document_.authority_uid >
           static_cast<std::uint64_t>(std::numeric_limits<uid_t>::max()) ||
       document_.authority_gid >
           static_cast<std::uint64_t>(std::numeric_limits<gid_t>::max()) ||
       document_.worker_identity.uid == 0U ||
       document_.worker_identity.gid == 0U ||
-      document_.worker_identity.uid == document_.authority_uid ||
-      document_.worker_identity.gid == document_.authority_gid ||
+      // Identity sharing is all or nothing: a worker that shares one half of the
+      // authority identity and not the other is neither confined nor attestable.
+      (!shared_worker_identity && !separated_worker_identity) ||
+      shared_worker_identity !=
+          document_.worker_identity.inherit_authority_supplementary_groups
+              .value_or(false) ||
       document_.worker_identity.uid >
           static_cast<std::uint64_t>(std::numeric_limits<uid_t>::max()) ||
       document_.worker_identity.gid >
@@ -145,7 +168,7 @@ HostdDaemonConfiguration::HostdDaemonConfiguration(
       document_.journal_identity.inode == 0U ||
       document_.journal_identity.authority_device == 0U ||
       document_.journal_identity.authority_inode == 0U ||
-      document_.journal_identity.owner_uid != document_.authority_uid) {
+      document_.journal_identity.owner_uid != document_.transport.allowed_uid) {
     reject("hostd daemon authority identity or path is invalid");
   }
   if (document_.inventory.maximum_devices == 0U ||
@@ -162,6 +185,13 @@ HostdDaemonConfiguration::HostdDaemonConfiguration(
       !document_.inventory.trusted_host_namespace ||
       !document_.inventory.trusted_nvml_loader) {
     reject("hostd daemon inventory trust or bounds are invalid");
+  }
+  if (document_.gpu_fault_guard &&
+      (!canonical_absolute(document_.gpu_fault_guard->state_path) ||
+       document_.gpu_fault_guard->maximum_state_age_ns < 1'000'000'000ULL ||
+       document_.gpu_fault_guard->maximum_state_age_ns >
+           60'000'000'000ULL)) {
+    reject("hostd daemon GPU fault guard path or freshness is invalid");
   }
   if (!canonical_absolute(document_.cgroup.root_path) ||
       document_.cgroup.root_unified_path.empty() ||
@@ -287,6 +317,9 @@ SqliteAuthorityConfig HostdDaemonConfiguration::ledger_authority() const {
           .ledger_path = document_.ledger_path,
           .expected_owner_uid = static_cast<uid_t>(document_.authority_uid),
           .expected_owner_gid = static_cast<gid_t>(document_.authority_gid),
+          // The authority owns its ledger as its own unprivileged uid, which is
+          // exactly what the strict grade asserts: a dedicated, non-root,
+          // non-nobody identity matching the effective uid and gid.
           .enforcement_grade = SqliteAuthorityEnforcementGrade::strict_filesystem};
 }
 
@@ -303,7 +336,8 @@ LinuxNvidiaInventoryConfig HostdDaemonConfiguration::inventory() const {
           .maximum_snapshot_age_ns =
               document_.inventory.maximum_snapshot_age_ns,
           .trusted_host_namespace = true,
-          .trusted_nvml_loader = true};
+          .trusted_nvml_loader = true,
+          .authorized_display_gpu_ids = {}};
 }
 
 LinuxCgroupAuthorityConfig HostdDaemonConfiguration::cgroup() const {
@@ -318,6 +352,9 @@ LinuxWorkerCredentialSpec HostdDaemonConfiguration::worker_credentials() const {
       .uid = static_cast<uid_t>(document_.worker_identity.uid),
       .gid = static_cast<gid_t>(document_.worker_identity.gid),
       .no_new_privileges = true,
+      // The runtime seals the observed set when the document declares group
+      // inheritance; configuration alone cannot name it truthfully.
+      .supplementary_gids = {},
   };
 }
 

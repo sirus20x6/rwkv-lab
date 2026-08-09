@@ -200,12 +200,24 @@ class WorkerControlRuntime:
     ) -> tuple[AppliedControlPatch, ...]:
         if not isinstance(safe_point, SafePoint):
             raise TypeError("safe point must be allowlisted")
+        # A launch-gate evaluation runs before any optimizer step, so step 0 is
+        # its correct and only sensible value — the HF adapter requires that
+        # gate on a fresh run and fails closed without it. Every other safe
+        # point names a step that must already have happened, where a zeroth
+        # step is meaningless and stays rejected. Zero is representable
+        # downstream regardless: an immediate control patch is acknowledged with
+        # effective_step 0 a few lines below, and acknowledge_controls defaults
+        # to it.
+        minimum_step = 0 if safe_point is SafePoint.NEXT_EVAL else 1
         if (
             not isinstance(effective_step, int)
             or isinstance(effective_step, bool)
-            or effective_step <= 0
+            or effective_step < minimum_step
         ):
-            raise WorkerControlError("safe-point effective step must be positive")
+            raise WorkerControlError(
+                "safe-point effective step must be at least "
+                f"{minimum_step} for {safe_point.name}, got {effective_step!r}"
+            )
         self._collect()
         applied: list[AppliedControlPatch] = []
         while self._pending:
@@ -626,13 +638,20 @@ class WorkerControlRuntime:
     def optimizer_step(
         self, step: int, applier: ControlApplier
     ) -> tuple[AppliedControlPatch, ...]:
+        attempt_baseline = getattr(
+            self._session, "attempt_baseline_optimizer_step", 0
+        )
+        if step <= attempt_baseline:
+            raise WorkerControlError(
+                "optimizer mutation step must follow the immutable attempt baseline"
+            )
         if (
-            step > 0
-            and getattr(self._session, "step_zero_eval_gate_required", False)
+            getattr(self._session, "step_zero_eval_gate_required", False)
             and not getattr(self._session, "step_zero_eval_gate_satisfied", False)
         ):
             raise WorkerControlError(
-                "optimizer mutation is blocked until durable step-zero scalar and eval-examples evidence"
+                "optimizer mutation is blocked until durable attempt-baseline "
+                "scalar and eval-examples evidence"
             )
         return self.apply(
             SafePoint.NEXT_OPTIMIZER_STEP, effective_step=step, applier=applier

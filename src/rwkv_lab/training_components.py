@@ -141,6 +141,8 @@ from rwkv_lab.training_runtime.normalizations import (
     normalization_from_resolved_component,
 )
 from rwkv_lab.training_runtime.objectives import (
+    CachedReferenceDPOConfiguration,
+    CachedReferenceDPOObjective,
     LinearHeadCrossEntropyConfiguration,
     LinearHeadCrossEntropyObjective,
     ObjectiveImplementation,
@@ -241,6 +243,8 @@ __all__ = [
     "BFloat16PrecisionPolicy",
     "BatchingImplementation",
     "BucketedBatchingConfiguration",
+    "CachedReferenceDPOConfiguration",
+    "CachedReferenceDPOObjective",
     "CausalTokensMapperConfiguration",
     "CheckpointPolicyImplementation",
     "CollatorImplementation",

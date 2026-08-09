@@ -547,12 +547,22 @@ bool selector_fields_match(const ObservedHostResource& resource,
 bool contexts_allow(const ObservedHostResource& resource,
                     ResourceAccessMode mode) {
   if (mode == ResourceAccessMode::mutex_exclusive) return true;
-  if (resource.compute_contexts != ResourceContextDisposition::absent ||
+  if (resource.compute_contexts == ResourceContextDisposition::unknown ||
       resource.graphics_contexts == ResourceContextDisposition::unknown) {
+    return false;
+  }
+  if (mode == ResourceAccessMode::cooperative_compute) return true;
+  if (resource.compute_contexts != ResourceContextDisposition::absent) {
     return false;
   }
   if (mode == ResourceAccessMode::exclusive_compute) return true;
   return resource.graphics_contexts == ResourceContextDisposition::absent;
+}
+
+bool disposition_allows(const ObservedHostResource& resource,
+                        ResourceAccessMode mode) {
+  return resource_disposition_permits(resource.disposition, resource.labels,
+                                      mode);
 }
 
 bool blocked_by_conflicting_observation(
@@ -563,8 +573,7 @@ bool blocked_by_conflicting_observation(
         !host_resources_conflict(candidate.id, observed.id)) {
       return false;
     }
-    return observed.disposition !=
-               ResourceObservationDisposition::audited_eligible ||
+    return !disposition_allows(observed, access_mode) ||
            !probe_allows_selection(inventory, observed) ||
            !contexts_allow(observed, access_mode);
   });
@@ -605,6 +614,22 @@ bool topology_facts_equal(const ObservedHostResource& left,
 }
 
 }  // namespace
+
+bool resource_disposition_permits(
+    ResourceObservationDisposition disposition,
+    const std::map<std::string, std::string>& labels, ResourceAccessMode mode) {
+  if (disposition == ResourceObservationDisposition::audited_eligible)
+    return true;
+  if (mode != ResourceAccessMode::cooperative_compute ||
+      disposition != ResourceObservationDisposition::occupied) {
+    return false;
+  }
+  const bool display_device = labels.contains("display");
+  if (!display_device) return true;
+  const auto authorization = labels.find("display-sharing");
+  return authorization != labels.end() &&
+         authorization->second == "operator-authorized-cooperative";
+}
 
 std::string canonical_resource_key(const HostResourceId& id) {
   return id.stable_id + "\x1f" + enum_to_string(id.kind) + "\x1f" +
@@ -861,8 +886,7 @@ void validate_resource_selection(const ResourceBundleSelection& selection) {
   std::set<std::string> selected_ids;
   for (const auto& resource : selection.resources) {
     validate_observed_resource(resource);
-    if (resource.disposition !=
-            ResourceObservationDisposition::audited_eligible ||
+    if (!disposition_allows(resource, selection.access_mode) ||
         resource.id.kind != kind_for(selection.access_mode) ||
         !contexts_allow(resource, selection.access_mode) ||
         !selected_ids.insert(resource.id.stable_id).second) {
@@ -969,8 +993,7 @@ std::optional<ResourceBundleSelection> select_host_resources(
   std::vector<ObservedHostResource> candidates;
   for (const auto& resource : inventory.resources) {
     if (resource.id.kind == kind_for(request.access_mode) &&
-        resource.disposition ==
-            ResourceObservationDisposition::audited_eligible &&
+        disposition_allows(resource, request.access_mode) &&
         probe_allows_selection(inventory, resource) &&
         contexts_allow(resource, request.access_mode) &&
         selector_fields_match(resource, request.selector) &&

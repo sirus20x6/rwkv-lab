@@ -29,6 +29,8 @@ import torch
 from rwkv_lab.training_components import (
     AssistantConversationMapperConfiguration,
     AssistantOnlyMapperConfiguration,
+    CachedReferenceDPOConfiguration,
+    CachedReferenceDPOObjective,
     CausalTokensMapperConfiguration,
     CollatorImplementation,
     ImageCaptionProcessorConfiguration,
@@ -51,6 +53,7 @@ _MULTIMODAL_TENSOR_KEYS = frozenset(
         "image_grid_thw",
         "image_sizes",
         "input_ids",
+        "mm_token_type_ids",
         "pixel_attention_mask",
         "pixel_values",
         "pixel_values_videos",
@@ -230,17 +233,25 @@ def _conversation(
     return messages
 
 
-def _template(processor: Any, messages: object, *, generation: bool) -> str:
+def _template(
+    processor: Any,
+    messages: object,
+    *,
+    generation: bool,
+    enable_thinking: bool | None = None,
+) -> str:
     render = getattr(processor, "apply_chat_template", None)
     if not callable(render):
         raise HFMultimodalSFTError(
             "multimodal processor has no apply_chat_template boundary"
         )
-    value = render(
-        messages,
-        tokenize=False,
-        add_generation_prompt=generation,
-    )
+    arguments: dict[str, Any] = {
+        "tokenize": False,
+        "add_generation_prompt": generation,
+    }
+    if enable_thinking is not None:
+        arguments["enable_thinking"] = enable_thinking
+    value = render(messages, **arguments)
     if not isinstance(value, str) or not value:
         raise HFMultimodalSFTError("multimodal chat template returned invalid text")
     return value
@@ -281,6 +292,30 @@ class HFForwardBatch:
             self.targets,
             self.source_images,
             self.supervised_tokens,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class HFPreferenceBatch:
+    chosen: HFForwardBatch
+    rejected: HFForwardBatch
+    reference_chosen: torch.Tensor
+    reference_rejected: torch.Tensor
+
+    @property
+    def supervised_tokens(self) -> int:
+        return self.chosen.supervised_tokens + self.rejected.supervised_tokens
+
+    @property
+    def pairs(self) -> int:
+        return len(self.chosen.sample_ids)
+
+    def to(self, device: torch.device) -> HFPreferenceBatch:
+        return HFPreferenceBatch(
+            self.chosen.to(device),
+            self.rejected.to(device),
+            self.reference_chosen.to(device=device, non_blocking=True),
+            self.reference_rejected.to(device=device, non_blocking=True),
         )
 
 
@@ -332,6 +367,102 @@ class HFForwardBatchCodec:
         if self.multimodal:
             return self._encode_multimodal(samples)
         return self._encode_causal(samples)
+
+    def encode_preference(
+        self,
+        samples: Sequence[ProcessedSample],
+        configuration: CachedReferenceDPOConfiguration,
+    ) -> HFPreferenceBatch:
+        """Encode exact chosen/rejected suffixes and bind their cached references."""
+
+        if not self.multimodal or not samples:
+            raise HFMultimodalSFTError(
+                "cached-reference DPO requires nonempty multimodal samples"
+            )
+        mapper = self.mapper_configuration
+        if not isinstance(
+            mapper,
+            (AssistantConversationMapperConfiguration, AssistantOnlyMapperConfiguration),
+        ):
+            raise HFMultimodalSFTError("cached-reference DPO requires an assistant mapper")
+
+        def variants(column: str) -> tuple[ProcessedSample, ...]:
+            result: list[ProcessedSample] = []
+            for sample in samples:
+                value = sample.values.get(column)
+                if not isinstance(value, str) or not value.strip():
+                    raise HFMultimodalSFTError(
+                        f"preference sample {sample.sample_id!r} has empty {column!r}"
+                    )
+                values = dict(sample.values)
+                values[mapper.target_column] = value
+                result.append(
+                    ProcessedSample(
+                        sample.sample_id,
+                        sample.ordinal,
+                        MappingProxyType(values),
+                        sample.image,
+                        sample.image_size,
+                        sample.token_length,
+                    )
+                )
+            return tuple(result)
+
+        chosen = self.encode(variants(configuration.chosen_column))
+        rejected = self.encode(variants(configuration.rejected_column))
+
+        def references(
+            batch: HFForwardBatch, logp_column: str, token_column: str
+        ) -> torch.Tensor:
+            labels = batch.tensors.get("labels")
+            if not isinstance(labels, torch.Tensor) or labels.ndim != 2:
+                raise HFMultimodalSFTError("preference batch has no labels")
+            result: list[float] = []
+            for index, sample in enumerate(samples):
+                token_ids = sample.values.get(token_column)
+                actual = labels[index][
+                    labels[index] != self.collator_configuration.label_pad_token_id
+                ].tolist()
+                if (
+                    not isinstance(token_ids, list)
+                    or any(
+                        not isinstance(token, int)
+                        or isinstance(token, bool)
+                        or token < 0
+                        for token in token_ids
+                    )
+                    or actual != token_ids
+                ):
+                    raise HFMultimodalSFTError(
+                        f"preference sample {sample.sample_id!r} token suffix "
+                        "differs from the frozen reference ledger"
+                    )
+                logp = sample.values.get(logp_column)
+                if (
+                    not isinstance(logp, (float, int))
+                    or isinstance(logp, bool)
+                    or not math.isfinite(float(logp))
+                ):
+                    raise HFMultimodalSFTError(
+                        f"preference sample {sample.sample_id!r} has invalid cached logp"
+                    )
+                result.append(float(logp))
+            return torch.tensor(result, dtype=torch.float32)
+
+        return HFPreferenceBatch(
+            chosen,
+            rejected,
+            references(
+                chosen,
+                configuration.reference_chosen_logp_column,
+                configuration.reference_chosen_token_ids_column,
+            ),
+            references(
+                rejected,
+                configuration.reference_rejected_logp_column,
+                configuration.reference_rejected_token_ids_column,
+            ),
+        )
 
     def _encode_causal(self, samples: Sequence[ProcessedSample]) -> HFForwardBatch:
         configuration = self.mapper_configuration
@@ -427,11 +558,13 @@ class HFForwardBatchCodec:
                 processor,
                 _conversation(system_prompt, prompt),
                 generation=True,
+                enable_thinking=getattr(mapper, "enable_thinking", None),
             )
             rendered_full = _template(
                 processor,
                 _conversation(system_prompt, prompt, target),
                 generation=False,
+                enable_thinking=getattr(mapper, "enable_thinking", None),
             )
             if not rendered_full.startswith(rendered_prompt):
                 raise HFMultimodalSFTError(
@@ -448,7 +581,16 @@ class HFForwardBatchCodec:
                     "rendered assistant target is misaligned or exceeds token policy"
                 )
             if mapper.append_eos:
-                if not isinstance(eos, int) or not full_ids or full_ids[-1] != eos:
+                terminator = (
+                    len(full_ids)
+                    - 1
+                    - getattr(mapper, "maximum_trailing_tokens_after_eos", 0)
+                )
+                if (
+                    not isinstance(eos, int)
+                    or terminator < len(prompt_ids)
+                    or full_ids[terminator] != eos
+                ):
                     raise HFMultimodalSFTError(
                         "append_eos requires the chat template to end in the exact EOS token"
                     )
@@ -567,6 +709,7 @@ class HFForwardBatchCodec:
                     processor,
                     _conversation(system_prompt, prompt),
                     generation=True,
+                    enable_thinking=getattr(mapper, "enable_thinking", None),
                 )
             )
             if sample.image is None:
@@ -683,12 +826,17 @@ class HFDataRuntime:
         test_by_id = {sample.sample_id: sample for sample in test_raw}
         training.sampler.bind(training_split.selected_ids)
         qualitative = components.qualitative_samples()
-        count = qualitative.configuration.sample_count
-        qualitative_ids = tuple(evaluation_split.selected_ids[:count])
-        binding = qualitative.bind(
-            qualitative_ids, selector_digest=evaluation_split.membership_digest
+        binding = qualitative.select(
+            evaluation_split.selected_ids,
+            selector_digest=evaluation_split.membership_digest,
+            dataset_root=(
+                Path(training.source.configuration.dataset_root)
+                if frozen
+                else None
+            ),
         )
-        measured_identities_digest = getattr(binding, "identities_digest", None)
+        qualitative_ids = binding.identities
+        measured_identities_digest = binding.identities_digest
         return cls(
             training_pipeline=training,
             evaluation_pipeline=evaluation,
@@ -779,6 +927,15 @@ class HFDataRuntime:
             identifiers = identifiers[:maximum]
         return tuple(
             self._process(self.evaluation_pipeline, self.evaluation_records[item])
+            for item in identifiers
+        )
+
+    def training_audit_samples(self, *, maximum: int) -> tuple[ProcessedSample, ...]:
+        if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum < 1:
+            raise HFMultimodalSFTError("training audit size must be positive")
+        identifiers = tuple(self.training_records)[:maximum]
+        return tuple(
+            self._process(self.training_pipeline, self.training_records[item])
             for item in identifiers
         )
 
@@ -1598,6 +1755,163 @@ def component_causal_loss(
     return loss
 
 
+def _evaluation_objective(objective: Any) -> Any:
+    return (
+        objective.evaluation_objective
+        if isinstance(objective, CachedReferenceDPOObjective)
+        else objective
+    )
+
+
+def component_sequence_logp(
+    model: torch.nn.Module,
+    objective: Any,
+    batch: HFForwardBatch,
+    *,
+    ignore_index: int,
+) -> torch.Tensor:
+    """Memory-bounded differentiable sequence log p for one preference response."""
+
+    if len(batch.sample_ids) != 1:
+        raise HFMultimodalSFTError(
+            "cached-reference DPO v1 requires one preference pair per microbatch"
+        )
+    loss = component_causal_loss(
+        model,
+        objective,
+        batch.tensors,
+        ignore_index=ignore_index,
+    )
+    return -loss * batch.supervised_tokens
+
+
+def component_cached_dpo_loss(
+    model: torch.nn.Module,
+    objective: CachedReferenceDPOObjective,
+    batch: HFPreferenceBatch,
+    *,
+    ignore_index: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    policy_chosen = component_sequence_logp(
+        model,
+        objective.evaluation_objective,
+        batch.chosen,
+        ignore_index=ignore_index,
+    ).reshape(1)
+    policy_rejected = component_sequence_logp(
+        model,
+        objective.evaluation_objective,
+        batch.rejected,
+        ignore_index=ignore_index,
+    ).reshape(1)
+    loss, margin = objective(
+        policy_chosen,
+        policy_rejected,
+        batch.reference_chosen.to(dtype=policy_chosen.dtype),
+        batch.reference_rejected.to(dtype=policy_rejected.dtype),
+    )
+    return loss, margin, policy_chosen, policy_rejected
+
+
+def backward_cached_dpo_pair(
+    model: torch.nn.Module,
+    objective: CachedReferenceDPOObjective,
+    batch: HFPreferenceBatch,
+    *,
+    ignore_index: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Backpropagate exact DPO while retaining at most one response graph."""
+
+    with torch.no_grad():
+        rejected_probe = component_sequence_logp(
+            model,
+            objective.evaluation_objective,
+            batch.rejected,
+            ignore_index=ignore_index,
+        ).reshape(1)
+    policy_chosen = component_sequence_logp(
+        model,
+        objective.evaluation_objective,
+        batch.chosen,
+        ignore_index=ignore_index,
+    ).reshape(1)
+    with torch.no_grad():
+        loss, margin = objective(
+            policy_chosen.detach(),
+            rejected_probe,
+            batch.reference_chosen.to(dtype=policy_chosen.dtype),
+            batch.reference_rejected.to(dtype=rejected_probe.dtype),
+        )
+        # d loss / d margin for the optionally smoothed binary logistic loss.
+        derivative = torch.sigmoid(margin) - (
+            1.0 - float(objective.configuration.label_smoothing)
+        )
+        chosen_gradient = float(objective.configuration.beta) * derivative
+    torch.autograd.backward(policy_chosen, chosen_gradient)
+    policy_rejected = component_sequence_logp(
+        model,
+        objective.evaluation_objective,
+        batch.rejected,
+        ignore_index=ignore_index,
+    ).reshape(1)
+    torch.autograd.backward(policy_rejected, -chosen_gradient)
+    return (
+        loss.detach(),
+        margin.detach(),
+        policy_chosen.detach(),
+        policy_rejected.detach(),
+    )
+
+
+@torch.no_grad()
+def evaluate_cached_reference_alignment(
+    *,
+    stack: HFTrainingStack,
+    codec: HFForwardBatchCodec,
+    samples: Sequence[ProcessedSample],
+    device: torch.device,
+) -> Mapping[str, float]:
+    objective = stack.objective
+    if not isinstance(objective, CachedReferenceDPOObjective):
+        raise HFMultimodalSFTError("reference alignment requires cached-reference DPO")
+    losses: list[float] = []
+    margins: list[float] = []
+    drifts: list[float] = []
+    training = stack.model.training
+    stack.model.eval()
+    try:
+        for sample in samples:
+            batch = codec.encode_preference((sample,), objective.configuration).to(device)
+            with _autocast(stack.precision, device):
+                loss, margin, chosen, rejected = component_cached_dpo_loss(
+                    stack.model,
+                    objective,
+                    batch,
+                    ignore_index=codec.collator_configuration.label_pad_token_id,
+                )
+            losses.append(float(loss.float().cpu()))
+            margins.append(float(margin.float().cpu()[0]))
+            drifts.extend(
+                (
+                    abs(float(chosen.float().cpu()[0]) - float(batch.reference_chosen.cpu()[0])),
+                    abs(float(rejected.float().cpu()[0]) - float(batch.reference_rejected.cpu()[0])),
+                )
+            )
+    finally:
+        stack.model.train(training)
+    if not losses:
+        raise HFMultimodalSFTError("reference alignment selected no preference pairs")
+    return MappingProxyType(
+        {
+            "loss": sum(losses) / len(losses),
+            "margin": sum(margins) / len(margins),
+            "accuracy": sum(value > 0.0 for value in margins) / len(margins),
+            "maximum_reference_drift": max(drifts),
+            "pairs": float(len(losses)),
+        }
+    )
+
+
 def weighted_loss(values: Sequence[tuple[float, int]]) -> float:
     if not values or any(
         not math.isfinite(loss) or tokens < 1 for loss, tokens in values
@@ -1666,7 +1980,7 @@ def evaluate_hf_scalar_loss(
                 with _autocast(stack.precision, device):
                     loss = component_causal_loss(
                         stack.model,
-                        stack.objective,
+                        _evaluation_objective(stack.objective),
                         batch.tensors,
                         ignore_index=codec.collator_configuration.label_pad_token_id,
                     )
@@ -2874,6 +3188,31 @@ def run_hf_multimodal_sft(
         loaded=loaded,
         precision=precision,
     )
+    if isinstance(stack.objective, CachedReferenceDPOObjective):
+        if _batch_size(data.training_pipeline) != 1:
+            raise HFMultimodalSFTError(
+                "cached-reference DPO v1 requires training batch_size=1"
+            )
+        if resume_directory is None:
+            alignment = evaluate_cached_reference_alignment(
+                stack=stack,
+                codec=codec,
+                samples=data.training_audit_samples(
+                    maximum=stack.objective.configuration.launch_audit_examples
+                ),
+                device=selected_device,
+            )
+            drift = alignment["maximum_reference_drift"]
+            if drift > stack.objective.configuration.reference_drift_tolerance:
+                raise HFMultimodalSFTError(
+                    "step-zero policy differs from the frozen cached reference: "
+                    f"maximum sequence-logp drift {drift:.6f} exceeds "
+                    f"{stack.objective.configuration.reference_drift_tolerance:.6f}"
+                )
+            for name, value in alignment.items():
+                observability.publish_if_declared(
+                    f"eval.preference_{name}", value, step=0
+                )
     baseline_test_evidence: Path | None = None
     baseline_complete = False
     baseline_evidence_digest = "sha256:" + "0" * 64
@@ -3359,34 +3698,56 @@ def run_hf_multimodal_sft(
     while step < maximum_steps:
         started = time.perf_counter()
         tokens = 0
+        gradient_units = 0
         losses: list[tuple[float, int]] = []
+        preference_margins: list[float] = []
         for _ in stack.accumulation.microbatch_indices():
             controls.microbatch(step + 1, reject_live_controls)
             with step_profiler.input_wait():
                 samples = data.next_training_samples()
-            batch = codec.encode(samples).to(selected_device)
-            with _autocast(stack.precision, selected_device):
-                loss = component_causal_loss(
-                    stack.model,
-                    stack.objective,
-                    batch.tensors,
-                    ignore_index=codec.collator_configuration.label_pad_token_id,
+            if isinstance(stack.objective, CachedReferenceDPOObjective):
+                preference = codec.encode_preference(
+                    samples, stack.objective.configuration
+                ).to(selected_device)
+                with _autocast(stack.precision, selected_device):
+                    loss, margin, _chosen, _rejected = backward_cached_dpo_pair(
+                        stack.model,
+                        stack.objective,
+                        preference,
+                        ignore_index=codec.collator_configuration.label_pad_token_id,
+                    )
+                pair_count = preference.pairs
+                losses.append(
+                    (float(stack.precision.reduce(loss.detach()).cpu()), pair_count)
                 )
-            # The registered objective is a token mean. Backpropagating each
-            # microbatch token sum and normalizing once preserves that exact
-            # objective when buckets contain unequal supervised-token counts.
-            (loss * batch.supervised_tokens).backward()
-            losses.append(
-                (
-                    float(stack.precision.reduce(loss.detach()).cpu()),
-                    batch.supervised_tokens,
+                preference_margins.append(float(margin.float().mean().cpu()))
+                gradient_units += pair_count
+                tokens += preference.supervised_tokens
+            else:
+                batch = codec.encode(samples).to(selected_device)
+                with _autocast(stack.precision, selected_device):
+                    loss = component_causal_loss(
+                        stack.model,
+                        stack.objective,
+                        batch.tensors,
+                        ignore_index=codec.collator_configuration.label_pad_token_id,
+                    )
+                # The registered objective is a token mean. Backpropagating each
+                # microbatch token sum and normalizing once preserves that exact
+                # objective when buckets contain unequal supervised-token counts.
+                (loss * batch.supervised_tokens).backward()
+                losses.append(
+                    (
+                        float(stack.precision.reduce(loss.detach()).cpu()),
+                        batch.supervised_tokens,
+                    )
                 )
-            )
-            tokens += batch.supervised_tokens
+                gradient_units += batch.supervised_tokens
+                tokens += batch.supervised_tokens
         trainable_parameters = tuple(
             parameter for parameter in stack.model.parameters() if parameter.requires_grad
         )
-        normalize_token_mean_gradients(trainable_parameters, tokens)
+        normalize_token_mean_gradients(trainable_parameters, gradient_units)
         components.gradient_clipping(
             trainable_parameters
         )
@@ -3403,6 +3764,18 @@ def run_hf_multimodal_sft(
         observability.publish_if_declared(
             "train.tokens_per_second", tokens / elapsed, step=step
         )
+        if preference_margins:
+            observability.publish_if_declared(
+                "train.preference_margin",
+                sum(preference_margins) / len(preference_margins),
+                step=step,
+            )
+            observability.publish_if_declared(
+                "train.preference_accuracy",
+                sum(value > 0.0 for value in preference_margins)
+                / len(preference_margins),
+                step=step,
+            )
         observability.optimizer_step(step, "train")
         controls.optimizer_step(step, reject_live_controls)
 
@@ -3573,8 +3946,12 @@ __all__ = [
     "HFForwardBatch",
     "HFForwardBatchCodec",
     "HFMultimodalSFTError",
+    "HFPreferenceBatch",
     "HFTrainingStack",
+    "backward_cached_dpo_pair",
+    "component_cached_dpo_loss",
     "component_causal_loss",
+    "evaluate_cached_reference_alignment",
     "initialize_training_stack",
     "normalize_token_mean_gradients",
     "restore_exact_checkpoint",

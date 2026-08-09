@@ -143,9 +143,13 @@ std::vector<AdapterProfile> profiles() {
                {"eval_gallery", port(OperationPortType::artifact, false,
                                 ArtifactType::image_gallery,
                                 "rwkv-lab.eval-gallery.v2")},
-               {"metrics", port(OperationPortType::artifact, false,
-                                ArtifactType::metrics,
-                                "hf.multimodal-sft.metrics.v1")},
+               // Deliberately three outputs, matching the deployed adapter
+               // registry and the worker itself: hf_multimodal_sft.py publishes
+               // via output_name exactly twice, eval_gallery and test_eval,
+               // plus checkpoint state. It emits no metrics artifact. This
+               // fixture previously declared a fourth, so a recipe publishing
+               // "metrics" authored cleanly here while the live controller
+               // rejected it with author_run.adapter.
                {"test_eval", port(OperationPortType::artifact, false,
                                   ArtifactType::report,
                                   "rwkv-lab.hf-test-caption-evidence-bundle.v1")}}}};
@@ -232,7 +236,7 @@ nlohmann::json prepare_registry(const TemporaryDirectory &temporary) {
                            "docs/experiment-vm/examples/"
                            "hf-multimodal-sft.recipe-profiles.v1.json";
   auto registry = nlohmann::json::parse(read_file(source_path));
-  auto &spec = registry["recipes"][0]["template_document"]["spec"];
+  auto &spec = registry["recipes"][1]["template_document"]["spec"];
   const auto input = temporary.path() / "input";
   const auto run = temporary.path() / "runs" / "run";
   std::filesystem::create_directory(temporary.path() / "runs");
@@ -269,6 +273,10 @@ nlohmann::json prepare_registry(const TemporaryDirectory &temporary) {
     files[name] = {{"rows", split_rows.at(split).size()},
                    {"sha256", sha256_hex(payload)}};
   }
+  const std::string qualitative_manifest =
+      nlohmann::json{{"id", "validation-1"}}.dump() + "\n";
+  std::ofstream(input / "data" / "validation-fixed.jsonl")
+      << qualitative_manifest;
   std::ofstream(input / "data" / "manifest.json")
       << nlohmann::json{{"schema", "fixture.manifested-jsonl-splits.v1"},
                         {"dataset_digest", "fixture"},
@@ -345,6 +353,12 @@ std::string author_document(const TemporaryDirectory &temporary,
   instance["overrides"]["data.root"] = (input / "data").string();
   instance["overrides"]["model.target_manifest"] =
       (input / "model" / "targets" / "custom-targets.json").string();
+  instance["overrides"]["data.qualitative_manifest_name"] =
+      "validation-fixed.jsonl";
+  instance["overrides"]["data.qualitative_manifest_sha256"] =
+      "sha256:" +
+      sha256_hex(nlohmann::json{{"id", "validation-1"}}.dump() + "\n");
+  instance["overrides"]["evaluation.qualitative_sample_count"] = 1;
   instance["overrides"]["trainability.lora_rank"] = 64;
   return nlohmann::json{
       {"api_version", kAuthorRunApiVersion},
@@ -423,6 +437,20 @@ int main() {
         exact_evidence.node_id != "train")
       throw std::runtime_error(
           "checked-in HF recipe did not pass the production native probe");
+    auto corrupted_manifest_plan = passively_resolved.plan;
+    corrupted_manifest_plan.canonical_plan[nlohmann::json::json_pointer(
+        "/spec/workflow/nodes/train/invoke/training/components/"
+        "qualitative_samples/configuration/manifest_sha256")] =
+        "sha256:" + std::string(64U, '0');
+    bool rejected_corrupted_manifest = false;
+    try {
+      (void)exact_probe(corrupted_manifest_plan, "train", profiles().back());
+    } catch (const std::runtime_error &) {
+      rejected_corrupted_manifest = true;
+    }
+    if (!rejected_corrupted_manifest)
+      throw std::runtime_error(
+          "HF native probe accepted a corrupt qualitative manifest identity");
     const auto& compiled_checkpoint =
         passively_resolved.plan.experiment.spec.artifacts.at("checkpoint");
     if (!compiled_checkpoint.required)

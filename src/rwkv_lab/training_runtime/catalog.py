@@ -86,6 +86,7 @@ def supported_worker_capabilities() -> frozenset[str]:
             "sample_processor.image_caption.v1",
             "sample_processor.token_ids.v1",
             "sample_mapper.assistant_conversation.v2",
+            "sample_mapper.assistant_conversation.v3",
             "sample_mapper.assistant_only.v1",
             "sample_mapper.causal_tokens.v1",
             "collator.packed_tokens.v1",
@@ -100,6 +101,7 @@ def supported_worker_capabilities() -> frozenset[str]:
             "evaluator.scalar_loss.v1",
             "model_loader.hf_causal.v1",
             "model_loader.hf_multimodal.v1",
+            "model_loader.hf_multimodal.v2",
             "model_loader.rwkv_checkpoint.v1",
             "model_loader.rwkv_scratch.v1",
             "trainability.full.v1",
@@ -127,9 +129,11 @@ def supported_worker_capabilities() -> frozenset[str]:
             "optimizer.torch_adamw_no_decay.v2",
             "optimizer.fp32_master_adamw_no_decay.v2",
             "objective.linear_head_cross_entropy.v1",
+            "objective.cached_reference_dpo.v1",
             "precision.bf16_parameters_fp32_reductions.v1",
             "precision.fp32_parameters_bf16_compute.v1",
             "qualitative_sample.fixed_held_out.v1",
             "qualitative_sample.fixed_held_out.v2",
+            "qualitative_sample.fixed_manifest.v1",
         }
     )

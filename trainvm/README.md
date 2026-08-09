@@ -406,8 +406,8 @@ trainvm/build/trainvm inspect-rwkv-lab-worker \
 trainvm/build/trainvm inspect-registry "$PWD/experiments.db" \
   --task recall:16 --metric acc --baseline baseline --limit 20
 trainvm/build/trainvm serve --journal /tmp/trainvm.db --socket /tmp/trainvm.sock \
-  --registry /etc/trainvm/adapters.json \
-  --host-launch-registry /etc/trainvm/host-launches.json \
+  --registry /opt/trainvm/adapters.json \
+  --host-launch-registry /opt/trainvm/host-launches.json \
   --training-component-registry \
   "$PWD/docs/experiment-vm/examples/empty-training-components.json"
 trainvm/build/trainvm simulate \
@@ -481,13 +481,39 @@ every ledger, inventory, cgroup, socket, session, challenge, and startup sub-pol
 of truth. The foreground `trainvm-hostd` entry point now constructs the live namespace, inventory,
 journal, ledger, cgroup, recovery, audit, challenge, service-identity, and unified transport graph;
 it binds only after startup admission and can validate its closed document without touching live
-authority (`trainvm-hostd --validate-config FILE`). Resource grant/release, stopped-child launch,
+authority (`trainvm-hostd --validate-config FILE`). The systemd deployment installs that document as
+a static template. `--materialize-config TEMPLATE RUNTIME` securely samples the current boot ID
+around a double-observed host namespace set and atomically publishes a runtime document after
+replacing only those boot-scoped fields. `--publish-client-config CLIENT` runs only after startup
+admission and pins the client policy to the newly bound socket inode; a controller retaining the
+previous boot's document therefore fails closed and must restart against the new document. The
+deployed controller role uses the stable `/system.slice/trainvm-controller.service` cgroup identity,
+never a reboot-variant login-session scope. Resource grant/release, stopped-child launch,
 terminal reconciliation, and durable hostd adoption are wired. The mutation server receives process
 authority only when strict root/non-root credentials and durable device/CPU/I/O enforcement make
 the daemon launch-capable. Privileged crash qualification and trainer safe-point pause/resume remain
 subsequent milestones. A worker launch ticket is a protocol authorization only
 until it is paired with a trusted descriptor digest, resolved launch specification, host identity,
 and durable process receipt.
+
+The enabled hostd unit is GPU-passive by default. It checks the root-owned
+`/etc/trainvm/hostd-gpu-authorization.json` before any startup precondition or NVML load, and a
+missing or prior-boot document causes systemd to skip the service without touching the driver.
+Installation intentionally does not create this authorization. For a boot where display GPUs must
+remain unavailable to training, explicitly authorize inventory with the `deny` policy, then start
+the service:
+
+```bash
+sudo /usr/local/sbin/trainvm-hostd --authorize-gpu-start \
+  /etc/trainvm/hostd.template.json \
+  /etc/trainvm/hostd-gpu-authorization.json deny
+sudo /usr/bin/systemctl start trainvm-hostd.service
+```
+
+`cooperative_allowlist GPU-uuid ...` is the only display-sharing alternative. It grants only
+cooperative-compute eligibility for exact UUIDs that the admitted inventory independently marks as
+display-active; it cannot authorize exclusive display-GPU use. Reboot changes the bound boot ID and
+invalidates either policy.
 
 Host-launch v4 closes capability attestation, code-slot placement, and bootstrap-runtime-closure
 identity over the sealed code identity. Adapter and selected training-component profiles form the

@@ -63,12 +63,10 @@ void validate_binding(const ResolvedLaunchSpec& spec,
 
 LinuxPreparedLaunch::LinuxPreparedLaunch(
     HostProcessLaunchIntent intent, HostProcessSpawnReceipt spawn_receipt,
-    LinuxDevicePolicyInstallation device_policy,
     LinuxProcessPolicy process_policy,
     LinuxProcessPolicyInstallation process_policy_installation,
     LinuxAllocationCgroup cgroup, LinuxStoppedChild child) noexcept
     : intent_(std::move(intent)), spawn_receipt_(std::move(spawn_receipt)),
-      device_policy_(std::move(device_policy)),
       process_policy_(std::move(process_policy)),
       process_policy_installation_(std::move(process_policy_installation)),
       cgroup_(std::move(cgroup)),
@@ -119,7 +117,7 @@ LinuxRecoveredLaunch::exit_receipt() const noexcept {
 LinuxProcessAuthority::LinuxProcessAuthority(
     SQLiteHostLedger& ledger, AuthorityClock& clock,
     LinuxCgroupAuthority& cgroups,
-    LinuxDevicePolicyInstaller& device_policies,
+    LinuxDevicePolicyInstaller* device_policies,
     LinuxProcessPolicyInstaller& process_policies,
     LinuxStoppedLauncherKernel& launcher,
     LinuxWorkerCredentialSpec worker_credentials,
@@ -131,6 +129,15 @@ LinuxProcessAuthority::LinuxProcessAuthority(
   if (worker_credentials_.uid == 0U || worker_credentials_.gid == 0U ||
       !worker_credentials_.no_new_privileges) {
     reject("process authority requires a non-root worker credential boundary");
+  }
+  // A sealed supplementary set is only meaningful for a worker that shares this
+  // authority's identity; anything else means the seal was taken from the wrong
+  // process.
+  if (!worker_credentials_.supplementary_gids.empty() &&
+      worker_credentials_.uid != ::geteuid()) {
+    reject(
+        "inherited supplementary groups require the worker to share the "
+        "authority identity");
   }
 }
 
@@ -161,14 +168,10 @@ LinuxPreparedLaunch LinuxProcessAuthority::prepare(
   LinuxAllocationCgroup cgroup = cgroups_.open_or_create(
       grant.allocation_id, spec.identity.launch_event_id);
   const auto& cgroup_identity = cgroup.identity();
-  const LinuxDevicePolicySpec device_policy = derive_linux_device_policy(
-      inventory, grant, cgroup_identity, spec.identity.launch_event_id);
-  const LinuxDeviceProgramImage device_program =
-      compile_linux_device_program(device_policy);
   const HostProcessLaunchRequest request =
       seal_host_process_launch_request({
           .api_version =
-              std::string(kHostProcessLaunchRequestApiVersionV3),
+              std::string(kHostProcessLaunchRequestApiVersionV4),
           .launch_id = spec.identity.launch_event_id,
           .allocation_id = grant.allocation_id,
           .grant_digest = grant.receipt_digest,
@@ -187,9 +190,7 @@ LinuxPreparedLaunch LinuxProcessAuthority::prepare(
               .uid = static_cast<std::uint32_t>(worker_credentials_.uid),
               .gid = static_cast<std::uint32_t>(worker_credentials_.gid),
               .no_new_privileges = true},
-          .device_policy =
-              host_device_policy_intent_binding(device_policy,
-                                                device_program),
+          .device_policy = std::nullopt,
           .process_policy =
               host_process_policy_intent_binding(process_policy),
           .canonical_request_digest = {},
@@ -197,8 +198,6 @@ LinuxPreparedLaunch LinuxProcessAuthority::prepare(
   const auto intended = ledger_.commit_process_launch_intent(
       request, ledger_time(clock_.sample(), inventory.boot_id));
   cgroup.retain_for_durable_intent();
-  const LinuxDevicePolicyInstallation installed_device_policy =
-      device_policies_.install(device_policy, device_program, cgroup);
   LinuxProcessPolicyInstallation installed_process_policy =
       process_policies_.install(process_policy, grant.allocation_id,
                                 spec.identity.launch_event_id, cgroup);
@@ -279,7 +278,7 @@ LinuxPreparedLaunch LinuxProcessAuthority::prepare(
   const HostProcessSpawnRequest spawn_request =
       seal_host_process_spawn_request({
           .api_version =
-              std::string(kHostProcessSpawnRequestApiVersionV3),
+              std::string(kHostProcessSpawnRequestApiVersionV4),
           .launch_id = request.launch_id,
           .launch_intent_digest = intended.intent.receipt_digest,
           .host_pid = observed.host_pid,
@@ -290,16 +289,14 @@ LinuxPreparedLaunch LinuxProcessAuthority::prepare(
           .cgroup_inode = observed.cgroup_inode,
           .executable_digest = observed.executable_digest,
           .worker_credentials = request.worker_credentials,
-          .device_policy = host_device_policy_installation_binding(
-              installed_device_policy),
+          .device_policy = std::nullopt,
           .process_policy = host_process_policy_installation_binding(
               installed_process_policy),
           .canonical_request_digest = {},
       });
   const auto spawned = ledger_.commit_process_spawn(
       spawn_request, ledger_time(clock_.sample(), inventory.boot_id));
-  return LinuxPreparedLaunch(intended.intent, spawned.receipt,
-                             installed_device_policy, process_policy,
+  return LinuxPreparedLaunch(intended.intent, spawned.receipt, process_policy,
                              installed_process_policy, std::move(cgroup),
                              std::move(child));
 }
@@ -308,7 +305,6 @@ void LinuxProcessAuthority::release_to_exec(LinuxPreparedLaunch& launch) {
   if (launch.exit_receipt_) {
     reject("terminal process cannot regain executable authority");
   }
-  (void)device_policies_.verify(launch.device_policy_, launch.cgroup_);
   process_policies_.verify(launch.process_policy_,
                            launch.process_policy_installation_,
                            launch.cgroup_, launch.child_.identity().nice);
@@ -406,14 +402,24 @@ LinuxRecoveredLaunch LinuxProcessAuthority::adopt_recovered(
       record.intent.api_version == kHostProcessLaunchIntentApiVersionV3 ||
       record.spawn->api_version == kHostProcessSpawnReceiptApiVersionV2 ||
       record.spawn->api_version == kHostProcessSpawnReceiptApiVersionV3) {
+    // A record sealed by a privileged authority. Re-verifying it means querying
+    // the attached BPF program, which needs CAP_BPF. Refuse it outright rather
+    // than adopt a process whose device confinement we cannot confirm.
+    if (device_policies_ == nullptr) {
+      reject(
+          "recovered process carries device-policy evidence this authority "
+          "cannot verify");
+    }
     device_policy = linux_device_policy_installation_from_process(
         record.intent, *record.spawn);
-    (void)device_policies_.verify(*device_policy, cgroup);
+    (void)device_policies_->verify(*device_policy, cgroup);
   }
   std::optional<LinuxProcessPolicy> process_policy;
   std::optional<LinuxProcessPolicyInstallation> process_policy_installation;
   if (record.intent.api_version == kHostProcessLaunchIntentApiVersionV3 ||
-      record.spawn->api_version == kHostProcessSpawnReceiptApiVersionV3) {
+      record.intent.api_version == kHostProcessLaunchIntentApiVersionV4 ||
+      record.spawn->api_version == kHostProcessSpawnReceiptApiVersionV3 ||
+      record.spawn->api_version == kHostProcessSpawnReceiptApiVersionV4) {
     process_policy =
         linux_process_policy_from_process(record.intent, *record.spawn);
     process_policy_installation =

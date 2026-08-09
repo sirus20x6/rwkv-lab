@@ -202,16 +202,29 @@ public:
   [[nodiscard]] virtual HostLedgerTime commit_time() = 0;
 };
 
+// Fresh, externally maintained safety evidence checked only for new physical
+// grants. A blocked guard must not interfere with inspection, lost-reply
+// reconciliation, process termination, or resource release.
+class IHostdGrantAdmissionGuard {
+ public:
+  virtual ~IHostdGrantAdmissionGuard() = default;
+  virtual void require_new_grant_allowed() = 0;
+};
+
 class HostGrantCoordinator final {
 public:
   HostGrantCoordinator(HostdCoordinatorConfig config,
                        std::shared_ptr<SQLiteHostLedger> ledger,
                        std::shared_ptr<IHostdLogicalFenceEvidenceSource>
-                           logical_fence_evidence = nullptr);
+                           logical_fence_evidence = nullptr,
+                       std::shared_ptr<IHostdGrantAdmissionGuard>
+                           grant_admission_guard = nullptr);
   HostGrantCoordinator(HostdCoordinatorConfig config,
                        std::shared_ptr<IHostdLedgerBoundary> ledger,
                        std::shared_ptr<IHostdLogicalFenceEvidenceSource>
-                           logical_fence_evidence = nullptr);
+                           logical_fence_evidence = nullptr,
+                       std::shared_ptr<IHostdGrantAdmissionGuard>
+                           grant_admission_guard = nullptr);
   ~HostGrantCoordinator();
 
   HostGrantCoordinator(const HostGrantCoordinator &) = delete;

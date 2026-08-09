@@ -164,40 +164,66 @@ int main() {
       {"complete", true},
       {"eval_examples_manifest", manifest_document},
   };
-  check(!trainvm::durable_step_zero_eval_gate_satisfied(
-            {checkpoint, examples_event}, "run-1", "train", "train@1"),
+  check(!trainvm::durable_attempt_baseline_eval_gate_satisfied(
+            {checkpoint, examples_event}, "run-1", "train", "train@1", 0U),
         "examples without prior scalar do not satisfy replayed gate");
-  check(!trainvm::durable_step_zero_eval_gate_satisfied(
-            {metric, examples_event}, "run-1", "train", "train@1"),
+  check(!trainvm::durable_attempt_baseline_eval_gate_satisfied(
+            {metric, examples_event}, "run-1", "train", "train@1", 0U),
         "examples without a same-attempt checkpoint do not satisfy replayed "
         "gate");
-  check(trainvm::durable_step_zero_eval_gate_satisfied(
+  check(trainvm::durable_attempt_baseline_eval_gate_satisfied(
             {checkpoint, metric, examples_event}, "run-1", "train",
-            "train@1"),
+            "train@1", 0U),
         "ordered same-attempt durable provenance and examples satisfy replayed "
         "gate");
-  check(!trainvm::durable_step_zero_eval_gate_satisfied(
+  check(!trainvm::durable_attempt_baseline_eval_gate_satisfied(
             {checkpoint, metric, examples_event}, "run-1", "train",
-            "train@2"),
+            "train@2", 0U),
         "step-zero evidence from a prior attempt does not carry into a resumed "
         "attempt");
   trainvm::Event mismatched_attempt = examples_event;
   mismatched_attempt.attempt_id = "train@2";
-  check(!trainvm::durable_step_zero_eval_gate_satisfied(
+  check(!trainvm::durable_attempt_baseline_eval_gate_satisfied(
             {checkpoint, metric, mismatched_attempt}, "run-1", "train",
-            "train@2"),
+            "train@2", 0U),
         "artifact and embedded manifest attempt identities must agree");
   trainvm::Event wrong_step = examples_event;
   wrong_step.optimizer_step = 1U;
-  check(!trainvm::durable_step_zero_eval_gate_satisfied(
-            {checkpoint, metric, wrong_step}, "run-1", "train", "train@1"),
+  check(!trainvm::durable_attempt_baseline_eval_gate_satisfied(
+            {checkpoint, metric, wrong_step}, "run-1", "train", "train@1",
+            0U),
         "wrong-step examples do not satisfy replayed gate");
   trainvm::Event malformed = examples_event;
   malformed.payload["eval_examples_manifest"]["examples"] =
       trainvm::Json::array();
-  check(!trainvm::durable_step_zero_eval_gate_satisfied(
-            {checkpoint, metric, malformed}, "run-1", "train", "train@1"),
+  check(!trainvm::durable_attempt_baseline_eval_gate_satisfied(
+            {checkpoint, metric, malformed}, "run-1", "train", "train@1",
+            0U),
         "malformed examples do not satisfy replayed gate");
+
+  trainvm::Event resumed_checkpoint = checkpoint;
+  resumed_checkpoint.attempt_id = "train@2";
+  resumed_checkpoint.optimizer_step = 7U;
+  trainvm::Event resumed_metric = metric;
+  resumed_metric.attempt_id = "train@2";
+  resumed_metric.optimizer_step = 7U;
+  trainvm::Json resumed_document = periodic_document;
+  resumed_document["attempt_id"] = "train@2";
+  resumed_document.erase("canonical_manifest_digest");
+  resumed_document["canonical_manifest_digest"] =
+      "sha256:" + trainvm::sha256_hex(resumed_document.dump());
+  trainvm::Event resumed_examples = examples_event;
+  resumed_examples.attempt_id = "train@2";
+  resumed_examples.optimizer_step = 7U;
+  resumed_examples.payload["eval_examples_manifest"] = resumed_document;
+  check(trainvm::durable_attempt_baseline_eval_gate_satisfied(
+            {resumed_checkpoint, resumed_metric, resumed_examples}, "run-1",
+            "train", "train@2", 7U) &&
+            !trainvm::durable_attempt_baseline_eval_gate_satisfied(
+                {resumed_checkpoint, resumed_metric, resumed_examples},
+                "run-1", "train", "train@2", 0U),
+        "replacement evidence satisfies only its controller-derived resume "
+        "baseline");
   const trainvm::Json gated_publication{
       {"eval_examples",
        {{"declaration",

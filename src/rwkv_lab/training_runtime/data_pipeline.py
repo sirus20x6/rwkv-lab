@@ -41,6 +41,9 @@ class SampleMapperImplementation(str, Enum):
     ASSISTANT_CONVERSATION_V2 = (
         "rwkv_lab.sample_mapper.assistant_conversation.v2"
     )
+    ASSISTANT_CONVERSATION_V3 = (
+        "rwkv_lab.sample_mapper.assistant_conversation.v3"
+    )
     CAUSAL_TOKENS_V1 = "rwkv_lab.sample_mapper.causal_tokens.v1"
 
 
@@ -849,6 +852,8 @@ class AssistantConversationMapperConfiguration:
     target_column: str
     maximum_tokens: int
     append_eos: bool
+    enable_thinking: bool | None = None
+    maximum_trailing_tokens_after_eos: int = 0
 
     def __post_init__(self) -> None:
         _column(self.target_column, "target_column")
@@ -866,21 +871,38 @@ class AssistantConversationMapperConfiguration:
             raise DataPipelineError("maximum_tokens is invalid")
         if not isinstance(self.append_eos, bool):
             raise DataPipelineError("append_eos must be boolean")
+        if self.enable_thinking is not None and not isinstance(
+            self.enable_thinking, bool
+        ):
+            raise DataPipelineError("enable_thinking must be boolean when declared")
+        if (
+            not isinstance(self.maximum_trailing_tokens_after_eos, int)
+            or isinstance(self.maximum_trailing_tokens_after_eos, bool)
+            or not 0 <= self.maximum_trailing_tokens_after_eos <= 16
+        ):
+            raise DataPipelineError(
+                "maximum_trailing_tokens_after_eos must be in [0, 16]"
+            )
 
     @classmethod
     def from_resolved(
-        cls, value: Mapping[str, Any]
+        cls, value: Mapping[str, Any], *, template_options: bool = False
     ) -> AssistantConversationMapperConfiguration:
+        fields = {
+            "system_prompt",
+            "user_prompt",
+            "target_column",
+            "maximum_tokens",
+            "append_eos",
+        }
+        if template_options:
+            fields.update(
+                {"enable_thinking", "maximum_trailing_tokens_after_eos"}
+            )
         return cls(
             **_exact(
                 value,
-                {
-                    "system_prompt",
-                    "user_prompt",
-                    "target_column",
-                    "maximum_tokens",
-                    "append_eos",
-                },
+                fields,
                 "assistant-conversation mapper",
             )
         )
@@ -1001,11 +1023,21 @@ class RegisteredSampleMapper:
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
+                **(
+                    {"enable_thinking": configuration.enable_thinking}
+                    if configuration.enable_thinking is not None
+                    else {}
+                ),
             )
             full = render(
                 [*messages, {"role": "assistant", "content": target}],
                 tokenize=False,
                 add_generation_prompt=False,
+                **(
+                    {"enable_thinking": configuration.enable_thinking}
+                    if configuration.enable_thinking is not None
+                    else {}
+                ),
             )
             if (
                 not isinstance(prompt, str)
@@ -1035,7 +1067,12 @@ class RegisteredSampleMapper:
                 )
             if configuration.append_eos:
                 eos = backend.eos_token_id
-                if not isinstance(eos, int) or input_ids[-1] != eos:
+                terminator = len(input_ids) - 1 - configuration.maximum_trailing_tokens_after_eos
+                if (
+                    not isinstance(eos, int)
+                    or terminator < 0
+                    or input_ids[terminator] != eos
+                ):
                     raise DataPipelineError(
                         "assistant-conversation template must append exact EOS"
                     )
@@ -1967,8 +2004,16 @@ def sample_mapper_from_resolved_component(
     configuration: SampleMapperConfiguration
     if implementation is SampleMapperImplementation.ASSISTANT_ONLY_V1:
         configuration = AssistantOnlyMapperConfiguration.from_resolved(value)
-    elif implementation is SampleMapperImplementation.ASSISTANT_CONVERSATION_V2:
-        configuration = AssistantConversationMapperConfiguration.from_resolved(value)
+    elif implementation in {
+        SampleMapperImplementation.ASSISTANT_CONVERSATION_V2,
+        SampleMapperImplementation.ASSISTANT_CONVERSATION_V3,
+    }:
+        configuration = AssistantConversationMapperConfiguration.from_resolved(
+            value,
+            template_options=(
+                implementation is SampleMapperImplementation.ASSISTANT_CONVERSATION_V3
+            ),
+        )
     else:
         configuration = CausalTokensMapperConfiguration.from_resolved(value)
     return RegisteredSampleMapper(implementation, configuration)

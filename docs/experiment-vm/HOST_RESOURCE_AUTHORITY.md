@@ -84,9 +84,13 @@ authorize a launch.
 
 Hostd is a systemd-owned singleton for the physical host. The default deployment paths are:
 
-- filesystem Unix socket: `/run/trainvm/hostd.sock`;
-- durable ledger: `/var/lib/trainvm/host-resource.db`;
-- worker cgroups: a root-owned subtree beneath `trainvm-workers.slice`.
+- static strict template: `/etc/trainvm/hostd.template.json`;
+- explicit boot-scoped GPU authorization: `/etc/trainvm/hostd-gpu-authorization.json`;
+- boot-materialized strict document: `/run/trainvm-hostd/hostd.json`;
+- filesystem Unix socket: `/run/trainvm-hostd/hostd.sock`;
+- boot-specific controller policy: `/run/trainvm-hostd/client.json`;
+- durable ledger: `/var/lib/trainvm-hostd/host-ledger-*.sqlite3`;
+- worker cgroups: `/system.slice/trainvm-hostd.service/workers`.
 
 Paths may be configured only by a root- or dedicated-authority-owned startup configuration. They are
 not experiment fields.
@@ -110,6 +114,51 @@ single owner thread, runs restart convergence and the one-shot audit, and binds 
 only after admission. The process supervisor now admits stopped-child launch only with a durable,
 restart-adoptable cgroup-device BPF program, non-root credentials, and CPU/I/O process-policy
 receipt. Privileged real-host crash qualification remains a deployment gate.
+
+Boot identity is deliberately materialized rather than trusted from a long-lived installed file.
+`trainvm-hostd --materialize-config TEMPLATE RUNTIME` pins procfs with `openat2`, samples the Linux
+boot ID around the already double-observed mount/PID/cgroup/time namespace set, copies the validated
+template, replaces only `boot_id` and `host_namespaces`, validates the resulting strict document,
+and publishes it with an fsynced temporary inode plus atomic rename. Journal identity, service-role
+peer authority, recovery behavior, inventory trust, and socket/cgroup policy are unchanged. The
+systemd unit bounds failed starts to avoid a stale or invalid template becoming a restart storm.
+
+Enabling the unit is deliberately not permission to contact the NVIDIA driver. Before any
+`ExecStartPre`, hostd construction, NVML load, device access, or cgroup mutation, an `ExecCondition`
+validates a root-owned reflected `trainvm.hostd-gpu-authorization/v1` document. The document binds
+the exact host, current Linux boot ID, and hostd broker instance, sets explicit read-only driver-probe
+authority, and carries either a `deny` display policy or an exact sorted cooperative display-GPU
+UUID allowlist. A missing, stale, malformed, tampered, or mismatched document skips the enabled unit
+without probing the driver. Reboot invalidates the prior authorization even though the file remains.
+
+The operator creates authorization explicitly and then starts hostd:
+
+```bash
+# Permit read-only inventory, but never schedule work on a display GPU.
+sudo /usr/local/sbin/trainvm-hostd --authorize-gpu-start \
+  /etc/trainvm/hostd.template.json \
+  /etc/trainvm/hostd-gpu-authorization.json deny
+sudo /usr/bin/systemctl start trainvm-hostd.service
+
+# Or permit cooperative compute on only these display-active physical UUIDs.
+sudo /usr/local/sbin/trainvm-hostd --authorize-gpu-start \
+  /etc/trainvm/hostd.template.json \
+  /etc/trainvm/hostd-gpu-authorization.json cooperative_allowlist \
+  GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+sudo /usr/bin/systemctl start trainvm-hostd.service
+```
+
+The allowlist never makes a display device generally free. NVML must independently prove the exact
+UUID is display-active, only `cooperative_compute` may select it, and exclusive-compute or
+exclusive-device requests remain blocked. Installation does not create this authorization file;
+automatic boot startup therefore remains GPU-passive until an operator authorizes that boot.
+
+After startup admission, `--publish-client-config` reattests the concrete socket and atomically
+publishes a root-owned, group-readable controller document containing its exact inode identity.
+A controller holding the previous document cannot follow the replacement socket and fails closed;
+the controller must restart after the new client document exists. Production peer authorization
+uses the stable `/system.slice/trainvm-controller.service` identity. Session-number cgroups such as
+`session-3.scope` are forbidden deployment inputs because they change across reboot.
 
 `trainvm-hostd-crash-qualification --workspace DIR` executes that gate's destructive matrix and
 emits the machine-readable receipt described in
