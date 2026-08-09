@@ -1,0 +1,15 @@
+{
+  "api_version": "trainvm.input-content-root-set/v1",
+  "paths": [
+    "/mnt/hypercard/mageflow-cache/trainvm-terminal-continuation-step3952/entries",
+    "/thearray/git/datasets/anima-civitai-balanced-10000/images/sfw",
+    "/thearray/git/datasets/midjourney-v6-recap-continuation-30pct-b-512-1024/eval.jsonl",
+    "/thearray/git/datasets/midjourney-v6-recap-continuation-30pct-b-512-1024/images",
+    "/thearray/git/datasets/midjourney-v6-recap-continuation-30pct-b-512-1024/train.jsonl",
+    "/thearray/git/datasets/midjourney-v6-recap-stage-100k/images/eval",
+    "/thearray/git/datasets/porn/reddit/trainer-eval-128",
+    "/thearray/git/moe-mla/experiments/mageflow_terminal_alternating_epoch_schedule.json",
+    "/thearray/git/moe-mla/runs/trainvm-mageflow-terminal-continuation-inputs-step3952/checkpoint-00003952",
+    "/thearray/git/ob/text-generation-webui/models/Mage-Flow-Base"
+  ]
+}

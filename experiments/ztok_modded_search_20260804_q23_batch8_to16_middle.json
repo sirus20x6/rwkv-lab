@@ -1,0 +1,249 @@
+{
+  "api_version": "trainvm.rwkv-lab/v1alpha1",
+  "kind": "Experiment",
+  "metadata": {
+    "description": "Bounded 10000-step ztok enhancement-search proxy.",
+    "labels": {
+      "campaign": "ztok-enhancement-search",
+      "family": "rwkv",
+      "optimizer_runtime": "fused",
+      "runtime_levers": "pinned_input_prefetch+async_step_timing+buffered_telemetry+fused_linear_cross_entropy",
+      "telemetry_interval_steps": "8"
+    },
+    "name": "ztok-modded-search-20260804-q23-batch8-to16-middle"
+  },
+  "spec": {
+    "artifacts": {},
+    "components": {
+      "core": {
+        "adapter": "trainvm.core",
+        "operations": {
+          "acquire_resources": {
+            "contract": "trainvm.v1.AcquireResources"
+          },
+          "release_resources": {
+            "contract": "trainvm.v1.ReleaseResources"
+          }
+        },
+        "runtime": "builtin",
+        "version": "1.0.0"
+      },
+      "trainer": {
+        "adapter": "rwkv-lab.ztok-superposition",
+        "operations": {
+          "train": {
+            "contract": "rwkv_lab.ztok_superposition.v1.Train"
+          }
+        },
+        "runtime": "python_worker",
+        "version": "1.0.0"
+      }
+    },
+    "controls": {
+      "catalog": {}
+    },
+    "execution": {
+      "compile": {
+        "enabled": false
+      },
+      "component": "trainer",
+      "gpu_trace": {
+        "enabled": false
+      },
+      "operation": "train"
+    },
+    "observability": {
+      "heartbeat_seconds": 30,
+      "metrics": [
+        {
+          "aggregation": "last",
+          "name": "eval.loss",
+          "step_domain": "optimizer_step",
+          "type": "gauge",
+          "unit": "dimensionless"
+        }
+      ],
+      "retain_raw_metrics_days": 30
+    },
+    "parameters": {},
+    "recovery": {
+      "exact_resume": false,
+      "graceful_stop_seconds": 300,
+      "orphan_policy": "leave_and_block",
+      "reconcile": "fail_closed"
+    },
+    "resources": {
+      "accelerators": {
+        "count": 1,
+        "exclusive": false,
+        "minimum_memory_gib": 80,
+        "vendor": "nvidia"
+      },
+      "cpu_io_policy": {
+        "cpu_weight": 100,
+        "io_weight": 100,
+        "nice": 0,
+        "omp_threads": 4,
+        "preprocessing_workers": 2
+      },
+      "cpu_threads": 16,
+      "lease_timeout_seconds": 300,
+      "minimum_host_memory_gib": 32
+    },
+    "workflow": {
+      "entrypoint": "acquire_gpu",
+      "nodes": {
+        "acquire_gpu": {
+          "effect": "resource",
+          "idempotency": "receipt_required",
+          "invoke": {
+            "component": "core",
+            "inputs": {
+              "concurrency_key": {
+                "literal": "ztok-modded-search-20260804"
+              }
+            },
+            "operation": "acquire_resources"
+          },
+          "transitions": [
+            {
+              "on": "resource.acquired",
+              "target": "train"
+            },
+            {
+              "on": "operation.failed",
+              "target": "$failed"
+            }
+          ]
+        },
+        "release_gpu": {
+          "effect": "resource",
+          "idempotency": "replay_safe",
+          "invoke": {
+            "component": "core",
+            "inputs": {
+              "concurrency_key": {
+                "literal": "ztok-modded-search-20260804"
+              }
+            },
+            "operation": "release_resources"
+          },
+          "transitions": [
+            {
+              "on": "resource.released",
+              "target": "$completed"
+            },
+            {
+              "on": "operation.failed",
+              "target": "$failed"
+            }
+          ]
+        },
+        "train": {
+          "effect": "process",
+          "idempotency": "receipt_required",
+          "invoke": {
+            "component": "trainer",
+            "inputs": {
+              "config": {
+                "literal": {
+                  "batch_size": 8,
+                  "batch_size_schedule": [
+                    {
+                      "batch_size": 8,
+                      "start_fraction": 0.0
+                    },
+                    {
+                      "batch_size": 16,
+                      "start_fraction": 0.5
+                    }
+                  ],
+                  "compile_cache_dir": "/thearray/git/moe-mla/runs/trainvm-search-cache/ztok-rwkv-xielu-sm120/compile",
+                  "defer_intermediate_evaluation": true,
+                  "eval_batches": 4,
+                  "input_verification_cache_dir": "/thearray/git/moe-mla/runs/trainvm-search-cache/ztok-rwkv-xielu-sm120/input-content",
+                  "max_steps": 10000,
+                  "output_dir": "/thearray/git/moe-mla/runs/ztok-modded-search-20260804-q23-batch8-to16-middle",
+                  "preserve_source_budget": true,
+                  "run_name": "ztok-modded-search-20260804-q23-batch8-to16-middle",
+                  "runtime_levers": [
+                    "pinned_input_prefetch",
+                    "async_step_timing",
+                    "buffered_telemetry",
+                    "fused_linear_cross_entropy"
+                  ],
+                  "source_byte_budget": 227844989,
+                  "telemetry_interval_steps": 8
+                }
+              }
+            },
+            "operation": "train",
+            "training": {
+              "components": {
+                "optimizer": {
+                  "configuration": {
+                    "beta1": 0.9,
+                    "beta2": 0.95,
+                    "epsilon": 1e-08,
+                    "foreach": false,
+                    "fused": true,
+                    "learning_rate": 0.0003,
+                    "weight_decay": 0.1
+                  },
+                  "key": {
+                    "category": "optimizer",
+                    "name": "torch_adamw",
+                    "version": "1.0.0"
+                  }
+                }
+              },
+              "model_family": "rwkv"
+            }
+          },
+          "timeout_seconds": 600,
+          "transitions": [
+            {
+              "on": "worker.completed",
+              "target": "release_gpu"
+            },
+            {
+              "on": "operation.failed",
+              "target": "$failed"
+            }
+          ]
+        }
+      }
+    },
+    "workspace": {
+      "allowed_read_roots": [
+        "/thearray/git/ztok/experiments/nanogpt_superposition",
+        "/thearray/git/moe-mla/src/rwkv_lab"
+      ],
+      "allowed_write_roots": [
+        "/thearray/git/moe-mla/runs/trainvm-search-cache/ztok-rwkv-xielu-sm120",
+        "/thearray/git/moe-mla/runs/ztok-modded-search-20260804-q23-batch8-to16-middle"
+      ],
+      "concurrency_key": "ztok-modded-search-20260804",
+      "input_content_roots": [
+        {
+          "api_version": "trainvm.input-content-root/v1",
+          "file_count": 408,
+          "kind": "directory",
+          "path": "/thearray/git/moe-mla/src/rwkv_lab",
+          "total_bytes": 12077669,
+          "tree_sha256": "sha256:70c980b73db2d02163678a5a7b7e29f6c696231416323ad9405eb0e89bf9a4c8"
+        },
+        {
+          "api_version": "trainvm.input-content-root/v1",
+          "file_count": 347,
+          "kind": "directory",
+          "path": "/thearray/git/ztok/experiments/nanogpt_superposition",
+          "total_bytes": 3076871477,
+          "tree_sha256": "sha256:568716648ebe781b59f7be2b6c1ea08b031a194799ff1a29d42a1f0f3a964667"
+        }
+      ],
+      "root": "/thearray/git/moe-mla-parity-integration",
+      "run_directory": "/thearray/git/moe-mla/runs/ztok-modded-search-20260804-q23-batch8-to16-middle"
+    }
+  }
+}

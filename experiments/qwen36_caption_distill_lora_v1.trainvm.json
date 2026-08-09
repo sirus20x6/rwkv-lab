@@ -1,0 +1,241 @@
+{
+  "api_version": "trainvm.rwkv-lab/v1alpha1",
+  "kind": "Experiment",
+  "metadata": {
+    "name": "qwen36-caption-distill-lora-v1",
+    "description": "Untouched BF16 test baseline, one-epoch assistant-only multimodal LoRA caption distillation, fixed validation generations, and final blinded test audit.",
+    "labels": {
+      "family": "transformer",
+      "task": "multimodal-caption-distillation",
+      "model": "qwen3.6-35b-a3b"
+    }
+  },
+  "spec": {
+    "workspace": {
+      "root": "/thearray/git/moe-mla",
+      "run_directory": "/thearray/git/moe-mla/runs/qwen36-caption-distill-lora-v1",
+      "concurrency_key": "qwen36-caption-distill-lora-v1",
+      "allowed_read_roots": [
+        "/thearray/git/datasets/captiontest/qwen36-caption-finetune-v1",
+        "/thearray/git/moe-mla",
+        "/thearray/git/ob/text-generation-webui/models/Qwen3.6-35B-A3B-heretic"
+      ],
+      "allowed_write_roots": [
+        "/thearray/git/moe-mla/runs/qwen36-caption-distill-lora-v1"
+      ]
+    },
+    "resources": {
+      "accelerators": {
+        "vendor": "nvidia",
+        "count": 1,
+        "minimum_memory_gib": 90,
+        "exclusive": true
+      },
+      "minimum_host_memory_gib": 128,
+      "cpu_threads": 16,
+      "lease_timeout_seconds": 30,
+      "cpu_io_policy": {
+        "cpu_weight": 100,
+        "io_weight": 100,
+        "omp_threads": 8,
+        "preprocessing_workers": 4,
+        "nice": 0
+      }
+    },
+    "parameters": {},
+    "artifacts": {
+      "caption_adapter_checkpoint": {
+        "type": "checkpoint",
+        "schema": "rwkv-lab.qwen-caption-finetune-checkpoint.v1",
+        "immutability": "immutable",
+        "fingerprint": "manifest_sha256"
+      }
+    },
+    "components": {
+      "core": {
+        "adapter": "trainvm.core",
+        "version": "1.0.0",
+        "runtime": "builtin",
+        "operations": {
+          "acquire_resources": {"contract": "trainvm.v1.AcquireResources"},
+          "release_resources": {"contract": "trainvm.v1.ReleaseResources"}
+        }
+      },
+      "caption_finetune": {
+        "adapter": "rwkv-lab.qwen-caption-finetune",
+        "version": "1.0.0",
+        "runtime": "python_worker",
+        "operations": {
+          "train": {"contract": "rwkv_lab.qwen_caption_finetune.v1.Train"}
+        }
+      }
+    },
+    "workflow": {
+      "entrypoint": "acquire_gpu",
+      "nodes": {
+        "acquire_gpu": {
+          "invoke": {
+            "component": "core",
+            "operation": "acquire_resources",
+            "inputs": {
+              "concurrency_key": {"literal": "qwen36-caption-distill-lora-v1"}
+            }
+          },
+          "idempotency": "receipt_required",
+          "effect": "resource",
+          "transitions": [
+            {"on": "resource.acquired", "target": "caption_finetune"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        },
+        "caption_finetune": {
+          "description": "Generate the frozen untouched baseline before installing LoRA, train only sealed language/output adapters, and evaluate the same test rows after the fixed one-epoch decision.",
+          "invoke": {
+            "component": "caption_finetune",
+            "operation": "train",
+            "inputs": {
+              "config": {
+                "literal": {
+                  "model_dir": "/thearray/git/ob/text-generation-webui/models/Qwen3.6-35B-A3B-heretic",
+                  "dataset_dir": "/thearray/git/datasets/captiontest/qwen36-caption-finetune-v1",
+                  "target_manifest": "/thearray/git/datasets/captiontest/qwen36-caption-finetune-v1/lora-targets.json",
+                  "run_dir": "/thearray/git/moe-mla/runs/qwen36-caption-distill-lora-v1",
+                  "epochs": 1,
+                  "micro_batch_size": 1,
+                  "gradient_accumulation_steps": 16,
+                  "lora_rank": 256,
+                  "lora_alpha": 512,
+                  "lora_dropout": 0.05,
+                  "learning_rate": 0.00002,
+                  "min_learning_rate": 0.000002,
+                  "warmup_ratio": 0.03,
+                  "weight_decay": 0.01,
+                  "adam_beta1": 0.9,
+                  "adam_beta2": 0.95,
+                  "adam_epsilon": 1e-08,
+                  "max_grad_norm": 1.0,
+                  "max_pixels": 1048576,
+                  "min_pixels": 65536,
+                  "max_text_tokens": 1024,
+                  "max_new_tokens": 768,
+                  "eval_every": 250,
+                  "save_every": 250,
+                  "log_every": 1,
+                  "validation_generation_count": 100,
+                  "seed": 20260805,
+                  "cuda_index": 0,
+                  "attention_implementation": "flash_attention_2",
+                  "experts_implementation": "grouped_mm",
+                  "minimum_free_vram_gib": 90.0,
+                  "resume": "",
+                  "auto_resume": true
+                }
+              }
+            },
+            "training": {
+              "model_family": "transformer",
+              "components": {
+                "gradient_accumulation": {
+                  "key": {
+                    "category": "gradient_accumulation",
+                    "name": "fixed",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {"microbatches_per_optimizer_step": 16}
+                },
+                "gradient_clipping": {
+                  "key": {
+                    "category": "gradient_clipping",
+                    "name": "global_norm",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "max_norm": 1.0,
+                    "norm_type": 2.0,
+                    "error_if_nonfinite": true
+                  }
+                },
+                "learning_rate": {
+                  "key": {
+                    "category": "learning_rate_schedule",
+                    "name": "linear_warmup_cosine",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "warmup_steps": 22,
+                    "max_steps": 745,
+                    "minimum_ratio": 0.1
+                  }
+                },
+                "optimizer": {
+                  "key": {
+                    "category": "optimizer",
+                    "name": "torch_adamw_no_decay",
+                    "version": "2.0.0"
+                  },
+                  "configuration": {
+                    "learning_rate": 0.00002,
+                    "beta1": 0.9,
+                    "beta2": 0.95,
+                    "epsilon": 1e-08,
+                    "foreach": false,
+                    "fused": true
+                  }
+                },
+                "weight_decay": {
+                  "key": {
+                    "category": "weight_decay_schedule",
+                    "name": "constant",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {"weight_decay": 0.01}
+                }
+              }
+            }
+          },
+          "publishes": {"checkpoint": "caption_adapter_checkpoint"},
+          "idempotency": "receipt_required",
+          "effect": "process",
+          "timeout_seconds": 259200,
+          "transitions": [
+            {"on": "worker.completed", "target": "release_gpu"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        },
+        "release_gpu": {
+          "invoke": {
+            "component": "core",
+            "operation": "release_resources",
+            "inputs": {
+              "concurrency_key": {"literal": "qwen36-caption-distill-lora-v1"}
+            }
+          },
+          "idempotency": "replay_safe",
+          "effect": "resource",
+          "transitions": [
+            {"on": "resource.released", "target": "$completed"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        }
+      }
+    },
+    "controls": {"catalog": {}},
+    "observability": {
+      "heartbeat_seconds": 5,
+      "metrics": [
+        {"name": "train.loss", "type": "gauge", "unit": "dimensionless", "step_domain": "optimizer_step", "aggregation": "weighted_mean"},
+        {"name": "train.images_per_second", "type": "gauge", "unit": "image/second", "step_domain": "optimizer_step", "aggregation": "mean"},
+        {"name": "eval.loss", "type": "gauge", "unit": "dimensionless", "step_domain": "optimizer_step", "aggregation": "weighted_mean"},
+        {"name": "system.gpu_memory_used", "type": "gauge", "unit": "byte", "step_domain": "optimizer_step", "aggregation": "last"}
+      ],
+      "retain_raw_metrics_days": 30
+    },
+    "recovery": {
+      "exact_resume": false,
+      "checkpoint_artifact": "caption_adapter_checkpoint",
+      "reconcile": "fail_closed",
+      "orphan_policy": "leave_and_block",
+      "graceful_stop_seconds": 900
+    }
+  }
+}
