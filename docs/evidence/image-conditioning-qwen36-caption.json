@@ -1,0 +1,347 @@
+{
+  "api_version": "rwkv-lab.image-conditioning-evidence/v1",
+  "applied_key_remap": {
+    "^model\\.language_model\\.visual\\.": "model.visual."
+  },
+  "caption_words": 60,
+  "checkpoint_tensor_count": 1026,
+  "checkpoint_vision_tensor_count": 333,
+  "conditions": [
+    {
+      "condition": "pretrained-vision",
+      "consumes_image_content": true,
+      "deterministic": true,
+      "discriminating": true,
+      "discrimination_accuracy": 1.0,
+      "discrimination_accuracy_threshold": 0.75,
+      "discrimination_margin_nats": 1.1242899537086486,
+      "discrimination_threshold_nats": 0.05,
+      "example_count": 5,
+      "examples": [
+        {
+          "identifier": "000599db015a2b09000f9a3e59d110dd5df719de04ca39871ebb4218990b7e15",
+          "matched_nats": 1.5328723192214966,
+          "mismatched_mean_nats": 2.3143044114112854,
+          "variants": [
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 1.5328723192214966,
+              "variant": "original"
+            },
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 1.5328723192214966,
+              "variant": "repeated"
+            },
+            {
+              "delta_from_reference_nats": 0.3538031578063965,
+              "score_nats": 1.886675477027893,
+              "variant": "shuffled"
+            },
+            {
+              "delta_from_reference_nats": 0.4503988027572632,
+              "score_nats": 1.9832711219787598,
+              "variant": "blank"
+            }
+          ]
+        },
+        {
+          "identifier": "00316ca2ac837763253c39abd88ef9184a7095d9b0e4a7519444140c08060d6a",
+          "matched_nats": 0.9444827437400818,
+          "mismatched_mean_nats": 2.2941890358924866,
+          "variants": [
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 0.9444827437400818,
+              "variant": "original"
+            },
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 0.9444827437400818,
+              "variant": "repeated"
+            },
+            {
+              "delta_from_reference_nats": 0.6166670918464661,
+              "score_nats": 1.5611498355865479,
+              "variant": "shuffled"
+            },
+            {
+              "delta_from_reference_nats": 0.9011096358299255,
+              "score_nats": 1.8455923795700073,
+              "variant": "blank"
+            }
+          ]
+        },
+        {
+          "identifier": "00706990bdfdeea65d2f92d952fc959f0971290df3f0db583ccb9337a405c02f",
+          "matched_nats": 1.564168095588684,
+          "mismatched_mean_nats": 2.079534351825714,
+          "variants": [
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 1.564168095588684,
+              "variant": "original"
+            },
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 1.564168095588684,
+              "variant": "repeated"
+            },
+            {
+              "delta_from_reference_nats": 1.3891762495040894,
+              "score_nats": 2.9533443450927734,
+              "variant": "shuffled"
+            },
+            {
+              "delta_from_reference_nats": 1.4413865804672241,
+              "score_nats": 3.005554676055908,
+              "variant": "blank"
+            }
+          ]
+        },
+        {
+          "identifier": "00b179f8a64a00249c63091b45ffff5680693d51fe735d43738fa941f483d8fb",
+          "matched_nats": 0.877429723739624,
+          "mismatched_mean_nats": 2.34885111451149,
+          "variants": [
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 0.877429723739624,
+              "variant": "original"
+            },
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 0.877429723739624,
+              "variant": "repeated"
+            },
+            {
+              "delta_from_reference_nats": 0.4754970073699951,
+              "score_nats": 1.3529267311096191,
+              "variant": "shuffled"
+            },
+            {
+              "delta_from_reference_nats": 0.8736714124679565,
+              "score_nats": 1.7511011362075806,
+              "variant": "blank"
+            }
+          ]
+        },
+        {
+          "identifier": "00c027a7510d16d53d78c9504fbf8d85f6d8cbb501fe341e5565cadd3db0c843",
+          "matched_nats": 0.7659221887588501,
+          "mismatched_mean_nats": 2.269445925951004,
+          "variants": [
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 0.7659221887588501,
+              "variant": "original"
+            },
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 0.7659221887588501,
+              "variant": "repeated"
+            },
+            {
+              "delta_from_reference_nats": 0.4082406759262085,
+              "score_nats": 1.1741628646850586,
+              "variant": "shuffled"
+            },
+            {
+              "delta_from_reference_nats": 0.9250571727752686,
+              "score_nats": 1.6909793615341187,
+              "variant": "blank"
+            }
+          ]
+        }
+      ],
+      "failures": [],
+      "minimum_responsiveness_nats": 0.3538031578063965,
+      "repeat_determinism_nats": 0.0,
+      "responsive": true,
+      "responsiveness_threshold_nats": 0.01,
+      "schema": "rwkv-lab.image-conditioning-probe.v1",
+      "subject": "Qwen3.6-35B-A3B-heretic-caption-step000745-merged-bf16/pretrained-vision",
+      "variants": [
+        "original",
+        "repeated",
+        "shuffled",
+        "blank"
+      ]
+    },
+    {
+      "condition": "randomized-vision",
+      "consumes_image_content": false,
+      "deterministic": true,
+      "discriminating": false,
+      "discrimination_accuracy": 0.8,
+      "discrimination_accuracy_threshold": 0.75,
+      "discrimination_margin_nats": 0.0262193500995636,
+      "discrimination_threshold_nats": 0.05,
+      "example_count": 5,
+      "examples": [
+        {
+          "identifier": "000599db015a2b09000f9a3e59d110dd5df719de04ca39871ebb4218990b7e15",
+          "matched_nats": 2.0357935428619385,
+          "mismatched_mean_nats": 2.1350013613700867,
+          "variants": [
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 2.0357935428619385,
+              "variant": "original"
+            },
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 2.0357935428619385,
+              "variant": "repeated"
+            },
+            {
+              "delta_from_reference_nats": 0.03648567199707031,
+              "score_nats": 2.072279214859009,
+              "variant": "shuffled"
+            },
+            {
+              "delta_from_reference_nats": 0.03797614574432373,
+              "score_nats": 1.9978173971176147,
+              "variant": "blank"
+            }
+          ]
+        },
+        {
+          "identifier": "00316ca2ac837763253c39abd88ef9184a7095d9b0e4a7519444140c08060d6a",
+          "matched_nats": 1.8190784454345703,
+          "mismatched_mean_nats": 2.1594290733337402,
+          "variants": [
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 1.8190784454345703,
+              "variant": "original"
+            },
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 1.8190784454345703,
+              "variant": "repeated"
+            },
+            {
+              "delta_from_reference_nats": 0.03323948383331299,
+              "score_nats": 1.7858389616012573,
+              "variant": "shuffled"
+            },
+            {
+              "delta_from_reference_nats": 0.027336597442626953,
+              "score_nats": 1.8464150428771973,
+              "variant": "blank"
+            }
+          ]
+        },
+        {
+          "identifier": "00706990bdfdeea65d2f92d952fc959f0971290df3f0db583ccb9337a405c02f",
+          "matched_nats": 3.008504629135132,
+          "mismatched_mean_nats": 1.8706315159797668,
+          "variants": [
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 3.008504629135132,
+              "variant": "original"
+            },
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 3.008504629135132,
+              "variant": "repeated"
+            },
+            {
+              "delta_from_reference_nats": 0.011937856674194336,
+              "score_nats": 3.020442485809326,
+              "variant": "shuffled"
+            },
+            {
+              "delta_from_reference_nats": 0.012847661972045898,
+              "score_nats": 2.995656967163086,
+              "variant": "blank"
+            }
+          ]
+        },
+        {
+          "identifier": "00b179f8a64a00249c63091b45ffff5680693d51fe735d43738fa941f483d8fb",
+          "matched_nats": 1.7509783506393433,
+          "mismatched_mean_nats": 2.200070232152939,
+          "variants": [
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 1.7509783506393433,
+              "variant": "original"
+            },
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 1.7509783506393433,
+              "variant": "repeated"
+            },
+            {
+              "delta_from_reference_nats": 0.01446533203125,
+              "score_nats": 1.7365130186080933,
+              "variant": "shuffled"
+            },
+            {
+              "delta_from_reference_nats": 0.008312582969665527,
+              "score_nats": 1.7426657676696777,
+              "variant": "blank"
+            }
+          ]
+        },
+        {
+          "identifier": "00c027a7510d16d53d78c9504fbf8d85f6d8cbb501fe341e5565cadd3db0c843",
+          "matched_nats": 1.7857288122177124,
+          "mismatched_mean_nats": 2.1660483479499817,
+          "variants": [
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 1.7857288122177124,
+              "variant": "original"
+            },
+            {
+              "delta_from_reference_nats": 0.0,
+              "score_nats": 1.7857288122177124,
+              "variant": "repeated"
+            },
+            {
+              "delta_from_reference_nats": 0.040851712226867676,
+              "score_nats": 1.82658052444458,
+              "variant": "shuffled"
+            },
+            {
+              "delta_from_reference_nats": 0.13736164569854736,
+              "score_nats": 1.648367166519165,
+              "variant": "blank"
+            }
+          ]
+        }
+      ],
+      "failures": [
+        "the least-distinguished perturbation moved the score by only 8.313e-03 nats (threshold 1.000e-02); image content is not reaching the computation",
+        "own-caption preference is +2.622e-02 nats at 80% accuracy (thresholds 5.000e-02 nats, 75%); the model responds to pixels but does not read them for content, which is what a randomly initialised vision tower looks like"
+      ],
+      "minimum_responsiveness_nats": 0.008312582969665527,
+      "repeat_determinism_nats": 0.0,
+      "responsive": false,
+      "responsiveness_threshold_nats": 0.01,
+      "schema": "rwkv-lab.image-conditioning-probe.v1",
+      "subject": "Qwen3.6-35B-A3B-heretic-caption-step000745-merged-bf16/randomized-vision",
+      "variants": [
+        "original",
+        "repeated",
+        "shuffled",
+        "blank"
+      ]
+    }
+  ],
+  "dataset": "/thearray/git/datasets/captiontest/qwen36-caption-finetune-v1/validation-fixed-100.jsonl",
+  "device": {
+    "free_gib": 84.85,
+    "total_gib": 94.98
+  },
+  "load_seconds": 186.0,
+  "max_pixels": 200704,
+  "missing_keys": 0,
+  "model_dir": "/thearray/git/ob/text-generation-webui/models/Qwen3.6-35B-A3B-heretic-caption-step000745-merged-bf16",
+  "randomized_vision_parameter_count": 333,
+  "unexpected_keys": 0
+}
