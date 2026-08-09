@@ -463,7 +463,8 @@ Rules:
 5. **Nothing raises.** A malformed document produces a receipt with `verdict: rejected`, not an
    exception, not a stack trace, and not a partially built program. The upstream contract said this
    and the audit disproved it at the pin; a fuzz corpus over the wire format is the regression that
-   keeps it true here, not a docstring.
+   keeps it true here, not a docstring. A receipt is emitted for a Phase A failure too, even though
+   its exit code differs, so that "there is always a receipt" holds without exception.
 6. **A rejection is complete.** All errors in the failing phase are reported, not the first. Phases
    after a failing phase are reported as not attempted, in `proved_invariants` by absence and in the
    `not_attempted` list by name, so "no error from Phase E" never reads as "Phase E passed".
@@ -473,7 +474,7 @@ Rules:
 | Code | Meaning |
 |---|---|
 | 0 | schedule accepted; receipt on stdout |
-| 2 | document malformed — Phase A failed; diagnostics on stderr |
+| 2 | document malformed — Phase A failed; receipt on stdout, diagnostics also on stderr |
 | 3 | document well-formed, schedule rejected; receipt with diagnostics on stdout |
 | 64 | usage error |
 
