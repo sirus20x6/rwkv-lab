@@ -20,6 +20,9 @@ import sys
 
 import pytest
 
+# tests/ is on sys.path because this directory holds the rootdir conftest.
+import trainvm_binary
+
 REPOSITORY = pathlib.Path(__file__).resolve().parents[1]
 RUNNER = REPOSITORY / "scripts/run_benchmark_fixture.py"
 MATRIX = REPOSITORY / "docs/experiment-vm/benchmark-matrix.v1.json"
@@ -64,19 +67,62 @@ def run_runner(*arguments: str) -> subprocess.CompletedProcess:
 
 
 def find_trainvm() -> str:
-    candidates = [
-        shutil.which("trainvm"),
-        str(REPOSITORY / "trainvm/build/trainvm"),
-        str(REPOSITORY / "trainvm/build-verify/trainvm"),
-    ]
-    binary = next(
-        (candidate for candidate in candidates
-         if candidate and pathlib.Path(candidate).exists()),
-        None,
-    )
+    """The gate binary is the one built from this checkout, or none at all.
+
+    See tests/trainvm_binary.py for why PATH is never consulted: preferring a
+    global install meant these graders could judge new source with an old
+    binary, on exactly the hosts where someone is reading the verdict. The
+    chosen binary is also printed in the pytest header on every run, so a
+    surprising verdict can be attributed to the thing that produced it.
+    """
+    binary, description = trainvm_binary.resolve_trainvm()
     if binary is None:
-        pytest.skip("trainvm binary not built; gate verdict not exercised")
+        pytest.skip(f"trainvm gate binary {description}")
+    print(f"grading with trainvm binary: {binary} ({description})")
     return binary
+
+
+def test_gate_binary_is_never_taken_from_path(tmp_path, monkeypatch):
+    """A trainvm on PATH must not be able to grade this checkout.
+
+    The rigged PATH here is the whole test: `shutil.which` is asserted to find
+    the decoy first, so the resolver is genuinely being offered it and is
+    genuinely declining. Before this change the decoy would have been returned
+    and used to judge qualification evidence.
+    """
+    decoy_directory = tmp_path / "bin"
+    decoy_directory.mkdir()
+    decoy = decoy_directory / "trainvm"
+    decoy.write_text("#!/bin/sh\necho 'not the binary under test'\nexit 1\n")
+    decoy.chmod(0o755)
+    monkeypatch.setenv("PATH", str(decoy_directory))
+    monkeypatch.delenv("TRAINVM_BINARY", raising=False)
+    monkeypatch.delenv("TRAINVM_BUILD_DIR", raising=False)
+
+    assert shutil.which("trainvm") == str(decoy)
+
+    binary, description = trainvm_binary.resolve_trainvm()
+    assert binary != str(decoy)
+    assert str(decoy_directory) not in (binary or "")
+    if binary is not None:
+        assert pathlib.Path(binary).is_relative_to(REPOSITORY), description
+
+
+def test_explicit_binary_request_that_cannot_be_honoured_is_loud(
+        tmp_path, monkeypatch):
+    """Asking for a specific binary and not getting it must not become a skip."""
+    monkeypatch.setenv("TRAINVM_BINARY", str(tmp_path / "absent"))
+    with pytest.raises(trainvm_binary.TrainvmBinaryError):
+        trainvm_binary.resolve_trainvm()
+
+
+def test_report_header_records_which_binary_would_grade(monkeypatch):
+    """Every run states the grader, including when there is none."""
+    monkeypatch.delenv("TRAINVM_BINARY", raising=False)
+    line = trainvm_binary.report_line()
+    assert line.startswith("trainvm gate binary: ")
+    binary, _ = trainvm_binary.resolve_trainvm()
+    assert (binary or "none") in line
 
 
 def test_unknown_fixture_is_refused():

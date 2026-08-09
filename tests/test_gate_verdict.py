@@ -8,6 +8,7 @@ phrasing and prove nothing about that property.
 
 from __future__ import annotations
 
+import pathlib
 import re
 import subprocess
 import sys
@@ -15,6 +16,8 @@ import sys
 import pytest
 
 from scripts.gate_verdict import verdict_line
+
+REPOSITORY = pathlib.Path(__file__).resolve().parents[1]
 
 DETAIL = "128 covered, 9 explained exclusions, 138 test files on disk"
 
@@ -94,9 +97,13 @@ def test_the_wired_gate_ends_with_a_verdict_line(gate):
     Parametrized rather than looped so a gate that cannot run in this
     environment skips on its own instead of taking the others with it.
     """
+    # Anchored to this checkout rather than to the invocation directory: a
+    # bare relative path runs whichever gate the caller's cwd happens to hold,
+    # which is the same "graded by a file outside the tree under test" mistake
+    # that let a PATH-resolved trainvm judge the benchmark evidence.
     completed = subprocess.run(
-        [sys.executable, gate],
-        capture_output=True, text=True, check=False,
+        [sys.executable, str(REPOSITORY / gate)],
+        capture_output=True, text=True, check=False, cwd=REPOSITORY,
     )
     # Not every job installs every gate's dependencies -- the CPU job has no
     # jsonschema, which only the schema-golden job pip-installs. A gate that

@@ -3,6 +3,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Anchored to this checkout: a bare relative script path runs whatever the
+# caller's working directory happens to contain, which is a test grading source
+# it was not pointed at.
+REPOSITORY = Path(__file__).resolve().parents[1]
+
 
 def test_builds_exact_nonoverlapping_slice(tmp_path: Path):
     source = tmp_path / "source.jsonl"
@@ -11,7 +16,7 @@ def test_builds_exact_nonoverlapping_slice(tmp_path: Path):
         for index in range(9)))
     output = tmp_path / "shard.jsonl"
     subprocess.run([
-        sys.executable, "scripts/build_vision_teacher_shard.py",
+        sys.executable, str(REPOSITORY / "scripts/build_vision_teacher_shard.py"),
         "--source", str(source), "--output", str(output),
         "--index", "1", "--size", "3"], check=True)
     rows = [json.loads(line) for line in output.open()]
