@@ -162,6 +162,40 @@ def test_a_device_the_probe_cannot_describe_is_refused_not_guessed():
         )
 
 
+def test_a_device_address_that_reaches_a_path_is_checked_not_trusted():
+    from rwkv_lab.trainvm_worker.runtime_evidence import _nvidia_device_identity
+
+    for address in ("../../../etc", "0000:41:00.0/../..", "", "nvidia0"):
+        with pytest.raises(RuntimeEvidenceError):
+            _nvidia_device_identity(address)
+
+
+def test_device_identity_is_measured_rather_than_taken_from_the_caller():
+    from rwkv_lab.trainvm_worker.runtime_evidence import _compute_identity
+
+    # The caller says which device the launch was fenced to. What that device
+    # *is* has to come from the driver, or the caller could name any identity
+    # it wanted and the placement-specific namespace would mean nothing. This
+    # address is well formed and resolves to no device, so the driver has
+    # nothing to say -- and the caller's answer is not used in its place.
+    fenced = {
+        "vendor": "nvidia",
+        "architecture": "sm_120",
+        "pci_address": "ffff:ff:ff.f",
+        "uuid": "GPU-00000000-0000-0000-0000-000000000000",
+    }
+    identity = _compute_identity([fenced])
+    assert identity["compute_device_uuid"] is None
+    # And an unidentifiable device cannot be laundered into a placement claim.
+    with pytest.raises(RuntimeEvidenceError):
+        measure_worker_runtime_evidence(
+            _bootstrap(),
+            runtime_closure_fingerprint=CLOSURE,
+            selected_devices=[fenced],
+            placement_specific=True,
+        )
+
+
 def test_placement_specificity_without_a_device_cannot_be_satisfied():
     # A placement-specific namespace names one exact device. With no device
     # fenced there is nothing to name, and the probe fails rather than emitting

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import sys
 import sysconfig
 from collections.abc import Iterable, Sequence
@@ -71,6 +72,7 @@ RUNTIME_VERSION_DISTRIBUTIONS = (
 # The absent-accelerator driver identity. A portable namespace still has to
 # name one, and an empty string is not a name.
 NO_DRIVER = "none"
+_PCI_ADDRESS = re.compile(r"[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F]")
 
 
 class RuntimeEvidenceError(RuntimeError):
@@ -92,6 +94,11 @@ def _nvidia_device_identity(pci_address: str) -> dict[str, str]:
     does not perturb the device it is describing and does not need the CUDA
     runtime it may be about to declare incompatible.
     """
+    # The address reaches a path, so its shape is checked rather than trusted.
+    # It arrives from the authority's inventory today; a probe that let it name
+    # an arbitrary path would be one caller change away from reading one.
+    if not _PCI_ADDRESS.fullmatch(pci_address):
+        raise RuntimeEvidenceError(f"malformed PCI address: {pci_address!r}")
     information = _read_text(
         os.path.join(NVIDIA_GPU_DIRECTORY, pci_address, "information")
     )
@@ -204,10 +211,11 @@ def _compute_identity(
         "compute_device_vendor": "nvidia",
         "compute_architecture": next(iter(architectures)),
         "driver_version": version,
+        # Measured from the driver, never taken from the caller's device
+        # description: the caller may say which device it was fenced to, but
+        # not what that device's identity is.
         "compute_device_uuid": (
-            models[exact["pci_address"]].get("gpu uuid") or exact.get("uuid")
-            if exact
-            else None
+            models[exact["pci_address"]].get("gpu uuid") if exact else None
         ),
         "compute_device_pci_address": exact["pci_address"] if exact else None,
         "attributes": {"devices": models},
