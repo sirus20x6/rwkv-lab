@@ -25,20 +25,27 @@ const trainVMDraftLimit = 2 << 20
 const trainVMCommandLimit = 64 << 10
 const trainVMAuthorRunLimit = 5 << 20
 
-// trainVMLifecycleCommandTimeout bounds a lifecycle submission end to end. It is
-// deliberately longer than the five seconds the other TrainVM mutations use: a
-// lifecycle command is journalled by a controller that re-verifies the whole
-// journal hash chain during recovery, and on a long-lived training journal that
-// competes with checkpoint publication for the same disk. A live pause was lost
-// to exactly that, five seconds being shorter than the authority's honest answer.
-const trainVMLifecycleCommandTimeout = 20 * time.Second
+// trainVMDurableCommandTimeout bounds a durable command submission end to end.
+// It is deliberately longer than the five seconds the other TrainVM mutations
+// use, and it covers every submission that reaches the authority's CommandRun
+// RPC — lifecycle actions and control patches alike, because that is one RPC
+// served by one handler. That handler constructs a Controller and calls
+// recover() before it branches on the command kind, and recover() re-verifies
+// the whole journal hash chain: a SHA-256 and a JSON parse per event across the
+// entire journal, so the cost is O(total events) and grows with the run rather
+// than with the command. On a long-lived training journal competing with
+// checkpoint publication for the same disk that is not a five-second operation.
+// A live pause was lost to exactly that, five seconds being shorter than the
+// authority's honest answer. The remaining 5s mutations here are different RPCs
+// — SubmitExperiment, DiffPlan, Compile — which do not enter that path.
+const trainVMDurableCommandTimeout = 20 * time.Second
 
-// trainVMLifecycleReconcileTimeout and trainVMLifecycleReconcileScan bound the
-// read that recovers a durable command identity once the submission deadline has
+// trainVMCommandReconcileTimeout and trainVMCommandReconcileScan bound the read
+// that recovers a durable command identity once the submission deadline has
 // already expired. The read is indexed and local, so it is budgeted far below
 // the submission it follows.
-const trainVMLifecycleReconcileTimeout = 5 * time.Second
-const trainVMLifecycleReconcileScan = 250
+const trainVMCommandReconcileTimeout = 5 * time.Second
+const trainVMCommandReconcileScan = 250
 
 func (s *Server) handleTrainVMHostAuthority(w http.ResponseWriter, r *http.Request) {
 	if s.commander == nil {
@@ -759,9 +766,15 @@ func (s *Server) handleTrainVMControls(w http.ResponseWriter, r *http.Request) {
 	if !decodeTrainVMMutation(w, r, "control", trainVMCommandLimit, &input) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	// A control patch reaches the same CommandRun RPC a lifecycle action does,
+	// and pays the same controller recovery before the authority branches on the
+	// command kind. Bound it identically, so an ordinarily slow submission still
+	// answers on the normal path and reconciliation below stays reserved for the
+	// pathological case rather than becoming the routine one.
+	ctx, cancel := context.WithTimeout(r.Context(), trainVMDurableCommandTimeout)
 	defer cancel()
-	run, found, err := s.trainvm.Run(ctx, r.PathValue("run"))
+	runID := r.PathValue("run")
+	run, found, err := s.trainvm.Run(ctx, runID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -776,13 +789,26 @@ func (s *Server) handleTrainVMControls(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.commander.RequestControls(ctx, trainvmstore.ControlRequest{
-		RunID: r.PathValue("run"), ExpectedJournalID: journalID, ExpectedPlanHash: run.PlanHash,
+		RunID: runID, ExpectedJournalID: journalID, ExpectedPlanHash: run.PlanHash,
 		ExpectedRunRevision:     input.ExpectedRunRevision,
 		ExpectedControlRevision: input.ExpectedControlRevision,
 		IdempotencyKey:          input.IdempotencyKey, Author: "dashboard", Reason: input.Reason,
 		Assignments: input.Assignments,
 	})
 	if err != nil {
+		// A transport deadline is not an answer about the command. The authority
+		// may have durably journalled control.requested and still be reconciling
+		// when our context expires, so recover the durable identity from the
+		// journal rather than reporting a failure the authority never gave. This
+		// path never re-submits: it is a read, so a caller that retries on 504
+		// cannot be induced to mutate the run twice.
+		if reconciled, ok := s.reconcileTrainVMControlCommand(r, runID, input, err); ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(reconciled)
+			return
+		}
 		writeTrainVMAuthorityError(w, err)
 		return
 	}
@@ -825,7 +851,7 @@ func (s *Server) handleTrainVMRunAction(w http.ResponseWriter, r *http.Request) 
 	// the authority to return the durable idempotent command receipt on the
 	// normal path, so reconciliation below stays reserved for the pathological
 	// case rather than becoming the routine one.
-	ctx, cancel := context.WithTimeout(r.Context(), trainVMLifecycleCommandTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), trainVMDurableCommandTimeout)
 	defer cancel()
 	runID := r.PathValue("run")
 	run, found, err := s.trainvm.Run(ctx, runID)
@@ -905,26 +931,61 @@ type trainVMLifecycleRequestPayload struct {
 	Reason              string `json:"reason"`
 }
 
-// reconcileTrainVMLifecycleCommand answers whether a lifecycle submission that
-// failed on a transport deadline nevertheless reached the journal, and returns
-// the durable command identity when it did.
+// trainVMControlRequestPayload is the durable receipt the native authority
+// writes into the control.requested event before it acknowledges anything to a
+// caller. It shares the command identity fields lifecycle.requested carries and
+// adds the control revision pair, because a control patch is ordered against
+// the control sequence as well as the run.
+type trainVMControlRequestPayload struct {
+	CommandID               string         `json:"command_id"`
+	IdempotencyKey          string         `json:"idempotency_key"`
+	ExpectedRunRevision     uint64         `json:"expected_run_revision"`
+	ExpectedControlRevision uint64         `json:"expected_control_revision"`
+	ControlRevision         uint64         `json:"control_revision"`
+	ApplyPoint              string         `json:"apply_point"`
+	RequiresPause           bool           `json:"requires_pause"`
+	Assignments             map[string]any `json:"assignments"`
+}
+
+// trainVMDurableCommandIdentity is the part of a *.requested payload that every
+// command kind carries — journal.cpp writes these same three fields into
+// lifecycle.requested and control.requested alike, before either is
+// acknowledged. Matching on them is what makes a recovered command this
+// caller's rather than merely this run's.
+type trainVMDurableCommandIdentity struct {
+	CommandID           string `json:"command_id"`
+	IdempotencyKey      string `json:"idempotency_key"`
+	ExpectedRunRevision uint64 `json:"expected_run_revision"`
+}
+
+// reconcileTrainVMDurableCommand answers whether a submission that failed on a
+// transport deadline nevertheless reached the journal, and hands the matching
+// event to build so the caller can shape its own receipt from the durable
+// payload. It is shared by every command kind, so the rule below is stated once
+// rather than once per endpoint.
 //
-// It reports a command only on an exact match of idempotency key, action and
-// expected run revision against a lifecycle.requested event for this run. A
-// looser match would let one submission claim another's command, which is the
-// duplicate-mutation hazard this exists to prevent — the caller acts on the
-// returned identity, so attributing the wrong one is worse than failing closed.
-func (s *Server) reconcileTrainVMLifecycleCommand(r *http.Request, runID string,
-	input trainVMRunActionRequest, cause error) (trainvmstore.RunActionResult, bool) {
+// It considers only an exact match of idempotency key and expected run revision
+// against a <kind>.requested event for this run, and build applies whatever
+// further identity the kind carries. A looser match would let one submission
+// claim another's command, which is the duplicate-mutation hazard this exists to
+// prevent — the caller acts on the returned identity, so attributing the wrong
+// one is worse than failing closed.
+//
+// This is a read. It issues no command, so a caller retrying on 504 cannot be
+// induced to mutate the run twice.
+func reconcileTrainVMDurableCommand[Result any](s *Server, r *http.Request, runID, eventType,
+	idempotencyKey string, expectedRunRevision uint64, cause error,
+	build func(event trainvmstore.Event) (Result, bool)) (Result, bool) {
+	var none Result
 	// Match on the key as the authority journalled it. The commander trims before
 	// it sends, so comparing the raw field would miss a padded key and fail
 	// closed on a command that is genuinely this caller's.
-	idempotencyKey := strings.TrimSpace(input.IdempotencyKey)
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
 	if s.trainvm == nil || idempotencyKey == "" {
-		return trainvmstore.RunActionResult{}, false
+		return none, false
 	}
 	if code := status.Code(cause); code != codes.DeadlineExceeded {
-		return trainvmstore.RunActionResult{}, false
+		return none, false
 	}
 	// A context derived from the request would already be dead whenever the
 	// expired deadline was the request's own rather than ours, and reconciliation
@@ -932,50 +993,107 @@ func (s *Server) reconcileTrainVMLifecycleCommand(r *http.Request, runID string,
 	// both cases. It also discards client disconnection, which costs nothing
 	// here: the read is bounded, indexed, local, and mutates nothing.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()),
-		trainVMLifecycleReconcileTimeout)
+		trainVMCommandReconcileTimeout)
 	defer cancel()
 	run, found, err := s.trainvm.Run(ctx, runID)
 	if err != nil || !found || run.LastEventSeq == 0 {
-		return trainvmstore.RunActionResult{}, false
+		return none, false
 	}
 	events, err := s.trainvm.Events(ctx, trainvmstore.EventQuery{
 		RunID: runID, Through: run.LastEventSeq, NewestFirst: true,
-		EventTypes: []string{"lifecycle.requested"},
-		Limit:      trainVMLifecycleReconcileScan,
+		EventTypes: []string{eventType},
+		Limit:      trainVMCommandReconcileScan,
 	})
 	if err != nil {
-		return trainvmstore.RunActionResult{}, false
+		return none, false
 	}
-	action := strings.ToLower(strings.TrimSpace(input.Action))
 	for _, event := range events {
-		if event.RunID != runID || event.EventType != "lifecycle.requested" {
+		if event.RunID != runID || event.EventType != eventType {
 			continue
 		}
-		var payload trainVMLifecycleRequestPayload
-		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		var identity trainVMDurableCommandIdentity
+		if err := json.Unmarshal(event.Payload, &identity); err != nil {
 			continue
 		}
-		if payload.CommandID == "" || payload.IdempotencyKey != idempotencyKey ||
-			payload.Kind != action || payload.ExpectedRunRevision != input.ExpectedRunRevision {
+		if identity.CommandID == "" || identity.IdempotencyKey != idempotencyKey ||
+			identity.ExpectedRunRevision != expectedRunRevision {
 			continue
 		}
-		return trainvmstore.RunActionResult{
-			Disposition: "ACCEPTED", Action: payload.Kind, CommandID: payload.CommandID,
-			CommandSequence: event.Sequence, ControllerSequence: event.Sequence,
-			Status:           "REQUESTED",
-			CheckpointFirst:  payload.CheckpointFirst,
-			ReleaseResources: payload.ReleaseResources,
-			Reason:           payload.Reason,
-			Diagnostics: []trainvmstore.ControlDiagnostic{{
-				Severity: "INFO", Code: "lifecycle_command_reconciled", Path: "/",
-				Message: "the lifecycle submission exceeded its transport deadline; " +
-					"this command identity was recovered from the durable journal",
-				Help: "the command is already journalled — poll the run timeline " +
-					"rather than re-submitting under a new idempotency key",
-			}},
-		}, true
+		if result, ok := build(event); ok {
+			return result, true
+		}
 	}
-	return trainvmstore.RunActionResult{}, false
+	return none, false
+}
+
+// trainVMReconciledDiagnostic names where a recovered command identity came
+// from, inside the existing envelope rather than a new field. The wording is
+// parameterised by kind so the two endpoints do not drift into saying the same
+// thing two ways.
+func trainVMReconciledDiagnostic(kind string) trainvmstore.ControlDiagnostic {
+	return trainvmstore.ControlDiagnostic{
+		Severity: "INFO", Code: kind + "_command_reconciled", Path: "/",
+		Message: "the " + kind + " submission exceeded its transport deadline; " +
+			"this command identity was recovered from the durable journal",
+		Help: "the command is already journalled — poll the run timeline " +
+			"rather than re-submitting under a new idempotency key",
+	}
+}
+
+// reconcileTrainVMLifecycleCommand recovers a lifecycle command identity from
+// the journal, additionally requiring that the journalled kind is the action
+// this caller submitted.
+func (s *Server) reconcileTrainVMLifecycleCommand(r *http.Request, runID string,
+	input trainVMRunActionRequest, cause error) (trainvmstore.RunActionResult, bool) {
+	action := strings.ToLower(strings.TrimSpace(input.Action))
+	return reconcileTrainVMDurableCommand(s, r, runID, "lifecycle.requested",
+		input.IdempotencyKey, input.ExpectedRunRevision, cause,
+		func(event trainvmstore.Event) (trainvmstore.RunActionResult, bool) {
+			var payload trainVMLifecycleRequestPayload
+			if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.Kind != action {
+				return trainvmstore.RunActionResult{}, false
+			}
+			return trainvmstore.RunActionResult{
+				Disposition: "ACCEPTED", Action: payload.Kind, CommandID: payload.CommandID,
+				CommandSequence: event.Sequence, ControllerSequence: event.Sequence,
+				Status:           "REQUESTED",
+				CheckpointFirst:  payload.CheckpointFirst,
+				ReleaseResources: payload.ReleaseResources,
+				Reason:           payload.Reason,
+				Diagnostics:      []trainvmstore.ControlDiagnostic{trainVMReconciledDiagnostic("lifecycle")},
+			}, true
+		})
+}
+
+// reconcileTrainVMControlCommand recovers a control command identity from the
+// journal, additionally requiring that the journalled expected control revision
+// is this caller's. A control patch is ordered against the control sequence as
+// well as the run, so two submissions can agree on every run-level field and
+// still be different commands; without this check reconciliation would report
+// one of them for the other.
+func (s *Server) reconcileTrainVMControlCommand(r *http.Request, runID string,
+	input trainVMControlRequest, cause error) (trainvmstore.ControlResult, bool) {
+	return reconcileTrainVMDurableCommand(s, r, runID, "control.requested",
+		input.IdempotencyKey, input.ExpectedRunRevision, cause,
+		func(event trainvmstore.Event) (trainvmstore.ControlResult, bool) {
+			var payload trainVMControlRequestPayload
+			if err := json.Unmarshal(event.Payload, &payload); err != nil ||
+				payload.ExpectedControlRevision != input.ExpectedControlRevision {
+				return trainvmstore.ControlResult{}, false
+			}
+			// The journal records the apply point as the C++ enumerator identifier
+			// (next_optimizer_step); the normal path reports the proto enum with its
+			// APPLY_POINT_ prefix stripped (NEXT_OPTIMIZER_STEP). Same words, one
+			// case apart — upcase so a caller sees one vocabulary on both paths.
+			return trainvmstore.ControlResult{
+				Disposition: "ACCEPTED", CommandID: payload.CommandID,
+				ControlRevision: payload.ControlRevision,
+				ApplyPoint:      strings.ToUpper(strings.TrimSpace(payload.ApplyPoint)),
+				RequiresPause:   payload.RequiresPause, Status: "REQUESTED",
+				Assignments: payload.Assignments,
+				Diagnostics: []trainvmstore.ControlDiagnostic{trainVMReconciledDiagnostic("control")},
+			}, true
+		})
 }
 
 func validateTrainVMMutation(w http.ResponseWriter, r *http.Request, kind string) bool {

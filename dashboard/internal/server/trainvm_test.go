@@ -23,6 +23,7 @@ import (
 type fakeTrainVMCommander struct {
 	request          trainvmstore.ControlRequest
 	result           trainvmstore.ControlResult
+	controlCalls     int
 	actionRequest    trainvmstore.RunActionRequest
 	actionResult     trainvmstore.RunActionResult
 	actionCalls      int
@@ -86,6 +87,7 @@ func (*unreachableTrainVMCommander) Reachable(context.Context) bool { return fal
 func (f *fakeTrainVMCommander) RequestControls(_ context.Context,
 	request trainvmstore.ControlRequest) (trainvmstore.ControlResult, error) {
 	f.request = request
+	f.controlCalls++
 	return f.result, f.err
 }
 
@@ -1857,6 +1859,9 @@ func TestTrainVMControlEndpointStatusMapping(t *testing.T) {
 		"validation":  {commander: &fakeTrainVMCommander{err: &trainvmstore.ValidationError{Message: "bad request"}}, expected: http.StatusBadRequest},
 		"conflict":    {commander: &fakeTrainVMCommander{result: trainvmstore.ControlResult{Disposition: "CONFLICT"}}, expected: http.StatusConflict},
 		"rejected":    {commander: &fakeTrainVMCommander{result: trainvmstore.ControlResult{Disposition: "REJECTED"}}, expected: http.StatusUnprocessableEntity},
+		// A deadline against a journal holding no matching request stays a 504.
+		// Reconciliation may only report a command the journal actually carries.
+		"deadline without durable request": {commander: &fakeTrainVMCommander{err: status.Error(codes.DeadlineExceeded, "context deadline exceeded")}, expected: http.StatusGatewayTimeout},
 	} {
 		t.Run(name, func(t *testing.T) {
 			config := Config{Commander: test.commander}
@@ -1872,5 +1877,153 @@ func TestTrainVMControlEndpointStatusMapping(t *testing.T) {
 				t.Fatalf("status=%d expected=%d body=%s", response.Code, test.expected, response.Body.String())
 			}
 		})
+	}
+}
+
+// trainVMJournalledControlPatch returns SQL appending a control.requested event
+// in the shape the native authority writes it (journal.cpp builds this payload
+// before it acknowledges anything), and advances the projection fence with it.
+func trainVMJournalledControlPatch(idempotencyKey string, expectedRunRevision,
+	expectedControlRevision int) string {
+	return `INSERT INTO events VALUES
+		  (6,'control-lr-9:requested','vm-run',2,1,'train','train@1',0,'control.requested',1,4,4,NULL,
+		   '{"command_id":"control-lr-9","idempotency_key":"` + idempotencyKey +
+		`","expected_run_revision":` + strconv.Itoa(expectedRunRevision) +
+		`,"expected_control_revision":` + strconv.Itoa(expectedControlRevision) +
+		`,"control_revision":` + strconv.Itoa(expectedControlRevision+1) +
+		`,"plan_revision":1,"apply_point":"next_optimizer_step","requires_pause":false,` +
+		`"assignments":{"learning_rate":0.00001},"author":"dashboard",` +
+		`"reason":"reduce learning rate"}');
+		UPDATE run_projection SET last_event_sequence=6 WHERE run_id='vm-run';`
+}
+
+func newTrainVMControlPatchRequest() *http.Request {
+	return newTrainVMControlPatchRequestWithKey("tab-intent")
+}
+
+func newTrainVMControlPatchRequestWithKey(idempotencyKey string) *http.Request {
+	request := newTrainVMControlRequest(`{
+		"expected_run_revision":7,
+		"expected_control_revision":2,
+		"idempotency_key":"` + idempotencyKey + `",
+		"reason":"reduce learning rate",
+		"assignments":{"learning_rate":0.00001}
+	}`)
+	request.Header.Set("Content-Type", "application/json")
+	return request
+}
+
+// A transport deadline is not an answer about the command. When the authority
+// durably journalled the control patch before our context expired, the
+// submission must report that command's identity rather than a failure the
+// authority never gave.
+func TestTrainVMControlDeadlineReconcilesDurableCommand(t *testing.T) {
+	// The commander trims the key before it sends, so the journal holds the
+	// trimmed form. A padded key is still this caller's command and must match.
+	for name, submitted := range map[string]string{
+		"exact key":  "tab-intent",
+		"padded key": "  tab-intent  ",
+	} {
+		t.Run(name, func(t *testing.T) {
+			commander := &fakeTrainVMCommander{err: status.Error(codes.DeadlineExceeded, "context deadline exceeded")}
+			srv := New(Config{Commander: commander, TrainVM: trainVMFixtureWithJournal(t,
+				trainVMJournalledControlPatch("tab-intent", 7, 2))})
+			response := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(response, newTrainVMControlPatchRequestWithKey(submitted))
+
+			body := response.Body.String()
+			if response.Code != http.StatusAccepted {
+				t.Fatalf("a journalled command was reported as a failure: status=%d body=%s",
+					response.Code, body)
+			}
+			for _, want := range []string{
+				`"disposition":"ACCEPTED"`, `"command_id":"control-lr-9"`,
+				`"control_revision":3`, `"apply_point":"NEXT_OPTIMIZER_STEP"`,
+				`"status":"REQUESTED"`, `"learning_rate":0.00001`,
+				`"code":"control_command_reconciled"`,
+			} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("reconciled receipt is missing %s: %s", want, body)
+				}
+			}
+			// The reconciliation is a read. A submission that times out must never
+			// turn into a second mutation, which is the duplicate-command hazard
+			// itself.
+			if commander.controlCalls != 1 {
+				t.Fatalf("submission was attempted %d times, want exactly 1", commander.controlCalls)
+			}
+		})
+	}
+}
+
+// Reconciliation may only report a command the journal proves is this caller's.
+// Every near miss fails closed, because acting on someone else's command
+// identity is worse than reporting an ambiguous outcome. A control patch is
+// ordered against the control sequence too, so the control revision is a fourth
+// way for two submissions to be different commands.
+func TestTrainVMControlDeadlineFailsClosedOnJournalMismatch(t *testing.T) {
+	for name, journal := range map[string]string{
+		"another caller's idempotency key": trainVMJournalledControlPatch("someone-elses-intent", 7, 2),
+		"a different run revision":         trainVMJournalledControlPatch("tab-intent", 6, 2),
+		"a different control revision":     trainVMJournalledControlPatch("tab-intent", 7, 1),
+		"no control request at all":        "",
+		// The two events carry the same identity fields, so only the event type
+		// separates a lifecycle command from a control one.
+		"a lifecycle command for this run": trainVMJournalledPause("tab-intent", "pause", 7),
+	} {
+		t.Run(name, func(t *testing.T) {
+			commander := &fakeTrainVMCommander{err: status.Error(codes.DeadlineExceeded, "context deadline exceeded")}
+			srv := New(Config{Commander: commander, TrainVM: trainVMFixtureWithJournal(t, journal)})
+			response := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(response, newTrainVMControlPatchRequest())
+
+			body := response.Body.String()
+			if response.Code != http.StatusGatewayTimeout {
+				t.Fatalf("an unmatched deadline was not reported as ambiguous: status=%d body=%s",
+					response.Code, body)
+			}
+			for _, forbidden := range []string{"control-lr-9", "lifecycle-pause-7"} {
+				if strings.Contains(body, forbidden) {
+					t.Fatalf("a command that is not this caller's was reported back: %s", body)
+				}
+			}
+			if commander.controlCalls != 1 {
+				t.Fatalf("submission was attempted %d times, want exactly 1", commander.controlCalls)
+			}
+		})
+	}
+}
+
+// A caller that replays the identical submission after a reconciled deadline
+// must land on the same durable command, not mint a second one.
+func TestTrainVMControlReplayAfterReconciledDeadlineKeepsOneCommand(t *testing.T) {
+	reader := trainVMFixtureWithJournal(t, trainVMJournalledControlPatch("tab-intent", 7, 2))
+	delayed := &fakeTrainVMCommander{err: status.Error(codes.DeadlineExceeded, "context deadline exceeded")}
+	first := httptest.NewRecorder()
+	New(Config{Commander: delayed, TrainVM: reader}).Handler().
+		ServeHTTP(first, newTrainVMControlPatchRequest())
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("delayed submission: status=%d body=%s", first.Code, first.Body.String())
+	}
+
+	// The authority has caught up and now answers the replay itself, recognising
+	// the idempotency key it already journalled.
+	recovered := &fakeTrainVMCommander{result: trainvmstore.ControlResult{
+		Disposition: "ALREADY_APPLIED", CommandID: "control-lr-9", ControlRevision: 3,
+		ApplyPoint: "NEXT_OPTIMIZER_STEP", Status: "REQUESTED",
+	}}
+	second := httptest.NewRecorder()
+	New(Config{Commander: recovered, TrainVM: reader}).Handler().
+		ServeHTTP(second, newTrainVMControlPatchRequest())
+	if second.Code != http.StatusOK {
+		t.Fatalf("replayed submission: status=%d body=%s", second.Code, second.Body.String())
+	}
+	if recovered.request.IdempotencyKey != "tab-intent" {
+		t.Fatalf("the replay did not carry the original intent: %#v", recovered.request)
+	}
+	if !strings.Contains(first.Body.String(), `"command_id":"control-lr-9"`) ||
+		!strings.Contains(second.Body.String(), `"command_id":"control-lr-9"`) {
+		t.Fatalf("the replay resolved to a different command: first=%s second=%s",
+			first.Body.String(), second.Body.String())
 	}
 }
