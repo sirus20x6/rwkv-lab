@@ -164,5 +164,21 @@ registry, which declares the MageFlow family as
 `rwkv_lab.mageflow_appearance_expert.v1.Train`,
 `rwkv_lab.mageflow_terminal_expert.v1.Train` and
 `rwkv_lab.mageflow_full_backbone.v1.Train`. Those documents therefore contribute
-no row to the table and could not be authored against today's registry. That is
-recorded rather than fixed here, and is tracked on its own card.
+no row to the table and could not be authored against today's registry.
+
+It is no longer only recorded. `scripts/validate_experiment_documents.py` now
+resolves every non-builtin component/operation invocation in every example
+document against `step-zero-arming.v1.json` and fails on any contract that
+neither resolves nor carries a recorded reason in
+`unresolved-contract-exclusions.v1.json`. Those three ids are recorded there,
+with why they are neither repointed nor deleted. In short: two of the three name
+operations that *no* registered contract has — all 21 registered operations are
+`.Train` except `rwkv_lab.scalar_metric_decision.v1.Decide` — so they cannot be
+renamed into existence, and the adapter shim that would declare them exists only
+on an unmerged branch (`b0bf119f`). Which side is wrong is an open question
+tracked on `card-486b8993`, not one this gate settles; the documents are
+meanwhile the reference fixture for `trainvm validate|plan|compile|simulate`,
+two CMake CLI tests, ~10 native test fixtures, `trainboard`'s shipped example
+document, and `trainvm_dashboard_live_e2e`, which hosted CI does not run. Any
+*other* document naming an unresolvable contract — including one that copies
+these ids — is now red.
