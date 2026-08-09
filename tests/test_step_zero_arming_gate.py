@@ -217,6 +217,111 @@ def test_the_pin_names_exactly_the_dispatched_routes() -> None:
     )
 
 
+def _summary(stdout: str) -> str:
+    """The verdict line, which is the part of the output that gets quoted."""
+    lines = [line for line in stdout.splitlines() if "step-zero arming gate:" in line]
+    assert len(lines) == 1, f"expected exactly one verdict line:\n{stdout}"
+    return lines[0]
+
+
+def test_the_verdict_line_says_armed_not_able_to_arm(repository: pathlib.Path) -> None:
+    """The number that gets quoted must not read as remaining work.
+
+    Asserted on the message rather than the exit code on purpose: the defect
+    this pins is a correct computation described loosely, and the gate was green
+    throughout. Only a wording assertion can catch it coming back.
+
+    The counts are read out of the table rather than hardcoded, so a route
+    arming for the first time turns this test's expectation green with it
+    instead of reddening a test that has nothing to do with the change.
+    """
+
+    result = _run(repository)
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = _summary(result.stdout)
+
+    rows = [
+        tuple(cell.strip() for cell in line.strip().strip("|").split("|"))
+        for line in (repository / DOCUMENT).read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("| `")
+    ]
+    assert rows, f"{DOCUMENT} holds no route rows, so this test proves nothing"
+    armed = sum(1 for row in rows if row[5] != "no")
+    armable = sum(1 for row in rows if row[5] == "no" and row[4] == "yes")
+    blocked = sum(
+        1 for row in rows if row[5] == "no" and row[4] != "yes" and row[1] == "yes"
+    )
+
+    assert "able to arm today" not in summary, (
+        "the verdict describes a count of already-armed routes as a capability, "
+        f"which reads as a backlog of unarmed ones:\n{summary}"
+    )
+    assert f"{armed} armed today by a shipped composition" in summary, summary
+    assert f"{armable} armable but unarmed" in summary, summary
+    assert f"{blocked} blocked" in summary, summary
+    assert f"{len(rows)} registered routes" in summary, summary
+    assert "not stateful" in summary, summary
+
+
+def test_the_verdict_line_names_partial_arming(repository: pathlib.Path) -> None:
+    """A route armed by one composition and not its sibling must say so.
+
+    `missing()` already refuses to write a bare "armed" for this case. The
+    summary collapsing it would put the looser claim in the line that is read
+    most often, which is the whole failure this file's wording tests exist for.
+    """
+
+    catalog = _catalog(repository)
+    _recipe(catalog, RECIPE)["template_document"]["spec"]["artifacts"][
+        "eval_examples"
+    ]["required"] = False
+    _write(repository, catalog)
+
+    summary = _summary(_run(repository).stdout)
+    assert "1 of those armed in some compositions and not others" in summary, summary
+
+
+@pytest.mark.parametrize(
+    ("count", "expected"),
+    [
+        (
+            0,
+            "0 registered routes (0 stateful); 0 armed today by a shipped "
+            "composition, 0 armable but unarmed (port in place, no shipped "
+            "composition arms it), 0 blocked, 0 not stateful",
+        ),
+        (
+            1,
+            "1 registered route (1 stateful); 1 armed today by a shipped "
+            "composition, 0 armable but unarmed (port in place, no shipped "
+            "composition arms it), 0 blocked, 0 not stateful",
+        ),
+        (
+            3,
+            "3 registered routes (3 stateful); 3 armed today by a shipped "
+            "composition, 0 armable but unarmed (port in place, no shipped "
+            "composition arms it), 0 blocked, 0 not stateful",
+        ),
+    ],
+    ids=["none", "one", "several"],
+)
+def test_the_verdict_line_reads_correctly_at_every_count(
+    count: int, expected: str
+) -> None:
+    """Singular and plural, at 0, 1 and n.
+
+    "1 routes armed" is the shape of error that makes a reader distrust the
+    whole line, and the counts here move whenever a route arms, so the sentence
+    has to survive its own arithmetic.
+    """
+
+    sys.path.insert(0, str(REPOSITORY))
+    from scripts.ci_step_zero_arming_gate import population_summary
+
+    armed_row = ("`x`", "yes", "yes", "yes", "yes", "yes — somewhere", "nothing — armed")
+    assert population_summary([armed_row] * count) == expected
+
+
 def test_a_wrong_schema_constant_in_the_pin_reddens(repository: pathlib.Path) -> None:
     """The pin records the schema the built registry used.
 
