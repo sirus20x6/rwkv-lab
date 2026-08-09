@@ -42,7 +42,20 @@ def test_dashboard_checkpoint_state_vocabulary_matches_worker_authority() -> Non
 
 
 class FakeCheckpointSession:
-    def __init__(self, root: Path) -> None:
+    """A publishing session over a workspace.
+
+    `workspace` defaults to the smallest one the publisher itself needs: a run
+    directory that is also its own read and write root. A caller that then
+    hands the resulting invocation to an *adapter handler* needs more than
+    that, because `WorkspacePathAuthority.from_workspace(..., require_content=True)`
+    refuses a workspace with no `input_content_roots`. Rather than growing a
+    hand-written content root here — inventing the shape production measures is
+    what PR #185 was cleaning up — such a caller passes the workspace it built
+    with `measure_input_content_root`, so the publisher and the handler agree
+    about one workspace instead of two that resemble each other.
+    """
+
+    def __init__(self, root: Path, *, workspace: object = None) -> None:
         self.bootstrap = SimpleNamespace(
             run_id="run-1", node_id="train", attempt_id="train@2"
         )
@@ -56,11 +69,15 @@ class FakeCheckpointSession:
         )
         self.invocation = SimpleNamespace(
             workspace=MappingProxyType(
-                {
-                    "run_directory": str(root),
-                    "allowed_read_roots": (str(root),),
-                    "allowed_write_roots": (str(root),),
-                }
+                dict(
+                    workspace
+                    if workspace is not None
+                    else {
+                        "run_directory": str(root),
+                        "allowed_read_roots": (str(root),),
+                        "allowed_write_roots": (str(root),),
+                    }
+                )
             ),
             publishes=MappingProxyType(
                 {
@@ -254,6 +271,7 @@ def resume_invocation(
     attempt_id: str = "train@3",
     parent_artifact_ids: list[str] | None = None,
     optimizer_step: int = 12,
+    inputs: object = None,
 ) -> WorkerInvocation:
     """Build the resume invocation the way the worker actually receives one.
 
@@ -297,6 +315,7 @@ def resume_invocation(
             run_id="run-1",
             node_id="train",
             attempt_id=attempt_id,
+            inputs=inputs,
             workspace=dict(session.invocation.workspace),
             resume={
                 "api_version": "trainvm.resume-checkpoint/v1",

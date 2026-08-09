@@ -100,6 +100,7 @@ def invocation_document(
     node_id: str = "train",
     attempt_id: str = "attempt-1",
     workspace: object = None,
+    inputs: object = None,
 ) -> bytes:
     """Build a canonical worker-invocation document.
 
@@ -130,7 +131,7 @@ def invocation_document(
         "effective_control_revision": 2,
         "execution": execution,
         "host_id": "sha256:" + "b" * 64,
-        "inputs": {"caption": "雪"},
+        "inputs": {"caption": "雪"} if inputs is None else inputs,
         "node_id": node_id,
         "observability": {},
         "plan_hash": "c" * 64,
