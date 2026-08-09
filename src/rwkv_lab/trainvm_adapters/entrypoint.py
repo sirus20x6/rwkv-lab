@@ -27,6 +27,7 @@ from rwkv_lab.trainvm_worker import (
 )
 
 from .handlers import HandlerResult, execute_invocation
+from .io import bind_worker_process_environment
 
 WORKER_BOOTSTRAP_DESCRIPTOR = 4
 
@@ -72,6 +73,8 @@ def run_worker(
         if session.completed_before_connect:
             return 0
         try:
+            # Before any adapter import pulls in a library that resolves HOME.
+            bind_worker_process_environment(session.invocation.workspace)
             apply_worker_runtime_policy(
                 getattr(session.invocation, "resources", {})
             )
