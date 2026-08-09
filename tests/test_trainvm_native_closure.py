@@ -457,11 +457,25 @@ def registry_only(tree: pathlib.Path, name: str) -> Closure:
     return Closure(native, paths)
 
 
-def backdate(path: pathlib.Path, before_ns: int) -> None:
-    """Put a file's mtime a minute before `before_ns`, content untouched."""
+def redate(path: pathlib.Path, seal_ns: int, *, minutes: int) -> None:
+    """Place a file's mtime a fixed distance from the seal, content untouched.
 
-    when = (before_ns - 60_000_000_000) / 1_000_000_000
+    Stated rather than left to the wall clock. A rewrite and the seal can land
+    in the same tick on a filesystem with coarse timestamps, and the churn case
+    would then read as a mismatch — a failure caused by the host's clock
+    granularity and nothing in the guard.
+    """
+
+    when = (seal_ns + minutes * 60_000_000_000) / 1_000_000_000
     os.utime(path, (when, when))
+
+
+def backdate(path: pathlib.Path, seal_ns: int) -> None:
+    redate(path, seal_ns, minutes=-1)
+
+
+def postdate(path: pathlib.Path, seal_ns: int) -> None:
+    redate(path, seal_ns, minutes=1)
 
 
 UNRELATED = "unrelated_ext.cpython-312-x86_64-linux-gnu.so"
@@ -482,11 +496,12 @@ def test_a_registry_object_rewritten_after_the_seal_says_so(registry_tree):
 
     closure = registry_only(registry_tree, UNRELATED)
     closure.verify()
-    write_elf(
+    planted = write_elf(
         registry_tree / "site-packages" / UNRELATED,
         soname="unrelated_ext.so",
         filler=b"a package this worker never asked for, v2",
     )
+    postdate(planted, closure.sealed_ns)
     with pytest.raises(guard.RuntimeClosureError) as failure:
         closure.verify()
     message = str(failure.value)
@@ -541,6 +556,8 @@ def test_the_two_registry_verdicts_are_not_the_same_sentence(registry_tree):
         )
         if backdated:
             backdate(planted, closure.sealed_ns)
+        else:
+            postdate(planted, closure.sealed_ns)
         with pytest.raises(guard.RuntimeClosureError) as failure:
             closure.verify()
         # Restore, so the second call builds against an unmutated tree.
@@ -578,6 +595,7 @@ def test_a_changed_closure_file_is_attributed_the_same_way(tree):
         runpath=(str(tree / "libs"),),
         filler=b"compiled extension v2",
     )
+    postdate(extension, closure.sealed_ns)
     churn = str(pytest.raises(guard.RuntimeClosureError, closure.verify).value)
     assert "runtime closure file content changed" in churn
     assert "after this closure was sealed" in churn
@@ -591,11 +609,15 @@ def test_an_unreadable_sealing_time_declines_to_attribute(registry_tree):
     """No seal time, no claim. Silence beats a guess that reads as authority."""
 
     closure = registry_only(registry_tree, UNRELATED)
+    sealed_ns = closure.sealed_ns
     closure.sealed_ns = None
-    write_elf(
-        registry_tree / "site-packages" / UNRELATED,
-        soname="unrelated_ext.so",
-        filler=b"a package this worker never asked for, v2",
+    postdate(
+        write_elf(
+            registry_tree / "site-packages" / UNRELATED,
+            soname="unrelated_ext.so",
+            filler=b"a package this worker never asked for, v2",
+        ),
+        sealed_ns,
     )
     with pytest.raises(guard.RuntimeClosureError) as failure:
         closure.verify()
