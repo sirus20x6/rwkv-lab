@@ -49,9 +49,9 @@ from pathlib import Path
 
 import pytest
 import torch
-import torch.nn as nn
 from test_trainvm_worker_documents import bootstrap_document, invocation_document
 from test_trainvm_worker_session import FakeController, resume_authority
+from torch import nn
 from torch.optim.optimizer import register_optimizer_step_pre_hook
 
 from rwkv_lab import rlvr_train
