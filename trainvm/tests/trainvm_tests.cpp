@@ -143,6 +143,22 @@ nlohmann::json cache_qualification_fixture() {
   return document;
 }
 
+// A self-comparison: the two arms ran the same implementation, so the measured
+// deviation is exactly zero and `equivalent` still means bit-identity.
+trainvm::TrajectoryParityEvidence bit_identical_trajectory() {
+  return {
+      .verdict = trainvm::TrajectoryParityVerdict::equivalent,
+      .criterion = trainvm::TrajectoryEquivalenceCriterion::bit_identical,
+      .effect_class = trainvm::TrajectoryEffectClass::optimizer_update,
+      .candidate_divergence = {{.step = 1U, .relative_deviation = 0.0},
+                               {.step = 2U, .relative_deviation = 0.0},
+                               {.step = 5U, .relative_deviation = 0.0}},
+      .reference_divergence = {},
+      .checkpoint_quality = {},
+      .analysis_seed = 0U,
+  };
+}
+
 // Evidence that passes every implemented gate. Individual tests degrade one
 // field at a time so a rejection reason is always attributable.
 trainvm::CacheQualificationEvidence passing_cache_evidence() {
@@ -165,7 +181,9 @@ trainvm::CacheQualificationEvidence passing_cache_evidence() {
       .gradient_parity = true,
       .optimizer_update_parity = true,
       .state_parity = true,
-      .resumed_trajectory_parity = true,
+      .optimizer_state_device_policy =
+          trainvm::OptimizerStateDevicePolicy::normalized_on_load,
+      .resumed_trajectory_parity = bit_identical_trajectory(),
       .determinism_parity = true,
       .content_parity = true,
       .ordering_parity = true,
@@ -7112,7 +7130,20 @@ void test_typed_cache_qualification_executor() {
   auto rejected_run = start_cache_qualification_run(*compiled.plan, "reject");
   auto failing_evidence = passing_cache_evidence();
   failing_evidence.candidate_throughput = 101.0;  // below the declared gain gate
-  failing_evidence.resumed_trajectory_parity = false;
+  // A bit-identity claim the samples do not support: the arms measurably
+  // separated. The declared verdict matches the derived one, so the receipt
+  // rejects on the trajectory itself rather than on a mislabelled document.
+  failing_evidence.resumed_trajectory_parity = {
+      .verdict = trainvm::TrajectoryParityVerdict::diverged,
+      .criterion = trainvm::TrajectoryEquivalenceCriterion::bit_identical,
+      .effect_class = trainvm::TrajectoryEffectClass::optimizer_update,
+      .candidate_divergence = {{.step = 1U, .relative_deviation = 1.6e-07},
+                               {.step = 2U, .relative_deviation = 1.7e-06},
+                               {.step = 5U, .relative_deviation = 1.3e-03}},
+      .reference_divergence = {},
+      .checkpoint_quality = {},
+      .analysis_seed = 0U,
+  };
   const trainvm::CacheQualificationReceipt rejection =
       trainvm::qualify_cache_artifact(failing_evidence);
   const auto& failed =
@@ -7133,6 +7164,53 @@ void test_typed_cache_qualification_executor() {
             rejection_event->payload.at("rejection_reasons") ==
                 nlohmann::json(rejection.rejection_reasons),
         "a rejected candidate routes to the declared failure path with attributable reasons");
+
+  // The case the boolean could not express. A fused kernel agrees to float32
+  // epsilon on one step and then amplifies; it can never be bit-identical, and
+  // it diverges more slowly than the reference does against its own seed.
+  auto tolerated = passing_cache_evidence();
+  tolerated.resumed_trajectory_parity = {
+      .verdict = trainvm::TrajectoryParityVerdict::diverged_within_tolerance,
+      .criterion = trainvm::TrajectoryEquivalenceCriterion::divergence_rate,
+      .effect_class = trainvm::TrajectoryEffectClass::optimizer_update,
+      .candidate_divergence = {{.step = 1U, .relative_deviation = 1.6e-07},
+                               {.step = 2U, .relative_deviation = 1.7e-06},
+                               {.step = 5U, .relative_deviation = 1.3e-03}},
+      .reference_divergence = {{.step = 1U, .relative_deviation = 2.0e-07},
+                               {.step = 2U, .relative_deviation = 2.0e-06},
+                               {.step = 5U, .relative_deviation = 2.0e-03}},
+      .checkpoint_quality = {},
+      .analysis_seed = 7U,
+  };
+  const trainvm::CacheQualificationReceipt tolerated_receipt =
+      trainvm::qualify_cache_artifact(tolerated);
+  check(tolerated_receipt.qualified &&
+            tolerated_receipt.trajectory_assessment.has_value() &&
+            tolerated_receipt.trajectory_assessment->verdict ==
+                trainvm::TrajectoryParityVerdict::diverged_within_tolerance &&
+            tolerated_receipt.trajectory_assessment->divergence_rate_ratio <
+                1.0 &&
+            tolerated_receipt.trajectory_assessment->tolerance
+                    .maximum_divergence_rate_ratio == 1.25,
+        "a candidate that cannot be bit-identical qualifies on a bounded "
+        "divergence rate, and the receipt carries the statistics that admitted it");
+
+  // The same measurements labelled as bit-identity. The label does not decide.
+  auto mislabelled = tolerated;
+  mislabelled.resumed_trajectory_parity.verdict =
+      trainvm::TrajectoryParityVerdict::equivalent;
+  check(trainvm::qualify_cache_artifact(mislabelled).rejection_reasons ==
+            std::vector<std::string>({"resumed_trajectory_verdict_unsupported"}),
+        "a verdict its own statistics do not support is rejected as such");
+
+  // The optimizer-state device question, decided rather than left open.
+  auto device_bound = tolerated;
+  device_bound.optimizer_state_device_policy =
+      trainvm::OptimizerStateDevicePolicy::device_bound;
+  check(trainvm::qualify_cache_artifact(device_bound).rejection_reasons ==
+            std::vector<std::string>({"optimizer_state_device_policy_failed"}),
+        "optimizer state that is not normalized on load makes a resume depend "
+        "on which implementation wrote it, and is rejected");
 
   std::filesystem::remove_all(qualified_run.directory);
   std::filesystem::remove_all(rejected_run.directory);

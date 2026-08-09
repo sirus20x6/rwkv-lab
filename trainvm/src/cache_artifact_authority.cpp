@@ -53,8 +53,26 @@ void validate_lease(const ResourceLease& lease) {
 nlohmann::json qualification_body(const CacheQualificationReceipt& receipt) {
   return {{"api_version", receipt.api_version},
           {"evidence", encode_json(receipt.evidence)},
+          {"trajectory_assessment", encode_json(receipt.trajectory_assessment)},
           {"qualified", receipt.qualified},
           {"rejection_reasons", receipt.rejection_reasons}};
+}
+
+// Present exactly for the workload class that has a trajectory. Deriving it
+// here rather than trusting the document is what stops the declared verdict
+// from being a label anybody can write.
+std::optional<TrajectoryParityAssessment>
+trajectory_assessment_for(const CacheQualificationEvidence& evidence) {
+  if (evidence.workload_class != CacheWorkloadClass::training) {
+    return std::nullopt;
+  }
+  try {
+    return assess_trajectory_parity(evidence.resumed_trajectory_parity);
+  } catch (const TrajectoryParityError& error) {
+    throw CacheArtifactAuthorityError(
+        std::string("resumed trajectory evidence is malformed: ") +
+        error.what());
+  }
 }
 
 std::string qualification_digest(const CacheQualificationReceipt& receipt) {
@@ -104,13 +122,34 @@ qualification_rejection_reasons(const CacheQualificationEvidence& evidence) {
     reject(!evidence.gradient_parity, "gradient_parity_failed");
     reject(!evidence.optimizer_update_parity, "optimizer_update_parity_failed");
     reject(!evidence.state_parity, "state_parity_failed");
-    reject(!evidence.resumed_trajectory_parity,
+    // The state round-trip gate now says what it requires of optimizer state
+    // that is device-placed by one implementation and host-placed by another,
+    // instead of leaving it undefined for whoever hits it first.
+    reject(evidence.optimizer_state_device_policy !=
+               OptimizerStateDevicePolicy::normalized_on_load,
+           "optimizer_state_device_policy_failed");
+    // Both `equivalent` and `diverged_within_tolerance` are passes. Only the
+    // first still means bit-identity; the second means the divergence was
+    // bounded by the stated criterion for this effect class.
+    const std::optional<TrajectoryParityAssessment> assessment =
+        trajectory_assessment_for(evidence);
+    reject(assessment->verdict == TrajectoryParityVerdict::diverged,
            "resumed_trajectory_parity_failed");
+    // A declared verdict its own statistics do not support is a rejection in
+    // its own right, so a receipt cannot carry a flattering label.
+    reject(assessment->verdict != evidence.resumed_trajectory_parity.verdict,
+           "resumed_trajectory_verdict_unsupported");
     reject(!evidence.model_quality_pass, "model_quality_failed");
   } else if (evidence.workload_class == CacheWorkloadClass::serving) {
     reject(!evidence.state_parity, "state_parity_failed");
+    reject(evidence.optimizer_state_device_policy !=
+               OptimizerStateDevicePolicy::not_applicable,
+           "optimizer_state_device_policy_failed");
     reject(!evidence.model_quality_pass, "model_quality_failed");
   } else {
+    reject(evidence.optimizer_state_device_policy !=
+               OptimizerStateDevicePolicy::not_applicable,
+           "optimizer_state_device_policy_failed");
     reject(!evidence.content_parity, "content_parity_failed");
     reject(!evidence.ordering_parity, "ordering_parity_failed");
     reject(!evidence.manifest_parity, "manifest_parity_failed");
@@ -133,6 +172,12 @@ qualification_rejection_reasons(const CacheQualificationEvidence& evidence) {
 void validate_qualification_receipt(const CacheQualificationReceipt& receipt) {
   const std::vector<std::string> expected_reasons =
       qualification_rejection_reasons(receipt.evidence);
+  if (receipt.trajectory_assessment !=
+      trajectory_assessment_for(receipt.evidence)) {
+    throw CacheArtifactAuthorityError(
+        "cache qualification receipt carries a trajectory assessment its own "
+        "evidence does not produce");
+  }
   if (receipt.api_version != "trainvm.cache-qualification/v1" ||
       !valid_sha256(receipt.receipt_digest) ||
       receipt.receipt_digest != qualification_digest(receipt) ||
@@ -241,9 +286,12 @@ void validate_adoption(const CacheArtifactAdoptionGrant& grant) {
 CacheQualificationReceipt
 qualify_cache_artifact(CacheQualificationEvidence evidence) {
   std::vector<std::string> reasons = qualification_rejection_reasons(evidence);
+  std::optional<TrajectoryParityAssessment> assessment =
+      trajectory_assessment_for(evidence);
   CacheQualificationReceipt receipt{
       .api_version = "trainvm.cache-qualification/v1",
       .evidence = std::move(evidence),
+      .trajectory_assessment = std::move(assessment),
       .qualified = reasons.empty(),
       .rejection_reasons = std::move(reasons),
       .receipt_digest = {},
