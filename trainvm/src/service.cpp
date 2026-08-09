@@ -1815,6 +1815,11 @@ ReconcileResult TrainVMService::reconcile_once(const std::string& run_id) {
             .run_id = run_id,
             .launch = std::nullopt};
   }
+  if (const auto disposition = reconcile_terminal_host_drain(run_id)) {
+    return {.disposition = *disposition,
+            .run_id = run_id,
+            .launch = std::nullopt};
+  }
   if (host_grant_saga_) {
     if (const auto disposition = reconcile_host_release(run_id)) {
       return {.disposition = *disposition,
@@ -1927,6 +1932,10 @@ std::optional<ReconcileDisposition> TrainVMService::reconcile_until_quiescent(
       case ReconcileDisposition::host_process_exited:
       case ReconcileDisposition::external_profiler_artifact_published:
       case ReconcileDisposition::host_grant_released:
+      // A drained terminal run keeps draining within this wake: it may owe a
+      // physical grant and a logical lease, one pass each, and it should not
+      // sleep a full cadence between them while holding the rest.
+      case ReconcileDisposition::terminal_authority_drained:
       case ReconcileDisposition::builtin_completed:
       // A committed qualification verdict advances the node either way, so the
       // run keeps draining within this wake instead of sleeping a full cadence
@@ -2284,6 +2293,7 @@ DispositionWait disposition_wait(ReconcileDisposition disposition) {
     case ReconcileDisposition::host_process_exited:
     case ReconcileDisposition::external_profiler_artifact_published:
     case ReconcileDisposition::host_grant_released:
+    case ReconcileDisposition::terminal_authority_drained:
     case ReconcileDisposition::builtin_completed:
     case ReconcileDisposition::qualification_completed:
     case ReconcileDisposition::qualification_rejected:
@@ -2523,6 +2533,117 @@ void TrainVMService::reconciliation_loop(std::stop_token stop) {
       return;
     }
   }
+}
+
+// A run can reach a terminal state while it still holds host authority: the
+// workflow's `$failed` and `$cancelled` targets clear the current node outright,
+// so the run never visits its `release_resources` node and its physical bundle
+// or logical lease stays owed. `reconcile_host_release` cannot cover this. It is
+// driven by the current node, and a terminal run has none, which is why this is
+// a separate branch rather than a widened guard.
+//
+// What it does *not* do is as load-bearing as what it does. It returns
+// authority; it never touches the run's outcome. No controller is advanced, no
+// node completes, no state is written. A failed run stays failed.
+//
+// The evidence ordering is the one `reconcile_host_release` establishes and is
+// deliberately identical: every committed process reaches a durable exit
+// receipt, then its launch binding is proved durable, then its exact physical
+// grant is released, and only then is the logical lease returned. Physical
+// before logical, so a released lease can never readmit another run to
+// resources this one has not actually given back.
+std::optional<ReconcileDisposition>
+TrainVMService::reconcile_terminal_host_drain(const std::string& run_id) {
+  std::scoped_lock lock(command_mutex_);
+  const auto projection = journal_.projection(run_id);
+  if (!projection) {
+    throw std::invalid_argument(
+        "cannot reconcile terminal host drain for unknown run");
+  }
+  if (projection->observed_state != "completed" &&
+      projection->observed_state != "failed" &&
+      projection->observed_state != "cancelled") {
+    return std::nullopt;
+  }
+  const AuthorityTimeSample now = authority_now();
+
+  if (host_grant_saga_ && host_process_saga_) {
+    // Event order, not retained in-memory descriptors, discovers every launch
+    // attempt: nothing but the journal survives a controller restart, and this
+    // path exists precisely for the runs that outlived one.
+    for (const Event& event : journal_.events_for_run(run_id)) {
+      if (event.event_type != "host.process_prepared" ||
+          !event.payload.contains("prepare")) {
+        continue;
+      }
+      const HostdProcessPrepareRequest prepare =
+          hostd_process_prepare_from_canonical_json(
+              event.payload.at("prepare").dump());
+      const std::string& launch_id = prepare.launch.identity.launch_event_id;
+      const auto process = journal_.host_process_saga(launch_id);
+      if (!process || !process->committed) {
+        throw OperationPreconditionError(
+            "terminal run has a prepared process without durable exec "
+            "authority");
+      }
+      if (!process->exited) {
+        const auto exited =
+            host_process_saga_->reconcile_exit(launch_id, true, now);
+        if (!exited.exited) {
+          throw std::runtime_error(
+              "terminal host drain process exit returned no receipt");
+        }
+        return ReconcileDisposition::host_process_exited;
+      }
+      if (!journal_.launch_binding(launch_id)) {
+        throw OperationPreconditionError(
+            "terminal run has a process without its durable launch binding");
+      }
+      const ResourceBundleGrant& grant = process->prepare.grant;
+      const auto saga = journal_.host_grant_saga(grant.request_id);
+      if (!saga || !saga->grant ||
+          saga->grant->receipt_digest != grant.receipt_digest ||
+          saga->busy_outcome_digest) {
+        throw OperationPreconditionError(
+            "terminal host drain has no exact durable physical grant");
+      }
+      if (saga->release_receipt) continue;
+      const ResourceReleaseRequest release = seal_resource_release_request({
+          .api_version = std::string(kHostLedgerReleaseRequestApiVersion),
+          .release_request_id =
+              "host-release-" +
+              sha256_hex(grant.request_id + "\n" + grant.receipt_digest),
+          .allocation_id = grant.allocation_id,
+          .grant_digest = grant.receipt_digest,
+          .journal_id = grant.journal_id,
+          .run_id = grant.run_id,
+          .logical_lease_id = grant.logical_lease_id,
+          .logical_fencing_token = grant.logical_fencing_token,
+          .canonical_request_digest = {},
+      });
+      const HostGrantSagaSnapshot released =
+          host_grant_saga_->reconcile_release(grant.request_id, release, now);
+      if (!released.release_receipt) {
+        throw std::runtime_error(
+            "terminal host drain resource release returned no receipt");
+      }
+      return ReconcileDisposition::host_grant_released;
+    }
+  }
+
+  const auto owed = journal_.owed_lease(run_id);
+  if (!owed) return std::nullopt;
+  // A lease this authority cannot fence is left alone rather than forced.
+  // `release_lease` matches on the current boot and the boottime clock domain,
+  // so a lease acquired under a boot this process did not observe reports false
+  // here. Parking is the required outcome: the run stays visible to the scan
+  // under its idle backoff and costs one query per wake, where retrying or
+  // throwing would spin on something no retry can change.
+  if (!journal_.release_lease(owed->concurrency_key, run_id, owed->lease_id,
+                              owed->fencing_token, now)) {
+    return std::nullopt;
+  }
+  return ReconcileDisposition::terminal_authority_drained;
 }
 
 std::optional<ReconcileDisposition> TrainVMService::reconcile_host_release(

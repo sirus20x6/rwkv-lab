@@ -26,6 +26,10 @@ enum class ReconcileDisposition {
   host_process_exited,
   external_profiler_artifact_published,
   host_grant_released,
+  // A terminal run returned host authority it was still holding. Distinct from
+  // host_grant_released because nothing about the run advanced: its outcome is
+  // already decided and stays decided.
+  terminal_authority_drained,
   launch_prepared,
   launch_replayed,
   awaiting_worker,

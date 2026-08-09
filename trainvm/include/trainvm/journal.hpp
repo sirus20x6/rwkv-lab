@@ -343,6 +343,15 @@ public:
   [[nodiscard]] std::optional<ResourceLease> active_lease(
       const std::string& concurrency_key,
       const AuthorityTimeSample& now) const;
+  // The logical lease a run still owes, if any: acquired, never released, and
+  // carrying no release receipt. Deliberately not `active_lease` with a run
+  // filter — that query requires the current boot and an unexpired deadline,
+  // and a lease that expired unreleased is exactly the leak this answers about.
+  // Release is proved by a receipt, never by a deadline, so this asks the same
+  // receipt-bound question `reconcilable_projections` asks when it decides a
+  // terminal run still holds authority.
+  [[nodiscard]] std::optional<ResourceLease> owed_lease(
+      const std::string& owner_run_id) const;
   [[nodiscard]] std::uint64_t event_count() const;
   [[nodiscard]] std::string journal_id() const;
   [[nodiscard]] JournalAuthoritySnapshot journal_authority_snapshot() const;
