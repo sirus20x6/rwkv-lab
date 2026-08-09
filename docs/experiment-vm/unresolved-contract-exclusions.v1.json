@@ -1,0 +1,138 @@
+{
+  "api_version": "trainvm.unresolved-contract-exclusions/v1",
+  "authority": "ci_scope_evidence_only",
+  "comment": "Adapter contract ids invoked by an example document under docs/experiment-vm/examples/ that the shipped rwkv-lab worker registry does not declare. scripts/validate_experiment_documents.py resolves every non-builtin invocation against docs/experiment-vm/step-zero-arming.v1.json and fails on any unresolvable contract absent from this list, on any entry here whose contract has since become resolvable, on any entry no document references, and on any document that invokes a listed contract without appearing in that entry's documents. That last rule is the one that matters most: it is what stops a third document copying a broken id out of one of these and inheriting the exemption with it. This is a countdown, not a configuration. An entry says the id is unresolvable *on purpose* -- a synthetic fixture adapter, or a route whose implementation exists but is not on main -- because a document naming a contract that no registry declares is otherwise indistinguishable from a working worked example, and this repository ships two of them.",
+  "gate": "scripts/validate_experiment_documents.py",
+  "registry_pin": "docs/experiment-vm/step-zero-arming.v1.json",
+  "exclusions": [
+    {
+      "contract": "coverage.external_pinned.v1.PreprocessPinnedInputs",
+      "documents": ["examples/coverage/external-revision-pinned-trainer.json"],
+      "reason": "Synthetic adapter for a compatibility-coverage fixture. The documents under examples/coverage/ exist to drive the native coverage machinery over workflow shapes the shipped registry does not offer -- here an externally pinned upstream trainer -- and they say so in their own namespace: every contract they name begins `coverage.`, and no deployment registry has ever declared one. Resolving these entries means the shape stopped being hypothetical, which would be a registry change, not a fixture change.",
+      "card": null
+    },
+    {
+      "contract": "coverage.external_pinned.v1.TrainCompatibleUpstream",
+      "documents": ["examples/coverage/external-revision-pinned-trainer.json"],
+      "reason": "Synthetic adapter for a compatibility-coverage fixture; see the sibling entry for coverage.external_pinned.v1.PreprocessPinnedInputs.",
+      "card": null
+    },
+    {
+      "contract": "coverage.external_pinned.v1.ValidateCheckpoint",
+      "documents": ["examples/coverage/external-revision-pinned-trainer.json"],
+      "reason": "Synthetic adapter for a compatibility-coverage fixture; see the sibling entry for coverage.external_pinned.v1.PreprocessPinnedInputs.",
+      "card": null
+    },
+    {
+      "contract": "coverage.external_pinned.v1.VerifyCleanRevision",
+      "documents": ["examples/coverage/external-revision-pinned-trainer.json"],
+      "reason": "Synthetic adapter for a compatibility-coverage fixture; see the sibling entry for coverage.external_pinned.v1.PreprocessPinnedInputs.",
+      "card": null
+    },
+    {
+      "contract": "coverage.rwkv_posttrain.v1.TrainRestartOnlySft",
+      "documents": ["examples/coverage/rwkv-posttraining.json"],
+      "reason": "Synthetic adapter for a compatibility-coverage fixture. The shipped rwkv_lab.rwkv_posttraining.v1.Train is a different thing: this fixture models a restart-only SFT route with a separate input-sealing operation, which no registered adapter declares.",
+      "card": null
+    },
+    {
+      "contract": "coverage.rwkv_posttrain.v1.ValidateSftInputs",
+      "documents": ["examples/coverage/rwkv-posttraining.json"],
+      "reason": "Synthetic adapter for a compatibility-coverage fixture; see the sibling entry for coverage.rwkv_posttrain.v1.TrainRestartOnlySft.",
+      "card": null
+    },
+    {
+      "contract": "coverage.rwkv_rlvr.v1.EvaluatePolicy",
+      "documents": ["examples/coverage/rwkv-rlvr.json"],
+      "reason": "Synthetic adapter for a compatibility-coverage fixture. The registry's rwkv_lab.rwkv_rlvr.v1.Train declares no separate evaluate or seal operation; this fixture invents both to exercise a three-operation policy workflow.",
+      "card": null
+    },
+    {
+      "contract": "coverage.rwkv_rlvr.v1.SealTrainingInputs",
+      "documents": ["examples/coverage/rwkv-rlvr.json"],
+      "reason": "Synthetic adapter for a compatibility-coverage fixture; see the sibling entry for coverage.rwkv_rlvr.v1.EvaluatePolicy.",
+      "card": null
+    },
+    {
+      "contract": "coverage.rwkv_rlvr.v1.TrainCompatiblePolicy",
+      "documents": ["examples/coverage/rwkv-rlvr.json"],
+      "reason": "Synthetic adapter for a compatibility-coverage fixture; see the sibling entry for coverage.rwkv_rlvr.v1.EvaluatePolicy.",
+      "card": null
+    },
+    {
+      "contract": "coverage.rwkv_scratch.v1.PrepareCorpus",
+      "documents": ["examples/coverage/scratch-rwkv-pretrain.json"],
+      "reason": "Synthetic adapter for a compatibility-coverage fixture. Note the near-miss with the registered rwkv_lab.rwkv_scratch.v1.Train: the namespaces differ by one segment, which is exactly why this gate compares whole contract ids against the pin rather than matching on a family name.",
+      "card": null
+    },
+    {
+      "contract": "coverage.rwkv_scratch.v1.TrainTerminalCheckpoint",
+      "documents": ["examples/coverage/scratch-rwkv-pretrain.json"],
+      "reason": "Synthetic adapter for a compatibility-coverage fixture; see the sibling entry for coverage.rwkv_scratch.v1.PrepareCorpus.",
+      "card": null
+    },
+    {
+      "contract": "coverage.transformer_mla.v1.ContinueCompatible",
+      "documents": ["examples/coverage/transformer-mla-continuation.json"],
+      "reason": "Synthetic adapter for a compatibility-coverage fixture. The eight registered transformer-MLA routes are all .Train; this fixture models a continuation with separate seal and evaluate operations.",
+      "card": null
+    },
+    {
+      "contract": "coverage.transformer_mla.v1.EvaluateCheckpoint",
+      "documents": ["examples/coverage/transformer-mla-continuation.json"],
+      "reason": "Synthetic adapter for a compatibility-coverage fixture; see the sibling entry for coverage.transformer_mla.v1.ContinueCompatible.",
+      "card": null
+    },
+    {
+      "contract": "coverage.transformer_mla.v1.SealContinuationInputs",
+      "documents": ["examples/coverage/transformer-mla-continuation.json"],
+      "reason": "Synthetic adapter for a compatibility-coverage fixture; see the sibling entry for coverage.transformer_mla.v1.ContinueCompatible.",
+      "card": null
+    },
+    {
+      "contract": "coverage.vision_distillation.v1.BuildTeacherCache",
+      "documents": ["examples/coverage/vision-distillation-training.json"],
+      "reason": "Synthetic adapter for a compatibility-coverage fixture. The registry's vision family (teacher compressor, rwkv student, frozen adapter, native head) declares only .Train; the teacher-cache build and validation operations here exist to exercise a cache-producing workflow shape.",
+      "card": null
+    },
+    {
+      "contract": "coverage.vision_distillation.v1.TrainCompressorCompatible",
+      "documents": ["examples/coverage/vision-distillation-training.json"],
+      "reason": "Synthetic adapter for a compatibility-coverage fixture; see the sibling entry for coverage.vision_distillation.v1.BuildTeacherCache.",
+      "card": null
+    },
+    {
+      "contract": "coverage.vision_distillation.v1.ValidateTeacherCache",
+      "documents": ["examples/coverage/vision-distillation-training.json"],
+      "reason": "Synthetic adapter for a compatibility-coverage fixture; see the sibling entry for coverage.vision_distillation.v1.BuildTeacherCache.",
+      "card": null
+    },
+    {
+      "contract": "rwkv_lab.mageflow.v1.Train",
+      "documents": [
+        "examples/mageflow-cache-resume.json",
+        "examples/rwkv-scratch-topologies.json"
+      ],
+      "reason": "The one entry here that is a genuine defect rather than a fixture namespace, and the reason this gate exists (card-75784c5d). Both documents predate the adapter registry: they were written in the original control-plane design commit, and the registry that arrived later named the MageFlow family rwkv_lab.mageflow_{appearance_expert,terminal_expert,full_backbone}.v1.Train. Nothing in this repository has ever declared a bare `mageflow` adapter -- and note where this one sits: examples/mageflow-cache-resume.json is `trainboard`'s shipped ExamplePath, so a component id that resolves against nothing is the first document a new user opens in the editor. It is deliberately NOT repointed and NOT deleted here, and the disposition is not this gate's to decide: (a) the same component declares two sibling operations that have no registry contract at all, so repointing only train would leave a component that is one-third true and reads as more authoritative than it does now; (b) whether the workflow is stale, aspirational, or real-but-undeclared is the open question on card-486b8993, and guessing it inside a gate change would bury it; (c) the document cannot be deleted -- it is the reference document for `trainvm validate|plan|compile|simulate`, two CMake CLI tests, ~10 native test fixtures that build a matching synthetic registry, the README, the dashboard editor's default document, and trainvm_dashboard_live_e2e, which is one of the four suites hosted CI does not run, so breakage there would not appear on a pull request; (d) the document is byte-pinned by a golden canonical-plan digest (`plan_hash` in trainvm/tests/trainvm_tests.cpp and quoted in trainvm/README.md), so even a one-sentence edit to metadata.description moves it -- measured: exactly two canonical-plan leaves change, /metadata/description and /plan_hash, and the golden becomes 8807f29c6e83fecc7f4b23abce28df9e891f0b2117446023d6eefc68be2e8fd3. That pin is doing its job and is left alone here. Closing this entry means resolving card-486b8993, most likely by porting examples/mageflow-cache-artifacts.json -- the corrected successor, written against real adapters -- from b0bf119f.",
+      "card": "card-486b8993"
+    },
+    {
+      "contract": "rwkv_lab.mageflow.v1.PrepareCacheSpan",
+      "documents": [
+        "examples/mageflow-cache-resume.json",
+        "examples/rwkv-scratch-topologies.json"
+      ],
+      "reason": "Names an operation NO registry contract has: all 21 registered operations are .Train except rwkv_lab.scalar_metric_decision.v1.Decide, so unlike its .Train sibling this one cannot be repointed at anything. It anticipates a route that exists but has never been on main: b0bf119f ('Add declarative MageFlow cache artifact handoff', on branch card/port-stale-branches, not an ancestor of main) adds rwkv_lab.mageflow_cache_plan.v1.Prepare to trainvm/src/rwkv_lab_worker_contract.cpp, a src/rwkv_lab/trainvm_adapters/mageflow_cache.py handler, and a 479-line docs/experiment-vm/examples/mageflow-cache-artifacts.json that models this same train-to-boundary/build-cache/resume story against real adapters and split components. So the card's second disposition -- 'the registry lost a contract' -- is nearly right: the contract was written and never landed, under a different name. Whether the capability is nonetheless live was checked, and the honest answer is 'the capability yes, the operation no'. `src/rwkv_lab/mage_flow_terminal_train.py:1301` defines a real `prepare_cache_span()` that writes the coverage manifest and the build/resume configs, and it is called at :4408 -- but it is a function inside the terminal-expert trainer, not an adapter operation: `src/rwkv_lab/trainvm_adapters/` contains zero references to `prepare_cache_span` or `cache_encoders`, and `handlers._HANDLERS` declares no such key, which ctest `rwkv_lab_worker_contract_python_parity` asserts matches the native registry key-for-key. So both sides of the parity pair agree the operation does not exist. The other apparent corroborations are not independent: `trainvm/tests/trainvm_tests.cpp:314-341` pins these ids inside a synthetic AdapterRegistry the test constructs itself in order to compile this fixture, and the Go tests likewise define their registry as inline JSON. A test asserting a document compiles against a registry the same test invented is evidence about the compiler, not about the registry. b0bf119f is precisely the missing promotion: it adds the adapter shim (`mageflow_cache.py`) and the two contract declarations that would make the capability an operation. Tracked on card-486b8993. This id is left as authored rather than repointed at mageflow_cache_plan, because that id does not resolve on main either and renaming one unresolvable string to another would churn contract literals pinned across trainvm/tests/trainvm_tests.cpp, cache_namespace_tests.cpp and the dashboard e2e fixture, and move the golden plan digest, for no change in what resolves.",
+      "card": "card-486b8993"
+    },
+    {
+      "contract": "rwkv_lab.mageflow.v1.CacheEncoders",
+      "documents": [
+        "examples/mageflow-cache-resume.json",
+        "examples/rwkv-scratch-topologies.json"
+      ],
+      "reason": "The sibling of the entry above, and likewise an operation no registered contract has: b0bf119f adds rwkv_lab.mageflow_cache_build.v1.Build for it, on the same unmerged branch. Read that entry before touching either.",
+      "card": "card-486b8993"
+    }
+  ]
+}
