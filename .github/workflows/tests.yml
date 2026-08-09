@@ -220,6 +220,16 @@ jobs:
       - name: Every native module has a production includer or an explained exclusion
         run: python scripts/ci_unwired_module_gate.py
 
+      # Same reasoning again, applied to the figures COMPATIBILITY_CATALOG.md
+      # states about the catalog beside it. One of them ("145 unique source
+      # files") had been wrong by ten for an unknown length of time, in a
+      # sentence whose other number was right because that one is a compiled
+      # array length. Here rather than in the native suite because the pull
+      # request that gets this wrong is a documentation edit, which is the one
+      # least likely to be waiting on an eight-minute C++26 build.
+      - name: Figures stated in the compatibility catalog document are true
+        run: python scripts/ci_catalog_doc_counts_gate.py
+
       # Same reasoning, applied to the source-disposition pins. The native
       # suite already enforces them, but only after an ~8 minute toolchain and
       # C++26 build; this reports the same drift in seconds and keeps reporting

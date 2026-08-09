@@ -2074,6 +2074,49 @@
     target.textContent = text + replay;
   }
 
+  // An execution-phase receipt carries `repeated Diagnostic diagnostics`: the
+  // authority admits up to 64 of them, each at severity info, warning or error
+  // (trainvm.proto Diagnostic.Severity, downcased to those three strings by
+  // service.cpp and re-checked in telemetry.go). Only one producer exists today
+  // — execution_phases.py emits exactly one, always at error severity, only on
+  // a failed phase — so rendering diagnostics[0] in a `vm-phase-error` element
+  // is not currently wrong. It is wrong the moment a second producer or a
+  // warning appears, and it fails silently in both directions: the operator
+  // sees one line with no sign that others exist, and sees a warning painted
+  // as the error that failed the phase.
+  //
+  // So: render every diagnostic, in the order the authority sent them (nothing
+  // anywhere ranks them, so re-ordering would invent a precedence), and colour
+  // each by its own severity. The authority's words are the only words in the
+  // line — a diagnostic that arrives without a code is shown by its message
+  // alone rather than under a "phase failure" label the dashboard made up.
+  // Anything the dashboard says about a malformed diagnostic is marked as the
+  // dashboard speaking, and is never styled as an authority-issued error.
+  function renderVMPhaseDiagnostics(diagnostics) {
+    if (!Array.isArray(diagnostics)) return "";
+    return diagnostics.map((diagnostic) => {
+      const severity = String(diagnostic?.severity || "");
+      const known = severity === "error" || severity === "warning" || severity === "info";
+      const code = String(diagnostic?.code || "");
+      const message = String(diagnostic?.message || "");
+      const documentPath = String(diagnostic?.document_path || "");
+      const help = String(diagnostic?.help || "");
+      const stated = [code, message].filter((part) => part !== "").join(" · ");
+      const body = stated ?
+        `<span class="vm-phase-stated">${vmEscape(stated)}</span>` :
+        // Neither field survived. Say that, rather than captioning an empty
+        // line with text no diagnostic contained.
+        `<span class="vm-phase-unstated">diagnostic carried no code and no message</span>`;
+      const label = known ? vmEscape(severity) :
+        (severity ? `<span class="vm-phase-unstated">unknown severity ${vmEscape(severity)}</span>` :
+          `<span class="vm-phase-unstated">severity absent</span>`);
+      const title = [documentPath, message, help].filter((part) => part !== "").join("\n");
+      return `<div class="vm-phase-diagnostic ${known ? vmEscape(severity) : "unstated"}"` +
+        ` title="${vmEscape(title)}">` +
+        `<span class="vm-phase-severity">${label}</span> ${body}</div>`;
+    }).join("");
+  }
+
   function renderVMExecutionPhases() {
     const target = document.getElementById("vm-execution-phases");
     const state = document.getElementById("vm-execution-phases-state");
@@ -2094,13 +2137,13 @@
       const restored = receipt.state_fingerprint_before === receipt.state_fingerprint_after;
       const requested = Number(receipt.requested_steps || 0);
       const executed = Number(receipt.steps_executed || 0);
-      const diagnostic = Array.isArray(receipt.diagnostics) ? receipt.diagnostics[0] : null;
+      const diagnostics = renderVMPhaseDiagnostics(receipt.diagnostics);
       const disposition = String(receipt.disposition || "unknown");
       return `<article class="vm-execution-phase ${vmEscape(disposition)}">` +
         `<header><strong>${vmEscape(receipt.phase || "phase")}</strong><span>${vmEscape(disposition)}</span></header>` +
         `<div>${executed.toLocaleString()}/${requested.toLocaleString()} steps · ${durationMS < 1000 ? durationMS.toFixed(1) + " ms" : (durationMS / 1000).toFixed(2) + " s"}</div>` +
         `<div class="vm-phase-proof" title="${vmEscape(receipt.request_digest || "")}">${restored ? "state restored" : "state changed after failure"} · ${vmEscape(receipt.node_id || "—")} · ${vmEscape(receipt.attempt_id || "—")}</div>` +
-        (diagnostic ? `<div class="vm-phase-error" title="${vmEscape(diagnostic.message || "")}">${vmEscape(diagnostic.code || "phase failure")} · ${vmEscape(diagnostic.message || "")}</div>` : "") +
+        diagnostics +
         `</article>`;
     }).join("");
   }

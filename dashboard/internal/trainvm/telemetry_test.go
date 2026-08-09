@@ -630,6 +630,61 @@ func TestCancelledExecutionPhaseIsProjectedWithinItsBound(t *testing.T) {
 	}
 }
 
+// The dashboard panel renders every diagnostic on a receipt, coloured by that
+// diagnostic's own severity, because the reader hands it a list that may hold
+// several of mixed severity in an order nobody ranks. Only one producer exists
+// today and it emits a single error, so that premise is the thing worth
+// pinning: if the reader ever collapsed the list to one entry, sorted it, or
+// refused a warning, the panel's contract would be answering a question that
+// no longer arises and the change that broke it would look harmless.
+func TestExecutionPhaseDiagnosticsKeepEverySeverityInOrder(t *testing.T) {
+	mixed := `[
+		{"severity":"warning","code":"execution.phase_slow",
+		 "document_path":"/spec/execution/warmup","message":"slower than declared","help":"h"},
+		{"severity":"error","code":"execution.phase_failed",
+		 "document_path":"/spec/execution/warmup","message":"trajectory not restored","help":"h"},
+		{"severity":"info","code":"execution.phase_note",
+		 "document_path":"/spec/execution/warmup","message":"fingerprint recomputed","help":"h"}
+	]`
+	point, err := executionPhaseReceiptFromEvent(
+		executionPhaseEventWith(5, "failed", 1, mixed))
+	if err != nil {
+		t.Fatalf("a mixed-severity receipt was refused: %v", err)
+	}
+	if len(point.Diagnostics) != 3 {
+		t.Fatalf("the reader kept %d of 3 diagnostics: %#v", len(point.Diagnostics), point.Diagnostics)
+	}
+	for index, want := range []ExecutionPhaseDiagnostic{
+		{Severity: "warning", Code: "execution.phase_slow"},
+		{Severity: "error", Code: "execution.phase_failed"},
+		{Severity: "info", Code: "execution.phase_note"},
+	} {
+		if point.Diagnostics[index].Severity != want.Severity ||
+			point.Diagnostics[index].Code != want.Code {
+			t.Fatalf("diagnostic %d was reordered or relabelled: %#v", index, point.Diagnostics)
+		}
+	}
+
+	// A severity the panel cannot colour, and the empty code the panel would
+	// otherwise have to caption, are both refused here rather than passed on.
+	// The message is asserted, not just the error: the payload-level checks a
+	// few lines above reject with "a malformed payload" and would keep this
+	// green after the diagnostic loop was deleted.
+	for name, diagnostics := range map[string]string{
+		"unknown severity": `[{"severity":"critical","code":"c","document_path":"","message":"m","help":""}]`,
+		"absent severity":  `[{"severity":"","code":"c","document_path":"","message":"m","help":""}]`,
+		"empty code":       `[{"severity":"error","code":"","document_path":"","message":"m","help":""}]`,
+		"empty message":    `[{"severity":"error","code":"c","document_path":"","message":"","help":""}]`,
+	} {
+		_, err := executionPhaseReceiptFromEvent(
+			executionPhaseEventWith(5, "failed", 1, diagnostics))
+		if err == nil || !strings.Contains(err.Error(), "has malformed diagnostics") {
+			t.Fatalf("a receipt carrying a diagnostic with %s was not refused by the diagnostic check: %v",
+				name, err)
+		}
+	}
+}
+
 func TestHeartbeatExecutionPhaseIsTypedAndCannotBeImpersonated(t *testing.T) {
 	step := uint64(8)
 	base := Event{

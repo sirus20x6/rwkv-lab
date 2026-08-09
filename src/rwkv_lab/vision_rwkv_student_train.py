@@ -30,6 +30,9 @@ from torch import Tensor
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset
 
+from rwkv_lab.trainvm_worker.mutation_sentinel import (
+    OptimizerMutationSentinel,
+)
 from rwkv_lab.vision_compressor_features import (
     FrozenTeacherCompressor,
     NativePrefixIdentity,
@@ -588,154 +591,179 @@ def train(
         _atomic_json(status_path, {"state": "training", "step": step,
             "updated": time.time(), "trainable_scope": "raw_pixel_vision_rwkv_student",
             "deployment_teacher_free": True})
-        while step < args.steps and not stop:
-            batches = (
-                worker_step_profiler.track_input(train_loader)
-                if worker_step_profiler is not None
-                else train_loader
-            )
-            for indices, pixels, geometry, moon, fusion in batches:
-                if step >= args.steps or stop:
-                    break
-                if worker_controls is not None:
-                    worker_controls.microbatch(step + 1, reject_live_controls)
-                started = time.perf_counter()
-                student.train()
-                optimizer.zero_grad(set_to_none=True)
-                loss, metrics, tokens = _forward_batch(
-                    indices=indices, pixels=pixels, geometry=geometry, moon=moon,
-                    fusion=fusion, rows=train_rows, student=student,
-                    compressor=compressor, rwkv=rwkv, identity=identity,
-                    engram=engram, deep_vision=deep_vision, nextlat=nextlat,
-                    grounding=grounding, baseline_args=baseline_args,
-                    args=args, training=True)
-                if not torch.isfinite(loss):
-                    raise FloatingPointError(f"non-finite student loss: {loss}")
-                loss.backward()
-                gradient_norm = (
-                    worker_components.gradient_clipping(student.parameters())
-                    if worker_components is not None
-                    else torch.nn.utils.clip_grad_norm_(
-                        student.parameters(), args.grad_clip
-                    )
+        # Installed for the whole loop, so the ordering below is enforced
+        # against every optimizer instance in the process rather than the one
+        # this trainer constructed. A fused update, a second optimizer, or a
+        # later edit that moves the crossing below the mutation all fail closed
+        # here instead of mutating parameters the controller never authorized.
+        # The controller-facing call the sentinel crosses. It is None when this
+        # trainer runs outside TrainVM authority; the sentinel still binds every
+        # mutation to one crossing, so the ordering discipline is identical and a
+        # standalone run cannot silently acquire a second update path either.
+        pre_optimizer_step = (
+            (lambda next_step: worker_controls.pre_optimizer_step(
+                next_step, reject_live_controls
+            ))
+            if worker_controls is not None
+            else None
+        )
+        mutation_sentinel = OptimizerMutationSentinel()
+        with mutation_sentinel.installed():
+            while step < args.steps and not stop:
+                batches = (
+                    worker_step_profiler.track_input(train_loader)
+                    if worker_step_profiler is not None
+                    else train_loader
                 )
-                optimizer.step()
-                sampler.consumed(len(indices))
-                step += 1
-                if learning_rate_schedule is not None:
-                    learning_rate_schedule.step()
-                if weight_decay_schedule is not None:
-                    weight_decay_schedule.step(step)
-                if worker_step_profiler is not None:
-                    worker_step_profiler.step(step)
-                if worker_observability is not None:
-                    worker_observability.optimizer_step(step)
-                if worker_controls is not None:
-                    worker_controls.optimizer_step(step, reject_live_controls)
-                elapsed = time.perf_counter() - started
-                event = {"kind": "train", "step": step, "loss": float(loss.detach()),
-                         "lr": optimizer.param_groups[0]["lr"],
-                         "gnorm": float(gradient_norm), "batch": len(indices),
-                         "step_seconds": elapsed, "tok_per_sec": tokens / max(elapsed, 1e-9),
-                         **{name: float(value) for name, value in metrics.items()}}
-                _append_json(log, event)
-                if worker_observability is not None:
-                    for name, value in (
-                        ("train.loss", event["loss"]),
-                        ("train.learning_rate", event["lr"]),
-                        ("train.gradient_norm", event["gnorm"]),
-                        ("train.tokens_per_second", event["tok_per_sec"]),
-                        ("train.step_seconds", event["step_seconds"]),
-                        ("train.representation_loss", event["representation_loss"]),
-                        ("train.caption_loss", event["caption_loss"]),
-                    ):
-                        worker_observability.publish_if_declared(
-                            name, value, step=step
-                        )
-                _atomic_json(status_path, {"state": "training", "step": step,
-                    "loss": event["loss"], "step_seconds": elapsed,
-                    "updated": time.time(),
-                    "trainable_scope": "raw_pixel_vision_rwkv_student",
-                    "deployment_teacher_free": True})
-
-                checkpoint_due = step % args.checkpoint_every == 0
-                eval_due = step % args.eval_every == 0
-                best_improved = False
-                evaluation = None
-                caption_eval = ppl = None
-                if eval_due:
+                for indices, pixels, geometry, moon, fusion in batches:
+                    if step >= args.steps or stop:
+                        break
                     if worker_controls is not None:
-                        worker_controls.evaluation(step, reject_live_controls)
-                    _atomic_json(status_path, {"state": "evaluating", "step": step,
-                                               "updated": time.time()})
-                    evaluation = _evaluate(eval_loader, eval_rows, student=student,
+                        worker_controls.microbatch(step + 1, reject_live_controls)
+                    started = time.perf_counter()
+                    student.train()
+                    optimizer.zero_grad(set_to_none=True)
+                    loss, metrics, tokens = _forward_batch(
+                        indices=indices, pixels=pixels, geometry=geometry, moon=moon,
+                        fusion=fusion, rows=train_rows, student=student,
                         compressor=compressor, rwkv=rwkv, identity=identity,
-                        engram=engram, deep_vision=deep_vision,
-                        baseline_args=baseline_args, args=args)
-                    caption_eval = float(evaluation["caption_loss"])
-                    ppl = math.exp(min(caption_eval, 20.0))
-                    _append_json(log, {"kind": "eval", "step": step,
-                        "loss": caption_eval, "ppl": ppl,
-                        **{f"eval_{name}": value for name, value in evaluation.items()}})
+                        engram=engram, deep_vision=deep_vision, nextlat=nextlat,
+                        grounding=grounding, baseline_args=baseline_args,
+                        args=args, training=True)
+                    if not torch.isfinite(loss):
+                        raise FloatingPointError(f"non-finite student loss: {loss}")
+                    loss.backward()
+                    gradient_norm = (
+                        worker_components.gradient_clipping(student.parameters())
+                        if worker_components is not None
+                        else torch.nn.utils.clip_grad_norm_(
+                            student.parameters(), args.grad_clip
+                        )
+                    )
+                    # The mandatory pre-mutation boundary, immediately before
+                    # the only optimizer mutation in this loop. A controller
+                    # refusal leaves the sentinel disarmed, so the `step()`
+                    # below raises rather than mutating unguarded. This
+                    # replaces the post-mutation `worker_controls
+                    # .optimizer_step` that used to sit after the update: same
+                    # safe point, same effective step number, now on the side
+                    # of the mutation where a refusal can still prevent it.
+                    mutation_sentinel.cross(step + 1, pre_optimizer_step)
+                    optimizer.step()
+                    sampler.consumed(len(indices))
+                    step += 1
+                    if learning_rate_schedule is not None:
+                        learning_rate_schedule.step()
+                    if weight_decay_schedule is not None:
+                        weight_decay_schedule.step(step)
+                    if worker_step_profiler is not None:
+                        worker_step_profiler.step(step)
                     if worker_observability is not None:
-                        worker_observability.publish_if_declared(
-                            "eval.loss", caption_eval, step=step
-                        )
-                        worker_observability.publish_if_declared(
-                            "eval.perplexity", ppl, step=step
-                        )
-                    if ppl < best_ppl:
-                        best_ppl = ppl
-                        best_improved = True
-                if checkpoint_due or eval_due:
-                    _atomic_json(status_path, {"state": "checkpointing", "step": step,
-                                               "updated": time.time()})
-                    save_current_checkpoint()
-                    _append_json(log, {"kind": "checkpoint", "step": step,
-                                       "path": str(last_path),
-                                       "reason": "eval" if eval_due else "periodic"})
-                    if best_improved:
-                        destination = best_dir / f"student_step_{step:08d}.pt"
-                        temporary = best_dir / f".{destination.name}.tmp"
-                        temporary.unlink(missing_ok=True)
-                        os.link(last_path, temporary)
-                        os.replace(temporary, destination)
-                        _atomic_json(best_dir / "best.json", {
-                            "step": step, "loss": caption_eval, "ppl": ppl,
-                            "representation_loss": evaluation.get("representation_loss"),
-                            "checkpoint": destination.name})
-                        for old in best_dir.glob("student_step_*.pt"):
-                            if old != destination:
-                                old.unlink(missing_ok=True)
-                if eval_due:
+                        worker_observability.optimizer_step(step)
+                    elapsed = time.perf_counter() - started
+                    event = {"kind": "train", "step": step, "loss": float(loss.detach()),
+                             "lr": optimizer.param_groups[0]["lr"],
+                             "gnorm": float(gradient_norm), "batch": len(indices),
+                             "step_seconds": elapsed, "tok_per_sec": tokens / max(elapsed, 1e-9),
+                             **{name: float(value) for name, value in metrics.items()}}
+                    _append_json(log, event)
+                    if worker_observability is not None:
+                        for name, value in (
+                            ("train.loss", event["loss"]),
+                            ("train.learning_rate", event["lr"]),
+                            ("train.gradient_norm", event["gnorm"]),
+                            ("train.tokens_per_second", event["tok_per_sec"]),
+                            ("train.step_seconds", event["step_seconds"]),
+                            ("train.representation_loss", event["representation_loss"]),
+                            ("train.caption_loss", event["caption_loss"]),
+                        ):
+                            worker_observability.publish_if_declared(
+                                name, value, step=step
+                            )
                     _atomic_json(status_path, {"state": "training", "step": step,
-                                               "updated": time.time(),
-                                               "trainable_scope": "raw_pixel_vision_rwkv_student",
-                                               "deployment_teacher_free": True})
-                checkpoint_requested = bool(
-                    worker_controls is not None
-                    and worker_controls.checkpoint_boundary_requested
-                )
-                if checkpoint_requested:
-                    worker_controls.checkpoint(step, reject_live_controls)
-                    save_current_checkpoint()
-                    if worker_controls.checkpoint_completion_requested:
-                        worker_controls.publish_requested_checkpoint_directory(
-                            str(checkpoint_directory),
-                            optimizer_step=step,
-                            resume_grade="compatible",
-                            state_components=(
-                                "component_composition",
-                                "control_revision",
-                                "data_cursor",
-                                "model",
-                                "optimizer",
-                                "rng_accelerator",
-                                "rng_python",
-                                "rng_torch",
-                            ),
-                        )
-            # A fully consumed sampler advances itself on the next iterator.
+                        "loss": event["loss"], "step_seconds": elapsed,
+                        "updated": time.time(),
+                        "trainable_scope": "raw_pixel_vision_rwkv_student",
+                        "deployment_teacher_free": True})
+
+                    checkpoint_due = step % args.checkpoint_every == 0
+                    eval_due = step % args.eval_every == 0
+                    best_improved = False
+                    evaluation = None
+                    caption_eval = ppl = None
+                    if eval_due:
+                        if worker_controls is not None:
+                            worker_controls.evaluation(step, reject_live_controls)
+                        _atomic_json(status_path, {"state": "evaluating", "step": step,
+                                                   "updated": time.time()})
+                        evaluation = _evaluate(eval_loader, eval_rows, student=student,
+                            compressor=compressor, rwkv=rwkv, identity=identity,
+                            engram=engram, deep_vision=deep_vision,
+                            baseline_args=baseline_args, args=args)
+                        caption_eval = float(evaluation["caption_loss"])
+                        ppl = math.exp(min(caption_eval, 20.0))
+                        _append_json(log, {"kind": "eval", "step": step,
+                            "loss": caption_eval, "ppl": ppl,
+                            **{f"eval_{name}": value for name, value in evaluation.items()}})
+                        if worker_observability is not None:
+                            worker_observability.publish_if_declared(
+                                "eval.loss", caption_eval, step=step
+                            )
+                            worker_observability.publish_if_declared(
+                                "eval.perplexity", ppl, step=step
+                            )
+                        if ppl < best_ppl:
+                            best_ppl = ppl
+                            best_improved = True
+                    if checkpoint_due or eval_due:
+                        _atomic_json(status_path, {"state": "checkpointing", "step": step,
+                                                   "updated": time.time()})
+                        save_current_checkpoint()
+                        _append_json(log, {"kind": "checkpoint", "step": step,
+                                           "path": str(last_path),
+                                           "reason": "eval" if eval_due else "periodic"})
+                        if best_improved:
+                            destination = best_dir / f"student_step_{step:08d}.pt"
+                            temporary = best_dir / f".{destination.name}.tmp"
+                            temporary.unlink(missing_ok=True)
+                            os.link(last_path, temporary)
+                            os.replace(temporary, destination)
+                            _atomic_json(best_dir / "best.json", {
+                                "step": step, "loss": caption_eval, "ppl": ppl,
+                                "representation_loss": evaluation.get("representation_loss"),
+                                "checkpoint": destination.name})
+                            for old in best_dir.glob("student_step_*.pt"):
+                                if old != destination:
+                                    old.unlink(missing_ok=True)
+                    if eval_due:
+                        _atomic_json(status_path, {"state": "training", "step": step,
+                                                   "updated": time.time(),
+                                                   "trainable_scope": "raw_pixel_vision_rwkv_student",
+                                                   "deployment_teacher_free": True})
+                    checkpoint_requested = bool(
+                        worker_controls is not None
+                        and worker_controls.checkpoint_boundary_requested
+                    )
+                    if checkpoint_requested:
+                        worker_controls.checkpoint(step, reject_live_controls)
+                        save_current_checkpoint()
+                        if worker_controls.checkpoint_completion_requested:
+                            worker_controls.publish_requested_checkpoint_directory(
+                                str(checkpoint_directory),
+                                optimizer_step=step,
+                                resume_grade="compatible",
+                                state_components=(
+                                    "component_composition",
+                                    "control_revision",
+                                    "data_cursor",
+                                    "model",
+                                    "optimizer",
+                                    "rng_accelerator",
+                                    "rng_python",
+                                    "rng_torch",
+                                ),
+                            )
+                # A fully consumed sampler advances itself on the next iterator.
         if step and (not last_path.is_file() or stop or step % args.checkpoint_every):
             _atomic_json(status_path, {"state": "checkpointing", "step": step,
                                        "updated": time.time()})

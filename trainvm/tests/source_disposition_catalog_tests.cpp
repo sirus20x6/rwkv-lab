@@ -235,7 +235,7 @@ int main() {
       dashboard_root / "docs/experiment-vm/source-dispositions.dashboard.v1.json";
   const auto dashboard_catalog = trainvm::SourceDispositionCatalog::load_file(
       dashboard_checked, dashboard_root, known_ids);
-  check(dashboard_catalog.entries().size() == 3U,
+  check(dashboard_catalog.entries().size() == 4U,
         "dashboard disposition catalog covers every reviewed dashboard module");
   std::map<trainvm::SourceDispositionClass, std::size_t> dashboard_classes;
   for (const auto& entry : dashboard_catalog.entries()) {
@@ -244,7 +244,7 @@ int main() {
   check(dashboard_classes[trainvm::SourceDispositionClass::explicit_exclusion] == 1U &&
             dashboard_classes[trainvm::SourceDispositionClass::
                                   internal_utility_data_tool] == 1U &&
-            dashboard_classes[trainvm::SourceDispositionClass::test_fixture] == 1U,
+            dashboard_classes[trainvm::SourceDispositionClass::test_fixture] == 2U,
         "the stale instrumented trainer fork stays an explicit exclusion, not an operation");
 
   const auto rwkv_catalog = trainvm::SourceDispositionCatalog::load_file(
