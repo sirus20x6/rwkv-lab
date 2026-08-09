@@ -205,9 +205,17 @@ adapter profile.
 artifact for the currently migrated training adapters. The stored zipapp contains the complete
 `rwkv_lab` Python source surface, the checked-in TrainVM protobuf package, one fixed `__main__`, and
 an embedded canonical per-member SHA-256 manifest. It also embeds a
-`trainvm.python-bootstrap-runtime-closure/v2` manifest produced by the exact copied interpreter.
+`trainvm.python-bootstrap-runtime-closure/v3` manifest produced by the exact copied interpreter.
 That manifest binds the interpreter identity, Python standard-library tree, declared root
-distributions, and their recursively complete installed-file closure. The reflected native
+distributions, and their recursively complete installed-file closure. Since v3 it also closes over
+what the dynamic loader would then load underneath that file closure, which the file closure by
+itself cannot express: the ELF graph reachable from the closure and the import path, each
+`DT_NEEDED` name resolved through the loader's own search order and pinned as a manifest entry, the
+NVIDIA driver identity — which lives in the kernel and so is carried by no file digest — and a
+kernel registry inventorying every loadable object on the import path, scoped to the directories
+rather than to the closure's distributions so an extension no distribution claims is still seen.
+The system search path is not re-derived at verification time; the `ld.so.conf` files that produce
+it are pinned instead. The reflected native
 `trainvm.rwkv-lab-worker-runtime-requirements/v1` contract is the sole adapter-to-root-distribution
 authority: the materializer queries it with `inspect-rwkv-lab-runtime-requirements` instead of
 maintaining a second Python dependency map. Shared dispatch and evaluation roots include `grpcio`,
@@ -215,7 +223,11 @@ maintaining a second Python dependency map. Shared dispatch and evaluation roots
 roots.
 The stdlib-only guard verifies its canonical digest, permissions, non-worker-writable ancestors,
 symlinks, sizes, and every regular-file SHA-256 before importing the worker entrypoint or any
-third-party module. Member order, timestamps, modes, and bytes are
+third-party module. It then re-runs two decisions rather than re-reading their recorded answers,
+because a digest cannot carry either: it resolves each object's `DT_NEEDED` names again over that
+object's recorded search order, so a library planted in an earlier directory is rejected while every
+pinned byte still matches, and it re-walks the import path and requires the discovered object set to
+equal the recorded one, so an extension that has merely appeared is rejected too. Member order, timestamps, modes, and bytes are
 fixed; the normal native test target builds it twice and requires byte equality. Hostd executes the
 sealed interpreter with `-I`, installs the zipapp at fd 3 through its separately bound code-argument
 slot, clears the environment, and appends exactly `--trainvm-bootstrap-fd=4`; the runner rejects
