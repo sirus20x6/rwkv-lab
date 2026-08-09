@@ -475,6 +475,31 @@ TrainingCompositionContract mageflow_full_backbone_composition() {
       });
 }
 
+// The same four evaluation slots the MageFlow routes carry, for the same
+// reason: validate_eval_examples_gate_provenance requires the resolved
+// training composition to carry exactly one component of category evaluator,
+// and the component registry admits an evaluation suite only as a unit. The
+// eight Transformer MLA routes share one composition contract, so declaring
+// the suite once covers every profile.
+//
+// The Transformer MLA family, unlike MageFlow, reads its corpus out of the
+// adapter's own configuration too — there is no data_source slot — so the
+// evaluator names an empty split_slot and the registry's no-pipeline branch
+// applies. caption_triplet rendering is admissible for model_family
+// transformer but describes an image-caption triple these text routes never
+// produce, and launch_gate_periodic 1.0.0 couples its launch count to the
+// sample count; neither is offered here.
+std::map<std::string, TrainingComponentCategory>
+transformer_mla_evaluation_slots() {
+  return {
+      {"artifact_renderer", TrainingComponentCategory::artifact_renderer},
+      {"evaluation_schedule",
+       TrainingComponentCategory::evaluation_schedule},
+      {"evaluator", TrainingComponentCategory::evaluator},
+      {"qualitative_samples", TrainingComponentCategory::qualitative_sample},
+  };
+}
+
 TrainingCompositionContract transformer_mla_composition() {
   TrainingCompositionContract composition{
       .model_family = "transformer",
@@ -491,11 +516,25 @@ TrainingCompositionContract transformer_mla_composition() {
            TrainingComponentCategory::weight_decay_schedule},
       },
   };
+  composition.slots.merge(transformer_mla_evaluation_slots());
   composition.allowed_components =
       std::map<std::string, std::vector<TrainingComponentKey>>{
+          {"artifact_renderer",
+           {{TrainingComponentCategory::artifact_renderer, "evidence_envelope",
+             "1.0.0"}}},
+          {"evaluation_schedule",
+           {{TrainingComponentCategory::evaluation_schedule,
+             "launch_gate_periodic", "2.0.0"},
+            {TrainingComponentCategory::evaluation_schedule,
+             "milestone_cadence", "3.0.0"}}},
+          {"evaluator",
+           {{TrainingComponentCategory::evaluator, "scalar_loss", "1.0.0"}}},
           {"optimizer",
            {{TrainingComponentCategory::optimizer, "torch_adamw", "1.0.0"},
             {TrainingComponentCategory::optimizer, "torch_adamw_no_decay",
+             "2.0.0"}}},
+          {"qualitative_samples",
+           {{TrainingComponentCategory::qualitative_sample, "fixed_held_out",
              "2.0.0"}}},
       };
   return composition;

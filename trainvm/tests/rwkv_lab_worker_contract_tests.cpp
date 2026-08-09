@@ -225,6 +225,180 @@ void verify_mageflow_evaluator_provenance(
   }
 }
 
+// One authorable composition for the shared Transformer MLA contract, chosen
+// from its own allowlist. `host_optimizer` is the single slot the engram route
+// adds on top.
+trainvm::TrainingComposition transformer_mla_composition_for(bool engram) {
+  using Category = trainvm::TrainingComponentCategory;
+  trainvm::TrainingComposition composition{
+      .model_family = "transformer",
+      .components = {},
+      .topologies = std::nullopt,
+      .post_training = std::nullopt,
+  };
+  composition.components.emplace(
+      "artifact_renderer",
+      select(Category::artifact_renderer, "evidence_envelope", "1.0.0",
+             nlohmann::json{{"modality", "text"}}));
+  composition.components.emplace(
+      "evaluation_schedule",
+      select(Category::evaluation_schedule, "milestone_cadence", "3.0.0",
+             nlohmann::json::object()));
+  // split_slot is empty on purpose: the Transformer MLA routes read their
+  // corpus out of the adapter's own configuration, so the composition declares
+  // no data pipeline and has no split-selector slot for the evaluator to name.
+  composition.components.emplace(
+      "evaluator",
+      select(Category::evaluator, "scalar_loss", "1.0.0",
+             nlohmann::json{{"metrics", nlohmann::json::array({"eval.loss"})},
+                            {"split_slot", ""}}));
+  composition.components.emplace(
+      "qualitative_samples",
+      select(Category::qualitative_sample, "fixed_held_out", "2.0.0",
+             nlohmann::json{{"identity_field", "sample_id"},
+                            {"sample_count", 4}}));
+  composition.components.emplace(
+      "gradient_accumulation",
+      select(Category::gradient_accumulation, "fixed", "1.0.0",
+             nlohmann::json{{"microbatches_per_optimizer_step", 1}}));
+  composition.components.emplace(
+      "gradient_clipping",
+      select(Category::gradient_clipping, "global_norm", "1.0.0",
+             nlohmann::json{{"max_norm", 1.0}}));
+  composition.components.emplace(
+      "learning_rate",
+      select(Category::learning_rate_schedule, "linear_warmup_cosine", "1.0.0",
+             nlohmann::json{{"warmup_steps", 8}, {"max_steps", 128}}));
+  composition.components.emplace(
+      "objective",
+      select(Category::objective, "linear_head_cross_entropy", "1.0.0",
+             nlohmann::json::object()));
+  composition.components.emplace(
+      "optimizer",
+      select(Category::optimizer, "torch_adamw_no_decay", "2.0.0",
+             nlohmann::json{{"learning_rate", 0.0001}}));
+  composition.components.emplace(
+      "precision",
+      select(Category::precision, "bf16_parameters_fp32_reductions", "1.0.0",
+             nlohmann::json::object()));
+  composition.components.emplace(
+      "weight_decay",
+      select(Category::weight_decay_schedule, "constant", "1.0.0",
+             nlohmann::json{{"weight_decay", 0.0}}));
+  if (engram) {
+    composition.components.emplace(
+        "host_optimizer",
+        select(Category::optimizer, "torch_sparse_adam", "1.0.0",
+               nlohmann::json{{"learning_rate", 0.0001}}));
+  }
+  return composition;
+}
+
+// The same end-to-end walk verify_mageflow_evaluator_provenance performs, for
+// the eight Transformer MLA routes: contract slot, registry resolution,
+// manifest provenance, then the evaluator struck out of the resolved
+// composition to prove the check is what makes the walk succeed. Every route
+// shares one composition contract, so an evaluator missing from that contract
+// would have deadlocked all eight at once.
+void verify_transformer_mla_evaluator_provenance(
+    const trainvm::RwkvLabWorkerContract& contract,
+    const trainvm::TrainingComponentRegistry& components) {
+  const std::vector<std::string> routes{
+      "rwkv-lab.transformer-mla",
+      "rwkv-lab.transformer-mla-engram",
+      "rwkv-lab.transformer-mla-fsp",
+      "rwkv-lab.transformer-mla-full-backbone",
+      "rwkv-lab.transformer-mla-mtp",
+      "rwkv-lab.transformer-mla-mutor",
+      "rwkv-lab.transformer-mla-parallel",
+      "rwkv-lab.transformer-mla-rwkv8",
+  };
+  for (const auto& adapter : routes) {
+    const trainvm::AdapterProfile& profile = find_profile(contract, adapter);
+    require(profile.training_composition.has_value(),
+            "each Transformer MLA route must own a training composition contract");
+    const auto slot = profile.training_composition->slots.find("evaluator");
+    require(slot != profile.training_composition->slots.end() &&
+                slot->second == trainvm::TrainingComponentCategory::evaluator,
+            "each Transformer MLA route must declare an evaluator slot");
+    const bool engram = adapter == "rwkv-lab.transformer-mla-engram";
+    const trainvm::TrainingComposition composition =
+        transformer_mla_composition_for(engram);
+    require(composition.components.size() ==
+                profile.training_composition->slots.size(),
+            "the authored Transformer MLA composition must fill every declared slot");
+    if (engram) {
+      // The engram route's slot set cannot resolve, and this predates the
+      // evaluation suite: it declares `optimizer` and `host_optimizer`, both
+      // of category optimizer, while validate_optimizer_decay_relationships
+      // runs unique_component over that category on every resolve and refuses
+      // a second selection. So the contract slot is verifiable but the walk
+      // below is not reachable for this one route. Pinned rather than skipped
+      // so the day the registry learns about host optimizers this test says
+      // so and the walk can be extended to all eight.
+      bool refused_two_optimizers = false;
+      try {
+        (void)components.resolve_composition(composition);
+      } catch (const trainvm::TrainingComponentResolutionError&) {
+        refused_two_optimizers = true;
+      }
+      require(refused_two_optimizers,
+              "the engram route's two optimizer-category slots must still be the only thing blocking its resolution");
+      continue;
+    }
+    const trainvm::ResolvedTrainingComposition resolved =
+        components.resolve_composition(composition);
+    std::size_t evaluators = 0U;
+    for (const auto& [name, component] : resolved.components) {
+      (void)name;
+      if (component.descriptor.key.category ==
+          trainvm::TrainingComponentCategory::evaluator)
+        ++evaluators;
+    }
+    require(evaluators == 1U,
+            "each Transformer MLA route must resolve exactly one evaluator");
+    const nlohmann::json resolved_training =
+        trainvm::resolved_training_composition_json(resolved);
+    const trainvm::EvalExamplesManifest manifest =
+        trainvm::validate_eval_examples_manifest(eval_examples_document(
+            resolved.components.at("evaluator").descriptor_digest));
+    const std::string authority_digest = "sha256:" + std::string(64U, 'a');
+    trainvm::Event checkpoint{};
+    checkpoint.run_id = "run-1";
+    checkpoint.node_id = "train";
+    checkpoint.attempt_id = "train@1";
+    checkpoint.event_type = "artifact.published";
+    checkpoint.optimizer_step = 0U;
+    checkpoint.payload = {{"artifact_id", "checkpoint-0"},
+                          {"kind", "checkpoint"},
+                          {"complete", true},
+                          {"fingerprint_algorithm", "manifest_sha256"},
+                          {"fingerprint", authority_digest}};
+    trainvm::Event metric{};
+    metric.run_id = "run-1";
+    metric.node_id = "train";
+    metric.attempt_id = "train@1";
+    metric.event_type = "metric.sampled";
+    metric.optimizer_step = 0U;
+    metric.payload = {{"name", "eval.loss"},
+                      {"step_domain", "optimizer_step"}};
+    trainvm::validate_eval_examples_gate_provenance(
+        manifest, resolved_training, {checkpoint, metric});
+
+    nlohmann::json without_evaluator = resolved_training;
+    without_evaluator.at("components").erase("evaluator");
+    bool refused = false;
+    try {
+      trainvm::validate_eval_examples_gate_provenance(
+          manifest, without_evaluator, {checkpoint, metric});
+    } catch (const std::invalid_argument&) {
+      refused = true;
+    }
+    require(refused,
+            "eval-examples provenance must refuse a Transformer MLA composition whose evaluator slot is absent");
+  }
+}
+
 nlohmann::json load_mageflow_fixture() {
   const auto path = std::filesystem::path(TRAINVM_SOURCE_ROOT) /
                     "docs/experiment-vm/examples/mageflow-cache-resume.json";
@@ -329,7 +503,8 @@ int main() {
                  transformer.training_composition->model_family ==
                      "transformer" &&
                  transformer.training_composition->slots.size() ==
-                     (adapter == "rwkv-lab.transformer-mla-engram" ? 8U : 7U) &&
+                     (adapter == "rwkv-lab.transformer-mla-engram" ? 12U
+                                                                   : 11U) &&
                  (adapter != "rwkv-lab.transformer-mla-engram" ||
                   (transformer.training_composition->slots.at(
                        "host_optimizer") ==
@@ -1228,6 +1403,7 @@ int main() {
             "sealed rwkv_lab worker contract must cover the checked-in component catalog");
 
     verify_mageflow_evaluator_provenance(contract, components);
+    verify_transformer_mla_evaluator_provenance(contract, components);
 
     std::vector<trainvm::RwkvLabWorkerRuntimeDeploymentSpec> runtimes;
     for (const trainvm::AdapterProfile& profile :

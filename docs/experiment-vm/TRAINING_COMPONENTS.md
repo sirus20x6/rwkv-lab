@@ -130,7 +130,9 @@ That requirement applies wherever it is expressible, which means wherever the co
 a data pipeline. A split-selector view is part of that pipeline, and the pipeline is admissible
 only as a whole — source, processor, mapper, collator, sampler and batching together — so a family
 whose dataset is not declared through components has no slot for the evaluator to name. MageFlow is
-that case: its dataset comes out of the adapter's own configuration object. Such a composition must
+that case: its dataset comes out of the adapter's own configuration object. So are the eight
+Transformer MLA routes, which name a packed token file in their own configuration rather than
+through a data source. Such a composition must
 declare `split_slot: ""`, stating that its held-out selection is adapter-owned; a dangling slot
 reference is refused rather than ignored, and a composition that does declare a data pipeline still
 has to wire the split views as above.
