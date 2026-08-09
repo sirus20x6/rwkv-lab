@@ -446,13 +446,22 @@ def main() -> int:
         profiles = deployment["host_launch_registry"]["profiles"]
         if deployment["schema"] != "trainvm.rwkv-lab-worker-deployment/v3":
             raise SystemExit("deployment inspector emitted the wrong schema")
-        if len(profiles) != 20 or any(
-            profile["code_argument_index"] != 1
-            or profile["public_arguments"] != ["-I", "rwkv-lab-worker.pyz"]
-            or profile["code_fingerprint"] != digest(first)
-            or profile["bootstrap_runtime_closure_fingerprint"]
-            != closure_document["closure_digest"]
-            for profile in profiles
+        deployed_keys = tuple(profile["key"] for profile in profiles)
+        adapter_registry_keys = tuple(
+            profile["key"] for profile in deployment["adapter_registry"]["profiles"]
+        )
+        deployed_adapters = tuple(key["adapter"] for key in deployed_keys)
+        if (
+            deployed_keys != adapter_registry_keys
+            or deployed_adapters != adapters
+            or any(
+                profile["code_argument_index"] != 1
+                or profile["public_arguments"] != ["-I", "rwkv-lab-worker.pyz"]
+                or profile["code_fingerprint"] != digest(first)
+                or profile["bootstrap_runtime_closure_fingerprint"]
+                != closure_document["closure_digest"]
+                for profile in profiles
+            )
         ):
             raise SystemExit("deployment registry drifted from sealed worker artifact")
         run_completed_replay(

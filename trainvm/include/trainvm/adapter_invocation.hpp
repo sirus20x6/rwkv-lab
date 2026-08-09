@@ -67,7 +67,8 @@ struct WorkerInvocationSpec final {
 };
 
 [[nodiscard]] WorkerInvocationSpec build_worker_invocation(
-    const CompiledPlan& plan, const WorkerInvocationContext& context);
+    const CompiledPlan& plan, const WorkerInvocationContext& context,
+    std::string_view finalization_policy_digest = {});
 [[nodiscard]] std::string worker_invocation_canonical_json(
     const WorkerInvocationSpec& value);
 [[nodiscard]] WorkerInvocationSpec worker_invocation_from_canonical_json(

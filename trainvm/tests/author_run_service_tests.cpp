@@ -1,4 +1,5 @@
 #include "trainvm/service.hpp"
+#include "trainvm/final_evaluation.hpp"
 
 #include <sys/stat.h>
 #include <time.h>
@@ -152,7 +153,11 @@ std::vector<AdapterProfile> profiles() {
                // rejected it with author_run.adapter.
                {"test_eval", port(OperationPortType::artifact, false,
                                   ArtifactType::report,
-                                  "rwkv-lab.hf-test-caption-evidence-bundle.v1")}}}};
+                                  "rwkv-lab.hf-test-caption-evidence-bundle.v1")},
+               {"final_evaluation",
+                port(OperationPortType::artifact, true,
+                     ArtifactType::report,
+                     "rwkv-lab.final-evaluation.v1")}}}};
   return {core("acquire_resources", "trainvm.v1.AcquireResources",
                Idempotency::receipt_required),
           core("release_resources", "trainvm.v1.ReleaseResources",
@@ -463,6 +468,9 @@ int main() {
         passively_resolved.plan.experiment.spec.workflow.nodes.at("train");
     if (!compiled_train.invoke.training)
       throw std::runtime_error("checked-in HF recipe lost its training composition");
+    const auto invocation_profiles = profiles();
+    const FinalizationPolicyRegistry finalization_registry(
+        {invocation_profiles.back()});
     const auto compiled_invocation = build_worker_invocation(
         passively_resolved.plan,
         WorkerInvocationContext{
@@ -479,7 +487,9 @@ int main() {
                 invocation_components.resolve_composition(
                     *compiled_train.invoke.training)),
             .resume = nullptr,
-        });
+        },
+        finalization_policy_digest(
+            finalization_registry.resolve(invocation_profiles.back().key)));
     if (!compiled_invocation.publishes.at("checkpoint")
              .at("declaration")
              .value("required", false))

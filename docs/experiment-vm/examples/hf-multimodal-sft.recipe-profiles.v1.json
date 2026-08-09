@@ -72,6 +72,13 @@
               "immutability": "immutable",
               "fingerprint": "manifest_sha256",
               "required": true
+            },
+            "final_evaluation": {
+              "type": "report",
+              "schema": "rwkv-lab.final-evaluation.v1",
+              "immutability": "immutable",
+              "fingerprint": "manifest_sha256",
+              "required": true
             }
           },
           "components": {
@@ -463,7 +470,8 @@
                 "publishes": {
                   "checkpoint": "checkpoint",
                   "eval_gallery": "eval_gallery",
-                  "test_eval": "test_eval"
+                  "test_eval": "test_eval",
+                  "final_evaluation": "final_evaluation"
                 },
                 "idempotency": "receipt_required",
                 "effect": "process",
@@ -814,6 +822,13 @@
             "test_eval": {
               "type": "report",
               "schema": "rwkv-lab.hf-test-caption-evidence-bundle.v1",
+              "immutability": "immutable",
+              "fingerprint": "manifest_sha256",
+              "required": true
+            },
+            "final_evaluation": {
+              "type": "report",
+              "schema": "rwkv-lab.final-evaluation.v1",
               "immutability": "immutable",
               "fingerprint": "manifest_sha256",
               "required": true
@@ -1230,7 +1245,8 @@
                 "publishes": {
                   "checkpoint": "checkpoint",
                   "eval_gallery": "eval_gallery",
-                  "test_eval": "test_eval"
+                  "test_eval": "test_eval",
+                  "final_evaluation": "final_evaluation"
                 },
                 "idempotency": "receipt_required",
                 "effect": "process",
@@ -1649,6 +1665,13 @@
               "immutability": "immutable",
               "fingerprint": "manifest_sha256",
               "required": true
+            },
+            "final_evaluation": {
+              "type": "report",
+              "schema": "rwkv-lab.final-evaluation.v1",
+              "immutability": "immutable",
+              "fingerprint": "manifest_sha256",
+              "required": true
             }
           },
           "components": {
@@ -2064,7 +2087,8 @@
                 "publishes": {
                   "checkpoint": "checkpoint",
                   "eval_gallery": "eval_gallery",
-                  "test_eval": "test_eval"
+                  "test_eval": "test_eval",
+                  "final_evaluation": "final_evaluation"
                 },
                 "idempotency": "receipt_required",
                 "effect": "process",

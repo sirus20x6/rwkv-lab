@@ -72,6 +72,13 @@ from .execution_phases import (
     decode_execution_phase_requests,
     state_fingerprint,
 )
+from .final_evaluation import (
+    FINAL_EVALUATION_SCHEMA,
+    FinalEvaluationPublicationError,
+    FinalEvaluationPublicationRequest,
+    FinalEvaluationPublisher,
+    PublishedFinalEvaluation,
+)
 from .invocation import (
     MAXIMUM_INVOCATION_BYTES,
     InvocationError,
@@ -143,6 +150,7 @@ __all__ = [
     "EXTERNAL_PROFILER_AUTHORITY_SCHEMA",
     "EXTERNAL_PROFILER_NVTX_RANGE",
     "EXTERNAL_PROFILER_WINDOW_SCHEMA",
+    "FINAL_EVALUATION_SCHEMA",
     "GPU_TRACE_SCHEMA",
     "IMMUTABLE_TREE_SCHEMA",
     "MAXIMUM_BOOTSTRAP_BYTES",
@@ -178,6 +186,9 @@ __all__ = [
     "ExecutionPhaseRequest",
     "ExternalProfilerAuthority",
     "ExternalStepProfiler",
+    "FinalEvaluationPublicationError",
+    "FinalEvaluationPublicationRequest",
+    "FinalEvaluationPublisher",
     "GalleryImage",
     "GpuProfileError",
     "GpuTracePublisher",
@@ -192,6 +203,7 @@ __all__ = [
     "PublishedCheckpoint",
     "PublishedEvalExamples",
     "PublishedEvalGallery",
+    "PublishedFinalEvaluation",
     "PublishedGpuTrace",
     "ResolvedArtifactObject",
     "ResolvedInputArtifact",

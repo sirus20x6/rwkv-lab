@@ -27,6 +27,14 @@ from rwkv_lab.training_runtime.evaluation_schedules import (
     evaluation_schedule_from_resolved_component,
 )
 
+# The terminal final-evaluation closure requires every evaluator metric to have
+# an exact observable scalar declared on the invocation. `_engine_harness`
+# declares one evaluator metric, `test_loss`, so a run that reaches completion
+# has to advertise `eval.test_loss` over the optimizer-step domain.
+FINAL_EVALUATION_OBSERVABILITY = {
+    "metrics": ({"name": "eval.test_loss", "step_domain": "optimizer_step"},)
+}
+
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG = json.loads(
     (ROOT / "docs/experiment-vm/examples/training-components.v1.json").read_text(
@@ -230,7 +238,10 @@ def _run(harness_directory, *, schedule_configuration, maximum_steps):
     controls = harness.Controls()
     observability = harness.Observability()
     step = run_hf_multimodal_sft(
-        invocation=SimpleNamespace(attempt_id="attempt-1"),
+        invocation=SimpleNamespace(
+            attempt_id="attempt-1",
+            observability=FINAL_EVALUATION_OBSERVABILITY,
+        ),
         components=harness.Components(),
         run_directory=harness_directory / "run",
         controls=controls,
@@ -336,7 +347,10 @@ def test_resume_cannot_relabel_a_trained_checkpoint_as_the_baseline(tmp_path):
     controls = harness.Controls(fail_before_step=2)
     with pytest.raises(RuntimeError, match="crash before optimizer step"):
         run_hf_multimodal_sft(
-            invocation=SimpleNamespace(attempt_id="attempt-1"),
+            invocation=SimpleNamespace(
+                attempt_id="attempt-1",
+                observability=FINAL_EVALUATION_OBSERVABILITY,
+            ),
             components=harness.Components(),
             run_directory=tmp_path / "run",
             controls=controls,
@@ -365,7 +379,10 @@ def test_resume_cannot_relabel_a_trained_checkpoint_as_the_baseline(tmp_path):
     resumed_controls = harness.Controls()
     resumed_observability = harness.Observability()
     step = run_hf_multimodal_sft(
-        invocation=SimpleNamespace(attempt_id="attempt-2"),
+        invocation=SimpleNamespace(
+            attempt_id="attempt-2",
+            observability=FINAL_EVALUATION_OBSERVABILITY,
+        ),
         components=harness.Components(),
         run_directory=tmp_path / "run",
         controls=resumed_controls,
@@ -467,7 +484,10 @@ def _run_with_patch(directory, *, patch, patch_at, maximum_steps=6):
     controls = harness.Controls(patch=patch, patch_at=patch_at)
     observability = harness.Observability()
     step = run_hf_multimodal_sft(
-        invocation=SimpleNamespace(attempt_id="attempt-1"),
+        invocation=SimpleNamespace(
+            attempt_id="attempt-1",
+            observability=FINAL_EVALUATION_OBSERVABILITY,
+        ),
         components=harness.Components(),
         run_directory=directory / "run",
         controls=controls,

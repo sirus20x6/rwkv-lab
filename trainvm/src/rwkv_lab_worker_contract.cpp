@@ -152,6 +152,15 @@ OperationAuthoringDeclaration hf_multimodal_sft_authoring() {
            .description =
                "Required immutable baseline/final test-caption evidence bundle.",
        }},
+      {"final_evaluation",
+       OperationPortDescriptor{
+           .type = OperationPortType::artifact,
+           .required = true,
+           .artifact_type = ArtifactType::report,
+           .artifact_schema = "rwkv-lab.final-evaluation.v1",
+           .description =
+               "Required terminal-checkpoint closure over every final output, scalar, and test member.",
+       }},
   };
   return authoring;
 }

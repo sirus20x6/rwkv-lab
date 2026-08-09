@@ -2,6 +2,7 @@
 
 #include "trainvm/reflection_json.hpp"
 #include "trainvm/eval_examples_contract.hpp"
+#include "trainvm/final_evaluation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -44,6 +45,8 @@ bool is_controller_event(std::string_view event_type) {
          event_type == "worker.launch_bound" || event_type == "worker.ready" ||
          event_type == "node.dispatch_prepared" ||
          event_type == "worker.invocation_bound" ||
+         event_type == "finalization.expectation_frozen" ||
+         event_type == "finalization.verdict_recorded" ||
          event_type == "node.dispatch_completed" ||
          event_type.starts_with("host.resource_") ||
          event_type.starts_with("host.process_") ||
@@ -242,6 +245,13 @@ void require_worker_observation_shape(const Event& event,
   const std::string kind = event.payload.value("kind", std::string{});
   const bool eval_examples = kind == "eval_examples";
   const bool checkpoint = kind == "checkpoint";
+  const bool stepped_final_evidence =
+      kind == "image_gallery" ||
+      (kind == "report" &&
+       (event.payload.value("schema", std::string{}) ==
+            "rwkv-lab.final-evaluation.v1" ||
+        event.payload.value("schema", std::string{}) ==
+            "rwkv-lab.hf-test-caption-evidence-bundle.v1"));
   // Historical v1 checkpoint events predate stepped artifact publication and
   // remain replayable, but cannot satisfy any provenance check that requires an
   // authoritative step. The service requires the step on every new checkpoint.
@@ -252,7 +262,8 @@ void require_worker_observation_shape(const Event& event,
         event.payload.at("eval_examples_manifest").is_object()));
   if (!fields_match ||
       (eval_examples ? !event.optimizer_step
-                     : (!checkpoint && event.optimizer_step.has_value())) ||
+                     : (!checkpoint && !stepped_final_evidence &&
+                        event.optimizer_step.has_value())) ||
       !std::ranges::all_of(fields, [&](std::string_view field) {
         return event.payload.contains(std::string(field));
       }) ||
@@ -832,6 +843,50 @@ const ExecutionState& Controller::recover() {
     if (event.event_type == "run.created") {
       if (event.event_id != events.front().event_id) {
         throw std::runtime_error("journal recovery found more than one run.created event");
+      }
+      continue;
+    }
+    if (event.event_type == "finalization.expectation_frozen") {
+      FinalEvaluationExpectation expectation;
+      std::vector<Diagnostic> diagnostics;
+      if (phase != ReplayPhase::ready || expected_completion ||
+          event.worker_sequence != 0U || !event.optimizer_step ||
+          event.run_id != run_id_ || event.run_revision != recovered.revision ||
+          event.node_id != recovered.current_node_id ||
+          event.attempt_id != recovered.current_attempt_id ||
+          event.event_id != dispatch_id_for(recovered) +
+                                ":finalization-expectation" ||
+          !decode_json(event.payload, expectation, "", diagnostics) ||
+          !diagnostics.empty() ||
+          expectation.optimizer_step != *event.optimizer_step ||
+          encode_json(expectation) != event.payload) {
+        throw std::runtime_error(
+            "journal contains a noncanonical finalization expectation freeze");
+      }
+      continue;
+    }
+    if (event.event_type == "finalization.verdict_recorded") {
+      nlohmann::json encoded = event.payload;
+      const bool versioned = encoded.is_object() &&
+                             encoded.value("api_version", std::string{}) ==
+                                 "trainvm.finalization-verdict/v1";
+      encoded.erase("api_version");
+      FinalizationVerdict finalization_verdict;
+      std::vector<Diagnostic> diagnostics;
+      if (phase != ReplayPhase::ready || expected_completion ||
+          event.worker_sequence != 0U || event.run_id != run_id_ ||
+          event.run_revision != recovered.revision ||
+          event.event_version != 1U ||
+          event.node_id != recovered.current_node_id ||
+          event.attempt_id != recovered.current_attempt_id || !versioned ||
+          !decode_json(encoded, finalization_verdict, "", diagnostics) ||
+          !diagnostics.empty() || finalization_verdict.cause.empty() ||
+          finalization_verdict_json(finalization_verdict) != event.payload ||
+          event.event_id != dispatch_id_for(recovered) +
+                                ":finalization-verdict:" +
+                                    sha256_hex(event.payload.dump())) {
+        throw std::runtime_error(
+            "journal contains a noncanonical finalization verdict");
       }
       continue;
     }
@@ -2457,6 +2512,98 @@ WorkerInvocationSpec Controller::bind_worker_invocation(
     throw std::runtime_error(
         "durable worker invocation disappeared after commit");
   return *durable;
+}
+
+FinalEvaluationExpectation Controller::freeze_final_evaluation_expectation(
+    const FinalEvaluationExpectation &expectation,
+    const AuthorityTimeSample &now) {
+  recover();
+  const std::string dispatch_id = dispatch_id_for(state_);
+  const auto dispatch = journal_.dispatch(dispatch_id);
+  if (state_.status != ExecutionStatus::running || paused_ || !dispatch ||
+      dispatch->status != DispatchStatus::prepared) {
+    throw std::logic_error(
+        "finalization expectation requires an active prepared dispatch");
+  }
+  const Event candidate{
+      .event_id = dispatch_id + ":finalization-expectation",
+      .run_id = run_id_,
+      .run_revision = state_.revision,
+      .plan_revision = kInitialPlanRevision,
+      .node_id = state_.current_node_id,
+      .attempt_id = state_.current_attempt_id,
+      .worker_sequence = 0U,
+      .event_type = "finalization.expectation_frozen",
+      .event_version = 1U,
+      .wall_time_ns = now.wall.nanoseconds,
+      .monotonic_time_ns = 0U,
+      .optimizer_step = expectation.optimizer_step,
+      .payload = encode_json(expectation),
+  };
+  if (const auto durable = journal_.event(candidate.event_id)) {
+    FinalEvaluationExpectation result;
+    std::vector<Diagnostic> diagnostics;
+    if (durable->event_type != candidate.event_type ||
+        durable->run_id != candidate.run_id ||
+        durable->node_id != candidate.node_id ||
+        durable->attempt_id != candidate.attempt_id ||
+        durable->optimizer_step != candidate.optimizer_step ||
+        !decode_json(durable->payload, result, "", diagnostics) ||
+        !diagnostics.empty() || result != expectation) {
+      throw std::logic_error(
+          "durable finalization expectation conflicts with candidate");
+    }
+    return result;
+  }
+  (void)journal_.append(candidate);
+  recover();
+  return expectation;
+}
+
+void Controller::record_finalization_verdict(
+    const FinalizationVerdict &verdict_value,
+    std::optional<std::uint64_t> optimizer_step,
+    const AuthorityTimeSample &now) {
+  recover();
+  const std::string dispatch_id = dispatch_id_for(state_);
+  const auto dispatch = journal_.dispatch(dispatch_id);
+  if (state_.status != ExecutionStatus::running || paused_ || !dispatch ||
+      dispatch->status != DispatchStatus::prepared ||
+      verdict_value.cause.empty()) {
+    throw std::logic_error(
+        "finalization verdict requires an active prepared dispatch");
+  }
+  const nlohmann::json payload = finalization_verdict_json(verdict_value);
+  const Event candidate{
+      .event_id = dispatch_id + ":finalization-verdict:" +
+                  sha256_hex(payload.dump()),
+      .run_id = run_id_,
+      .run_revision = state_.revision,
+      .plan_revision = kInitialPlanRevision,
+      .node_id = state_.current_node_id,
+      .attempt_id = state_.current_attempt_id,
+      .worker_sequence = 0U,
+      .event_type = "finalization.verdict_recorded",
+      .event_version = 1U,
+      .wall_time_ns = now.wall.nanoseconds,
+      .monotonic_time_ns = 0U,
+      .optimizer_step = optimizer_step,
+      .payload = payload,
+  };
+  if (const auto durable = journal_.event(candidate.event_id)) {
+    if (durable->event_type != candidate.event_type ||
+        durable->run_id != candidate.run_id ||
+        durable->node_id != candidate.node_id ||
+        durable->attempt_id != candidate.attempt_id ||
+        durable->optimizer_step != candidate.optimizer_step ||
+        durable->payload != candidate.payload) {
+      throw std::logic_error(
+          "durable finalization verdict conflicts with candidate");
+    }
+    return;
+  }
+  (void)journal_.append(candidate);
+  recover();
 }
 
 const ExecutionState& Controller::handle_event(const Event& input) {

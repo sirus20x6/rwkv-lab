@@ -181,6 +181,48 @@ def _is_digest(value: object) -> bool:
     )
 
 
+_FINAL_CONTEXT_COMPONENT_SLOTS = (
+    "artifact_renderer",
+    "data",
+    "evaluator",
+    "generation_policy",
+    "processor",
+    "sample_mapping",
+    "test_split",
+)
+
+
+def _final_member_context_digest(sample: ProcessedSample, components: Any) -> str:
+    """Bind a frozen member ID to admitted data and transform semantics.
+
+    The data descriptor already commits the complete frozen content root.  Do
+    not hash processor output here: the controller intentionally does not run
+    worker transformations while deciding completion.
+    """
+
+    descriptors = components.composition.components
+    try:
+        component_digests = {
+            slot: descriptors[slot].descriptor_digest
+            for slot in _FINAL_CONTEXT_COMPONENT_SLOTS
+        }
+    except (AttributeError, KeyError) as error:
+        raise HFMultimodalSFTError(
+            "final member context lacks a resolved component descriptor"
+        ) from error
+    if any(not _is_digest(value) for value in component_digests.values()):
+        raise HFMultimodalSFTError(
+            "final member context contains an invalid component digest"
+        )
+    return _digest(
+        {
+            "api_version": "rwkv-lab.hf-final-member-context/v1",
+            "components": component_digests,
+            "member_id": sample.sample_id,
+        }
+    )
+
+
 def _prompt_and_target(
     sample: ProcessedSample,
     configuration: (
@@ -3151,6 +3193,7 @@ def run_hf_multimodal_sft(
         CheckpointPublicationRequest,
         EvalGalleryItem,
         EvalGalleryPublicationRequest,
+        FinalEvaluationPublicationRequest,
         GalleryImage,
         PublishedCheckpoint,
     )
@@ -3532,7 +3575,9 @@ def run_hf_multimodal_sft(
         )
         publication_pending = False
 
-    def publish_gallery(checkpoint: Any, generated: Sequence[tuple[str, str, str]]) -> None:
+    def publish_gallery(
+        checkpoint: Any, generated: Sequence[tuple[str, str, str]]
+    ) -> Any:
         samples = data.qualitative_samples()
         items: list[Any] = []
         cards = run_directory / f"eval-cards-step-{step}"
@@ -3583,7 +3628,7 @@ def run_hf_multimodal_sft(
                     },
                 )
             )
-        controls.publish_evaluation_gallery(
+        return controls.publish_evaluation_gallery(
             EvalGalleryPublicationRequest(
                 output_name="eval_gallery",
                 step=step,
@@ -4034,7 +4079,7 @@ def run_hf_multimodal_sft(
         final_checkpoint_manifest_digest=final_checkpoint.manifest_sha256,
         final_model_state_digest=final_model_state_digest,
     )
-    controls.publish_artifact(
+    published_test_evaluation = controls.publish_artifact(
         ArtifactPublicationRequest(
             source_directory=bundle,
             output_name="test_eval",
@@ -4042,6 +4087,7 @@ def run_hf_multimodal_sft(
                 baseline_checkpoint_artifact_id,
                 final_checkpoint.artifact_id,
             ),
+            optimizer_step=step,
         )
     )
     observability.publish_if_declared("eval.test_loss", test_value, step=step)
@@ -4053,7 +4099,95 @@ def run_hf_multimodal_sft(
         maximum_new_tokens=maximum_new_tokens,
         use_cache=use_generation_cache,
     )
-    publish_gallery(final_checkpoint, qualitative)
+    published_gallery = publish_gallery(final_checkpoint, qualitative)
+    final_caption_records = tuple(
+        json.loads(line)
+        for line in (test_evidence / "captions.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    )
+    samples_by_id = {sample.sample_id: sample for sample in data.test_samples()}
+    canonical_members = tuple(sorted(samples_by_id))
+    records_by_id = {
+        str(record["sample_id"]): record for record in final_caption_records
+    }
+    if set(records_by_id) != set(canonical_members):
+        raise HFMultimodalSFTError(
+            "final closure membership disagrees with sealed test evidence"
+        )
+    final_records = tuple(
+        {
+            "member_id": member,
+            "context_digest": _final_member_context_digest(
+                samples_by_id[member], components
+            ),
+            "attempt": 1,
+            "disposition": "success",
+            "result_digest": _digest(records_by_id[member]["text"]),
+        }
+        for member in canonical_members
+    )
+    observable_eval_scalars = {
+        str(metric["name"])
+        for metric in invocation.observability.get("metrics", ())
+        if isinstance(metric, Mapping)
+        and isinstance(metric.get("name"), str)
+        and metric.get("step_domain") == "optimizer_step"
+    }
+    evaluator_metric_names = tuple(
+        name if str(name).startswith("eval.") else f"eval.{name}"
+        for name in evaluator.configuration.metrics
+    )
+    if any(name not in observable_eval_scalars for name in evaluator_metric_names):
+        raise HFMultimodalSFTError(
+            "final evaluator metric lacks an exact observable scalar"
+        )
+    required_scalars = tuple(
+        {"metric_name": name, "step_domain": "optimizer_step"}
+        for name in sorted(evaluator_metric_names)
+    )
+    output_receipts = tuple(
+        sorted(
+            (
+                {
+                    "output_name": "checkpoint",
+                    "artifact_id": final_checkpoint.artifact_id,
+                    "artifact_fingerprint": final_checkpoint.manifest_sha256,
+                },
+                {
+                    "output_name": "eval_gallery",
+                    "artifact_id": published_gallery.artifact_id,
+                    "artifact_fingerprint": published_gallery.manifest_sha256,
+                },
+                {
+                    "output_name": "test_eval",
+                    "artifact_id": published_test_evaluation.artifact_id,
+                    "artifact_fingerprint": published_test_evaluation.manifest_sha256,
+                },
+            ),
+            key=lambda receipt: receipt["output_name"],
+        )
+    )
+    controls.publish_final_evaluation(
+        FinalEvaluationPublicationRequest(
+            optimizer_step=step,
+            checkpoint_artifact_id=final_checkpoint.artifact_id,
+            checkpoint_fingerprint=final_checkpoint.manifest_sha256,
+            required_members=canonical_members,
+            member_context_digests={
+                member: _final_member_context_digest(
+                    samples_by_id[member], components
+                )
+                for member in canonical_members
+            },
+            records=final_records,
+            output_receipts=output_receipts,
+            required_scalars=required_scalars,
+            parent_artifact_ids=tuple(
+                receipt["artifact_id"] for receipt in output_receipts
+            ),
+        )
+    )
     return step
 
 

@@ -119,6 +119,7 @@ def test_eval_gallery_publisher_freezes_and_atomically_publishes_side_by_side(
             "fingerprint_algorithm": "manifest_sha256",
             "fingerprint": result.manifest_sha256,
             "parent_artifact_ids": ("checkpoint-125",),
+            "optimizer_step": 125,
             "wait": True,
         }
     ]
