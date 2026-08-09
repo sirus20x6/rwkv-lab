@@ -48,7 +48,10 @@ from rwkv_lab.trainvm_worker import (
     WorkerCancellationRequested,
     WorkerExecutionPhases,
     WorkerResourcesReleasedPause,
+    load_worker_invocation,
 )
+
+from test_trainvm_worker_documents import invocation_document
 
 
 @pytest.fixture(autouse=True)
@@ -227,6 +230,55 @@ def test_home_binding_refuses_an_unprovisioned_run_directory(tmp_path) -> None:
 
     with pytest.raises(AdapterInputError, match="not a provisioned directory"):
         bind_worker_process_environment(workspace, environment={})
+
+
+def test_workspace_path_authority_accepts_the_production_invocation_freeze(
+    tmp_path,
+) -> None:
+    """`from_workspace` must accept the workspace shape the worker really gets.
+
+    Every other test here hands it `_sealed_workspace`, a plain dict of plain
+    lists. Production hands it `WorkerInvocation.workspace`, which
+    `load_worker_invocation` has passed through `deep_freeze`: a
+    `MappingProxyType` whose `input_content_roots` is a **tuple** of
+    `MappingProxyType`, not a list of dicts.
+
+    That distinction is load-bearing rather than cosmetic.
+    `verify_input_content_roots` rejects anything failing `type(raw) is list`,
+    so the frozen tuple only survives because `from_workspace` coerces it back
+    with `list(raw_content_roots)`. Nothing exercised that coercion, because no
+    test had ever handed this function a frozen workspace — the same blind spot
+    that let a resume-lineage `list == tuple` comparison stay broken on main
+    for six days under a green suite.
+    """
+
+    read_root = tmp_path / "read"
+    run_root = tmp_path / "write"
+    for directory in (read_root, run_root):
+        directory.mkdir()
+    (read_root / "manifest.jsonl").write_text("{}\n", encoding="utf-8")
+    workspace = _sealed_workspace(read_root, run_root / "run")
+
+    invocation = load_worker_invocation(invocation_document(workspace=workspace))
+
+    assert isinstance(invocation.workspace, MappingProxyType)
+    assert isinstance(invocation.workspace["input_content_roots"], tuple)
+    assert isinstance(invocation.workspace["input_content_roots"][0], MappingProxyType)
+    assert isinstance(invocation.workspace["allowed_read_roots"], tuple)
+
+    authority = WorkspacePathAuthority.from_workspace(
+        invocation.workspace, require_content=True
+    )
+
+    assert authority.read_roots == (read_root.resolve(),)
+    assert len(authority.input_content_roots) == 1
+    assert authority.input_content_roots[0].path == str(read_root.resolve())
+    assert (
+        authority.read_path(
+            str(read_root / "manifest.jsonl"), label="manifest", kind="file"
+        )
+        == read_root / "manifest.jsonl"
+    )
 
 
 def test_workspace_path_authority_confines_reads_writes_and_symlinks(tmp_path) -> None:

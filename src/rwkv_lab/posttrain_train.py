@@ -449,6 +449,38 @@ def _qualify_reset_packing(model: nn.Module, reward_head: nn.Module | None,
             "tolerance": tolerance, "passed": passed}
 
 
+def refuse_ungated_attempt_baseline(worker_controls: Any | None) -> None:
+    """Refuse an attempt baseline this restart-only route can never reach.
+
+    ``rwkv-lab.rwkv-posttraining`` is the registry's only ``restart_only``
+    profile: its handler rejects resume state outright, so every attempt --
+    fresh or replacement -- begins its own loop at step zero and the first
+    crossing names step one. The controller's ``optimizer_step`` refuses any
+    step at or below ``attempt_baseline_optimizer_step``, so a baseline above
+    zero is a deadlock this trainer cannot work its way out of.
+
+    The value is therefore *read* from the controller and compared, rather than
+    the comparison being skipped because "it is always zero here". Assuming the
+    zero is exactly the mistake that made a resumed MageFlow attempt skip its
+    baseline for the whole life of the run (PR #94/#115); the assumption is
+    true for this route today and is checked rather than trusted, so it fails
+    loudly on the day the profile's resume grade changes.
+    """
+
+    if worker_controls is None:
+        return
+    if not worker_controls.step_zero_eval_gate_required:
+        return
+    if worker_controls.step_zero_eval_gate_satisfied:
+        return
+    baseline = worker_controls.attempt_baseline_optimizer_step
+    if baseline != 0:
+        raise ValueError(
+            "RWKV post-training is restart-only and starts every attempt at "
+            f"step zero, but the controller gates this one at {baseline}"
+        )
+
+
 def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
           adapter_name: str = "posttrain", rank: int = 16, alpha: float = 32.0,
           targets: tuple[str, ...] = (), steps: int = 100, batch_size: int = 2,
@@ -466,6 +498,10 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
           worker_observability: Any | None = None,
           worker_controls: Any | None = None) -> dict:
     from rwkv_lab.generate import WorldVocab, build_from_ckpt
+    # Imported here rather than at module scope: this trainer runs standalone
+    # from its own CLI on hosts without the trainvm-worker extra, and the
+    # sentinel's package pulls in the wire protocol.
+    from rwkv_lab.trainvm_worker import OptimizerMutationSentinel
 
     if objective not in ("sft", "dpo", "kto", "orpo", "simpo", "reward", "prm"):
         raise ValueError("unsupported post-training objective")
@@ -741,112 +777,140 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
     completed_steps = 0
     telemetry_started = time.monotonic()
     telemetry_tokens = 0
-    for step in range(int(steps)):
-        if worker_controls is not None:
-            worker_controls.microbatch(step + 1, reject_live_controls)
-        if packing == "reset" and objective != "kto":
-            batch = packed_groups[rng.randrange(len(packed_groups))]
-        elif kto_pools is not None:
-            good, bad = kto_pools
-            batch = [good[rng.randrange(len(good))], bad[rng.randrange(len(bad))]]
-            candidates = [encoded[rng.randrange(len(encoded))] for _ in range(int(batch_size) - 2)]
-            if packing == "reset":
-                used = sum(len(row.variants["response"].input_ids) for row in batch)
-                for row in candidates:
-                    size = len(row.variants["response"].input_ids)
-                    if used + size <= max_length:
-                        batch.append(row)
-                        used += size
-                if used > max_length:
-                    raise ValueError("one good/bad KTO pair does not fit the packing context")
+    refuse_ungated_attempt_baseline(worker_controls)
+    # Installed for the whole loop, so the ordering below is enforced against
+    # every optimizer instance in the process rather than the one this module
+    # constructed -- a reward head trained by a second optimizer, a fused
+    # update, or an edit that moves the crossing below the mutation all fail
+    # closed here instead of mutating parameters the controller never
+    # authorized.
+    mutation_sentinel = OptimizerMutationSentinel()
+    with mutation_sentinel.installed():
+        for step in range(int(steps)):
+            if worker_controls is not None:
+                worker_controls.microbatch(step + 1, reject_live_controls)
+            if packing == "reset" and objective != "kto":
+                batch = packed_groups[rng.randrange(len(packed_groups))]
+            elif kto_pools is not None:
+                good, bad = kto_pools
+                batch = [good[rng.randrange(len(good))], bad[rng.randrange(len(bad))]]
+                candidates = [encoded[rng.randrange(len(encoded))] for _ in range(int(batch_size) - 2)]
+                if packing == "reset":
+                    used = sum(len(row.variants["response"].input_ids) for row in batch)
+                    for row in candidates:
+                        size = len(row.variants["response"].input_ids)
+                        if used + size <= max_length:
+                            batch.append(row)
+                            used += size
+                    if used > max_length:
+                        raise ValueError("one good/bad KTO pair does not fit the packing context")
+                else:
+                    batch += candidates
+                rng.shuffle(batch)
             else:
-                batch += candidates
-            rng.shuffle(batch)
-        else:
-            batch = [encoded[rng.randrange(len(encoded))] for _ in range(int(batch_size))]
-        optimizer.zero_grad(set_to_none=True)
-        offload = (torch.autograd.graph.save_on_cpu(pin_memory=True)
-                   if activation_offload and device.startswith("cuda") else nullcontext())
-        with offload:
-            collect_metrics = (step == 0 or step + 1 == steps or (step + 1) % log_every == 0)
-            if packing == "reset":
-                loss, last_metrics = _packed_train_loss(model, reward_head, batch, objective,
-                                                        device, beta, gamma,
-                                                        reference_cache=reference_cache,
-                                                        collect_metrics=collect_metrics)
+                batch = [encoded[rng.randrange(len(encoded))] for _ in range(int(batch_size))]
+            optimizer.zero_grad(set_to_none=True)
+            offload = (torch.autograd.graph.save_on_cpu(pin_memory=True)
+                       if activation_offload and device.startswith("cuda") else nullcontext())
+            with offload:
+                collect_metrics = (step == 0 or step + 1 == steps or (step + 1) % log_every == 0)
+                if packing == "reset":
+                    loss, last_metrics = _packed_train_loss(model, reward_head, batch, objective,
+                                                            device, beta, gamma,
+                                                            reference_cache=reference_cache,
+                                                            collect_metrics=collect_metrics)
+                else:
+                    loss, last_metrics = _train_loss(model, reward_head, batch, objective, adapter_name,
+                                                     device, beta, gamma,
+                                                     reference_cache=reference_cache,
+                                                     collect_metrics=collect_metrics)
+            loss.backward()
+            finite = torch.isfinite(loss.detach())
+            finite_window_t.logical_and_(finite)
+            # Keep a bad update from poisoning adapter/reward-head state while deferring the host
+            # status read to telemetry cadence.  Adapter training has few gradient tensors, so these
+            # device-side passes cost less than a full CUDA-stream synchronization every step.
+            gradients = [parameter.grad for parameter in parameters if parameter.grad is not None]
+            for gradient in gradients:
+                gradient.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+            gradient_groups: dict[tuple[torch.device, torch.dtype], list[torch.Tensor]] = {}
+            for gradient in gradients:
+                gradient_groups.setdefault((gradient.device, gradient.dtype), []).append(gradient)
+            for (_, dtype), group in gradient_groups.items():
+                torch._foreach_mul_(group, finite.to(dtype=dtype))
+            if worker_components is not None:
+                worker_components.gradient_clipping(parameters)
             else:
-                loss, last_metrics = _train_loss(model, reward_head, batch, objective, adapter_name,
-                                                 device, beta, gamma,
-                                                 reference_cache=reference_cache,
-                                                 collect_metrics=collect_metrics)
-        loss.backward()
-        finite = torch.isfinite(loss.detach())
-        finite_window_t.logical_and_(finite)
-        # Keep a bad update from poisoning adapter/reward-head state while deferring the host
-        # status read to telemetry cadence.  Adapter training has few gradient tensors, so these
-        # device-side passes cost less than a full CUDA-stream synchronization every step.
-        gradients = [parameter.grad for parameter in parameters if parameter.grad is not None]
-        for gradient in gradients:
-            gradient.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
-        gradient_groups: dict[tuple[torch.device, torch.dtype], list[torch.Tensor]] = {}
-        for gradient in gradients:
-            gradient_groups.setdefault((gradient.device, gradient.dtype), []).append(gradient)
-        for (_, dtype), group in gradient_groups.items():
-            torch._foreach_mul_(group, finite.to(dtype=dtype))
-        if worker_components is not None:
-            worker_components.gradient_clipping(parameters)
-        else:
-            torch.nn.utils.clip_grad_norm_(parameters, max_gradient_norm)
-        used_learning_rate = float(optimizer.param_groups[0]["lr"])
-        optimizer.step()
-        train_tokens += _batch_tokens(batch, objective)
-        completed_steps = step + 1
-        if learning_rate_schedule is not None:
-            learning_rate_schedule.step()
-        if weight_decay_schedule is not None:
-            weight_decay_schedule.step(completed_steps)
-        if worker_step_profiler is not None:
-            worker_step_profiler.step(completed_steps)
-        if worker_observability is not None:
-            worker_observability.optimizer_step(completed_steps)
-        if worker_controls is not None:
-            worker_controls.optimizer_step(completed_steps, reject_live_controls)
-        safe_loss = torch.where(finite, loss.detach().float(), torch.zeros_like(loss.detach().float()))
-        loss_sum_t.add_(safe_loss)
-        last_loss_t = safe_loss
-        telemetry_due = (completed_steps == steps or completed_steps % log_every == 0)
-        if telemetry_due:
-            if not bool(finite_window_t):
-                raise FloatingPointError(
-                    f"non-finite {objective} loss in steps "
-                    f"{max(1, completed_steps - log_every + 1)}..{completed_steps}")
-            scalar_loss = float(last_loss_t)
-            scalar_losses.append(scalar_loss)
-            log.write(json.dumps({"kind": "train", "step": completed_steps,
-                                  "loss": scalar_loss, "objective": objective,
-                                  "telemetry_steps": min(log_every, completed_steps),
-                                  **last_metrics}) + "\n")
+                torch.nn.utils.clip_grad_norm_(parameters, max_gradient_norm)
+            used_learning_rate = float(optimizer.param_groups[0]["lr"])
+            # The mandatory pre-mutation boundary, immediately before the only
+            # mutation in this loop. This is the `worker_controls` call that
+            # used to sit below the update as
+            # `optimizer_step(completed_steps, ...)`: it is moved, not
+            # duplicated, to the same safe point at the same effective step
+            # number, on the side of the mutation where a refusal can still
+            # bite. Routed through the sentinel, so a refusal leaves the token
+            # disarmed and `optimizer.step()` raises rather than mutating
+            # unguarded.
+            mutation_sentinel.cross(
+                step + 1,
+                (
+                    (
+                        lambda next_step: worker_controls.pre_optimizer_step(
+                            next_step, reject_live_controls
+                        )
+                    )
+                    if worker_controls is not None
+                    else None
+                ),
+            )
+            optimizer.step()
+            train_tokens += _batch_tokens(batch, objective)
+            completed_steps = step + 1
+            if learning_rate_schedule is not None:
+                learning_rate_schedule.step()
+            if weight_decay_schedule is not None:
+                weight_decay_schedule.step(completed_steps)
+            if worker_step_profiler is not None:
+                worker_step_profiler.step(completed_steps)
             if worker_observability is not None:
-                elapsed = max(time.monotonic() - telemetry_started, 1.0e-12)
-                interval_tokens = train_tokens - telemetry_tokens
-                worker_observability.publish_if_declared(
-                    "train.loss", scalar_loss, step=completed_steps
-                )
-                worker_observability.publish_if_declared(
-                    "train.learning_rate",
-                    used_learning_rate,
-                    step=completed_steps,
-                )
-                worker_observability.publish_if_declared(
-                    "train.tokens_per_second",
-                    interval_tokens / elapsed,
-                    step=completed_steps,
-                )
-                telemetry_started = time.monotonic()
-                telemetry_tokens = train_tokens
-            finite_window_t.fill_(True)
-        if max_train_tokens and train_tokens >= max_train_tokens:
-            break
+                worker_observability.optimizer_step(completed_steps)
+            safe_loss = torch.where(finite, loss.detach().float(), torch.zeros_like(loss.detach().float()))
+            loss_sum_t.add_(safe_loss)
+            last_loss_t = safe_loss
+            telemetry_due = (completed_steps == steps or completed_steps % log_every == 0)
+            if telemetry_due:
+                if not bool(finite_window_t):
+                    raise FloatingPointError(
+                        f"non-finite {objective} loss in steps "
+                        f"{max(1, completed_steps - log_every + 1)}..{completed_steps}")
+                scalar_loss = float(last_loss_t)
+                scalar_losses.append(scalar_loss)
+                log.write(json.dumps({"kind": "train", "step": completed_steps,
+                                      "loss": scalar_loss, "objective": objective,
+                                      "telemetry_steps": min(log_every, completed_steps),
+                                      **last_metrics}) + "\n")
+                if worker_observability is not None:
+                    elapsed = max(time.monotonic() - telemetry_started, 1.0e-12)
+                    interval_tokens = train_tokens - telemetry_tokens
+                    worker_observability.publish_if_declared(
+                        "train.loss", scalar_loss, step=completed_steps
+                    )
+                    worker_observability.publish_if_declared(
+                        "train.learning_rate",
+                        used_learning_rate,
+                        step=completed_steps,
+                    )
+                    worker_observability.publish_if_declared(
+                        "train.tokens_per_second",
+                        interval_tokens / elapsed,
+                        step=completed_steps,
+                    )
+                    telemetry_started = time.monotonic()
+                    telemetry_tokens = train_tokens
+                finite_window_t.fill_(True)
+            if max_train_tokens and train_tokens >= max_train_tokens:
+                break
     if completed_steps and completed_steps % log_every:
         if not bool(finite_window_t):
             raise FloatingPointError(f"non-finite {objective} loss before step {completed_steps}")
