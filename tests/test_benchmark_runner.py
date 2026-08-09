@@ -24,6 +24,7 @@ import pytest
 
 # tests/ is on sys.path because this directory holds the rootdir conftest.
 import trainvm_binary
+import ztok_binary
 
 REPOSITORY = pathlib.Path(__file__).resolve().parents[1]
 RUNNER = REPOSITORY / "scripts/run_benchmark_fixture.py"
@@ -870,10 +871,22 @@ def test_ao3_fixture_carries_real_input_measurements_into_receipt(tmp_path):
         ao3_workload.DEFAULT_CORPUS_ROOT,
         ao3_workload.DEFAULT_TOKENIZER_VOCAB,
     )
-    if not all(path.exists() for path in required):
-        pytest.skip("host AO3 corpus or RWKV tokenizer is not available")
+    # Both skips below name what was missing. They used to say only "host AO3
+    # corpus or RWKV tokenizer is not available" and "ztok is not importable",
+    # which is the same silence test_world_vocab.py was fixed for: a dependency
+    # on another repository failing open, with nothing in the output saying
+    # which dependency or where it was looked for. Unlike the parity assertion
+    # this one cannot be vendored away -- it needs the multi-gigabyte host AO3
+    # corpus and ztok's compiled Python binding, and there is deliberately no
+    # synthetic fallback -- so naming the gap is the whole of the fix here.
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        pytest.skip("host AO3 corpus or RWKV tokenizer is not available: "
+                    + ", ".join(missing))
     if importlib.util.find_spec("ztok") is None:
-        pytest.skip("ztok is not importable")
+        pytest.skip("ztok's Python binding is not importable "
+                    "(it lives in the ztok repository, not this checkout); "
+                    + ztok_binary.python_binding_report_line())
 
     receipt = tmp_path / "ao3-receipt.json"
     result = run_runner(
