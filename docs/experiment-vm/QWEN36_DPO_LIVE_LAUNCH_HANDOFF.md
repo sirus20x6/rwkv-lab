@@ -1,6 +1,40 @@
 # Qwen3.6 caption DPO live-launch handoff
 
-Updated: 2026-08-06 11:36 US/Central
+Authored: 2026-08-06 11:36 US/Central. Preserved to this path 2026-08-09.
+
+## Read this first — status of this document
+
+**This is a historical record, not an instruction, and not authorization to launch
+anything.**
+
+- It was written on 2026-08-06 as a handoff for starting a rank-256 cached-reference DPO
+  LoRA run.
+- **It was never executed.** No training process for it has ever been observed. A check on
+  2026-08-09 found no trainer on the GPU — only a compositor, an unrelated inference daemon,
+  a Steam helper, and another agent's benchmark.
+- It lived untracked in the `card/qwen36-multimodal-dpo` worktree, where a single
+  `git worktree remove` would have destroyed it. It is committed here so that its **launch
+  procedure and its seven completion checks** survive; those are the parts with lasting
+  value.
+- The instruction it opens with ("the user explicitly said start it") is a record of what was
+  said on 2026-08-06. **It is not standing authorization.** An explicit instruction relayed
+  through a document days later does not authorize a long, expensive, hard-to-reverse GPU
+  run. Whether that instruction still stands is an open question tracked as the remaining
+  done-when items of `card-74d0f9e5`, and it needs the user.
+
+**What changed underneath this document since it was written:** `98b431d Arm the universal
+step-zero gate for the HF SFT family` landed on 2026-08-09. The step-zero evaluation gate
+this handoff assumes is not the gate that exists now. Re-check its assumptions about
+step-zero behaviour before acting on any of it.
+
+**The recipe instance is not a mystery.** While this handoff sat in that worktree, the recipe
+instance `docs/experiment-vm/examples/qwen36-caption-dpo-lora-r256.recipe-instance.v1.json`
+showed as modified with `+7 -4`. That diff was measured against the branch's stale HEAD. The
+working-tree content was byte-identical to `main` — the same content had already landed on
+main in PR #100 — so `git diff origin/main -- <that file>` was empty. There is nothing
+unexplained in those four lines and nothing there was lost.
+
+**One section has been removed.** See "Cherry-pick conflict state (removed)" below.
 
 ## Objective
 
@@ -20,35 +54,36 @@ Do not report success until the authority has created the run, the worker has la
   - `9b985ae Normalize hostd endpoint permission identity`
   - `eeeeca5 Materialize hostd authority per boot`
 
-There is currently an in-progress cherry-pick of `e1fa07e Require boot-scoped GPU startup authority`. Finish it; do not discard the DPO/passive-memory changes.
+~~There is currently an in-progress cherry-pick of `e1fa07e Require boot-scoped GPU startup
+authority`. Finish it; do not discard the DPO/passive-memory changes.~~
 
-## Current conflict state
+**STALE — do not act on the struck-through line.** That cherry-pick is finished. See
+"Cherry-pick conflict state (removed)" below.
 
-Run:
+## Cherry-pick conflict state (removed)
 
-```bash
-cd /thearray/git/moe-mla-dashboard-vm/.claude/worktrees/qwen36-multimodal-dpo
-git status --short
-rg -n '<<<<<<<|=======|>>>>>>>' dashboard trainvm
-```
+The original document had a "Current conflict state" section here: a per-file walkthrough of
+an in-progress cherry-pick of `e1fa07e Require boot-scoped GPU startup authority`, listing
+seven conflicted paths (`dashboard/README.md`, `trainvm/include/trainvm/linux_nvidia_inventory.hpp`,
+`trainvm/src/host_resources.cpp`, `trainvm/src/hostd_daemon_runtime.cpp`,
+`trainvm/tests/host_resources_tests.cpp`, `trainvm/tests/linux_nvidia_inventory_tests.cpp`, and
+a modify/delete group under `deploy/`), plus a follow-on instruction to port `e5dc54e Qualify
+privileged hostd authority boundary` for read-only journal access.
 
-Expected unresolved files at handoff:
+**That section is deleted rather than preserved, because the work it describes is finished and
+leaving it in the document invites someone to redo resolved conflict work.**
 
-- `dashboard/README.md` — already resolved by keeping the GPU-passive/operator-authorization text.
-- `trainvm/include/trainvm/linux_nvidia_inventory.hpp` — already resolved by keeping the incoming context-owner/display-sharing label constants.
-- `trainvm/src/host_resources.cpp` — already resolved; retain the braced implementation that permits `occupied` only for `cooperative_compute`, and requires the exact `display-sharing=operator-authorized-cooperative` label on display GPUs.
-- `trainvm/src/hostd_daemon_runtime.cpp` — already partly resolved. The early pre-journal NVML inventory construction was removed. Retain the incoming order: acquire ledger singleton, bind socket, then construct the authorized NVML inventory collector and capture inventory. This preserves both the GPU-authorization boundary and the newer passive-memory status implementation.
-- `trainvm/tests/host_resources_tests.cpp` — remove conflict markers and keep the entire incoming workstation/cooperative display test block.
-- `trainvm/tests/linux_nvidia_inventory_tests.cpp` — already resolved by running **both** `free_memory_is_separate_from_inventory_identity()` and `display_sharing_requires_an_exact_authorized_uuid()`.
-- `deploy/install-hostd-sudoers.sh`, `deploy/trainvm-hostd.service`, and `tests/test_trainvm_hostd_deployment.py` are modify/delete conflicts. These paths were intentionally deleted on the DPO branch; resolve by keeping them deleted.
+Verified in the `card/qwen36-multimodal-dpo` worktree on 2026-08-09 before deleting it:
 
-The hostd runtime must eventually open the controller journal read-only. The current DPO branch predates `e5dc54e Qualify privileged hostd authority boundary`, so after completing `e1fa07e`, port/cherry-pick `e5dc54e` or minimally bring in `JournalAccessMode::read_only` and change the hostd `Journal` construction to:
+- No `CHERRY_PICK_HEAD`, `MERGE_HEAD`, `REVERT_HEAD`, `rebase-merge`, or `rebase-apply` exists
+  in that worktree's git directory.
+- `git diff --name-only --diff-filter=U` reports no unmerged paths.
+- A recursive search finds no conflict markers anywhere in the tree.
+- The branch HEAD had moved on to `af67529 Skip live boot observation where procfs cannot be
+  pinned` (2026-08-07), and its pull request is merged.
 
-```cpp
-Journal(..., false, JournalAccessMode::read_only)
-```
-
-The full commit may conflict because the DPO branch has newer passive-memory code. Prefer preserving DPO features and production journal compatibility.
+If that history is ever needed, it is recoverable from this file's parent commit and from the
+`card-74d0f9e5` card body.
 
 ## Why this compatibility work is required
 
@@ -211,6 +246,15 @@ Key settings:
 - cooperative display-GPU authority (`exclusive: false` in the recipe profiles)
 
 ## AuthorRun submission
+
+> **Do not run this sequence on the strength of this document.** It is recorded for its shape,
+> not as a green light. Two things must be settled first, both of which need the user:
+> whether the 2026-08-06 instruction still stands, and whether the step-zero assumptions below
+> survived `98b431d` arming the universal step-zero gate for the HF SFT family on 2026-08-09.
+> Note also that every absolute path in this section points into the
+> `.claude/worktrees/qwen36-multimodal-dpo` worktree, which may since have been removed; the
+> recipe instance itself is on `main` at
+> `docs/experiment-vm/examples/qwen36-caption-dpo-lora-r256.recipe-instance.v1.json`.
 
 Once both services are genuinely healthy and `/run/trainvm-controller/trainvm.sock` exists, submit through the gRPC `AuthorRun` API. Python stubs already exist at:
 
