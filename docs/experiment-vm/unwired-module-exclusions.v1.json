@@ -1,0 +1,33 @@
+{
+  "api_version": "trainvm.unwired-module-exclusions/v1",
+  "authority": "ci_scope_evidence_only",
+  "comment": "Native modules under trainvm/include/trainvm/ that no translation unit in trainvm/src/ reaches, transitively, other than the module's own implementation. scripts/ci_unwired_module_gate.py fails on any such module absent from this list, and on any entry here whose module has since gained a production includer or ceased to exist. This is a countdown, not a configuration: it can only shrink. An entry says the module is unwired *on purpose* — landed ahead of its consumer, or a deliberate test seam — because a fully tested module with no production caller is otherwise indistinguishable from working code, and this repository has shipped four of them.",
+  "gate": "scripts/ci_unwired_module_gate.py",
+  "exclusions": [
+    {
+      "module": "trainvm/conversion_publication.hpp",
+      "reason": "Landed ahead of its consumer. The conversion publication document, its API version constant and its parse/validate path are complete and covered by conversion_publication_tests, but no service, CLI subcommand or authority constructs one yet, so no conversion has ever been published through it. Unfinished, not unwanted — do not resolve this entry by deleting the module.",
+      "card": "card-1cbcb5c9"
+    },
+    {
+      "module": "trainvm/fake_worker.hpp",
+      "reason": "A deliberate test seam, and the one entry here that is not a countdown. FakeWorker exists to drive dispatch and journal transitions without a real worker process; its only consumer is trainvm/tests/trainvm_tests.cpp and that is correct. It is built into trainvm_core rather than a test target, which is why the graph sees it at all. Removing this entry requires moving the source out of trainvm/src/, not finding it a production caller.",
+      "card": null
+    },
+    {
+      "module": "trainvm/journal_cache_lease_authority.hpp",
+      "reason": "Found by this gate on its first run. Its own header comment calls it the 'Production cache publication/adoption fence', and JournalCacheLeaseAuthority is constructed exactly once in the whole tree, at trainvm/tests/cache_namespace_authority_tests.cpp:958. The ICacheLeaseAuthority interface it implements IS reached from production; this concrete implementation is not, so the production path runs on some other lease authority. Same shape as LinuxCacheEvidencePublisher, which 8ca3f10 closed.",
+      "card": "card-9c195527"
+    },
+    {
+      "module": "trainvm/linux_immutable_cache_store.hpp",
+      "reason": "Found by this gate on its first run, and the sibling of the entry above. LinuxImmutableCacheStore is the Linux ICacheArtifactStore with the uid, file-count and byte ceilings, and it is constructed exactly once in the tree, at trainvm/tests/cache_namespace_authority_tests.cpp:727. Nothing under trainvm/src/ ever builds one, so those ceilings have never bounded a real publication.",
+      "card": "card-9c195527"
+    },
+    {
+      "module": "trainvm/source_disposition_catalog.hpp",
+      "reason": "Unwired by a seam CLAUDE.md already documents. The C++ loader is the half that enumerates a disposition scope and rejects missing paths, but load_file only does so when handed a repository root, and source_disposition_catalog_tests.cpp guards that call behind TRAINVM_LEGACY_SOURCE_ROOT, which is unset in CI. What actually checks the pins in every run is scripts/print_disposition_digests.py --check, which walks only the entries a document lists. So the native catalog reader is reachable from no binary. Closing this means giving the loader a caller, which is the same work as the catalog-completeness card.",
+      "card": "card-9c195527"
+    }
+  ]
+}
