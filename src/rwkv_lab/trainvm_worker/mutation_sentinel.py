@@ -8,10 +8,13 @@ Native post-step rejection is defense in depth; it is not the boundary.
 
 Writing the two calls in the right order inside one helper makes the ordering a
 convention. This sentinel makes it enforceable. ``cross()`` calls the boundary
-for one exact next step and arms a single-use token; the mutation consumes it.
-An optimizer step that finds nothing armed raises, so the boundary cannot be
-moved after the mutation, deleted, or bypassed by a second optimizer instance
-or a fused update path that never routes through the helper.
+for one exact next step and arms a token for an exact number of mutations --
+one by default; the mutations consume it. An optimizer step that finds nothing
+armed raises, so the boundary cannot be moved after the mutation, deleted, or
+bypassed by a second optimizer instance or a fused update path that never
+routes through the helper. A route whose training step mutates several
+optimizers declares that count once rather than crossing once per optimizer, so
+the controller still hears about one training step exactly once.
 
 The observation point is
 ``torch.optim.optimizer.register_optimizer_step_pre_hook``, a process-global
@@ -34,10 +37,11 @@ class MutationSentinelError(RuntimeError):
 class OptimizerMutationSentinel:
     """Bind every optimizer mutation to one preceding boundary crossing."""
 
-    __slots__ = ("_armed", "_handle", "_journal", "_mutations")
+    __slots__ = ("_armed", "_authorized", "_handle", "_journal", "_mutations")
 
     def __init__(self) -> None:
         self._armed: int | None = None
+        self._authorized = 0
         self._handle = None
         self._mutations = 0
         self._journal: list[tuple[str, int]] = []
@@ -57,15 +61,31 @@ class OptimizerMutationSentinel:
         return tuple(self._journal)
 
     def cross(
-        self, next_step: int, boundary: Callable[[int], None] | None = None
+        self,
+        next_step: int,
+        boundary: Callable[[int], None] | None = None,
+        *,
+        mutations: int = 1,
     ) -> None:
-        """Call the controller boundary for ``next_step``, then arm one token.
+        """Call the controller boundary for ``next_step``, then arm the token.
 
         ``boundary`` is the controller-facing call — for TrainVM workers,
         ``WorkerControlRuntime.pre_optimizer_step``. It runs before the token
         is armed, so a boundary that refuses (an unsatisfied attempt-baseline
         eval gate, a cancellation) leaves the sentinel disarmed and the
         mutation that would have followed fails closed.
+
+        ``mutations`` is how many optimizer mutations this one crossing
+        authorizes, and it is *exact* in both directions. One optimizer step
+        per crossing is the common shape and stays the default. A route that
+        steps several optimizers for the same training step must declare the
+        number, because calling the controller once per optimizer would
+        announce one training step several times and would let a live control
+        patch land between two halves of a single update. Declaring too few is
+        caught when the extra mutation finds nothing armed; declaring too many
+        is caught at the next crossing, which still finds authorization
+        outstanding. Both fail closed, which is the only safe direction for a
+        count a caller supplies.
         """
 
         if (
@@ -76,14 +96,24 @@ class OptimizerMutationSentinel:
             raise MutationSentinelError(
                 "the pre-mutation boundary names the positive step about to run"
             )
+        if (
+            not isinstance(mutations, int)
+            or isinstance(mutations, bool)
+            or mutations < 1
+        ):
+            raise MutationSentinelError(
+                "a boundary crossing authorizes at least one optimizer mutation"
+            )
         if self._armed is not None:
             raise MutationSentinelError(
-                "the pre-mutation boundary was crossed twice without a mutation"
+                "the pre-mutation boundary was crossed twice without a mutation "
+                f"consuming the {self._authorized} it still has authorized"
             )
         if boundary is not None:
             boundary(next_step)
         self._journal.append(("boundary", next_step))
         self._armed = next_step
+        self._authorized = mutations
 
     def _observe(self, optimizer: object, args: object, kwargs: object) -> None:
         del optimizer, args, kwargs
@@ -94,7 +124,9 @@ class OptimizerMutationSentinel:
             )
         self._mutations += 1
         self._journal.append(("mutation", self._armed))
-        self._armed = None
+        self._authorized -= 1
+        if self._authorized <= 0:
+            self._armed = None
 
     @contextmanager
     def installed(self) -> Iterator[OptimizerMutationSentinel]:
