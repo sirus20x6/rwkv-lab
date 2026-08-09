@@ -567,35 +567,54 @@ void validate_evaluation_checkpoint_relationships(
 
     const std::string split_slot =
         evaluator->configuration.at("split_slot").get<std::string>();
-    const auto split = composition.components.find(split_slot);
-    const bool frozen_split =
-        split != composition.components.end() &&
-        split->second.descriptor.implementation ==
-            "rwkv_lab.split_selector.frozen_named.v1";
-    if (split == composition.components.end() ||
-        split->second.descriptor.key.category !=
-            TrainingComponentCategory::split_selector ||
-        split->second.configuration.at("selection") !=
-            (frozen_split ? "validation" : "held_out"))
-      reject("training evaluator must reference a deterministic held-out split-selector slot");
-    const auto training_split = composition.components.find("split");
-    if (training_split == composition.components.end() ||
-        training_split->second.descriptor.key.category !=
-            TrainingComponentCategory::split_selector ||
-        training_split->second.configuration.at("selection") != "train" ||
-        (!frozen_split &&
-         (training_split->second.configuration.at("seed") !=
-              split->second.configuration.at("seed") ||
-          training_split->second.configuration.at("held_out_count") !=
-              split->second.configuration.at("held_out_count"))))
-      reject("training and evaluation split-selector views must name one deterministic partition");
-    if (frozen_split) {
-      const auto test_split = composition.components.find("test_split");
-      if (test_split == composition.components.end() ||
-          test_split->second.descriptor.implementation !=
-              "rwkv_lab.split_selector.frozen_named.v1" ||
-          test_split->second.configuration.at("selection") != "test")
-        reject("manifested data requires an untouched frozen test split");
+    // A split-selector view is part of the declarative data pipeline, and
+    // validate_data_pipeline_relationships insists on that pipeline as a unit:
+    // no split selector is resolvable without a source, processor, mapper,
+    // collator, sampler and batching component beside it. So a family whose
+    // data is not declared through components — MageFlow reads its dataset
+    // out of the adapter's own configuration — cannot name a split slot at
+    // all, and demanding one demands a component that cannot exist.
+    //
+    // This is deliberately not an escape hatch. Slot sets are owned by the
+    // authority's adapter profiles, so a document cannot drop its data
+    // pipeline to reach this branch; and the branch itself refuses a dangling
+    // reference rather than ignoring it, so an evaluator here has to say in
+    // its own configuration that its held-out selection is adapter-owned.
+    // Wherever the pipeline IS declared, the wiring below stays mandatory.
+    if (!grouped.contains(TrainingComponentCategory::data_source)) {
+      if (!split_slot.empty())
+        reject("an evaluator in a composition without a declarative data pipeline must not name a split-selector slot");
+    } else {
+      const auto split = composition.components.find(split_slot);
+      const bool frozen_split =
+          split != composition.components.end() &&
+          split->second.descriptor.implementation ==
+              "rwkv_lab.split_selector.frozen_named.v1";
+      if (split == composition.components.end() ||
+          split->second.descriptor.key.category !=
+              TrainingComponentCategory::split_selector ||
+          split->second.configuration.at("selection") !=
+              (frozen_split ? "validation" : "held_out"))
+        reject("training evaluator must reference a deterministic held-out split-selector slot");
+      const auto training_split = composition.components.find("split");
+      if (training_split == composition.components.end() ||
+          training_split->second.descriptor.key.category !=
+              TrainingComponentCategory::split_selector ||
+          training_split->second.configuration.at("selection") != "train" ||
+          (!frozen_split &&
+           (training_split->second.configuration.at("seed") !=
+                split->second.configuration.at("seed") ||
+            training_split->second.configuration.at("held_out_count") !=
+                split->second.configuration.at("held_out_count"))))
+        reject("training and evaluation split-selector views must name one deterministic partition");
+      if (frozen_split) {
+        const auto test_split = composition.components.find("test_split");
+        if (test_split == composition.components.end() ||
+            test_split->second.descriptor.implementation !=
+                "rwkv_lab.split_selector.frozen_named.v1" ||
+            test_split->second.configuration.at("selection") != "test")
+          reject("manifested data requires an untouched frozen test split");
+      }
     }
   }
   const auto* checkpoint = unique_component(
