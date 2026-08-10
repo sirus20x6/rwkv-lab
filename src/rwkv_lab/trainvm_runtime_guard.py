@@ -9,6 +9,7 @@ import re
 import stat
 import sys
 import sysconfig
+import time
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -92,6 +93,66 @@ def _sha256_file(path: str, expected_size: int) -> str:
         os.close(descriptor)
 
 
+def _moment(nanoseconds: int) -> str:
+    seconds, remainder = divmod(nanoseconds, 1_000_000_000)
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(seconds))
+    return f"{stamp}.{remainder // 1_000_000:03d}Z"
+
+
+def _sealing_time_ns(archive_path: str) -> int | None:
+    """When this closure was sealed onto this host.
+
+    Read for one purpose: phrasing a rejection that has already been decided.
+    Never load-bearing, for the same reason `driver_report` is not -- an mtime
+    is writable by anyone who can write the file, so nothing may be *accepted*
+    on its strength. Returning None costs the reader a sentence and costs the
+    guard nothing.
+    """
+
+    try:
+        return os.stat(archive_path).st_mtime_ns
+    except OSError:
+        return None
+
+
+def _attribution(path: str, sealed_ns: int | None) -> str:
+    """Say whether a digest that moved moved *after* the closure was sealed.
+
+    A closure names every native object on its import path, so an unrelated
+    host package rewritten mid-session reds it on a change that never touched
+    Python -- and the bare message names a file the author has no reason to
+    recognise. Every natural reading of that is wrong, and the worst of them
+    ("the check is flaky, rerun it") is the habit this repository can least
+    afford in a suite that hosted CI does not run.
+
+    The two cases are distinguishable and mean opposite things. A file written
+    after the seal changed under the run; a file untouched since the seal never
+    matched the closure at all. Neither answer changes the verdict -- the object
+    is rejected either way -- so a backdated mtime buys an attacker a misleading
+    sentence and no acceptance.
+    """
+
+    if sealed_ns is None:
+        return " (sealing time unreadable, so the change cannot be placed in time)"
+    try:
+        written_ns = os.lstat(path).st_mtime_ns
+    except OSError:
+        return " (file timestamp unreadable, so the change cannot be placed in time)"
+    if written_ns > sealed_ns:
+        return (
+            f" (rewritten {_moment(written_ns)}, after this closure was sealed at "
+            f"{_moment(sealed_ns)}: something changed this file on the host after "
+            f"the seal, which is what a package manager run during a session looks "
+            f"like -- re-seal the closure; this is not evidence about the change "
+            f"under test)"
+        )
+    return (
+        f" (last written {_moment(written_ns)}, not since this closure was sealed at "
+        f"{_moment(sealed_ns)}: these bytes were already in place at the seal and "
+        f"still do not match it, so this is a real mismatch and not host churn)"
+    )
+
+
 def _require_nonwritable_ancestors(path: Path) -> None:
     """Refuse a closure the worker could rewrite between verification and use.
 
@@ -120,7 +181,7 @@ def _require_nonwritable_ancestors(path: Path) -> None:
         current = current.parent
 
 
-def _verify_entry(entry: dict[str, Any]) -> None:
+def _verify_entry(entry: dict[str, Any], sealed_ns: int | None) -> None:
     path_value = entry.get("path")
     kind = entry.get("kind")
     if (
@@ -179,7 +240,10 @@ def _verify_entry(entry: dict[str, Any]) -> None:
     ):
         raise RuntimeClosureError("runtime closure entry size or digest is malformed")
     if _sha256_file(path_value, size) != sha256:
-        raise RuntimeClosureError(f"runtime closure file content changed: {path}")
+        raise RuntimeClosureError(
+            f"runtime closure file content changed: {path}"
+            f"{_attribution(path_value, sealed_ns)}"
+        )
 
 
 def native_roots() -> list[str]:
@@ -399,7 +463,7 @@ def _verify_native_object(
 
 
 def _verify_kernel_registry(
-    registry: Any, index: dict[str, dict[str, Any]]
+    registry: Any, index: dict[str, dict[str, Any]], sealed_ns: int | None
 ) -> set[str]:
     if (
         not isinstance(registry, dict)
@@ -454,6 +518,7 @@ def _verify_kernel_registry(
         if _sha256_whole(path) != sha256:
             raise RuntimeClosureError(
                 f"runtime closure kernel registry object changed: {path}"
+                f"{_attribution(path, sealed_ns)}"
             )
     if recorded != sorted(set(recorded)):
         raise RuntimeClosureError(
@@ -466,7 +531,9 @@ def _verify_kernel_registry(
     return answerable
 
 
-def _verify_native(native: Any, index: dict[str, dict[str, Any]]) -> None:
+def _verify_native(
+    native: Any, index: dict[str, dict[str, Any]], sealed_ns: int | None
+) -> None:
     """Verify what the dynamic loader would do, not only what Python imports.
 
     Everything here is a property no file digest can carry on its own: which
@@ -510,7 +577,7 @@ def _verify_native(native: Any, index: dict[str, dict[str, Any]]) -> None:
     # are answerable for their own bytes. An object on the import path that no
     # closure distribution claims is still pinned — by the registry rather than
     # by `files` — and an ELF object may cite either.
-    pinned = _verify_kernel_registry(native["kernel_registry"], index)
+    pinned = _verify_kernel_registry(native["kernel_registry"], index, sealed_ns)
     pinned.update(
         path for path, entry in index.items() if entry["kind"] == "regular"
     )
@@ -555,6 +622,12 @@ def verify_embedded_runtime_closure(archive_path: str | None = None) -> str:
     """Verify the deployment environment before importing any third-party code."""
 
     archive_path = archive_path or sys.argv[0]
+    # The archive's own mtime is when this closure was sealed onto this host.
+    # The manifest cannot carry the answer: the artifact builder writes every
+    # zip member at a fixed 1980 timestamp so the build is byte-reproducible,
+    # which is worth more than a self-describing seal time. Explanatory only --
+    # see _attribution.
+    sealed_ns = _sealing_time_ns(archive_path)
     try:
         with zipfile.ZipFile(archive_path) as archive:
             info = archive.getinfo(RUNTIME_CLOSURE_MEMBER)
@@ -634,7 +707,7 @@ def verify_embedded_runtime_closure(archive_path: str | None = None) -> str:
         for entry in files:
             if not isinstance(entry, dict):
                 raise RuntimeClosureError("runtime closure entry is not an object")
-            _verify_entry(entry)
+            _verify_entry(entry, sealed_ns)
             paths.append(entry["path"])
             index[entry["path"]] = entry
             if entry["kind"] == "regular":
@@ -645,7 +718,7 @@ def verify_embedded_runtime_closure(archive_path: str | None = None) -> str:
                     )
         if paths != sorted(set(paths)):
             raise RuntimeClosureError("runtime closure paths are not canonical")
-        _verify_native(body.get("native"), index)
+        _verify_native(body.get("native"), index, sealed_ns)
         return closure_digest
     except RuntimeClosureError:
         raise
