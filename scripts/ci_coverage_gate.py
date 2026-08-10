@@ -76,12 +76,31 @@ def main() -> int:
         document = json.loads(exclusions_path.read_text())
         exclusions = dict(document.get("excluded", {}))
 
+    # `rglob`, not `glob`. The node-id regex above accepts nested `tests/**`
+    # paths, so a file at `tests/native/test_x.py` would land in `covered` while
+    # a non-recursive glob never put it in `on_disk` -- and the two halves
+    # disagreeing is silent in the flattering direction, because `covered`
+    # exceeding `on_disk` reads as better coverage than the tree has.
+    #
+    # Recursing rather than narrowing the regex is a real choice and they are
+    # not equivalent. Narrowing would make a nested test file invisible to this
+    # gate: neither counted as covered nor demanded to contribute, so an entire
+    # nested directory could contribute nothing and nothing would say so. That
+    # is the failure this gate exists to catch, relocated rather than fixed.
+    # Recursing costs nothing today -- `tests/` holds one nested file and it is
+    # a `.json` -- and makes the gate correct for the first nested test written.
     on_disk = {
-        str(path) for path in sorted(tests_dir.glob("test_*.py"))
+        str(path) for path in sorted(tests_dir.rglob("test_*.py"))
     }
     covered = collect(tests_dir, arguments.mark_expression)
     uncovered = sorted(on_disk - covered - set(exclusions))
     stale = sorted(set(exclusions) - on_disk)
+    # The invariant a reader otherwise has to check by eye against the verdict
+    # line. Stated as containment rather than arithmetic so the failure names
+    # the file: a count mismatch tells you something is wrong, this tells you
+    # what. It fires if the two halves ever disagree again for a reason neither
+    # comment above anticipated.
+    unaccounted = sorted(covered - on_disk)
 
     for path in uncovered:
         print(f"NO COVERAGE: {path} contributes no tests to '"
@@ -89,14 +108,18 @@ def main() -> int:
     for path in stale:
         print(f"STALE EXCLUSION: {path} is listed in {exclusions_path} "
               "but no longer exists")
+    for path in unaccounted:
+        print(f"UNACCOUNTED: {path} contributed collected tests but is not a "
+              f"file this gate counts on disk, so the covered total above is "
+              f"larger than the population it is measured against")
 
     print(verdict_line(
         "coverage gate",
-        uncovered + stale,
+        uncovered + stale + unaccounted,
         f"{len(covered)} covered, {len(exclusions)} explained exclusions, "
         f"{len(on_disk)} test files on disk",
     ))
-    return 1 if uncovered or stale else 0
+    return 1 if uncovered or stale or unaccounted else 0
 
 
 if __name__ == "__main__":
