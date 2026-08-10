@@ -46,6 +46,31 @@ class RuntimeClosureError(RuntimeError):
 # identical to one that still has it.
 _self_owned_ancestors: set[str] = set()
 
+# The digest this process actually verified, recorded by
+# verify_embedded_runtime_closure and read back by
+# verified_runtime_closure_fingerprint. The zipapp entrypoint calls the guard
+# and then hands control to a `main` that never saw its return value, so
+# without this the one value the authority binds cache evidence to is
+# discarded microseconds after being computed.
+#
+# It is deliberately not readable from anywhere but a successful run of the
+# guard in this same process. An environment variable or an argument carrying
+# it would be a caller-authored answer to the question the guard exists to ask,
+# and the authority compares this value against the fingerprint its sealed
+# launch pinned -- so a worker that could name it could claim to be a runtime
+# it is not.
+_verified_runtime_closure_fingerprint: str | None = None
+
+
+def verified_runtime_closure_fingerprint() -> str | None:
+    """The closure digest this process verified, or None if it never did.
+
+    None is a real answer and not a failure: a worker running outside a sealed
+    deployment (a developer checkout, the test suite) has no verified closure,
+    and evidence bound to an unverified one would be evidence about nothing.
+    """
+    return _verified_runtime_closure_fingerprint
+
 
 def self_owned_closure_ancestors() -> list[str]:
     """Closure ancestors the worker could rewrite, because it owns them.
@@ -719,6 +744,12 @@ def verify_embedded_runtime_closure(archive_path: str | None = None) -> str:
         if paths != sorted(set(paths)):
             raise RuntimeClosureError("runtime closure paths are not canonical")
         _verify_native(body.get("native"), index, sealed_ns)
+        # Recorded only here, on the one path that has verified everything the
+        # manifest claims. Every failure above raises, so a recorded value
+        # always means "this interpreter is running the closure that digest
+        # names".
+        global _verified_runtime_closure_fingerprint
+        _verified_runtime_closure_fingerprint = closure_digest
         return closure_digest
     except RuntimeClosureError:
         raise
@@ -740,5 +771,6 @@ __all__ = [
     "native_objects",
     "native_roots",
     "self_owned_closure_ancestors",
+    "verified_runtime_closure_fingerprint",
     "verify_embedded_runtime_closure",
 ]
