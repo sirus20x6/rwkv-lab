@@ -865,6 +865,57 @@ catalog typo if you like; do not skip it for a change to what a composition
 the gate checks, and the distance between that and what you want to know is
 invisible in its output — every one of them prints the same `PASSED`.
 
+### Run your throwaway classifier on a known-good case first
+
+Most findings here come from a script written in the moment — a grep, an AST
+walk, a JSON comprehension over a catalog — and pointed at the tree. That
+script is an instrument, and an instrument nobody calibrated reports whatever
+its author assumed. **Before believing its output, run it on one case whose
+answer you already know**, and check it says so.
+
+This is the mutation-testing baseline idea applied to ad-hoc analysis, and it
+is cheap in the same way: one extra invocation, seconds, before any conclusion
+is drawn. It would have caught, on 2026-08-10 alone:
+
+- **An AST pass** classifying every module-level host-path constant as an
+  unconverted default, reporting **19 sites**. Fifteen were
+  `*_HISTORICAL_PATH` constants — the value step 2 of the host-path policy
+  *requires*, which is why the existing sweep tests skip that exact substring.
+  Running it on `train_mla.py`, a file PR #103 had already converted, would
+  have returned "four defects" for a file known to be compliant, in one second.
+  The real count was four.
+- **`{e.get("path") for e in catalog["source_digests"]}`**, over entries keyed
+  `source_path`. Every element was `None`, the set had one member, and the
+  report read `pinned sources: 1` and `compat-pinned=False` for all three files
+  asked about — a confident, specific, exactly-wrong answer. Printing one entry
+  first shows the key.
+- **`grep '^class Cache'`** over two `flash-linear-attention` wheels, returning
+  nothing, briefly concluding the symbol does not exist in either release. It
+  is declared indented inside an `if`. Asking Python — `fla.models.utils.Cache`
+  and its `__mro__` — settled it immediately.
+- **`git diff origin/main...<branch>`** and `rev-list --count`, covered in
+  their own section above: three of four "stranded work" findings were false.
+- **An assertion that a test was missing**, written without opening
+  `tests/test_host_path_defaults.py`, which carries that coverage and more.
+
+Five in one session, one shape: *an instrument applied without checking it
+understands the domain*. They do not feel like guesses at the time — each
+produced a specific number, and the number is what makes it convincing.
+
+The calibration case is usually free, because the repository is full of them:
+
+| checking for | run it first on |
+| --- | --- |
+| a policy violation | a file the policy was already applied to |
+| an unwired module or symbol | one with a known production caller |
+| a missing pin or entry | a path you can see in the catalog |
+| a stale or absent commit | a commit you know merged |
+
+If the known-good case comes back "clean" when you expect a hit, or "broken"
+when you expect clean, stop: the finding you were about to file is about your
+script. And say in the write-up which case you calibrated on, so the next
+reader can tell a measured claim from a plausible one.
+
 ### Mutation testing: the baseline row is not a formality
 
 There is no mutation-testing harness in this repository — the practice is to
