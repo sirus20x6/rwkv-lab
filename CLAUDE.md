@@ -271,6 +271,61 @@ Suspect staleness hardest when a card names a *file path* — paths move and get
 superseded — and when its parent card has other children, because a sibling may
 have landed the half you are reading about.
 
+### One command answers "do the cited paths still hold": `card_anchor_check.py`
+
+The rule above is a convention, and conventions here have a poor record — the
+merged-PR reference that 56 of 126 Done cards ignore is the standing example.
+Worse, "cite the sha" only reaches cards written after it, and the 200+ already
+filed are the ones that will go stale. So there is also a mechanical check, and
+it needs nothing added to any card:
+
+```bash
+# save the kanban_get_board JSON first, then, for the card you are dispatching:
+python scripts/card_anchor_check.py --board board.json --card card-74b81095
+```
+
+It resolves every `path` and `path:line` a card body cites, against
+`origin/main`, and asks two different questions:
+
+- **Does the path exist?** Decisive, and the only thing that exits non-zero. It
+  fires today on `card-b2f647ee`, which names
+  `src/rwkv_lab/qwen_caption_finetune.py` — a path that has never existed on
+  main — and on 32 other cards.
+- **Did a cited path change after the card was written?** `created_at` is the
+  measurement time every card already carries. This never fails the run, because
+  a commit touching the file need not touch the claim. It is the half that
+  catches `card-74b81095`: six of its nine cited paths moved between authoring
+  and dispatch, and the report names PR #201 against each — the commit that
+  falsified all four claims.
+
+Four card states are printed and they are deliberately not interchangeable:
+`STALE`, `DRIFTED`, `ANCHORS HOLD`, and `NO ANCHORS FOUND` / `NOTHING
+CHECKABLE`. The last pair is the point. A checker that recognises nothing in a
+card body reports it as healthy, so "nothing was checked" has to look different
+from "everything held" — and the summary line carries the recognition rate for
+the same reason. Measured across all 353 cards on this project's five boards:
+**994 anchors checked across 224 cards; 129 cards cite no path it can check.**
+
+**What it does not do, measured rather than assumed.** It does not check that a
+cited line still *says* what the card claims. That was built and rejected:
+binding the backticked identifiers on a card's line to the anchor on that line,
+and requiring the identifier within ±3 lines of the cited line, reported 46 of
+70 checkable anchors as moved — mostly prose adjacency, since a sentence naming
+four symbols binds all four to the one path it also names. A check that fires on
+two thirds of its input is as uninformative as one that fires on none, and it
+would have taught everyone to ignore the report. So the content half of the
+card's ask is unmet, and `DRIFTED` is what stands in for it: it tells you which
+commits to read, not whether the sentence survived them. The weak remnant is a
+cited line past the end of its file, which fires on **zero** of the 200
+line-carrying anchors on the board today; that count is printed on the summary
+line rather than left implied, so its silence is visible.
+
+It reads the board, so it is not a CI gate — nothing in a pull request can see a
+card. It is a dispatch-time step, run by whoever is about to hand a card over,
+and it is a report rather than a decision: a card that legitimately proposes to
+*create* a file cites a path that does not exist, and no tool can tell that from
+a card describing a branch as though it were trunk. Read the rows.
+
 **Read the document you are about to add to.** Three cards were filed proposing to
 write down rules that were already written down: two claimed this file did not
 state the base branch for new worktrees (it did, and had for some time), and one

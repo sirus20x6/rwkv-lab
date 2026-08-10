@@ -60,6 +60,7 @@ GATES = (
 # build into a unit test. A pointer that is itself checked is the cheaper
 # instrument and does not degrade to a skip.
 NEEDS_ARGUMENTS = {
+    "scripts/card_anchor_check.py": "tests/test_card_anchor_check.py",
     "scripts/ci_skip_reason_gate.py": "tests/test_skip_reason_gate.py",
     "scripts/print_disposition_digests.py": "tests/test_disposition_digests.py",
     "scripts/print_step_zero_arming_pin.py": "tests/test_step_zero_arming_pin.py",
