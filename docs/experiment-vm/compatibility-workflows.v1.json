@@ -349,7 +349,7 @@
     },
     {
       "source_path": "src/rwkv_lab/build_engram_patch.py",
-      "source_sha256": "sha256:33692b21883c4f6b34fb461bab97519429e4935cd315260a8d1a8f7d0b6dc47d"
+      "source_sha256": "sha256:52c9f4729c9dee6ed1bc94a6d5b4ef04c90f1f5a20b4fc52144933f0e0d301e5"
     },
     {
       "source_path": "src/rwkv_lab/build_memory_targets.py",

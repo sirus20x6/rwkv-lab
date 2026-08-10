@@ -1081,6 +1081,7 @@ caller *did* supply is still validated.
 | `MOE_MLA_ATTN_POC_TOKENS` | packed token stream for `attn_L3_poc.py` |
 | `MOE_MLA_QWEN35_TOKENIZER_DIR` | tokenizer for `build_qwen35_data.py --tokenizer_path` |
 | `MOE_MLA_ENGRAM_CORPUS` | packed corpus for `engram_lmb_build.py freq --corpus` |
+| `MOE_MLA_ENGRAM_SOURCE` | the `engram_ext` package `build_engram_patch.py` puts on `sys.path` |
 
 `MOE_MLA_TEACHER_MODEL_DIR` is deliberately separate from `MOE_MLA_MODEL_DIR`
 even though both are reached through a flag spelled `--model-dir`. They name

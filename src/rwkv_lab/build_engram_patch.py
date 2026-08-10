@@ -24,9 +24,24 @@ from pathlib import Path
 import torch
 from safetensors.torch import save_file
 
-_ENGRAM_PATH = Path("/thearray/git/engram/python")
-if str(_ENGRAM_PATH) not in sys.path:
-    sys.path.insert(0, str(_ENGRAM_PATH))
+from .host_paths import require_host_path, resolve_host_path
+
+ENGRAM_SOURCE_ENV = "MOE_MLA_ENGRAM_SOURCE"
+ENGRAM_SOURCE_HISTORICAL_PATH = "/thearray/git/engram/python"
+
+# Resolved and required at import, because the `engram_ext` import below
+# depends on this entry being on sys.path. Every other converted site defers
+# the refusal to a use site or to parse_args; this one cannot, since the
+# failure it prevents happens while the module is still loading.
+#
+# Before this, an unset path meant a bogus sys.path entry and then
+# `ImportError: No module named 'engram_ext'` -- true, and useless, because it
+# names neither the field nor the variable that would fix it.
+_engram_source = require_host_path(
+    resolve_host_path(ENGRAM_SOURCE_ENV, ENGRAM_SOURCE_HISTORICAL_PATH),
+    field="engram_source", env_var=ENGRAM_SOURCE_ENV)
+if _engram_source not in sys.path:
+    sys.path.insert(0, _engram_source)
 
 from engram_ext.engram_module import EngramConfig, EngramModule  # noqa: E402
 
