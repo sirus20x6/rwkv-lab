@@ -92,12 +92,15 @@ It is a countdown, not a configuration. An entry whose module has since gained
 a production includer FAILS, so the list can only shrink -- the same shape as
 ``UNMAPPED_INTERCEPTION`` in tests/test_step_zero_interception_enumeration.py.
 
-The Python half of this question is NOT shipped here, and that is measured
----------------------------------------------------------------------------
-The card that asked for this named the Python analogue: a symbol exported from
-``__init__.py`` whose every importer is under ``tests/``. It was implemented
-and measured before being dropped, because at this tree's numbers it cannot
-fail:
+The Python half is shipped separately, over a smaller population
+----------------------------------------------------------------
+``scripts/ci_contract_caller_gate.py`` asks this question of the adapter routes
+the native registry advertises. It is not the analogue the card asked for, and
+the difference is the point.
+
+The analogue -- a symbol exported from ``__init__.py`` whose every importer is
+under ``tests/`` -- was implemented and measured before being dropped, because
+at this tree's numbers it cannot fail:
 
     symbol level, rwkv_lab.trainvm_worker      79 of 117 exports unwired
     symbol level, rwkv_lab.trainvm_adapters    17 of  18 exports unwired
@@ -109,7 +112,8 @@ sit outside this repository, and ``src/rwkv_lab`` is a research lever library
 where implementing a lever ahead of its use is the point. A gate that is 90%
 allowlist is an instrument tuned to produce a comfortable number, which is the
 defect class the card belongs to. Filed as card-d198cc09 rather than shipped
-weak.
+weak, and the gate that did ship scopes itself to the contract instead, where
+the count is zero and no allowlist exists to grow.
 
 Usage:
     python scripts/ci_unwired_module_gate.py [--repository .]

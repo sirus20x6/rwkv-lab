@@ -433,6 +433,7 @@ making the merged-PR reference structural instead of a prose convention.
 ```bash
 python scripts/ci_coverage_gate.py -m "not gpu"
 python scripts/ci_unwired_module_gate.py
+python scripts/ci_contract_caller_gate.py
 python scripts/ci_catalog_doc_counts_gate.py
 python scripts/ci_step_zero_arming_gate.py
 python scripts/ci_gpu_observation_gate.py
@@ -491,6 +492,23 @@ An allowlist entry costs one sentence and turns that into a recorded decision.
 The allowlist is a countdown. An entry whose module later gains a production
 includer **fails**, so it can only shrink — write the entry expecting to delete
 it.
+
+### The Python gate asks the same question of the adapter contract only
+
+`ci_contract_caller_gate.py` fails when a route the native adapter registry
+advertises dispatches to a handler nothing reaches from the worker's
+entrypoint, or when a module in `src/rwkv_lab/trainvm_adapters/` is reached by
+nothing from it. It has **no allowlist**, because the honest count over that
+population is zero.
+
+Do not widen it to `__all__`. That was measured — 79 of 117 `trainvm_worker`
+exports and 17 of 18 `trainvm_adapters` exports have no in-tree importer — and
+it is not a backlog: `trainvm_worker` is a published SDK whose consumers sit
+outside this repository, and `src/rwkv_lab` is a lever library where a
+test-only lever is the tree working as designed. A gate over that surface needs
+a ~96-entry allowlist, which is an instrument tuned until the number looks
+comfortable. card-d198cc09 holds the measurement and the two candidate
+questions that are still unexplored.
 
 ## Content pins, and how to refresh them
 
