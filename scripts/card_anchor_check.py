@@ -144,9 +144,13 @@ def locate_missing(repository: pathlib.Path, path: str, rev: str) -> str:
     project's boards: 25 exist only on a branch, 27 exist nowhere, 2 were on
     main and were renamed away.
 
-    - **Branch-only** is the one that misleads. The card reads as though it
-      describes trunk and describes unlanded work; seven such paths are a
-      single production-qualification toolchain that never landed.
+    - **Branch-only** usually *corroborates* the card rather than catching
+      it out. Measured: of the 12 cards carrying such an anchor, 11 say in
+      their own title that the work is not on main — this verdict confirms
+      from repository state what they assert in prose, which is worth having
+      and is not a defect. It misleads only on the card that does not say
+      so, and there was exactly one. Seven of the paths are a single
+      production-qualification toolchain that never landed.
     - **Never anywhere** is usually benign — an illustrative path in a
       sentence, or a file the card proposes to create. No tool separates
       those two; a reader must.

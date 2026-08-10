@@ -253,7 +253,12 @@ def test_a_path_that_exists_nowhere_is_named_as_such(tmp_path):
 
 
 def test_a_path_only_on_a_branch_is_reported_as_branch_only(tmp_path):
-    """The verdict that misleads: the card reads as trunk, the work is not."""
+    """Names the branch, so a reader can find the work rather than assume.
+
+    This verdict usually agrees with a card that already says its subject is
+    unlanded; it is the one card in twelve that does not say so where it
+    earns its keep.
+    """
     repo = _repo(tmp_path)
     git(repo, "checkout", "-q", "-b", "side")
     (repo / "sideways.py").write_text("y = 2\n")
