@@ -50,11 +50,55 @@ def _test_extra() -> list[str]:
     return document["project"]["optional-dependencies"]["test"]
 
 
+def _installed_name(argument: str) -> str:
+    """The package an argument names, without shell quoting or version pin.
+
+    Both sides of this file have to agree on what "the same package" means.
+    A pyproject entry is written `jsonschema>=4.0`; the workflow writes the
+    same package as `'flash-linear-attention==0.4.1'`, quotes included,
+    because that is how a pin survives the shell. Comparing either form
+    literally against a bare name never matches, so both go through here.
+    """
+    unquoted = argument.strip("'\"")
+    return re.split(r"[<>=!~\[]", unquoted, maxsplit=1)[0].strip()
+
+
 def _requirement_names(requirements: list[str]) -> set[str]:
-    return {
-        re.split(r"[<>=!~\[]", entry, maxsplit=1)[0].strip()
-        for entry in requirements
-    }
+    return {_installed_name(entry) for entry in requirements}
+
+
+def _ad_hoc_offenders(text: str, declared: set[str]) -> list[str]:
+    """The offender list, over workflow text supplied by the caller.
+
+    Split out from the test so the branches below can be exercised against
+    constructed lines. Reading the real file is one caller of this, not the
+    only way to reach it.
+    """
+    offenders: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if "pip install" not in stripped:
+            continue
+        arguments = stripped.split("pip install", 1)[1].split()
+        for argument in arguments:
+            unquoted = argument.strip("'\"")
+            if unquoted.startswith("-") or unquoted.startswith("."):
+                break  # an extra install or a flag-led form, e.g. -e '.[test]'
+            name = _installed_name(argument)
+            if name in ("pip",):
+                continue
+            if name in ALLOWED_AD_HOC:
+                continue
+            if name in declared:
+                offenders.append(
+                    f"{name} is installed ad hoc although the test extra "
+                    f"already declares it")
+            else:
+                offenders.append(
+                    f"{name} is installed ad hoc and is declared nowhere; "
+                    f"add it to the test extra or to ALLOWED_AD_HOC with a "
+                    f"reason")
+    return offenders
 
 
 def test_the_test_extra_declares_every_module_scope_import():
@@ -99,31 +143,81 @@ def test_no_workflow_step_installs_an_undeclared_package():
     Matches `pip install foo bar`, but not `pip install -e '.[extra]'` and not
     `pip install --upgrade pip`, since those are the declared forms.
     """
-    text = WORKFLOW.read_text(encoding="utf-8")
-    declared = _requirement_names(_test_extra())
-    offenders: list[str] = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if "pip install" not in stripped:
-            continue
-        arguments = stripped.split("pip install", 1)[1].split()
-        for argument in arguments:
-            if argument.startswith("-") or argument.startswith("."):
-                break  # an extra install or a flag-led form, e.g. -e '.[test]'
-            if argument in ("pip",):
-                continue
-            if argument in ALLOWED_AD_HOC:
-                continue
-            if argument in declared:
-                offenders.append(
-                    f"{argument} is installed ad hoc although the test extra "
-                    f"already declares it")
-            else:
-                offenders.append(
-                    f"{argument} is installed ad hoc and is declared nowhere; "
-                    f"add it to the test extra or to ALLOWED_AD_HOC with a "
-                    f"reason")
+    offenders = _ad_hoc_offenders(
+        WORKFLOW.read_text(encoding="utf-8"),
+        _requirement_names(_test_extra()),
+    )
     assert not offenders, "\n".join(offenders)
+
+
+def test_a_pinned_allowlisted_install_is_not_an_offender():
+    """The allowlist must survive someone pinning the package it names.
+
+    This is not hypothetical. PR #224 pinned flash-linear-attention, which is
+    in ALLOWED_AD_HOC, and the gate went red -- it compared the raw shell
+    token `'flash-linear-attention==0.4.1'`, quotes and pin included, against
+    the bare allowlist key. The allowlist stopped working at the moment
+    someone did the responsible thing.
+    """
+    assert "flash-linear-attention" in ALLOWED_AD_HOC, (
+        "this test is written around a real allowlist entry; pick another "
+        "one rather than deleting the test")
+    for form in (
+        "flash-linear-attention",
+        "flash-linear-attention==0.4.1",
+        "'flash-linear-attention==0.4.1'",
+        '"flash-linear-attention>=0.4,<0.5"',
+    ):
+        assert not _ad_hoc_offenders(f"          pip install {form}", set()), (
+            f"{form} names an allowlisted package and must not be reported")
+
+
+def test_a_pinned_declared_install_reports_the_duplicate_declaration():
+    """The pinned form must reach the same branch the bare form reaches.
+
+    Before the fix a pinned declared package fell past the `in declared`
+    branch into the else, so the gate said it "is declared nowhere" about
+    something the test extra declares -- sending the reader off to add a
+    second declaration to fix a message that was simply wrong.
+    """
+    offenders = _ad_hoc_offenders(
+        "          pip install 'jsonschema>=4.0'", {"jsonschema"})
+    assert len(offenders) == 1
+    assert "already declares it" in offenders[0], offenders[0]
+    assert offenders[0].startswith("jsonschema "), (
+        f"the offender should name the package, not the shell token: "
+        f"{offenders[0]}")
+
+
+def test_a_pinned_undeclared_install_is_still_an_offender():
+    """The whole risk of normalising: it must not smuggle anything past.
+
+    triton is the live example -- the fla job installs it ad hoc and nothing
+    declares it. Stripping the pin has to leave that finding intact, and has
+    to report the package name rather than the quoted token.
+    """
+    offenders = _ad_hoc_offenders(
+        "          pip install 'triton==3.7.1'", {"jsonschema"})
+    assert len(offenders) == 1
+    assert "declared nowhere" in offenders[0], offenders[0]
+    assert offenders[0].startswith("triton "), offenders[0]
+
+
+def test_a_flag_led_install_still_stops_at_the_flag():
+    """Normalising must not turn the declared forms into findings.
+
+    `pip install -e '.[test]'` and `pip install --upgrade pip` are how the
+    workflow is supposed to install things. Stripping quotes made the
+    leading-dot check see `.[test]` where it used to see `'.[test]'`, so
+    this pins that the guard still fires on both spellings.
+    """
+    for line in (
+        "          pip install -e '.[vision,test,trainvm-worker]'",
+        "          pip install '.[test]'",
+        "          pip install --upgrade pip",
+        "          pip install .[test]",
+    ):
+        assert not _ad_hoc_offenders(line, set()), line
 
 
 def test_the_allowlist_itself_states_reasons():
