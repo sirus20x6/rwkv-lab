@@ -300,19 +300,19 @@ type RunKPIs struct {
 	StructuredBoxIoULegacy *float64 `json:"structured_box_iou_legacy"`
 	StructuredBoxGIoU      *float64 `json:"structured_box_giou"`
 	StructuredMaskDice     *float64 `json:"structured_mask_dice"`
-	BestPPL                        *float64 `json:"best_ppl"`
-	BestPPLStep                    *int64   `json:"best_ppl_step"`
-	Top1                           *float64 `json:"top1"`
-	BestTop1                       *float64 `json:"best_top1"`
-	BestTop1Step                   *int64   `json:"best_top1_step"`
-	BestLoss                       *float64 `json:"best_loss"`
-	BestLossStep                   *int64   `json:"best_loss_step"`
-	Toks                           *float64 `json:"toks"`
-	LR                             *float64 `json:"lr"`
-	Gnorm                          *float64 `json:"gnorm"`
-	NTrain                         int      `json:"n_train"`
-	NEval                          int      `json:"n_eval"`
-	NCkpt                          int      `json:"n_ckpt"`
+	BestPPL                *float64 `json:"best_ppl"`
+	BestPPLStep            *int64   `json:"best_ppl_step"`
+	Top1                   *float64 `json:"top1"`
+	BestTop1               *float64 `json:"best_top1"`
+	BestTop1Step           *int64   `json:"best_top1_step"`
+	BestLoss               *float64 `json:"best_loss"`
+	BestLossStep           *int64   `json:"best_loss_step"`
+	Toks                   *float64 `json:"toks"`
+	LR                     *float64 `json:"lr"`
+	Gnorm                  *float64 `json:"gnorm"`
+	NTrain                 int      `json:"n_train"`
+	NEval                  int      `json:"n_eval"`
+	NCkpt                  int      `json:"n_ckpt"`
 }
 
 // kpiScan normalizes one KPI QueryRow result. A run with no rows of that kind

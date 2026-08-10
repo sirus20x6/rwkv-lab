@@ -126,8 +126,8 @@ type TrainStats struct {
 	MedTokPerSec   float64
 	LastStep       int64
 	LastTS         float64
-	LastLoss       float64 // newest row in the window
-	OldestLoss     float64 // oldest row in the window (coarse train-trend check)
+	LastLoss       float64   // newest row in the window
+	OldestLoss     float64   // oldest row in the window (coarse train-trend check)
 	CodecRel       *float64  // newest non-null codec_rel in the window
 	CodecRelWindow []float64 // every codec_rel in the window (newest first)
 	RosaInjRMS     *float64  // latest ROSA injection RMS (nil if the run has no ROSA)
