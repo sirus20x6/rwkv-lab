@@ -682,6 +682,63 @@ Each ends with a line stating `PASSED` or `FAILED`. Read that line — the older
 form printed a neutral tally that looked identical either way, and a PR was
 pushed red because its output was truncated to exactly that line.
 
+### None of these resolves a training composition
+
+Every gate above answers a question about a **document**. If you changed a
+training composition, none of them has told you it works, and two of them are
+close enough to the question to feel like they did.
+
+The four relationship validators live at `training_component_registry.cpp:847`:
+
+```cpp
+validate_model_trainability_relationships(resolved);
+validate_data_pipeline_relationships(resolved);
+validate_evaluation_checkpoint_relationships(resolved);
+validate_optimizer_decay_relationships(resolved);
+```
+
+They run inside `resolve_composition`, and `resolve_composition` is reached from
+exactly one production site — `trainvm/src/service.cpp:3457`, the run-authoring
+service — plus four test files. `recipe inspect` is not among its callers and
+neither is `ci_step_zero_arming_gate.py`. **The only thing that runs those four
+validators outside the service is ctest.**
+
+So `recipe inspect` printing `VALID` means the catalog document is well-formed.
+The arming gate printing `PASSED` means a shipped composition names this route.
+Neither means the composition resolves, and a composition that does not resolve
+fails at authoring time, which is after everything cheap has already gone green.
+
+This is not a hypothetical ordering of concerns. On 2026-08-10 a `model_loader`
+slot was reported as landed and measured-to-work on exactly those two green
+readings; the native suite refused it, because
+`validate_model_trainability_relationships` rejects a model loader with no
+trainability policy beside it. The claim had to be retracted. Worse, the
+tempting way to make it pass was to declare `trainability.full.v1` — false for
+that family, which sets `requires_grad` per profile inside `train_mla.py`. **A
+cheap green reading pointed straight at a decorative declaration**, which is the
+hazard this file warns about in three other places.
+
+The check is to build and run the suite that resolves it:
+
+```bash
+ctest --test-dir trainvm/build -R \
+  'training_component_registry_tests|rwkv_lab_worker_contract_tests|adapter_invocation_tests|author_run_service_tests'
+```
+
+Those are the four suites that call `resolve_composition`, and they are four
+separately registered ctest targets rather than one — a selector naming only
+the first two runs half of them and still prints a confident green, which is
+the same failure one level down. `ctest` ends with `N tests passed ... out of
+N` — read that N and confirm it is four before believing the result, because a
+selector that matches fewer suites than you meant looks identical to one that
+matches all of them.
+
+That costs a GCC 16 build, which is the reason it gets skipped. Skip it for a
+catalog typo if you like; do not skip it for a change to what a composition
+*contains*. The general rule this instance belongs to: a gate tells you what
+the gate checks, and the distance between that and what you want to know is
+invisible in its output — every one of them prints the same `PASSED`.
+
 ### Mutation testing: the baseline row is not a formality
 
 There is no mutation-testing harness in this repository — the practice is to
