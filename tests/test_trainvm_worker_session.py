@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from collections.abc import Iterable
@@ -1223,3 +1224,160 @@ def test_poll_initialization_observes_a_cancel_before_step_one() -> None:
     )
     assert acknowledgement.optimizer_step == 0
     session.close()
+
+
+def _entrypoint_invocation(run_directory: Path, resources: dict[str, object]) -> bytes:
+    """A sealed invocation `run_worker` can drive, with a resource authority."""
+    document = json.loads(step_zero_invocation(run_directory))
+    document.pop("invocation_digest")
+    document["resources"] = resources
+    return canonical_dumps(
+        {**document, "invocation_digest": sha256_digest(canonical_dumps(document))}
+    )
+
+
+def _run_entrypoint(
+    controller: FakeController,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fingerprint: str | None,
+) -> int:
+    """Drive the shipped worker entrypoint over a real session."""
+    from rwkv_lab.trainvm_adapters import entrypoint
+    from rwkv_lab.trainvm_adapters.handlers import HandlerResult
+
+    bootstrap = load_worker_bootstrap(bootstrap_document())
+    # The guard runs pre-import in the zipapp and records what it verified;
+    # nothing has verified a closure inside a test interpreter, so the one
+    # value production reads is substituted here rather than invented in the
+    # entrypoint.
+    monkeypatch.setattr(
+        entrypoint, "verified_runtime_closure_fingerprint", lambda: fingerprint
+    )
+    environment = dict(os.environ)
+    try:
+        # hostd execs the worker with a literal empty envp, and `run_worker`
+        # binds HOME to the authorized run directory itself. Inheriting the
+        # developer's HOME would exercise a path production never takes.
+        os.environ.pop("HOME", None)
+        return entrypoint.run_worker(
+            bootstrap_reader=lambda _descriptor: bootstrap,
+            session_factory=lambda value: WorkerSession(value, connector=controller),
+            executor=lambda *_arguments: HandlerResult(
+                "worker.completed", {"reason": "training_complete"}, 1
+            ),
+        )
+    finally:
+        os.environ.clear()
+        os.environ.update(environment)
+
+
+def test_the_shipped_entrypoint_publishes_its_measured_runtime_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The producer, the transport and the consumer all existed; nothing called.
+
+    `measure_worker_runtime_evidence` and `WorkerSession.publish_runtime_evidence`
+    were reachable from tests and from no production module, so the worker that
+    ships measured nothing and sent nothing and the authority's cache-namespace
+    admission never saw a report from our own worker. This drives the real
+    entrypoint over a real session and requires the report on the wire.
+    """
+    run_directory = tmp_path / "run"
+    run_directory.mkdir()
+    controller = FakeController(
+        invocation=_entrypoint_invocation(run_directory, {})
+    )
+    fingerprint = "sha256:" + "c" * 64
+    assert _run_entrypoint(controller, monkeypatch, fingerprint=fingerprint) == 0
+
+    kinds = [message.WhichOneof("message") for message in controller.received]
+    assert "runtime_evidence" in kinds
+    # Before the terminal event, and before the trainer ran: the report
+    # describes the runtime the compile decision is made in.
+    assert kinds.index("runtime_evidence") < kinds.index("event")
+    evidence = controller.received[kinds.index("runtime_evidence")].runtime_evidence
+    bootstrap = load_worker_bootstrap(bootstrap_document())
+    assert evidence.api_version == "trainvm.worker-runtime-evidence/v1"
+    assert evidence.run_id == bootstrap.run_id
+    assert evidence.node_id == bootstrap.node_id
+    assert evidence.attempt_id == bootstrap.attempt_id
+    assert evidence.launch_nonce == bootstrap.launch_nonce
+    assert evidence.concurrency_key == bootstrap.concurrency_key
+    assert evidence.lease_id == bootstrap.lease_id
+    assert evidence.fencing_token == bootstrap.fencing_token
+    assert evidence.runtime_closure_fingerprint == fingerprint
+    # The portable shape, which is the only one the authority admits from a
+    # launch it fenced to no accelerator.
+    assert evidence.compute_device_vendor == "cpu"
+    assert not evidence.HasField("compute_device_uuid")
+    assert not evidence.HasField("compute_device_pci_address")
+
+
+def test_the_entrypoint_sends_nothing_it_cannot_bind_to_a_verified_closure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No guard ran, so there is no digest the authority would accept.
+
+    Re-deriving one here would be a second answer to the question the guard
+    already answered under stricter conditions, and a report bound to an
+    unverified closure is a report about nothing.
+    """
+    run_directory = tmp_path / "run"
+    run_directory.mkdir()
+    controller = FakeController(
+        invocation=_entrypoint_invocation(run_directory, {})
+    )
+    assert _run_entrypoint(controller, monkeypatch, fingerprint=None) == 0
+    assert "runtime_evidence" not in [
+        message.WhichOneof("message") for message in controller.received
+    ]
+
+
+def test_the_entrypoint_sends_no_portable_report_from_an_accelerator_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused report is a terminal stream status, not a shrug.
+
+    The authority derives placement specificity from the devices it fenced the
+    launch to and refuses a portable probe that disagrees, so sending this
+    shape from an accelerator launch would kill the training run to say
+    something about a cache namespace. The fenced device identity is what that
+    case needs and no sealed document carries it to the worker today.
+    """
+    run_directory = tmp_path / "run"
+    run_directory.mkdir()
+    controller = FakeController(
+        invocation=_entrypoint_invocation(
+            run_directory,
+            {"accelerators": {"vendor": "nvidia", "count": 1, "exclusive": True}},
+        )
+    )
+    assert (
+        _run_entrypoint(controller, monkeypatch, fingerprint="sha256:" + "c" * 64) == 0
+    )
+    assert "runtime_evidence" not in [
+        message.WhichOneof("message") for message in controller.received
+    ]
+
+
+def test_a_malformed_accelerator_authority_is_refused_not_read_as_portable() -> None:
+    from rwkv_lab.trainvm_worker import accelerator_fence_count
+    from rwkv_lab.trainvm_worker.runtime_evidence import RuntimeEvidenceError
+
+    assert accelerator_fence_count({}) == 0
+    assert accelerator_fence_count({"accelerators": {"vendor": "none", "count": 0}}) == 0
+    assert (
+        accelerator_fence_count({"accelerators": {"vendor": "nvidia", "count": 4}}) == 4
+    )
+    for malformed in (
+        {"accelerators": []},
+        {"accelerators": {"vendor": "nvidia"}},
+        {"accelerators": {"count": 1}},
+        {"accelerators": {"vendor": "nvidia", "count": -1}},
+        {"accelerators": {"vendor": "nvidia", "count": True}},
+        {"accelerators": {"vendor": "", "count": 0}},
+        {"accelerators": {"vendor": "nvidia", "count": "1"}},
+    ):
+        with pytest.raises(RuntimeEvidenceError, match="malformed"):
+            accelerator_fence_count(malformed)

@@ -5,6 +5,7 @@ import traceback
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 
+from rwkv_lab.trainvm_runtime_guard import verified_runtime_closure_fingerprint
 from rwkv_lab.trainvm_worker import (
     WorkerBootstrap,
     WorkerCancellationRequested,
@@ -16,9 +17,11 @@ from rwkv_lab.trainvm_worker import (
     WorkerResourcesReleasedPause,
     WorkerSession,
     WorkerStepProfiler,
+    accelerator_fence_count,
     apply_worker_runtime_policy,
     bind_eval_gallery_checkpoints,
     controls_from_invocation,
+    measure_worker_runtime_evidence,
     observability_from_invocation,
     publish_artifact_requests,
     publish_checkpoint_requests,
@@ -50,6 +53,59 @@ InvocationExecutor = Callable[
     HandlerResult,
 ]
 SessionFactory = Callable[[WorkerBootstrap], WorkerSession]
+ClosureFingerprintReader = Callable[[], str | None]
+
+
+def publish_worker_runtime_evidence(
+    session: WorkerSession,
+    *,
+    closure_fingerprint: ClosureFingerprintReader | None = None,
+) -> bool:
+    """Measure this worker's runtime and send it over the connection it holds.
+
+    Returns whether a report was sent, which is the only thing a caller can
+    observe: acceptance is the immutable receipt the authority publishes, and
+    refusal is the stream's terminal status, neither of which arrives here.
+
+    Two conditions decide whether a report exists to send at all, and both are
+    read from something the authority sealed rather than from this process's
+    argv or environment -- a cache decision must never rest on either:
+
+    * **the verified runtime closure.** `measure_worker_runtime_evidence`
+      binds the report to the digest the pre-import guard verified, and the
+      authority refuses a report whose fingerprint is not the one its sealed
+      launch pinned. Outside a sealed deployment the guard never ran, there is
+      no such digest, and re-deriving one here would be a second answer to the
+      question the guard exists to ask. Nothing is sent.
+    * **the accelerator fence.** The portable report this measures names the
+      CPU vendor and carries no placement identity, and the authority admits
+      that shape only from a launch it fenced to no accelerator -- it derives
+      placement specificity from the device selection itself and refuses a
+      disagreeing probe. So a launch holding accelerators is left unpublished
+      rather than sent a report that would be refused: refusal is a terminal
+      stream status, and a worker that killed its own training run to say
+      something about a cache namespace would be worse than one that says
+      nothing. Delivering the fenced device identity to the worker is what
+      that case needs, and no sealed document carries it today.
+    """
+    # Resolved through the module namespace rather than bound as a default, so
+    # the guard reading stays one substitutable seam rather than a value frozen
+    # at import time.
+    reader = closure_fingerprint or verified_runtime_closure_fingerprint
+    fingerprint = reader()
+    if fingerprint is None:
+        return False
+    if accelerator_fence_count(getattr(session.invocation, "resources", {})) != 0:
+        return False
+    session.publish_runtime_evidence(
+        measure_worker_runtime_evidence(
+            session.bootstrap,
+            runtime_closure_fingerprint=fingerprint,
+            selected_devices=(),
+            placement_specific=False,
+        )
+    )
+    return True
 
 
 def _bootstrap_descriptor(arguments: Sequence[str]) -> int:
@@ -75,6 +131,11 @@ def run_worker(
         if session.completed_before_connect:
             return 0
         try:
+            # Before any adapter import: the report describes the runtime that
+            # is about to compile, and the authority's cache-namespace
+            # admission is the reader. Measuring after the trainer has loaded
+            # would describe a process the compile decision was not made in.
+            publish_worker_runtime_evidence(session)
             # Before any adapter import pulls in a library that resolves HOME.
             bind_worker_process_environment(session.invocation.workspace)
             apply_worker_runtime_policy(
@@ -220,5 +281,6 @@ __all__ = [
     "WORKER_BOOTSTRAP_DESCRIPTOR",
     "WorkerEntrypointError",
     "main",
+    "publish_worker_runtime_evidence",
     "run_worker",
 ]

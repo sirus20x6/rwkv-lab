@@ -120,6 +120,11 @@ from .profiling import (
     trace_request_from_invocation,
 )
 from .publication import WorkerPublicationError, WorkerPublicationRuntime
+from .runtime_evidence import (
+    RuntimeEvidenceError,
+    accelerator_fence_count,
+    measure_worker_runtime_evidence,
+)
 from .runtime_policy import (
     EffectiveWorkerRuntimePolicy,
     WorkerRuntimePolicy,
@@ -218,6 +223,7 @@ __all__ = [
     "ResolvedResumeCheckpoint",
     "ResolvedTrainingComponent",
     "ResolvedTrainingComposition",
+    "RuntimeEvidenceError",
     "SafePoint",
     "Scalar",
     "TorchStepProfiler",
@@ -244,6 +250,7 @@ __all__ = [
     "WorkerSession",
     "WorkerSessionError",
     "WorkerStepProfiler",
+    "accelerator_fence_count",
     "apply_worker_runtime_policy",
     "bind_eval_gallery_checkpoints",
     "controls_from_invocation",
@@ -255,6 +262,7 @@ __all__ = [
     "load_worker_bootstrap",
     "load_worker_invocation",
     "load_worker_runtime_policy",
+    "measure_worker_runtime_evidence",
     "observability_from_invocation",
     "publish_artifact_requests",
     "publish_checkpoint_requests",

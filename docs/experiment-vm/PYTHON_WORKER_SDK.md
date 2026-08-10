@@ -321,6 +321,42 @@ authority at all, and the message is then refused with `FAILED_PRECONDITION`.
 Silently accepting a report that cannot be published would be indistinguishable
 to a worker from a published one.
 
+### Who calls it
+
+`rwkv_lab.trainvm_adapters.entrypoint.publish_worker_runtime_evidence`, from
+the worker's session bring-up, before any adapter import: the report describes
+the runtime the compile decision is made in, and measuring after the trainer
+has loaded would describe a different process. The caller is in this
+repository, not outside it — everything above was reachable from tests and from
+no production module until this call existed, so the shipped worker measured
+nothing and sent nothing while the documentation said otherwise.
+
+Two conditions decide whether there is a report to send, and both are read from
+something the authority sealed rather than from argv or the environment,
+because a cache decision must never rest on either:
+
+- **a verified runtime closure.** `verify_embedded_runtime_closure` records the
+  digest it verified, and `verified_runtime_closure_fingerprint` returns it.
+  Outside a sealed deployment the guard never ran, there is no such digest, and
+  the worker sends nothing rather than binding a report to a closure nobody
+  verified.
+- **no accelerator fence.** The probe's portable shape names the CPU vendor and
+  carries no placement identity, and the authority admits that shape only from
+  a launch it fenced to no accelerator — it derives placement specificity from
+  the device selection itself and refuses a probe that disagrees. The worker
+  reads the fence count from the sealed invocation's
+  `resources.accelerators.count`, the same number
+  `cache_namespace_authority.cpp` requires to equal the size of its own device
+  selection.
+
+So an accelerator-fenced launch still publishes nothing. That is not a
+simplification: a refusal is the stream's terminal status, so sending a report
+the authority must refuse would end the training run to say something about a
+cache namespace. What that case needs is the fenced device identity — UUID and
+PCI address — delivered to the worker in a sealed document, and no message
+carries it today. `measure_worker_runtime_evidence` already accepts it as
+`selected_devices`; nothing can supply it.
+
 ## Fixed adapter runner
 
 `scripts/build_trainvm_worker_artifact.py` deterministically builds the sole sealed project-code

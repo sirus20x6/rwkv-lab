@@ -34,7 +34,7 @@ import platform
 import re
 import sys
 import sysconfig
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -290,6 +290,39 @@ def measure_worker_runtime_evidence(
         report["compute_device_uuid"] = uuid
         report["compute_device_pci_address"] = address
     return report
+
+
+def accelerator_fence_count(resources: Mapping[str, Any]) -> int:
+    """How many accelerators the sealed invocation says this launch holds.
+
+    This is the authority's own number, read from the digest-bound invocation
+    document rather than measured, and it is the one fact that decides whether
+    a worker can produce an admissible report at all. The authority requires
+    `resources.accelerators.count` to equal the size of the device selection it
+    fenced the launch to (`cache_namespace_authority.cpp`), so a launch
+    declaring none is a launch whose evidence is the portable CPU shape.
+
+    Malformed is refused rather than treated as zero, mirroring the same file's
+    "invocation accelerator authority is malformed": a report measured against
+    a resource document nobody could parse is not a portable report, it is an
+    unread one.
+    """
+    accelerators = resources.get("accelerators")
+    if accelerators is None:
+        return 0
+    if not isinstance(accelerators, Mapping):
+        raise RuntimeEvidenceError("invocation accelerator authority is malformed")
+    count = accelerators.get("count")
+    vendor = accelerators.get("vendor")
+    if (
+        not isinstance(count, int)
+        or isinstance(count, bool)
+        or count < 0
+        or not isinstance(vendor, str)
+        or not vendor
+    ):
+        raise RuntimeEvidenceError("invocation accelerator authority is malformed")
+    return count
 
 
 def worker_runtime_evidence_bytes(report: dict[str, Any]) -> bytes:
