@@ -211,7 +211,16 @@ def main() -> int:
             failures.append(f"{identifier}: notes must explain the fixture")
 
         if fixture.get("declares_curriculum_transition"):
-            transition_families.add(family)
+            # Guarded for the same reason `families` is, one loop above. A
+            # fixture with no usable family now fails -- but this function
+            # collects failures and keeps going, so `None` would still reach
+            # this set and could satisfy the "at least one fixture declares a
+            # transition" requirement below with a family that is not a family.
+            # The document cannot pass either way; what this protects is the
+            # failing run's own numbers, which are what someone reads while
+            # fixing it.
+            if isinstance(family, str) and family.strip():
+                transition_families.add(family)
 
     missing = REQUIRED_FAMILIES - families
     for family in sorted(missing):

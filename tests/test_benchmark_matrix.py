@@ -254,3 +254,32 @@ def test_the_verdict_line_reads_correctly_at_every_count(
     distrust the rest of the line.
     """
     assert population_summary(fixtures, families, transitions) == expected
+
+
+def test_a_family_less_fixture_does_not_pollute_the_transition_count(tmp_path, matrix):
+    """The failing run's own numbers stay honest.
+
+    A fixture with no family already fails. But this validator collects
+    failures and keeps going, so an unguarded `transition_families.add(family)`
+    would still take `None` -- and the transition count is printed on that same
+    failing run, which is the output someone reads while fixing it.
+
+    Asserted through the verdict line rather than the exit code, because the
+    exit code is 1 either way: the guard changes what the failing run SAYS, and
+    a test on the exit code alone would pass with the guard removed.
+    """
+    orphan = copy.deepcopy(matrix["fixtures"][0])
+    orphan["id"] = orphan["id"] + "-orphan-transition"
+    orphan.pop("family")
+    orphan["declares_curriculum_transition"] = True
+    matrix["fixtures"].append(orphan)
+
+    transitions = {fixture["family"] for fixture in matrix["fixtures"]
+                   if "family" in fixture
+                   and fixture.get("declares_curriculum_transition")}
+
+    result = run_validator(write(tmp_path, matrix))
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"{orphan['id']}: declares no family" in result.stdout
+    assert (f"{len(transitions)} of those families declaring a "
+            "curriculum-stage transition") in verdict(result.stdout)
