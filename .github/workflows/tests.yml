@@ -288,6 +288,15 @@ jobs:
       - name: Figures stated in the compatibility catalog document are true
         run: python scripts/ci_catalog_doc_counts_gate.py
 
+      # Nothing validated experiments/ at all -- validate_experiment_documents.py
+      # scans docs/experiment-vm/examples/, so the directory holding the
+      # documents someone would actually launch was the one nobody checked.
+      # Nine of its twenty-one JSON documents name an adapter that exists
+      # nowhere on main. They are preserved history and are recorded as such in
+      # a countdown; this refuses a TENTH arriving unnoticed.
+      - name: Every experiment document names an adapter that exists
+        run: python scripts/ci_experiment_adapter_gate.py
+
       # No native source names a path that exists only on the deployment host.
       # A test hardcoding /thearray/git/moe-mla passes for whoever writes it --
       # they are on the machine the path names -- and fails only here, often on

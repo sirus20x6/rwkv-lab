@@ -1,0 +1,52 @@
+{
+  "api_version": "trainvm.unrunnable-experiment-documents/v1",
+  "authority": "ci_scope_evidence_only",
+  "comment": "Checked-in documents under experiments/ that name an adapter the registry does not declare, so they cannot run against main. They are preserved history rather than defects: PR #139 deliberately preserved the ztok trials, and QWEN_CAPTION_DECLARATIVE_MIGRATION.md says the old bespoke implementation and its artifacts remain historical evidence. What was missing was anything mechanical linking that prose to the documents. This is a countdown, not a configuration. scripts/ci_experiment_adapter_gate.py FAILS when a listed document's adapters all resolve, so porting an implementation forces the entry's deletion; it also fails when a listed path no longer exists. Adding an entry is a deliberate act that says a new document cannot run -- prefer declaring the adapter.",
+  "documents": [
+    {
+      "path": "experiments/qwen36_caption_distill_lora_r256_pipeline.locked.json",
+      "adapter": "rwkv-lab.qwen-caption-finetune",
+      "why": "The Qwen caption bespoke trainer is not on origin/main -- `git log origin/main -- src/rwkv_lab/qwen_caption_finetune.py` returns nothing, so that path has never existed on main. The implementation is real but unmerged, reachable from `integration/parity-candidate` (1a906c9d). docs/experiment-vm/PRESERVED_WORKTREE_ARTIFACTS.md records this bundle with per-file content hashes. Delete this entry when the adapter is declared, not before."
+    },
+    {
+      "path": "experiments/qwen36_caption_distill_lora_v1.locked.json",
+      "adapter": "rwkv-lab.qwen-caption-finetune",
+      "why": "The Qwen caption bespoke trainer is not on origin/main -- `git log origin/main -- src/rwkv_lab/qwen_caption_finetune.py` returns nothing, so that path has never existed on main. The implementation is real but unmerged, reachable from `integration/parity-candidate` (1a906c9d). docs/experiment-vm/PRESERVED_WORKTREE_ARTIFACTS.md records this bundle with per-file content hashes. Delete this entry when the adapter is declared, not before."
+    },
+    {
+      "path": "experiments/qwen36_caption_distill_lora_v1.trainvm.json",
+      "adapter": "rwkv-lab.qwen-caption-finetune",
+      "why": "The Qwen caption bespoke trainer is not on origin/main -- `git log origin/main -- src/rwkv_lab/qwen_caption_finetune.py` returns nothing, so that path has never existed on main. The implementation is real but unmerged, reachable from `integration/parity-candidate` (1a906c9d). docs/experiment-vm/PRESERVED_WORKTREE_ARTIFACTS.md records this bundle with per-file content hashes. Delete this entry when the adapter is declared, not before."
+    },
+    {
+      "path": "experiments/ztok_modded_search_20260804_q16_nsys_profile_replay_full.json",
+      "adapter": "rwkv-lab.ztok-superposition",
+      "why": "rwkv-lab.ztok-superposition is declared nowhere on main and its implementation (src/rwkv_lab/trainvm_adapters/ztok_superposition.py and its generator) lives on integration/parity-candidate, 166 ahead of main and 147 behind. PR #139 preserved these six trial documents deliberately; card-9aae2e9e records why the port is large. Delete this entry when the adapter is declared, not before."
+    },
+    {
+      "path": "experiments/ztok_modded_search_20260804_q23_batch8_to16_middle.json",
+      "adapter": "rwkv-lab.ztok-superposition",
+      "why": "rwkv-lab.ztok-superposition is declared nowhere on main and its implementation (src/rwkv_lab/trainvm_adapters/ztok_superposition.py and its generator) lives on integration/parity-candidate, 166 ahead of main and 147 behind. PR #139 preserved these six trial documents deliberately; card-9aae2e9e records why the port is large. Delete this entry when the adapter is declared, not before."
+    },
+    {
+      "path": "experiments/ztok_modded_search_20260804_q24_batch8_to16_to24_middle.json",
+      "adapter": "rwkv-lab.ztok-superposition",
+      "why": "rwkv-lab.ztok-superposition is declared nowhere on main and its implementation (src/rwkv_lab/trainvm_adapters/ztok_superposition.py and its generator) lives on integration/parity-candidate, 166 ahead of main and 147 behind. PR #139 preserved these six trial documents deliberately; card-9aae2e9e records why the port is large. Delete this entry when the adapter is declared, not before."
+    },
+    {
+      "path": "experiments/ztok_modded_search_20260804_q25_context_batch_curriculum_middle.json",
+      "adapter": "rwkv-lab.ztok-superposition",
+      "why": "rwkv-lab.ztok-superposition is declared nowhere on main and its implementation (src/rwkv_lab/trainvm_adapters/ztok_superposition.py and its generator) lives on integration/parity-candidate, 166 ahead of main and 147 behind. PR #139 preserved these six trial documents deliberately; card-9aae2e9e records why the port is large. Delete this entry when the adapter is declared, not before."
+    },
+    {
+      "path": "experiments/ztok_modded_search_20260804_q26_late_linear_cooldown_full.json",
+      "adapter": "rwkv-lab.ztok-superposition",
+      "why": "rwkv-lab.ztok-superposition is declared nowhere on main and its implementation (src/rwkv_lab/trainvm_adapters/ztok_superposition.py and its generator) lives on integration/parity-candidate, 166 ahead of main and 147 behind. PR #139 preserved these six trial documents deliberately; card-9aae2e9e records why the port is large. Delete this entry when the adapter is declared, not before."
+    },
+    {
+      "path": "experiments/ztok_modded_search_20260804_q27_late_head_split_full.json",
+      "adapter": "rwkv-lab.ztok-superposition",
+      "why": "rwkv-lab.ztok-superposition is declared nowhere on main and its implementation (src/rwkv_lab/trainvm_adapters/ztok_superposition.py and its generator) lives on integration/parity-candidate, 166 ahead of main and 147 behind. PR #139 preserved these six trial documents deliberately; card-9aae2e9e records why the port is large. Delete this entry when the adapter is declared, not before."
+    }
+  ]
+}
