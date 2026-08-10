@@ -1008,6 +1008,38 @@ written, tested and nearly merged on the strength of pass 3's "the honest
 count is now zero"; pass 4 showed it would have shipped reporting PASSED over
 32 live instances of the defect it existed to catch.
 
+#### The operational form: grep the type, not the name
+
+Everything above is true and none of it is a command you can type, which is why
+it kept being violated on the night it was written — including once *in the act
+of writing advice against it*. This is the mechanical version:
+
+**When a name is ambiguous, query the thing the code must touch to do the job —
+the type, the constructor, the import, the function it has to call.** A real
+capability leaves a call site. A coincidence leaves only a spelling.
+
+All five failures of 2026-08-10 had a discriminating query available, and it was
+never the obvious one:
+
+| the ambiguous question | what a grep on the name says | what actually discriminates |
+| --- | --- | --- |
+| does this file publish eval-examples? | 1–5 hits on `eval_examples` | uses of the **`EvalExample` type**: armed routes 6–8, blocked routes **0** |
+| is this constant an unconverted default? | every `NAME = "…"` | whether a `resolve_host_path` call consumes it |
+| is this constant a module constant? | `NAME = "literal"` only | an **AST** walk — `NAME = Path("literal")` is a Call |
+| does `fla` export `Cache`? | `grep '^class Cache'` finds nothing | ask Python: `fla.models.utils.Cache.__mro__` |
+| which sources are pinned? | `e.get("path")` → `{None}` | print one entry; the key is `source_path` |
+
+The `eval_examples` row is the sharpest. Four blocked trainers "mention
+`eval_examples`" — as `eval_examples: int | None`, meaning *how many eval rows
+to use*, and `"eval_examples": len(encoded_eval)` in telemetry. Same spelling,
+unrelated meaning, and a grep cannot tell them apart. The producer half was
+reported as substantially done when it did not exist anywhere.
+
+So before a count becomes a claim, ask: **what would this code have to import,
+call or construct if the claim were true?** Then count *that*. If the answer is
+"nothing in particular" the claim is about syntax and cannot be about
+behaviour.
+
 ### Mutation testing: the baseline row is not a formality
 
 There is no mutation-testing harness in this repository — the practice is to
