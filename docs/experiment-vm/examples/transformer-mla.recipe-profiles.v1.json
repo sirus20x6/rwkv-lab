@@ -416,7 +416,7 @@
           "name": "hyperparameters.maximum_steps",
           "domain": "hyperparameters",
           "type": "integer",
-          "target": "/spec/workflow/nodes/train/invoke/inputs/config/literal/max_steps",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/learning_rate/configuration/max_steps",
           "required": false,
           "minimum": 1,
           "maximum": 1000000000
@@ -849,7 +849,7 @@
           "name": "hyperparameters.maximum_steps",
           "domain": "hyperparameters",
           "type": "integer",
-          "target": "/spec/workflow/nodes/train/invoke/inputs/config/literal/max_steps",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/learning_rate/configuration/max_steps",
           "required": false,
           "minimum": 1,
           "maximum": 1000000000
@@ -1285,7 +1285,7 @@
           "name": "hyperparameters.maximum_steps",
           "domain": "hyperparameters",
           "type": "integer",
-          "target": "/spec/workflow/nodes/train/invoke/inputs/config/literal/max_steps",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/learning_rate/configuration/max_steps",
           "required": false,
           "minimum": 1,
           "maximum": 1000000000
@@ -1720,7 +1720,7 @@
           "name": "hyperparameters.maximum_steps",
           "domain": "hyperparameters",
           "type": "integer",
-          "target": "/spec/workflow/nodes/train/invoke/inputs/config/literal/max_steps",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/learning_rate/configuration/max_steps",
           "required": false,
           "minimum": 1,
           "maximum": 1000000000
@@ -2163,7 +2163,7 @@
           "name": "hyperparameters.maximum_steps",
           "domain": "hyperparameters",
           "type": "integer",
-          "target": "/spec/workflow/nodes/train/invoke/inputs/config/literal/max_steps",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/learning_rate/configuration/max_steps",
           "required": false,
           "minimum": 1,
           "maximum": 1000000000
@@ -2597,7 +2597,7 @@
           "name": "hyperparameters.maximum_steps",
           "domain": "hyperparameters",
           "type": "integer",
-          "target": "/spec/workflow/nodes/train/invoke/inputs/config/literal/max_steps",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/learning_rate/configuration/max_steps",
           "required": false,
           "minimum": 1,
           "maximum": 1000000000
@@ -3044,7 +3044,7 @@
           "name": "hyperparameters.maximum_steps",
           "domain": "hyperparameters",
           "type": "integer",
-          "target": "/spec/workflow/nodes/train/invoke/inputs/config/literal/max_steps",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/learning_rate/configuration/max_steps",
           "required": false,
           "minimum": 1,
           "maximum": 1000000000
@@ -3476,7 +3476,7 @@
           "name": "hyperparameters.maximum_steps",
           "domain": "hyperparameters",
           "type": "integer",
-          "target": "/spec/workflow/nodes/train/invoke/inputs/config/literal/max_steps",
+          "target": "/spec/workflow/nodes/train/invoke/training/components/learning_rate/configuration/max_steps",
           "required": false,
           "minimum": 1,
           "maximum": 1000000000
