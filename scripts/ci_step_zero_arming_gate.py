@@ -560,11 +560,21 @@ def registry_parity_note() -> str:
 
     It cannot run here. `rwkv_lab.trainvm_adapters.handlers` imports torch
     transitively and the schema job installs `.[test]` without it; adding torch
-    to a seconds-fast job to read twenty-one strings is the wrong trade. Reading
-    the literal statically does not work either -- `_HANDLERS` ends in a `**`
-    unpacking of a dict comprehension over `PROFILE_ADAPTERS`, so eight of the
-    twenty-one contracts do not exist as string literals at all, and an AST
-    reader silently reports thirteen.
+    to a seconds-fast job to read a couple of dozen strings is the wrong trade.
+    Reading the literal statically does not work either -- `_HANDLERS` ends in a
+    `**` unpacking of a dict comprehension over `PROFILE_ADAPTERS`, so the
+    Transformer MLA family does not exist as string literals at all, and an AST
+    reader silently reports only the explicit keys.
+
+    No counts here on purpose. This paragraph used to name three, and by the
+    time anyone checked, two of them were wrong and nothing had noticed. A count
+    restated in prose beside the thing that computes it is a second copy that
+    only ever drifts -- the same defect this file's own verdict line was fixed
+    for. Restating the corrected numbers here would just restart the clock, so
+    the argument is left in the form that stays true: the static read is
+    systematically short by however large that family currently is, the gate's
+    verdict line prints the live figure, and the two tests named below are what
+    actually hold the parity.
 
     So the check lives in the two jobs that can answer it, and neither is
     optional on a pull request:
