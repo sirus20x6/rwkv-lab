@@ -21,18 +21,67 @@ REPOSITORY = pathlib.Path(__file__).resolve().parents[1]
 
 DETAIL = "128 covered, 9 explained exclusions, 138 test files on disk"
 
-# Every gate that uses the helper. If one is added without a line here it keeps
-# whatever summary it had, which is the drift this file exists to prevent.
+# Every gate that uses the helper AND runs with no arguments, executed below.
+#
+# This list used to claim it held "every gate that uses the helper". It held
+# four of twelve. The other eight kept whatever summary they had, which is the
+# exact drift this file exists to prevent -- and the list could not say so,
+# because nothing compared it against the scripts that import verdict_line.
+# `test_every_gate_using_the_helper_is_accounted_for` does that now, so an
+# unlisted gate fails rather than being quietly uncovered.
 GATES = (
+    "scripts/ci_catalog_doc_counts_gate.py",
+    "scripts/ci_compatibility_pin_gate.py",
+    "scripts/ci_contract_caller_gate.py",
     "scripts/ci_coverage_gate.py",
+    "scripts/ci_gpu_observation_gate.py",
+    "scripts/ci_native_host_path_gate.py",
+    "scripts/ci_step_zero_arming_gate.py",
+    "scripts/ci_unwired_module_gate.py",
     "scripts/validate_benchmark_matrix.py",
     "scripts/validate_experiment_documents.py",
     "scripts/validate_native_ci_exclusions.py",
+    "scripts/validate_no_code_authoring_matrix.py",
 )
+
+# Gates the parametrization above cannot run, because they require arguments:
+# `[sys.executable, gate]` with none would test argparse's usage exit, not the
+# verdict property. Each names the test that asserts the property instead, and
+# `test_an_argument_taking_gate_is_asserted_somewhere` checks that file exists
+# and mentions a verdict -- so "it is covered elsewhere" cannot become a claim
+# nobody checks, which is the failure this whole file is about. That check found
+# one such claim false on its first run: nothing in
+# tests/test_no_code_authoring_receipt.py asserted a verdict until it did.
+#
+# Building argv fixtures for these here was considered and rejected: one of them
+# (`print_step_zero_arming_pin.py --check`) needs a built trainvm binary, so the
+# fixture would either be skipped in the schema job or drag an eight-minute C++26
+# build into a unit test. A pointer that is itself checked is the cheaper
+# instrument and does not degrade to a skip.
+NEEDS_ARGUMENTS = {
+    "scripts/ci_skip_reason_gate.py": "tests/test_skip_reason_gate.py",
+    "scripts/print_disposition_digests.py": "tests/test_disposition_digests.py",
+    "scripts/print_step_zero_arming_pin.py": "tests/test_step_zero_arming_pin.py",
+    "scripts/validate_no_code_authoring_receipt.py": "tests/test_no_code_authoring_receipt.py",
+}
 
 # scripts/acceptance.sh is deliberately absent: it already ends in
 # "ACCEPTANCE FAILED" or "acceptance passed", and it drives real suites on a
 # real host, so running it from a unit test is not appropriate.
+
+
+def scripts_using_the_helper() -> set[str]:
+    """Every script that imports verdict_line, read from the tree.
+
+    Derived rather than listed, because a hand-maintained census of a
+    hand-maintained list has the same defect one level up.
+    """
+    found = set()
+    for path in sorted((REPOSITORY / "scripts").glob("*.py")):
+        if "from scripts.gate_verdict import verdict_line" in path.read_text(
+                encoding="utf-8"):
+            found.add(f"scripts/{path.name}")
+    return found
 
 
 def test_the_failing_and_passing_summaries_are_different():
@@ -124,3 +173,55 @@ def test_the_wired_gate_ends_with_a_verdict_line(gate):
     assert (completed.returncode == 0) == ("PASSED" in last), (
         f"{gate} exited {completed.returncode} but its last line says "
         f"{last!r}; the summary and the exit code disagree")
+
+
+def test_every_gate_using_the_helper_is_accounted_for():
+    """A new gate must join one list or fail here.
+
+    This is the assertion the old comment stood in for. It claimed the tuple
+    held every gate using the helper; it held four of twelve, and nothing
+    compared the two, so eight gates were uncovered while the file read as
+    exhaustive. That is the same shape as a receipt that describes a different
+    commit than the one it is served at.
+
+    Both directions are checked. An unlisted script fails, which is the drift.
+    A listed script that no longer imports the helper also fails, so a stale
+    entry cannot sit here implying coverage that has moved.
+    """
+    using = scripts_using_the_helper()
+    accounted = set(GATES) | set(NEEDS_ARGUMENTS)
+
+    unlisted = sorted(using - accounted)
+    assert not unlisted, (
+        f"these scripts import verdict_line and are in neither GATES nor "
+        f"NEEDS_ARGUMENTS: {unlisted}. Add to GATES if it runs with no "
+        f"arguments; otherwise add to NEEDS_ARGUMENTS naming the test that "
+        f"asserts its verdict line.")
+
+    stale = sorted(accounted - using)
+    assert not stale, (
+        f"these are listed here but no longer import verdict_line: {stale}. "
+        f"Remove them; an entry implying coverage that has moved is worse than "
+        f"no entry.")
+
+
+@pytest.mark.parametrize("gate,asserting_test", sorted(NEEDS_ARGUMENTS.items()))
+def test_an_argument_taking_gate_is_asserted_somewhere(gate, asserting_test):
+    """The pointer in NEEDS_ARGUMENTS has to lead somewhere real.
+
+    "Covered elsewhere" is the kind of claim that survives the thing it names
+    being deleted. This does not assert the other file is *correct* -- only
+    that it exists and asserts a verdict, which is the part that would rot
+    silently, and which was already false for one of these four.
+    """
+    assert (REPOSITORY / gate).exists(), f"{gate} is listed but does not exist"
+
+    target = REPOSITORY / asserting_test
+    assert target.exists(), (
+        f"{gate} points at {asserting_test} for its verdict-line assertion, "
+        f"and that file does not exist")
+
+    text = target.read_text(encoding="utf-8")
+    assert "PASSED" in text or "FAILED" in text, (
+        f"{asserting_test} is named as where {gate}'s verdict line is asserted, "
+        f"but it mentions neither PASSED nor FAILED")
