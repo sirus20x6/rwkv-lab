@@ -108,10 +108,6 @@ are fixed in different files:
 - reading a bare `no`: nothing arms it — usually no `eval_examples` output port
   at all, which is inert and harmless.
 
-(Written as a list rather than a table on purpose: the generated table below is
-parsed out of this document by line prefix, and a second Markdown table here
-would feed it rows.)
-
 The verdict line counts the middle population separately, and prints it even
 when it is zero. The gate reads the two publisher conditions out of
 `eval_examples.py`'s own AST rather than restating them, and requires the
