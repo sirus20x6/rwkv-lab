@@ -38,8 +38,10 @@ Scope note, deliberately not papered over: every case here is a report line
 whose version token `driver_identity()` recognises. A line it does *not*
 recognise falls back to keeping the whole line, which reproduces the original
 defect in miniature -- the fallback identity carries spaces and is rejected
-downstream. That is a real gap, filed separately rather than hidden by dropping
-the assertion, and it is why no unrecognised-report case appears below.
+downstream. That is a real gap, filed as `card-e1a0a6eb` rather than hidden by
+dropping the assertion, and it is why no unrecognised-report case appears below.
+When that card is decided, its case belongs here, where the real validator will
+judge it.
 """
 
 from __future__ import annotations
