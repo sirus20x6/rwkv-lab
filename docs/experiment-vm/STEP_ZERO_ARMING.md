@@ -27,7 +27,13 @@ rate, weight decay, gradient clipping and parameter router, and nothing else.
 So the blocker moved while the note about it did not. What blocks MageFlow now
 is the row below: no `eval_examples` output port.
 
-## What arms the gate
+## What arms the gate — three conditions, and two more to publish
+
+Arming takes **five** conditions on one artifact declaration, stated in two
+places. The first three arm the controller; the last two decide whether the
+route can then satisfy what it has been armed for. A declaration holding only
+the first three is the worst of the three outcomes — see *Arming is not
+publishing* below.
 
 `trainvm/src/service.cpp` computes `step_zero_eval_gate_required` as
 `invocation_requires_step_zero_eval_gate(invocation->publishes)`. The predicate,
@@ -67,6 +73,52 @@ port forces the node to publish something; only the artifact's own
 `required: true` arms the controller. `trainvm/src/run_authoring.cpp` carries
 the same note beside the HF checks.
 
+### Arming is not publishing
+
+The predicate above is not the whole requirement, and the difference has been
+paid for. `EvalExamplesPublisher.__init__`, in
+`src/rwkv_lab/trainvm_worker/eval_examples.py`, refuses the **same declaration**
+unless it also carries:
+
+```
+"immutability": "append_only"
+"fingerprint":  "manifest_sha256"
+```
+
+Those are fields of the same artifact object the predicate reads —
+`trainvm/src/adapter_invocation.cpp` hands the worker
+`encode_json(spec.artifacts[logical_name])`. Both default to a value the
+publisher refuses (`Immutability immutability{}` is `immutable`, `Fingerprint
+fingerprint{}` is `sha256`, in `trainvm/include/trainvm/model.hpp`), so omitting
+them is not a neutral state.
+
+A composition satisfying only the arming three therefore arms the controller and
+then **cannot publish**: the route deadlocks at its first `pre_optimizer_step`
+crossing, with no diagnostic. That is strictly worse than never arming — an
+inert gate is merely absent, a deadlocked one stops the run and does not say
+why. PR #204 hit this the expensive way on RLVR.
+
+So the table below distinguishes three outcomes rather than two, because they
+are fixed in different files:
+
+- *can arm today?* reading `yes — <documents>`: all five conditions hold, so the
+  route arms and the worker can publish.
+- reading `no — arms, then the publisher refuses`: the three conjuncts hold and
+  a publisher condition does not. **This route would deadlock.**
+- reading a bare `no`: nothing arms it — usually no `eval_examples` output port
+  at all, which is inert and harmless.
+
+(Written as a list rather than a table on purpose: the generated table below is
+parsed out of this document by line prefix, and a second Markdown table here
+would feed it rows.)
+
+The verdict line counts the middle population separately, and prints it even
+when it is zero. The gate reads the two publisher conditions out of
+`eval_examples.py`'s own AST rather than restating them, and requires the
+extraction to recover the `type` and `schema` the predicate also states — which
+is what makes a disagreement between the two authorities red rather than
+invisible.
+
 ## Two things that are not arming declarations
 
 Both look like hits when grepping for `eval_examples`, and both are unrelated:
@@ -91,8 +143,10 @@ every pull request by the same script without `--write`. Do not hand-edit it.
   `python scripts/print_step_zero_arming_pin.py trainvm/build/trainvm --write`
   and checked against a real build by ctest `step_zero_arming_pin`.
 - *can arm today?* is recomputed from every composition document under
-  `docs/experiment-vm/examples/`, by evaluating the three conjuncts on each
-  artifact a node actually publishes. The cell names the documents that arm.
+  `docs/experiment-vm/examples/`, by evaluating all five conditions on each
+  artifact a node actually publishes — the three conjuncts from the predicate
+  and the two the publisher demands. The cell names the documents that arm, or
+  says the route would deadlock.
 - The pin naming exactly the routes the worker dispatches is checked by
   `tests/test_step_zero_arming_gate.py`, in the CPU job — importing the worker
   registry pulls in torch, which the schema job does not install.
@@ -150,9 +204,11 @@ particular it is **not** evidence for any of the following:
   its `UNMAPPED_INTERCEPTION` allowlist is where that debt is recorded. A route
   can be off that allowlist and still unable to arm, and the reverse.
 - **That arming a route would be safe.** A route whose port and composition both
-  satisfy the predicate can still deadlock fresh or resumed attempts if no
-  producer publishes the artifact. This table says the declaration is reachable,
-  not that the evidence exists.
+  satisfy all five conditions can still deadlock fresh or resumed attempts if no
+  producer publishes the artifact. This table says the declaration is reachable
+  and would be accepted, not that the evidence exists. The *declaration* route
+  into a deadlock is covered — see *Arming is not publishing* — the *producer*
+  route into one is not.
 - **Any route outside the worker's adapter registry.** The rows are exactly the
   operations `rwkv_lab.trainvm_adapters.handlers` dispatches, cross-checked
   against the pin. `trainvm.core` operations and anything authored outside that
