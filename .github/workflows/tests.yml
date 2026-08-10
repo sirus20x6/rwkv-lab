@@ -200,8 +200,18 @@ jobs:
           # dependencies as the CPU job even though it runs only the fla-marked
           # tests. The test extra supplies them.
           pip install -e '.[vision,test,trainvm-worker]'
-          # The real dependency this job exists to exercise. It is a CUDA-stack
-          # package, but importing it and driving its Cache type works on CPU.
+          # The real dependency this job exists to exercise.
+          #
+          # triton is installed explicitly because fla-core does NOT declare it:
+          # its metadata requires only torch and einops, yet `import
+          # fla.models.utils` raises `ImportError: No module named 'triton'`
+          # without it. CPU torch wheels do not bring triton either, so before
+          # this line the import failed, pytest.importorskip took the skip, and
+          # this job passed having run nothing at all -- `1 skipped, 2154
+          # deselected`, zero passed. The comment that used to sit here said
+          # "importing it and driving its Cache type works on CPU", which is
+          # true only once triton is present.
+          pip install triton
           pip install flash-linear-attention
 
       - name: The fla-marked assertions run against the installed package
@@ -210,6 +220,19 @@ jobs:
           python scripts/non_gpu_environment.py \
             python -m pytest -q -m "fla and not gpu" tests \
             --junitxml=evidence/python-fla.xml
+
+      # The job's whole purpose is to EXECUTE the assertion the CPU job cannot,
+      # so it must fail when it executes nothing. pytest exits 0 for a run that
+      # skips everything, and the test's own safeguard -- "pytest exits 5 if
+      # the marker disappears" -- covers collection only. It was collected and
+      # then skipped, which is how this job stayed green while asserting
+      # nothing.
+      - name: The fla-marked assertions actually ran
+        if: always()
+        run: |
+          python scripts/ci_marked_suite_ran.py evidence/python-fla.xml \
+            --at-least 1 \
+            --label "the fla dependency job"
 
       # This job exists to run assertions the CPU job skips, so a skip HERE is
       # the coverage draining out of the one place that catches it.

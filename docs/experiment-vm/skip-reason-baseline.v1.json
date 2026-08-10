@@ -16,11 +16,11 @@
     {
       "name": "github-hosted-fla",
       "count_authority": "enforced",
-      "max_skipped": 1,
+      "max_skipped": 0,
       "where": ".github/workflows/tests.yml, job python-fla",
       "why": "the same hosted image with flash-linear-attention installed, running only the fla-marked selection; a skip here means the assertions this job exists to run are not running",
-      "observed": "1 skipped, 0 passed, 2083 deselected, run 31345026412 at 959f553d. The job's single fla-marked test skips on `requires the optional fla dependency` even though the job installs the package, so the assertion runs in NO job -- the exact failure this gate was built to find, found on its first real run. Filed as card-a702bb37.",
-      "countdown": "this 1 is a recorded hole, not a budget. It is pinned above 0 only because a permanently red job is one everybody learns to ignore; it comes back to 0 when card-a702bb37 lands, and like the unwired-module allowlist this entry should be written expecting to delete it."
+      "observed": "0 skipped, 1 passed after card-a702bb37 (PR for it). Before that: 1 skipped, 0 passed, 2083 deselected, run 31345026412 at 959f553d -- the job's single fla-marked test skipped on `requires the optional fla dependency` even though the job installed the package, so the assertion ran in NO job. Cause: fla-core declares only torch and einops, but `import fla.models.utils` raises ImportError: No module named 'triton', and CPU torch does not bring triton. The job now installs triton explicitly.",
+      "countdown": "back to 0, as the previous note said it should be. This job exists to execute one assertion; any skip here means that assertion is running nowhere, which is the state that produced card-a702bb37. Do not raise this to make a red job green -- the honest move is to fix the import or delete the job. A companion check, scripts/ci_marked_suite_ran.py, now fails the job when it passes zero tests, because a bound on SKIPS cannot see a run that errors instead."
     },
     {
       "name": "real-host-acceptance",
