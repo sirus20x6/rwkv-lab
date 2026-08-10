@@ -59,6 +59,62 @@ PUBLISHER = "src/rwkv_lab/trainvm_worker/eval_examples.py"
 RECIPE = "rwkv_lm_scratch"
 CONTRACT = "rwkv_lab.rwkv_scratch.v1.Train"
 
+# The same markers the gate itself slices on (`ci_step_zero_arming_gate.py`
+# BEGIN/END). Restated rather than imported because the gate is deliberately run
+# as a subprocess here, not imported -- see this module's docstring.
+TABLE_BEGIN = "<!-- BEGIN GENERATED ARMING TABLE -->"
+TABLE_END = "<!-- END GENERATED ARMING TABLE -->"
+
+
+def _generated_table(repository: pathlib.Path) -> tuple[list[str], list[list[str]]]:
+    """The generated table's header and route rows, sliced between its markers.
+
+    An earlier version selected rows from the WHOLE document by the prefix
+    "| `", which is two defects wearing one line. Any second Markdown table in
+    the prose feeds it rows, and a row shorter than the widest index raises a
+    bare `IndexError` from a test whose name is about a verdict line -- an
+    investigation that ends nowhere near the edit that caused it. The gate has
+    always sliced on these markers; only the test did not.
+    """
+    document = (repository / DOCUMENT).read_text(encoding="utf-8")
+    assert TABLE_BEGIN in document and TABLE_END in document, (
+        f"{DOCUMENT} is missing its generated-table markers, so this test "
+        f"cannot tell the generated table from prose")
+    body = document.split(TABLE_BEGIN, 1)[1].split(TABLE_END, 1)[0]
+
+    lines = [line.strip() for line in body.splitlines() if line.strip().startswith("|")]
+    assert len(lines) >= 3, (
+        f"{DOCUMENT}: the generated table has {len(lines)} lines between its "
+        f"markers; a header, a separator and at least one route are required")
+
+    def cells(line: str) -> list[str]:
+        return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+    header = cells(lines[0])
+    rows = [cells(line) for line in lines[2:]]
+    for row in rows:
+        assert len(row) == len(header), (
+            f"{DOCUMENT}: a table row has {len(row)} cells against a "
+            f"{len(header)}-cell header, so column positions cannot be trusted:"
+            f"\n{row}")
+    assert rows, f"{DOCUMENT} holds no route rows, so this test proves nothing"
+    return header, rows
+
+
+def _column(header: list[str], name: str) -> int:
+    """Resolve a column by its header text, never by position.
+
+    Positional indices are how this file's counts quietly start measuring a
+    different column: the table has gained a column before, and an index that
+    still parses reads exactly like one that is right.
+    """
+    matches = [i for i, cell in enumerate(header) if cell.startswith(name)]
+    assert len(matches) == 1, (
+        f"{DOCUMENT}: expected exactly one column starting {name!r}, found "
+        f"{len(matches)} in {header}")
+    return matches[0]
+
+
 
 def _copy(tmp_path: pathlib.Path) -> pathlib.Path:
     """A minimal copy of the repository: the gate, its inputs, and the package.
@@ -266,16 +322,17 @@ def test_the_verdict_line_says_armed_not_able_to_arm(repository: pathlib.Path) -
     assert result.returncode == 0, result.stdout + result.stderr
     summary = _summary(result.stdout)
 
-    rows = [
-        tuple(cell.strip() for cell in line.strip().strip("|").split("|"))
-        for line in (repository / DOCUMENT).read_text(encoding="utf-8").splitlines()
-        if line.strip().startswith("| `")
-    ]
-    assert rows, f"{DOCUMENT} holds no route rows, so this test proves nothing"
-    armed = sum(1 for row in rows if row[5].startswith("yes"))
-    armable = sum(1 for row in rows if row[5] == "no" and row[4] == "yes")
+    header, rows = _generated_table(repository)
+    can_arm = _column(header, "can arm today?")
+    has_port = _column(header, "eval_examples output port")
+    stateful = _column(header, "stateful")
+
+    armed = sum(1 for row in rows if row[can_arm].startswith("yes"))
+    armable = sum(
+        1 for row in rows if row[can_arm] == "no" and row[has_port] == "yes")
     blocked = sum(
-        1 for row in rows if row[5] == "no" and row[4] != "yes" and row[1] == "yes"
+        1 for row in rows
+        if row[can_arm] == "no" and row[has_port] != "yes" and row[stateful] == "yes"
     )
 
     assert "able to arm today" not in summary, (
