@@ -946,6 +946,33 @@ when you expect clean, stop: the finding you were about to file is about your
 script. And say in the write-up which case you calibrated on, so the next
 reader can tell a measured claim from a plausible one.
 
+**A fact about the repository is not a fact about the card.** This is the
+variant that survives calibration, because the instrument is working — you
+just reported a wider claim than it answered.
+
+A board-wide sweep found 25 card citations naming paths that exist on a branch
+and not on main, and that was written up as "the cards that mislead, reading as
+trunk while describing unlanded work". Mapping them back to their cards and
+reading the **titles** disproved it: 11 of the 12 announce the gap themselves —
+*"three cards are blocked on scripts that never existed on main"*, *"main does
+not have"*, *"written and never reached main"*. For those the sweep
+*corroborates* the card from repository state, which is worth having and is not
+a defect. Exactly one card said nothing, and that one was the entire actionable
+output.
+
+The gap is a real property of the tree; "misleading" is a claim about what a
+human wrote, and no query over the tree can reach it. The same shape appeared
+three more times in that one investigation — `git log --all` conflating a
+renamed file with branch-only work, and a path counted twice because the
+extraction kept its `:393` line suffix.
+
+So before a finding about cards, tests or documentation goes anywhere: **read
+one of the objects it is about.** Not all of them — one is usually enough to
+discover the claim is the wrong shape. It is the same instruction as the
+calibration case above, applied to the side of the comparison that is prose
+rather than code, and it is the side that gets skipped because querying it
+feels like reading rather than measuring.
+
 ### Mutation testing: the baseline row is not a formality
 
 There is no mutation-testing harness in this repository — the practice is to
