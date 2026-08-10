@@ -274,6 +274,18 @@ jobs:
       - name: Figures stated in the compatibility catalog document are true
         run: python scripts/ci_catalog_doc_counts_gate.py
 
+      # No native source names a path that exists only on the deployment host.
+      # A test hardcoding /thearray/git/moe-mla passes for whoever writes it --
+      # they are on the machine the path names -- and fails only here, often on
+      # somebody else's branch. That already happened: lm_recipe_profiles_tests
+      # reached filesystem::exists and aborted in CI while passing locally, and
+      # the sweep that followed found seven sites across six files where two
+      # were expected. Here rather than in the native suite because it is a
+      # text property needing no compiler, and because the change that
+      # introduces one is not necessarily waiting on the native build.
+      - name: No native source names a host-specific absolute path
+        run: python scripts/ci_native_host_path_gate.py
+
       # Same reasoning again, applied to the step-zero arming table. The pull
       # request that changes an arming answer is usually a JSON edit to a
       # recipe-profile catalog under docs/experiment-vm/examples/, which is the

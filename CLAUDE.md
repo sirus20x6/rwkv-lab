@@ -436,6 +436,7 @@ python scripts/ci_unwired_module_gate.py
 python scripts/ci_catalog_doc_counts_gate.py
 python scripts/ci_step_zero_arming_gate.py
 python scripts/ci_gpu_observation_gate.py
+python scripts/ci_native_host_path_gate.py
 python scripts/validate_benchmark_matrix.py
 python scripts/validate_experiment_documents.py
 python scripts/validate_native_ci_exclusions.py
