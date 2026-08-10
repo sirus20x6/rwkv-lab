@@ -24,6 +24,13 @@ import sys
 
 import pytest
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from scripts.card_anchor_check import (  # noqa: E402
+    NEVER_ANYWHERE,
+    locate_missing,
+)
+
 REPOSITORY = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = REPOSITORY / "scripts" / "card_anchor_check.py"
 
@@ -223,3 +230,80 @@ def test_selecting_one_card_checks_only_that_card(tree):
                     "--card", "card-ok")
     assert "card-gone" not in completed.stdout
     assert completed.returncode == 0
+
+
+# --- locate_missing: where does an absent path actually live? --------------
+
+
+def _repo(tmp_path):
+    repo = tmp_path / "r"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "t@example.com")
+    git(repo, "config", "user.name", "t")
+    (repo / "kept.py").write_text("x = 1\n")
+    git(repo, "add", "kept.py")
+    git(repo, "commit", "-qm", "base")
+    return repo
+
+
+def test_a_path_that_exists_nowhere_is_named_as_such(tmp_path):
+    repo = _repo(tmp_path)
+    assert locate_missing(repo, "no/such/file.py", "main") == NEVER_ANYWHERE
+
+
+def test_a_path_only_on_a_branch_is_reported_as_branch_only(tmp_path):
+    """The verdict that misleads: the card reads as trunk, the work is not."""
+    repo = _repo(tmp_path)
+    git(repo, "checkout", "-q", "-b", "side")
+    (repo / "sideways.py").write_text("y = 2\n")
+    git(repo, "add", "sideways.py")
+    git(repo, "commit", "-qm", "add sideways")
+    git(repo, "checkout", "-q", "main")
+
+    note = locate_missing(repo, "sideways.py", "main")
+    assert note.startswith("on a branch, never on main")
+    assert "add sideways" in note
+
+
+def test_a_deleted_path_is_reported_as_having_been_on_the_revision(tmp_path):
+    """`git log <rev> -- <path>` finds a deleted path; a tree test does not.
+
+    Without this case a renamed file reads as 'never landed', which is the
+    absence trap arriving through a filename instead of a sha.
+    """
+    repo = _repo(tmp_path)
+    (repo / "gone.py").write_text("z = 3\n")
+    git(repo, "add", "gone.py")
+    git(repo, "commit", "-qm", "add gone")
+    git(repo, "rm", "-q", "gone.py")
+    git(repo, "commit", "-qm", "remove gone")
+
+    note = locate_missing(repo, "gone.py", "main")
+    assert note.startswith("was on main and is not now")
+
+
+def test_the_revision_is_checked_before_any_branch(tmp_path):
+    """A path satisfying BOTH queries must report the revision's answer.
+
+    Deleted from main and still alive on a branch: `git log main -- p` finds
+    the deletion and `git log --all -- p` finds the branch. The revision wins,
+    so the card is told its work landed and was renamed, not that it never
+    landed.
+
+    This case does NOT catch an inverted lookup order — under inversion it
+    returns the same verdict. Mutation testing established that; the test that
+    catches inversion is the branch-only one above, which flips to was-on-main.
+    Both are kept because they fail to different mutations.
+    """
+    repo = _repo(tmp_path)
+    (repo / "both.py").write_text("a = 1\n")
+    git(repo, "add", "both.py")
+    git(repo, "commit", "-qm", "add both")
+    git(repo, "checkout", "-q", "-b", "keeper")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "rm", "-q", "both.py")
+    git(repo, "commit", "-qm", "remove both from main")
+
+    note = locate_missing(repo, "both.py", "main")
+    assert note.startswith("was on main and is not now"), note

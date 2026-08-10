@@ -131,6 +131,48 @@ def git(repository: pathlib.Path, *args: str) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, check=False)
 
 
+NEVER_ANYWHERE = "never on any ref — a proposal, or an example in prose"
+BRANCH_ONLY = "on a branch, never on {rev}"
+WAS_ON_REV = "was on {rev} and is not now — renamed or deleted"
+
+
+def locate_missing(repository: pathlib.Path, path: str, rev: str) -> str:
+    """Say where a path that is absent from ``rev`` does live.
+
+    A bare MISSING is three different situations wearing one label, and they
+    need opposite responses. Measured over the 54 missing paths on this
+    project's boards: 25 exist only on a branch, 27 exist nowhere, 2 were on
+    main and were renamed away.
+
+    - **Branch-only** is the one that misleads. The card reads as though it
+      describes trunk and describes unlanded work; seven such paths are a
+      single production-qualification toolchain that never landed.
+    - **Never anywhere** is usually benign — an illustrative path in a
+      sentence, or a file the card proposes to create. No tool separates
+      those two; a reader must.
+    - **Was on the revision** means the card is right about the work and
+      wrong about the name. It would otherwise read as "this never landed",
+      which is the absence trap this repository already warns about, arriving
+      through a filename instead of a sha.
+
+    Order matters, and specifically the revision is asked first. ``git log
+    <rev> -- <path>`` finds a *deleted* path, which an ls-tree membership
+    test does not — that is what separates a renamed file from branch-only
+    work. Asking ``--all`` first reports **branch-only paths as was-on-rev**,
+    because ``--all`` includes the revision; 25 of the 27 findings here would
+    have inverted. The branch-only case is what catches that mistake, not the
+    deleted case, whose answer is the same under either order.
+    """
+    on_rev = git(repository, "log", rev, "--oneline", "-1", "--", path)
+    if on_rev.returncode == 0 and on_rev.stdout.strip():
+        return WAS_ON_REV.format(rev=rev) + f"; last {on_rev.stdout.strip()}"
+    anywhere = git(repository, "log", "--all", "--oneline", "-1", "--", path)
+    if anywhere.returncode == 0 and anywhere.stdout.strip():
+        return (BRANCH_ONLY.format(rev=rev)
+                + f"; see {anywhere.stdout.strip()}")
+    return NEVER_ANYWHERE
+
+
 def revision_files(repository: pathlib.Path, rev: str) -> list[str]:
     completed = git(repository, "ls-tree", "-r", "--name-only", rev)
     if completed.returncode != 0:
@@ -273,7 +315,8 @@ def check_card(card: dict, revision: Revision) -> CardReport:
     return report
 
 
-def print_report(report: CardReport, rev: str) -> None:
+def print_report(report: CardReport, rev: str,
+                 repository: pathlib.Path | None = None) -> None:
     print(f"\n{report.card_id}  {report.title}")
     if report.verdict in ("NO ANCHORS", "NOTHING CHECKABLE"):
         if report.verdict == "NO ANCHORS":
@@ -299,6 +342,8 @@ def print_report(report: CardReport, rev: str) -> None:
     for anchor in report.anchors:
         if anchor.state == "missing":
             print(f"    MISSING  {anchor.cited}  ({anchor.note} on {rev})")
+            if repository is not None:
+                print(f"             {locate_missing(repository, anchor.path, rev)}")
         elif anchor.state == "past end of file":
             print(f"    PAST EOF {anchor.cited}  ({anchor.note})")
         elif anchor.state in ("skipped", "unresolved"):
@@ -369,7 +414,7 @@ def main(argv: list[str] | None = None) -> int:
     unresolved = 0
     past_eof = 0
     for report in reports:
-        print_report(report, args.rev)
+        print_report(report, args.rev, revision.repository)
         anchors_checked += len(report.checked)
         unresolved += len(report.unresolved)
         if report.verdict in ("NO ANCHORS", "NOTHING CHECKABLE"):
