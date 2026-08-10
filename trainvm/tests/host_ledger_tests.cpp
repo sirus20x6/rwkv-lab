@@ -680,6 +680,79 @@ void independent_connection_race() {
   remove_database(path);
 }
 
+// The replay wrinkle, asserted where it can actually fail.
+//
+// A grant is the one durable answer to "which inventory did this launch bind
+// against", and a replay of that grant has to give the same answer after the
+// host's inventory has moved on. It does, because the replay paths rebuild the
+// grant from its stored canonical bytes and read no inventory at all -- but
+// nothing above measures that. `basic_replay_release_and_reopen` replays under
+// the same inventory it granted under, so an implementation that re-derived
+// the projection from the *live* inventory would produce a byte-identical
+// grant and pass it. The difference between the two designs is only observable
+// when the inventory changed in between, which is exactly the case that would
+// otherwise reach production untested and fail intermittently.
+//
+// Both replay entry points are covered: `request_bundle`'s duplicate-request
+// path, and `reconcile_bundle_outcome`, which is what a controller recovering
+// a lost reply calls.
+void replay_answers_with_the_grant_time_inventory() {
+  const auto path = test_path("replay-inventory");
+  const auto granted_inventory = inventory({"mutex-a"});
+  ResourceBundleGrant original;
+  {
+    SQLiteHostLedger ledger(authority_for(path), granted_inventory);
+    const auto first = ledger.request_bundle(request("request-1"), {10, 20});
+    require(first.status == BundleRequestStatus::granted && first.grant &&
+                first.grant->inventory_projection.has_value() &&
+                first.grant->inventory_projection->receipt_digest ==
+                    granted_inventory.receipt_digest,
+            "replay fixture mints a grant sealing the inventory it fenced");
+    original = *first.grant;
+  }
+
+  // A genuinely different inventory: the host has been re-observed under a new
+  // broker epoch. The resource set is deliberately unchanged -- losing a
+  // resource is refused outright and gaining one degrades the topology, see
+  // `degraded_inventory_publication_rolls_back` -- but `broker_epoch` is
+  // folded into `inventory_digest_json`, so both the inventory digest and the
+  // receipt digest move. That is the smallest change that makes "grant-time"
+  // and "current" distinguishable, which is all this case needs.
+  const auto later_inventory = inventory({"mutex-a"}, "boot-001", "broker-002");
+  require(later_inventory.receipt_digest != granted_inventory.receipt_digest &&
+              later_inventory.inventory_digest !=
+                  granted_inventory.inventory_digest,
+          "the replay fixture's later inventory is a different inventory");
+  SQLiteHostLedger reopened(authority_for(path), later_inventory);
+  require(reopened.verify() && reopened.inventory().receipt_digest ==
+                                   later_inventory.receipt_digest,
+          "the reopened ledger is live on the later inventory");
+
+  const auto replayed = reopened.request_bundle(request("request-1"), {30, 40});
+  require(replayed.replayed && replayed.grant == original,
+          "a duplicate request replays the grant it minted, unchanged");
+  require(replayed.grant->inventory_projection &&
+              replayed.grant->inventory_projection->receipt_digest ==
+                  granted_inventory.receipt_digest,
+          "the replayed grant still names the inventory it was granted "
+          "against");
+  require(replayed.grant->inventory_projection->receipt_digest !=
+                  later_inventory.receipt_digest &&
+              replayed.grant->inventory_projection->inventory_digest !=
+                  later_inventory.inventory_digest,
+          "and not the inventory the host is running now");
+
+  const auto reconciled =
+      reopened.reconcile_bundle_outcome(request("request-1"));
+  require(reconciled && reconciled->replayed && reconciled->grant == original,
+          "lost-reply reconciliation returns the same grant, projection "
+          "included");
+  require(reconciled->grant->inventory_projection->receipt_digest ==
+              granted_inventory.receipt_digest,
+          "the reconciled grant names the grant-time inventory too");
+  remove_database(path);
+}
+
 void stale_inventory_instances_fail_closed() {
   const auto path = test_path("stale-inventory");
   const auto first_inventory =
@@ -1704,6 +1777,7 @@ void filesystem_authority_remains_bound() {
 int main() {
   try {
     basic_replay_release_and_reopen();
+    replay_answers_with_the_grant_time_inventory();
     concurrent_race();
     independent_connection_race();
     stale_inventory_instances_fail_closed();
