@@ -264,6 +264,20 @@ jobs:
       - name: Every native module has a production includer or an explained exclusion
         run: python scripts/ci_unwired_module_gate.py
 
+      # The Python half of the same question, and it is here for the same
+      # reason: it reads source text, needs no compiler and no torch.
+      #
+      # It is scoped to the adapter contract rather than to `__all__`. The
+      # symbol-level version over the worker SDK was measured at 79 of 117
+      # exports unwired and deliberately not shipped (card-d198cc09): that
+      # surface exists to be imported from outside this repository, so the
+      # gate would have been a 96-entry allowlist and could not have failed.
+      # The routes the native registry advertises are the population where
+      # "nothing in production reaches this" means an adapter that cannot run,
+      # and it needs no allowlist because the honest count is zero.
+      - name: Every advertised adapter route has a production caller
+        run: python scripts/ci_contract_caller_gate.py
+
       # Same reasoning again, applied to the figures COMPATIBILITY_CATALOG.md
       # states about the catalog beside it. One of them ("145 unique source
       # files") had been wrong by ten for an unknown length of time, in a
