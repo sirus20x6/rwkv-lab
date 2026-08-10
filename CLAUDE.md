@@ -218,6 +218,78 @@ identifies the agent — every agent pushes as the same GitHub user, so PR autho
 does not work either. This is genuinely unsolved here; do not paper over it with
 a path filter and a hopeful comment.
 
+### Before acting on another agent's workspace, ask the agent
+
+Recovering a dead agent's work is right and valuable — four agents died on a
+session limit on 2026-08-09 and their finished, green pull requests were the
+highest-value work on the board that hour. What is not valuable is getting the
+diagnosis wrong, and the diagnosis is harder than it looks.
+
+**An agent's task-output file mtime is not a liveness signal.** It records when
+the agent last *reported*, not when it last *worked*. An agent inside an 8–14
+minute native build, or a five-minute pytest, writes nothing to it. An hour of
+silence is two or three ordinary cycles back to back.
+
+On 2026-08-10 a coordinator concluded an agent had died from three signals:
+
+- its output file had not been written in sixty minutes;
+- no `cmake --build`, `ninja` or `ctest` process was running;
+- its branch had **zero commits**, with a worktree of uncommitted work.
+
+  (The coordinator recorded that work as "985 insertions", from `git diff
+  --stat`. The merged commit is 25 files and 3236 insertions: `git diff` does
+  not count **untracked** files, and five of the new sources were untracked. A
+  size read off `git diff` in a tree with new files is a subset presented as a
+  total — the same shape as everything else in this section.)
+
+It committed that work, rebased, opened a pull request and merged it. **The
+agent was alive**, committed on top nine minutes later, and had a pytest running
+in that worktree throughout.
+
+Each signal is individually reasonable and all three are weak in the same
+direction, which is what made them feel like corroboration:
+
+- **No build process** was one sample of a gap that is seconds long between a
+  build finishing and the next starting.
+- **Zero commits** is what an agent that commits at the end looks like. Nothing
+  here asks agents to commit early, so that is the expected shape, not a
+  symptom.
+- The output file had *already* been written down as not-a-progress-signal, and
+  was used anyway because the other two agreed with it.
+
+Three weak signals agreeing is one signal counted three times.
+
+**The check that answers it is to send the agent a message and wait.** A live
+agent replies; a dead one does not. It costs one round trip, and it is the only
+check that asks the agent rather than inferring from its exhaust. If you want a
+cheap pre-filter first, these beat all three signals above:
+
+```bash
+pgrep -af '<worktree-name>'                        # live processes in that tree
+find <worktree> -newermt '-10 minutes' -type f \
+     -not -path '*/.git/*' | head                  # a build writes objects
+```
+
+Both catch a working agent that has committed nothing and reported nothing.
+
+Do not reach for a longer timeout instead. The native build is 8–14 minutes and
+a full suite is five, so any threshold generous enough to avoid false positives
+leaves a genuinely dead agent's work idle for an hour. Timeouts are the wrong
+instrument here.
+
+**What the failure costs, so the check is worth its round trip:** merging a live
+agent's branch deletes its remote (`delete_branch_on_merge`), so its next push
+fails with an error that does not say "this was merged". It cannot distinguish a
+merged branch from a lost one, and neither can you — see the ancestry section
+below for why every git-native check that would settle it silently does not work
+here. Nothing was lost in the 2026-08-10 case, and that was timing rather than
+process: the agent's own follow-up commit happened to ride the same merge.
+
+This is the same family as two other hazards already recorded — a sweep removing
+a worktree while an agent is working in it, and two agents editing one worktree
+at once. All three are a coordinator acting on a live agent's workspace from a
+bad liveness read, and all three are answered by asking first.
+
 ## Before you start a card: read its comments, and read the docs it names
 
 Two failures cost real work on 2026-08-09, both the same shape — acting on a
