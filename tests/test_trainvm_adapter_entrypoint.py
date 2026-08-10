@@ -1478,6 +1478,36 @@ def test_rlvr_handler_seals_verifier_and_publishes_terminal_checkpoint(
     assert (request.source_directory / "state.pt").read_bytes() == b"candidate"
 
 
+def _vision_evaluation_components() -> SimpleNamespace:
+    """The four evaluation slots every vision composition contract declares.
+
+    `evaluation_slots()` in `rwkv_lab_worker_contract.cpp` gives all four vision
+    contracts the same slot set, and the training component registry admits that
+    suite only as a unit -- zero of four or four of four. So a double omitting
+    one models a composition the registry refuses, and
+    `_vision_eval_policy` reads all of them with no `get`.
+    """
+
+    return SimpleNamespace(
+        evaluator=lambda: SimpleNamespace(
+            configuration=SimpleNamespace(metrics=["eval.loss", "eval.perplexity"])
+        ),
+        qualitative_samples=lambda: SimpleNamespace(
+            configuration=SimpleNamespace(identity_field="image", sample_count=8)
+        ),
+        composition=SimpleNamespace(
+            components={
+                slot: SimpleNamespace(descriptor_digest="sha256:" + character * 64)
+                for slot, character in (
+                    ("evaluator", "a"),
+                    ("artifact_renderer", "b"),
+                    ("qualitative_samples", "c"),
+                )
+            }
+        ),
+    )
+
+
 def test_vision_compressor_handler_seals_inputs_and_publishes_checkpoint(
     tmp_path, monkeypatch
 ) -> None:
@@ -1540,7 +1570,7 @@ def test_vision_compressor_handler_seals_inputs_and_publishes_checkpoint(
         publishes={"checkpoint": {}},
         resume=None,
     )
-    components = SimpleNamespace()
+    components = _vision_evaluation_components()
     profiler = SimpleNamespace()
     observability = SimpleNamespace(
         keepalive=lambda *_args: __import__("contextlib").nullcontext()
@@ -1563,6 +1593,17 @@ def test_vision_compressor_handler_seals_inputs_and_publishes_checkpoint(
     assert arguments.preflight_only is False
     assert hooks["worker_components"] is components
     assert hooks["worker_step_profiler"] is profiler
+    # The step-zero policy is delivered, and every field of it comes from the
+    # RESOLVED composition rather than from anything the handler invents. A
+    # handler that built no policy would arm its own composition's gate and
+    # then be unable to publish the evidence that composition demands.
+    policy = hooks["worker_eval_examples"]
+    assert policy.evaluator_component_digest == "sha256:" + "a" * 64
+    assert policy.artifact_renderer_digest == "sha256:" + "b" * 64
+    assert policy.qualitative_sample_digest == "sha256:" + "c" * 64
+    assert policy.metric_names == ("eval.loss", "eval.perplexity")
+    assert policy.identity_field == "image"
+    assert policy.sample_count == 8
     assert result.event_type == "worker.completed"
     assert result.optimizer_step == 7
     assert len(result.checkpoint_requests) == 1
@@ -1643,7 +1684,7 @@ def test_frozen_vision_handler_lowers_compressor_arm_to_sealed_cache_only_argv(
         resume=None,
         node_id="compressor_arm",
     )
-    components = SimpleNamespace()
+    components = _vision_evaluation_components()
     profiler = SimpleNamespace()
     observability = SimpleNamespace(
         keepalive=lambda *_args: __import__("contextlib").nullcontext()
@@ -1763,7 +1804,7 @@ def test_vision_native_head_handler_seals_lineage_and_publishes_checkpoint(
         publishes={"checkpoint": {}},
         resume=None,
     )
-    components = SimpleNamespace()
+    components = _vision_evaluation_components()
     profiler = SimpleNamespace()
     observability = SimpleNamespace(
         keepalive=lambda *_args: __import__("contextlib").nullcontext()
@@ -1950,7 +1991,7 @@ def test_vision_student_handler_seals_lineage_and_publishes_checkpoint(
         publishes={"checkpoint": {}},
         resume=None,
     )
-    components = SimpleNamespace()
+    components = _vision_evaluation_components()
     profiler = SimpleNamespace()
     observability = SimpleNamespace(
         keepalive=lambda *_args: __import__("contextlib").nullcontext()

@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -229,6 +230,19 @@ def test_the_pin_names_exactly_the_dispatched_routes() -> None:
     )
 
 
+def _population(summary: str, label: str) -> int:
+    """Read one population out of the verdict line.
+
+    The counts are the gate's own answer, so a test asserting a delta has to
+    take the baseline from the gate rather than from a constant that goes stale
+    the next time a family arms.
+    """
+
+    match = re.search(rf"(\d+) {re.escape(label)}", summary)
+    assert match is not None, f"the verdict line names no {label!r}: {summary}"
+    return int(match.group(1))
+
+
 def _summary(stdout: str) -> str:
     """The verdict line, which is the part of the output that gets quoted."""
     lines = [line for line in stdout.splitlines() if "step-zero arming gate:" in line]
@@ -381,6 +395,15 @@ def test_a_publisher_condition_reddens_the_gate_as_a_deadlock(
     text and the summary population are asserted too.
     """
 
+    # The populations this mutation is expected to move, measured on the
+    # unmutated tree rather than restated. Hardcoding them made this test fail
+    # the day an unrelated family armed, which is the rot `registry_parity_note`
+    # and card-ac588eda are about: a test that restates a count is a second
+    # authority for it.
+    baseline = _summary(_run(repository).stdout)
+    armed_before = _population(baseline, "armed today by a shipped composition")
+    blocked_before = _population(baseline, "blocked")
+
     catalog = _catalog(repository)
     broken = 0
     for recipe in catalog["recipes"]:
@@ -416,8 +439,10 @@ def test_a_publisher_condition_reddens_the_gate_as_a_deadlock(
         "the deadlock population is not counted separately, so a reader cannot "
         f"tell it from a route that arms nothing:\n{result.stdout}"
     )
-    assert "10 armed today by a shipped composition" in summary, summary
-    assert "10 blocked" in summary, (
+    assert (
+        f"{armed_before - 1} armed today by a shipped composition" in summary
+    ), summary
+    assert f"{blocked_before} blocked" in summary, (
         "a deadlocking route was counted as blocked; blocked means the port is "
         f"missing or unusable and nothing arms:\n{summary}"
     )

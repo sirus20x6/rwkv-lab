@@ -46,6 +46,13 @@ from rwkv_lab.vision_loop import (
     set_loop_enabled,
     set_loop_scale,
 )
+from rwkv_lab.vision_step_zero import (
+    attempt_baseline_gate,
+    caption_eval_examples,
+    publish_attempt_baseline_evidence,
+    refuse_ungated_attempt_baseline,
+    select_heldout_indices,
+)
 from rwkv_lab.vision_teacher_compressor import TeacherCacheDataset
 from rwkv_lab.vision_train import (
     load_examples,
@@ -269,7 +276,8 @@ def _batch_loss(*, indices: torch.Tensor, moon: torch.Tensor,
                 deep_vision: DeepVisionInjector | None,
                 nextlat: NextLatPredictor | None,
                 grounding: ImageTextContrastiveHead | None,
-                baseline_args: dict, training: bool):
+                baseline_args: dict, training: bool,
+                return_selected_predictions: bool = False):
     chosen = [rows[int(index)] for index in indices.tolist()]
     ids, labels, mask = make_batch(chosen, device="cuda")
     positions = supervised_positions(
@@ -300,9 +308,77 @@ def _batch_loss(*, indices: torch.Tensor, moon: torch.Tensor,
                 baseline_args.get("grounding_early_tokens", 0)) if training else 0,
             grounding_early_weight=float(
                 baseline_args.get("grounding_early_weight", 1.0)) if training else 1.0,
+            return_selected_predictions=return_selected_predictions,
         )
     tokens = int((labels != -100).sum())
     return loss, metrics, tokens
+
+
+@torch.no_grad()
+def _heldout_caption_examples(*, loader: DataLoader, rows: list[dict],
+                              wanted: tuple[int, ...], vocab: WorldVocab,
+                              optimizer_step: int, rwkv: nn.Module,
+                              native: RWKVNativeTeacherCompressor,
+                              identity: NativePrefixIdentity, engram,
+                              deep_vision, baseline_args: dict) -> tuple:
+    """Render the frozen held-out rows as typed attempt-baseline evidence.
+
+    Teacher-forced next-token evidence rather than free generation, for the same
+    reason the Transformer MLA routes publish it: this composition contract
+    declares no ``generation_policy`` slot, so there is no authored decode
+    policy that would make a sampled caption reproducible across attempts.
+
+    The evaluation loader is deterministic (``shuffle=False``) and yields its
+    own dataset indices, so the frozen selection is applied by filtering rather
+    than by re-batching. That keeps the collation this dataset was built for and
+    avoids a second, subtly different, batching path existing only for evidence.
+    """
+
+    selected = set(wanted)
+    was_training = native.training
+    native.eval()
+    rendered: dict[int, tuple[str, str, str, str]] = {}
+    try:
+        for indices, moon, fusion in loader:
+            keep = [position for position, index in enumerate(indices.tolist())
+                    if int(index) in selected]
+            if not keep:
+                continue
+            picker = torch.tensor(keep, dtype=torch.long)
+            _, metrics, _ = _batch_loss(
+                indices=indices[picker], moon=moon[picker], fusion=fusion[picker],
+                rows=rows, rwkv=rwkv, native=native, identity=identity,
+                engram=engram, deep_vision=deep_vision, nextlat=None,
+                grounding=None, baseline_args=baseline_args, training=False,
+                return_selected_predictions=True)
+            row_of = metrics["_eval_selected_rows"].tolist()
+            predicted = metrics["_eval_selected_predictions"].tolist()
+            targeted = metrics["_eval_selected_targets"].tolist()
+            grouped: dict[int, tuple[list[int], list[int]]] = {}
+            for position, prediction, target in zip(row_of, predicted, targeted):
+                bucket = grouped.setdefault(int(position), ([], []))
+                bucket[0].append(int(target))
+                bucket[1].append(int(prediction))
+            for position, (targets, predictions) in grouped.items():
+                index = int(indices[picker][position])
+                row = rows[index]
+                rendered[index] = (
+                    str(row.get("image", index)),
+                    str(row.get("prompt") or ""),
+                    vocab.decode(targets),
+                    vocab.decode(predictions),
+                )
+            if len(rendered) >= len(selected):
+                break
+    finally:
+        native.train(was_training)
+    missing = selected - set(rendered)
+    if missing:
+        raise ValueError(
+            f"native-head held-out selection lost {len(missing)} of "
+            f"{len(selected)} rows before evidence was rendered")
+    return caption_eval_examples(
+        [rendered[index] for index in wanted], optimizer_step=optimizer_step)
 
 
 @torch.no_grad()
@@ -403,6 +479,7 @@ def train(
     worker_step_profiler: Any | None = None,
     worker_observability: Any | None = None,
     worker_controls: Any | None = None,
+    worker_eval_examples: Any | None = None,
 ) -> dict[str, Any]:
     """Execute one native-head arm under optional sealed TrainVM services."""
 
@@ -593,6 +670,28 @@ def train(
         torch.set_rng_state(saved["rng"]["torch"])
         torch.cuda.set_rng_state_all(saved["rng"]["cuda"])
 
+    # Before the baseline evaluation and long before the loop, so a
+    # disagreement with the controller's immutable attempt baseline is
+    # diagnosed as itself rather than as a refused first crossing after a full
+    # frozen-stack load.
+    refuse_ungated_attempt_baseline(
+        worker_controls,
+        step,
+        family="Vision native head",
+        can_publish_baseline_evidence=worker_eval_examples is not None,
+    )
+    gate_baseline = attempt_baseline_gate(worker_controls)
+    if (
+        gate_baseline is None
+        and worker_controls is not None
+        and worker_controls.step_zero_eval_gate_required
+    ):
+        print(
+            "attempt-baseline eval gate: already durable at step "
+            f"{worker_controls.attempt_baseline_optimizer_step}",
+            flush=True,
+        )
+
     checkpoint_directory = out / "checkpoint-current"
     checkpoint_state = checkpoint_directory / "state.pt"
 
@@ -655,6 +754,71 @@ def train(
             "deployment_bridge": False,
             "trainable_scope": "vision_compressor.native_output_head",
         })
+
+        if gate_baseline is not None:
+            # Scalars, then checkpoint, then examples -- the order the
+            # controller's `validate_eval_examples_gate_provenance` requires,
+            # and all three before the loop below can reach a mutation. The
+            # step is the controller's immutable baseline, never a literal
+            # zero: this route resumes, so keying publication to `step == 0`
+            # would owe evidence at a step a replacement attempt never reaches
+            # again while `pre_optimizer_step` refuses every mutation until it
+            # exists.
+            baseline_loss = _evaluate(
+                eval_loader, eval_rows, max_examples=args.eval_examples,
+                rwkv=rwkv, native=native, identity=identity,
+                engram=engram, deep_vision=deep_vision,
+                baseline_args=baseline_args)
+            baseline_ppl = math.exp(min(baseline_loss, 20.0))
+            _append_json(log, {
+                "kind": "eval", "step": gate_baseline, "loss": baseline_loss,
+                "ppl": baseline_ppl, "reason": "attempt_baseline",
+                "examples": min(args.eval_examples, len(eval_rows)),
+                "deployment_bridge": False,
+            })
+            if worker_observability is not None:
+                worker_observability.publish_if_declared(
+                    "eval.loss", baseline_loss, step=gate_baseline)
+                worker_observability.publish_if_declared(
+                    "eval.perplexity", baseline_ppl, step=gate_baseline)
+            wanted = select_heldout_indices(
+                len(eval_rows), worker_eval_examples.sample_count)
+
+            def stage_baseline_checkpoint() -> str:
+                save_checkpoint()
+                return str(checkpoint_directory)
+
+            publish_attempt_baseline_evidence(
+                worker_controls=worker_controls,
+                worker_observability=worker_observability,
+                policy=worker_eval_examples,
+                baseline=gate_baseline,
+                series_id="vision-native-head-caption",
+                identities=[str(eval_rows[index].get("image", index))
+                            for index in wanted],
+                selector={
+                    "eval_data": str(args.eval_data),
+                    "eval_rows": len(eval_rows),
+                    "sample_count": worker_eval_examples.sample_count,
+                },
+                examples=_heldout_caption_examples(
+                    loader=eval_loader, rows=eval_rows, wanted=wanted,
+                    vocab=vocab, optimizer_step=gate_baseline, rwkv=rwkv,
+                    native=native, identity=identity, engram=engram,
+                    deep_vision=deep_vision, baseline_args=baseline_args),
+                stage_checkpoint=stage_baseline_checkpoint,
+                resume_grade="compatible",
+                state_components=(
+                    "component_composition",
+                    "control_revision",
+                    "model",
+                    "optimizer",
+                    "rng_accelerator",
+                    "rng_python",
+                    "rng_torch",
+                ),
+            )
+            gate_baseline = None
 
         # Installed for the whole loop, so the ordering below is enforced
         # against every optimizer instance in the process rather than the one

@@ -1,0 +1,348 @@
+{
+  "api_version": "trainvm.rwkv-lab/v1alpha1",
+  "kind": "Experiment",
+  "metadata": {
+    "name": "vision-rwkv-student",
+    "description": "Continue the raw-pixel Vision-RWKV student under an authority-owned TrainVM lease, gated on held-out caption evidence published at the attempt baseline before the first optimizer mutation.",
+    "labels": {
+      "family": "vision",
+      "campaign": "step-zero-evidence"
+    }
+  },
+  "spec": {
+    "workspace": {
+      "root": "/thearray/git/moe-mla",
+      "run_directory": "/thearray/git/moe-mla/runs/trainvm/vision-rwkv-student",
+      "concurrency_key": "vision-rwkv-student",
+      "allowed_read_roots": [
+        "/home/sirus/.cache/moe-mla/i1_eight_hour_images",
+        "/thearray/git/moe-mla",
+        "/thearray/downloads/cache/moe-mla"
+      ],
+      "allowed_write_roots": [
+        "/thearray/git/moe-mla/runs/trainvm/vision-rwkv-student"
+      ]
+    },
+    "resources": {
+      "accelerators": {
+        "vendor": "nvidia",
+        "count": 1,
+        "minimum_memory_gib": 48,
+        "exclusive": true
+      },
+      "minimum_host_memory_gib": 64,
+      "cpu_threads": 16,
+      "lease_timeout_seconds": 30,
+      "cpu_io_policy": {
+        "cpu_weight": 100,
+        "io_weight": 100,
+        "omp_threads": 8,
+        "preprocessing_workers": 8,
+        "nice": 0
+      }
+    },
+    "parameters": {},
+    "artifacts": {
+      "checkpoint": {
+        "type": "checkpoint",
+        "schema": "rwkv-lab.vision-rwkv-student-checkpoint.v1",
+        "immutability": "immutable",
+        "fingerprint": "manifest_sha256",
+        "required": true
+      },
+      "eval_examples": {
+        "type": "eval_examples",
+        "schema": "rwkv-lab.eval-examples.v1",
+        "immutability": "append_only",
+        "fingerprint": "manifest_sha256",
+        "required": true
+      }
+    },
+    "components": {
+      "core": {
+        "adapter": "trainvm.core",
+        "version": "1.0.0",
+        "runtime": "builtin",
+        "operations": {
+          "acquire_resources": {
+            "contract": "trainvm.v1.AcquireResources"
+          },
+          "release_resources": {
+            "contract": "trainvm.v1.ReleaseResources"
+          }
+        }
+      },
+      "vision": {
+        "adapter": "rwkv-lab.vision-rwkv-student",
+        "version": "1.0.0",
+        "runtime": "python_worker",
+        "operations": {
+          "train": {
+            "contract": "rwkv_lab.vision_rwkv_student.v1.Train"
+          }
+        }
+      }
+    },
+    "workflow": {
+      "entrypoint": "acquire_gpu",
+      "nodes": {
+        "acquire_gpu": {
+          "description": "Take the exclusive accelerator lease this arm runs under.",
+          "invoke": {
+            "component": "core",
+            "operation": "acquire_resources",
+            "inputs": {
+              "concurrency_key": {
+                "literal": "vision-rwkv-student"
+              }
+            }
+          },
+          "idempotency": "receipt_required",
+          "effect": "resource",
+          "transitions": [
+            {
+              "on": "resource.acquired",
+              "target": "train"
+            },
+            {
+              "on": "operation.failed",
+              "target": "$failed"
+            }
+          ]
+        },
+        "train": {
+          "description": "One bounded arm. Publishes its attempt-baseline held-out evidence, bound to a baseline checkpoint, before the first optimizer mutation.",
+          "invoke": {
+            "component": "vision",
+            "operation": "train",
+            "inputs": {
+              "config": {
+                "literal": {
+                  "baseline_checkpoint": "/thearray/git/moe-mla/models/vision/moonvit-rwkv-eight-hour-grounded.pt",
+                  "compressor_checkpoint": "/thearray/git/moe-mla/models/vision/teacher-compressor-so400m-dinov2-sam-128x1024-v1.pt",
+                  "native_head_checkpoint": "/thearray/git/moe-mla/models/vision/native-head-calibrated-v1.pt",
+                  "train_manifest": "/thearray/git/moe-mla/curated_vision/vision_next_shard_001_ocr10_train.jsonl",
+                  "eval_manifest": "/thearray/git/moe-mla/curated_vision/vision_next_shard_000_ocr10_eval.jsonl",
+                  "moon_cache": "/thearray/downloads/cache/moe-mla/moonvit_next_128_shard_001_ocr10",
+                  "fusion_cache": "/thearray/downloads/cache/moe-mla/fusion_so400m_next_128_shard_001_ocr10",
+                  "moonvit_checkpoint": "/thearray/git/moe-mla/models/kimi-k2.6-moonvit/model-00064-of-000064.safetensors",
+                  "siglip2_model": "/thearray/git/moe-mla/models/vision/siglip2-so400m-patch16-512",
+                  "dinov2_model": "/thearray/git/moe-mla/models/vision/dinov2-base",
+                  "sam_model": "/thearray/git/moe-mla/models/vision/sam-vit-base",
+                  "vocab": "/thearray/git/moe-mla/src/rwkv_lab/assets/rwkv_vocab_v20230424.txt",
+                  "output_dir": "/thearray/git/moe-mla/runs/trainvm/vision-rwkv-student"
+                }
+              }
+            },
+            "training": {
+              "model_family": "vision",
+              "components": {
+                "artifact_renderer": {
+                  "key": {
+                    "category": "artifact_renderer",
+                    "name": "caption_triplet",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "modality": "multimodal",
+                    "schema": "trainvm.caption-triplet.v1"
+                  }
+                },
+                "evaluation_schedule": {
+                  "key": {
+                    "category": "evaluation_schedule",
+                    "name": "launch_gate_periodic",
+                    "version": "2.0.0"
+                  },
+                  "configuration": {
+                    "full_step_zero": true,
+                    "full_every_steps": 500,
+                    "qualitative_every_steps": 500,
+                    "final": true
+                  }
+                },
+                "evaluator": {
+                  "key": {
+                    "category": "evaluator",
+                    "name": "scalar_loss",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "split_slot": "",
+                    "metrics": [
+                      "eval.loss",
+                      "eval.perplexity"
+                    ],
+                    "reduction": "weighted_mean",
+                    "maximum_examples": 0
+                  }
+                },
+                "gradient_clipping": {
+                  "key": {
+                    "category": "gradient_clipping",
+                    "name": "global_norm",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "max_norm": 1.0,
+                    "norm_type": 2.0,
+                    "error_if_nonfinite": false
+                  }
+                },
+                "learning_rate": {
+                  "key": {
+                    "category": "learning_rate_schedule",
+                    "name": "constant",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {}
+                },
+                "optimizer": {
+                  "key": {
+                    "category": "optimizer",
+                    "name": "torch_adamw_no_decay",
+                    "version": "2.0.0"
+                  },
+                  "configuration": {
+                    "learning_rate": 0.0001,
+                    "beta1": 0.9,
+                    "beta2": 0.95,
+                    "epsilon": 1e-08,
+                    "foreach": false,
+                    "fused": true
+                  }
+                },
+                "precision": {
+                  "key": {
+                    "category": "precision",
+                    "name": "bf16_parameters_fp32_reductions",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "parameter_dtype": "bfloat16",
+                    "compute_dtype": "bfloat16",
+                    "reduction_dtype": "float32",
+                    "gradient_scaling": false
+                  }
+                },
+                "qualitative_samples": {
+                  "key": {
+                    "category": "qualitative_sample",
+                    "name": "fixed_held_out",
+                    "version": "2.0.0"
+                  },
+                  "configuration": {
+                    "identity_field": "image",
+                    "sample_count": 8
+                  }
+                },
+                "weight_decay": {
+                  "key": {
+                    "category": "weight_decay_schedule",
+                    "name": "constant",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "weight_decay": 0.05
+                  }
+                }
+              }
+            }
+          },
+          "publishes": {
+            "checkpoint": "checkpoint",
+            "eval_examples": "eval_examples"
+          },
+          "idempotency": "receipt_required",
+          "effect": "process",
+          "timeout_seconds": 604800,
+          "transitions": [
+            {
+              "on": "worker.completed",
+              "target": "release_gpu"
+            },
+            {
+              "on": "operation.failed",
+              "target": "$failed"
+            }
+          ]
+        },
+        "release_gpu": {
+          "description": "Return the accelerator lease however the arm ended.",
+          "invoke": {
+            "component": "core",
+            "operation": "release_resources",
+            "inputs": {
+              "concurrency_key": {
+                "literal": "vision-rwkv-student"
+              }
+            }
+          },
+          "idempotency": "replay_safe",
+          "effect": "resource",
+          "transitions": [
+            {
+              "on": "resource.released",
+              "target": "$completed"
+            },
+            {
+              "on": "operation.failed",
+              "target": "$failed"
+            }
+          ]
+        }
+      }
+    },
+    "controls": {
+      "catalog": {}
+    },
+    "observability": {
+      "heartbeat_seconds": 5,
+      "metrics": [
+        {
+          "name": "train.loss",
+          "type": "gauge",
+          "unit": "dimensionless",
+          "step_domain": "optimizer_step",
+          "aggregation": "mean"
+        },
+        {
+          "name": "train.learning_rate",
+          "type": "gauge",
+          "unit": "ratio",
+          "step_domain": "optimizer_step",
+          "aggregation": "last"
+        },
+        {
+          "name": "train.gradient_norm",
+          "type": "gauge",
+          "unit": "ratio",
+          "step_domain": "optimizer_step",
+          "aggregation": "last"
+        },
+        {
+          "name": "eval.loss",
+          "type": "gauge",
+          "unit": "dimensionless",
+          "step_domain": "optimizer_step",
+          "aggregation": "last"
+        },
+        {
+          "name": "eval.perplexity",
+          "type": "gauge",
+          "unit": "dimensionless",
+          "step_domain": "optimizer_step",
+          "aggregation": "last"
+        }
+      ],
+      "retain_raw_metrics_days": 30
+    },
+    "recovery": {
+      "exact_resume": false,
+      "reconcile": "adopt_if_fingerprint_matches",
+      "orphan_policy": "adopt_if_identity_matches",
+      "graceful_stop_seconds": 300,
+      "release_accelerators_when_paused": true
+    }
+  }
+}

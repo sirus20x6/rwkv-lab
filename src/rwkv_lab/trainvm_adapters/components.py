@@ -107,6 +107,30 @@ class WorkerTrainingComponents:
     def evaluator(self, *, slot: str = "evaluator"):
         component = self.composition.require(slot, category="evaluator")
         evaluator = evaluator_from_resolved_component(component.runtime_envelope())
+        # The registry's no-pipeline branch, mirrored here rather than assumed
+        # away. `validate_evaluation_checkpoint_relationships` admits an
+        # evaluator naming an empty `split_slot` when the composition declares
+        # no data pipeline to take a split from -- which is every family that
+        # names its evaluation corpus in its own trainer configuration instead
+        # of through a `data_source`. All four vision routes and all eight
+        # Transformer MLA routes are in that class.
+        #
+        # Without this branch the line below resolves the slot named `""`,
+        # which no composition has, so this accessor raises
+        # `TrainingCompositionError: resolved training composition has no ''
+        # slot` for every one of those routes. That is not a hypothetical: the
+        # MLA handler already calls this accessor to read the evaluator
+        # provenance its armed gate publishes, and every armed MLA attempt
+        # would have failed here before loading a model. Nothing caught it
+        # because no test drives a handler against a resolved composition whose
+        # evaluator names an empty split.
+        #
+        # The check below is unchanged for every composition that *does* name a
+        # split: an evaluator pointing at a slot that is not a held-out or
+        # validation selector is still refused. What is relaxed is only the
+        # case the registry itself calls legal.
+        if not evaluator.configuration.split_slot:
+            return evaluator
         split = self.composition.require(
             evaluator.configuration.split_slot, category="split_selector"
         )

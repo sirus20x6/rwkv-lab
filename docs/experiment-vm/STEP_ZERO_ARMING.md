@@ -173,10 +173,10 @@ every pull request by the same script without `--write`. Do not hand-edit it.
 | `rwkv_lab.transformer_mla_mutor.v1.Train` | yes | yes | yes | yes | yes — examples/transformer-mla.recipe-profiles.v1.json[transformer-mla-mutor] | nothing — armed |
 | `rwkv_lab.transformer_mla_parallel.v1.Train` | yes | yes | yes | yes | yes — examples/transformer-mla.recipe-profiles.v1.json[transformer-mla-parallel] | nothing — armed |
 | `rwkv_lab.transformer_mla_rwkv8.v1.Train` | yes | yes | yes | yes | yes — examples/transformer-mla.recipe-profiles.v1.json[transformer-mla-rwkv8] | nothing — armed |
-| `rwkv_lab.vision_frozen_adapter.v1.Train` | yes | yes | yes | no | no | the adapter declares no eval_examples output port, so no composition may publish one (adapter_registry.cpp rejects an undeclared operation output) |
-| `rwkv_lab.vision_native_head.v1.Train` | yes | yes | yes | no | no | the adapter declares no eval_examples output port, so no composition may publish one (adapter_registry.cpp rejects an undeclared operation output) |
-| `rwkv_lab.vision_rwkv_student.v1.Train` | yes | yes | yes | no | no | the adapter declares no eval_examples output port, so no composition may publish one (adapter_registry.cpp rejects an undeclared operation output) |
-| `rwkv_lab.vision_teacher_compressor.v1.Train` | yes | yes | yes | no | no | the adapter declares no eval_examples output port, so no composition may publish one (adapter_registry.cpp rejects an undeclared operation output) |
+| `rwkv_lab.vision_frozen_adapter.v1.Train` | yes | yes | yes | yes | yes — examples/vision-representation-ab.json[vision-representation-ab] | nothing — armed |
+| `rwkv_lab.vision_native_head.v1.Train` | yes | yes | yes | yes | yes — examples/vision-native-head.json[vision-native-head] | nothing — armed |
+| `rwkv_lab.vision_rwkv_student.v1.Train` | yes | yes | yes | yes | yes — examples/vision-rwkv-student.json[vision-rwkv-student] | nothing — armed |
+| `rwkv_lab.vision_teacher_compressor.v1.Train` | yes | yes | yes | yes | yes — examples/vision-teacher-compressor.json[vision-teacher-compressor] | nothing — armed |
 
 <!-- END GENERATED ARMING TABLE -->
 

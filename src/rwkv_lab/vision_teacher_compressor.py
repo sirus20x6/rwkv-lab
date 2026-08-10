@@ -31,6 +31,13 @@ from rwkv_lab.trainvm_worker.mutation_sentinel import (
 )
 from rwkv_lab.moonvit import checkpoint_fingerprint, feature_cache_key
 from rwkv_lab.vision_fusion import VisionTowerConfig, aligned_feature_cache_key
+from rwkv_lab.vision_step_zero import (
+    attempt_baseline_gate,
+    publish_attempt_baseline_evidence,
+    reconstruction_eval_examples,
+    refuse_ungated_attempt_baseline,
+    select_heldout_indices,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = 1
@@ -376,6 +383,68 @@ def evaluate(model: CanonicalTeacherCompressor, loader: DataLoader,
     return {name: value / examples for name, value in totals.items()}
 
 
+@torch.no_grad()
+def heldout_reconstruction_examples(
+    model: CanonicalTeacherCompressor, dataset: TeacherCacheDataset,
+    wanted: tuple[int, ...], args: argparse.Namespace, device: torch.device,
+    *, optimizer_step: int) -> tuple:
+    """Render the frozen held-out cache rows as typed attempt-baseline evidence.
+
+    One forward per selected row rather than a batched pass, because the
+    evidence is per-example and ``compressor_loss`` reduces over the batch. A
+    batched pass would publish one number for eight rows and call it eight
+    examples, which is the shape of synthetic evidence the gate exists to
+    refuse. The selection is small by construction -- the composition's
+    ``sample_count`` -- so the cost is bounded.
+
+    This route has no text anywhere in its objective, so the parts are
+    structured rather than textual: the input names the held-out teacher-cache
+    row, the target summarises the teacher features it carries, and the
+    prediction summarises the latent the compressor produced together with the
+    error against that target.
+    """
+
+    was_training = model.training
+    model.eval()
+    items: list[tuple[str, dict[str, float], dict[str, float]]] = []
+    try:
+        for index in wanted:
+            moon, fusion = dataset[index]
+            moon = moon.unsqueeze(0).to(device, non_blocking=True)
+            fusion = fusion.unsqueeze(0).to(device, non_blocking=True)
+            streams = split_cached_features(moon, fusion)
+            with torch.autocast("cuda", dtype=torch.bfloat16,
+                                enabled=device.type == "cuda"):
+                latent, predictions = model(streams)
+                _, metrics = compressor_loss(
+                    latent, predictions, streams,
+                    relational_weight=args.relational_weight,
+                    variance_weight=args.variance_weight,
+                    covariance_weight=args.covariance_weight,
+                    diversity_weight=args.diversity_weight)
+            target = {
+                "teacher_streams": float(len(streams)),
+                "teacher_norm": float(
+                    sum(float(stream.float().norm()) for stream in streams)
+                    / len(streams)),
+                "teacher_std": float(
+                    sum(float(stream.float().std()) for stream in streams)
+                    / len(streams)),
+            }
+            prediction = {
+                "latent_norm": float(latent.float().norm()),
+                "latent_std": float(latent.float().std()),
+                **{str(name).replace("/", "_"): float(value)
+                   for name, value in metrics.items()},
+            }
+            items.append((dataset.entries[index][0].name, target, prediction))
+    finally:
+        model.train(was_training)
+    return reconstruction_eval_examples(
+        items, optimizer_step=optimizer_step,
+        schema="rwkv-lab.vision-teacher-reconstruction.v1")
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, required=True)
@@ -419,6 +488,7 @@ def train(
     worker_step_profiler: Any | None = None,
     worker_observability: Any | None = None,
     worker_controls: Any | None = None,
+    worker_eval_examples: Any | None = None,
 ) -> dict[str, Any]:
     """Execute one compressor run under optional sealed TrainVM services."""
 
@@ -641,6 +711,87 @@ def train(
         )
         _durable_save(payload, last)
         _replace_hardlink(last, checkpoint_state)
+
+    # Before the baseline evaluation and long before the loop, so a
+    # disagreement with the controller's immutable attempt baseline is
+    # diagnosed as itself rather than as a refused first crossing after a full
+    # teacher-cache validation.
+    refuse_ungated_attempt_baseline(
+        worker_controls,
+        step,
+        family="Vision teacher compressor",
+        can_publish_baseline_evidence=worker_eval_examples is not None,
+    )
+    gate_baseline = attempt_baseline_gate(worker_controls)
+    if (
+        gate_baseline is None
+        and worker_controls is not None
+        and worker_controls.step_zero_eval_gate_required
+    ):
+        print(
+            "attempt-baseline eval gate: already durable at step "
+            f"{worker_controls.attempt_baseline_optimizer_step}",
+            flush=True,
+        )
+    if gate_baseline is not None:
+        # Scalars, then checkpoint, then examples -- the order the controller's
+        # `validate_eval_examples_gate_provenance` requires, and all three
+        # before the loop below can reach a mutation. The step is the
+        # controller's immutable baseline, never a literal zero: this route
+        # resumes, so keying publication to `step == 0` would owe evidence at a
+        # step a replacement attempt never reaches again while
+        # `pre_optimizer_step` refuses every mutation until it exists.
+        baseline_values = evaluate(model, eval_loader, args, device)
+        with metrics_path.open("a") as baseline_log:
+            baseline_log.write(json.dumps({
+                "kind": "eval", "step": gate_baseline,
+                "reason": "attempt_baseline", **baseline_values}) + "\n")
+        if worker_observability is not None:
+            for name, key in (
+                ("eval.loss", "loss"),
+                ("eval.reconstruction", "reconstruction"),
+                ("eval.relational", "relational"),
+                ("eval.latent_std", "latent_std"),
+            ):
+                if key in baseline_values:
+                    worker_observability.publish_if_declared(
+                        name, baseline_values[key], step=gate_baseline)
+        wanted = select_heldout_indices(
+            len(evaluation), worker_eval_examples.sample_count)
+
+        def stage_baseline_checkpoint() -> str:
+            save_current_checkpoint()
+            return str(checkpoint_directory)
+
+        publish_attempt_baseline_evidence(
+            worker_controls=worker_controls,
+            worker_observability=worker_observability,
+            policy=worker_eval_examples,
+            baseline=gate_baseline,
+            series_id="vision-teacher-compressor-reconstruction",
+            identities=[evaluation.entries[index][0].name for index in wanted],
+            selector={
+                "eval_data": str(args.eval_data),
+                "eval_rows": len(evaluation),
+                "sample_count": worker_eval_examples.sample_count,
+            },
+            examples=heldout_reconstruction_examples(
+                model, evaluation, wanted, args, device,
+                optimizer_step=gate_baseline),
+            stage_checkpoint=stage_baseline_checkpoint,
+            resume_grade="compatible",
+            state_components=(
+                "component_composition",
+                "control_revision",
+                "data_cursor",
+                "model",
+                "optimizer",
+                "rng_accelerator",
+                "rng_python",
+                "rng_torch",
+            ),
+        )
+        gate_baseline = None
 
     model.train()
     started = time.perf_counter()

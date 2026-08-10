@@ -91,6 +91,37 @@ OperationAuthoringDeclaration checkpoint_authoring() {
   };
 }
 
+// The universal pre-mutation eval gate's output port, written once for the
+// four vision routes rather than four times.
+//
+// The four differ in what their evidence *is* -- three emit an image /
+// reference-caption / predicted-caption triple, the teacher compressor emits
+// held-out feature-reconstruction evidence and no text at all -- but the port
+// is the same declaration in every case, because what varies is the manifest's
+// payload and not its contract. Only the description changes, and it changes
+// because a port description is the one place a reader learns which of the two
+// shapes to expect.
+//
+// `required` here forces a composition invoking these contracts to publish
+// *something* through the port; it is deliberately not what arms the
+// controller. Only the composition document's own artifact `required: true`
+// satisfies `invocation_requires_step_zero_eval_gate`, and
+// `require_artifact_contract` ties the artifact's type and schema to this port
+// and nothing else. The HF family sat inert for exactly that reason, and
+// `run_authoring.cpp` carries the same note beside its checks.
+void declare_vision_eval_examples(OperationAuthoringDeclaration& authoring,
+                                  std::string description) {
+  authoring.outputs.emplace(
+      "eval_examples",
+      OperationPortDescriptor{
+          .type = OperationPortType::artifact,
+          .required = true,
+          .artifact_type = ArtifactType::eval_examples,
+          .artifact_schema = "rwkv-lab.eval-examples.v1",
+          .description = std::move(description),
+      });
+}
+
 OperationAuthoringDeclaration rwkv_scratch_authoring() {
   OperationAuthoringDeclaration authoring = checkpoint_authoring();
   authoring.outputs.emplace(
@@ -227,6 +258,11 @@ OperationAuthoringDeclaration vision_compressor_authoring() {
       "rwkv-lab.vision-teacher-compressor-checkpoint.v1";
   checkpoint.description =
       "Required resumable multi-teacher compressor checkpoint.";
+  declare_vision_eval_examples(
+      authoring,
+      "Required same-attempt checkpoint-bound attempt-baseline held-out "
+      "teacher-feature reconstruction evidence. This route emits no text, so "
+      "the evidence is per-example reconstruction rather than a caption.");
   return authoring;
 }
 
@@ -248,6 +284,10 @@ OperationAuthoringDeclaration vision_frozen_adapter_authoring() {
           .description =
               "Required immutable best-evaluation scalar metric result.",
       });
+  declare_vision_eval_examples(
+      authoring,
+      "Required same-attempt checkpoint-bound attempt-baseline held-out "
+      "caption evidence.");
   return authoring;
 }
 
@@ -294,6 +334,10 @@ OperationAuthoringDeclaration vision_native_head_authoring() {
   checkpoint.artifact_schema = "rwkv-lab.vision-native-head-checkpoint.v1";
   checkpoint.description =
       "Required compatible native RWKV vision-head checkpoint.";
+  declare_vision_eval_examples(
+      authoring,
+      "Required same-attempt checkpoint-bound attempt-baseline held-out "
+      "caption evidence.");
   return authoring;
 }
 
@@ -304,6 +348,10 @@ OperationAuthoringDeclaration vision_rwkv_student_authoring() {
   checkpoint.artifact_schema = "rwkv-lab.vision-rwkv-student-checkpoint.v1";
   checkpoint.description =
       "Required compatible raw-pixel Vision-RWKV student checkpoint.";
+  declare_vision_eval_examples(
+      authoring,
+      "Required same-attempt checkpoint-bound attempt-baseline held-out "
+      "caption evidence.");
   return authoring;
 }
 

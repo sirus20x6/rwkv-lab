@@ -268,7 +268,11 @@
       "checkpoint_outputs": [
         "checkpoint"
       ],
-      "eval_examples_output": null
+      "eval_examples_output": {
+        "output_name": "eval_examples",
+        "required": true,
+        "artifact_schema": "rwkv-lab.eval-examples.v1"
+      }
     },
     {
       "contract": "rwkv_lab.vision_native_head.v1.Train",
@@ -280,7 +284,11 @@
       "checkpoint_outputs": [
         "checkpoint"
       ],
-      "eval_examples_output": null
+      "eval_examples_output": {
+        "output_name": "eval_examples",
+        "required": true,
+        "artifact_schema": "rwkv-lab.eval-examples.v1"
+      }
     },
     {
       "contract": "rwkv_lab.vision_rwkv_student.v1.Train",
@@ -292,7 +300,11 @@
       "checkpoint_outputs": [
         "checkpoint"
       ],
-      "eval_examples_output": null
+      "eval_examples_output": {
+        "output_name": "eval_examples",
+        "required": true,
+        "artifact_schema": "rwkv-lab.eval-examples.v1"
+      }
     },
     {
       "contract": "rwkv_lab.vision_teacher_compressor.v1.Train",
@@ -304,7 +316,11 @@
       "checkpoint_outputs": [
         "checkpoint"
       ],
-      "eval_examples_output": null
+      "eval_examples_output": {
+        "output_name": "eval_examples",
+        "required": true,
+        "artifact_schema": "rwkv-lab.eval-examples.v1"
+      }
     }
   ]
 }

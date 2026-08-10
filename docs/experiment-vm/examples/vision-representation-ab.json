@@ -49,11 +49,25 @@
         "immutability": "immutable",
         "fingerprint": "manifest_sha256"
       },
+      "moonvit_eval_examples": {
+        "type": "eval_examples",
+        "schema": "rwkv-lab.eval-examples.v1",
+        "immutability": "append_only",
+        "fingerprint": "manifest_sha256",
+        "required": true
+      },
       "compressor_checkpoint": {
         "type": "checkpoint",
         "schema": "rwkv-lab.vision-frozen-adapter-checkpoint.v1",
         "immutability": "immutable",
         "fingerprint": "manifest_sha256"
+      },
+      "compressor_eval_examples": {
+        "type": "eval_examples",
+        "schema": "rwkv-lab.eval-examples.v1",
+        "immutability": "append_only",
+        "fingerprint": "manifest_sha256",
+        "required": true
       },
       "moonvit_result": {
         "type": "report",
@@ -194,7 +208,8 @@
                   "configuration": {
                     "split_slot": "",
                     "metrics": [
-                      "eval.loss"
+                      "eval.loss",
+                      "eval.perplexity"
                     ],
                     "reduction": "weighted_mean",
                     "maximum_examples": 0
@@ -257,7 +272,8 @@
           },
           "publishes": {
             "checkpoint": "moonvit_checkpoint",
-            "result": "moonvit_result"
+            "result": "moonvit_result",
+            "eval_examples": "moonvit_eval_examples"
           },
           "idempotency": "receipt_required",
           "effect": "process",
@@ -336,7 +352,8 @@
                   "configuration": {
                     "split_slot": "",
                     "metrics": [
-                      "eval.loss"
+                      "eval.loss",
+                      "eval.perplexity"
                     ],
                     "reduction": "weighted_mean",
                     "maximum_examples": 0
@@ -399,7 +416,8 @@
           },
           "publishes": {
             "checkpoint": "compressor_checkpoint",
-            "result": "compressor_result"
+            "result": "compressor_result",
+            "eval_examples": "compressor_eval_examples"
           },
           "idempotency": "receipt_required",
           "effect": "process",
