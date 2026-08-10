@@ -162,6 +162,42 @@ def differences(pinned: dict, observed: dict) -> list[str]:
     return problems
 
 
+def population_summary(pinned: dict, observed: dict) -> str:
+    """Say which population each number counts, in the line that gets quoted.
+
+    This sentence used to read `{len(observed['profiles'])} registry profiles
+    compared field by field against {PIN}` over *every* profile the registry
+    declares. `differences()` field-compares only the intersection of the pin
+    and the registry: a contract the registry has and the pin does not is
+    reported and then skipped, never compared field by field. So the claim
+    overstated the checking precisely on the failing path -- the one whose
+    number gets quoted into a card.
+
+    The first two counts partition the registry, so they sum to its total and a
+    reader can check that they do. The third is a different population -- pin
+    entries with no live contract -- and is stated separately for that reason
+    rather than folded in. It is empty on a passing run, which is exactly when
+    one number under two names is indistinguishable from the truth.
+
+    Both sides are keyed by contract, the same way `differences()` keys them, so
+    the counts describe what was actually compared rather than what was read.
+    """
+    by_contract = {entry["contract"] for entry in pinned.get("profiles", [])}
+    live = {entry["contract"] for entry in observed["profiles"]}
+    compared = len(live & by_contract)
+    unpinned = len(live - by_contract)
+    orphaned = len(by_contract - live)
+    return (
+        f"{len(live)} registry "
+        f"{'profile' if len(live) == 1 else 'profiles'}; "
+        f"{compared} compared field by field against {PIN}, "
+        f"{unpinned} absent from the pin and reported without being compared; "
+        f"the pin holds {orphaned} "
+        f"{'contract' if orphaned == 1 else 'contracts'} the registry no "
+        "longer declares"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("trainvm", help="path to a built trainvm binary")
@@ -193,15 +229,15 @@ def main() -> int:
         print(verdict_line("step-zero arming pin", ["missing pin"], "0 profiles"))
         return 1
 
-    problems = differences(json.loads(path.read_text(encoding="utf-8")), observed)
+    pinned = json.loads(path.read_text(encoding="utf-8"))
+    problems = differences(pinned, observed)
     for problem in problems:
         print(f"FAIL: {problem}")
     print(
         verdict_line(
             "step-zero arming pin",
             problems,
-            f"{len(observed['profiles'])} registry profiles compared field by "
-            f"field against {PIN}",
+            population_summary(pinned, observed),
         )
     )
     return 1 if problems else 0

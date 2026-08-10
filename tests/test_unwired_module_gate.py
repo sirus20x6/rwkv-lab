@@ -25,6 +25,9 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
+import subprocess
+import sys
 
 import pytest
 
@@ -35,6 +38,7 @@ from scripts.ci_unwired_module_gate import (
     HEADER_ROOT,
     allowed,
     declaration_problems,
+    population_summary,
     staleness,
     unwired_modules,
 )
@@ -233,3 +237,140 @@ def test_an_entry_whose_module_no_longer_exists_fails(tmp_path):
     )
     assert now_wired == []
     assert missing == ["trainvm/deleted.hpp"]
+
+
+# --- the words the verdict line prints ------------------------------------
+#
+# These assert the MESSAGE, never the exit code. The defect they pin is a
+# correct computation described loosely: the gate was green before the wording
+# was fixed and is green after, so an exit-code assertion passes against both
+# spellings and proves nothing.
+
+
+def _verdict(stdout: str) -> str:
+    lines = [line for line in stdout.splitlines()
+             if line.startswith("unwired module gate:")]
+    assert len(lines) == 1, f"expected exactly one verdict line:\n{stdout}"
+    return lines[0]
+
+
+def test_the_verdict_line_counts_unexplained_modules_not_all_unwired(declaration):
+    """The number a reader acts on is the unexplained one, and it is zero.
+
+    The line used to read `{len(unwired)} unwired, {len(reasons)} explained
+    exclusions` -- every unwired header beside the allowlist that explains them,
+    which `staleness()` forces to be a subset. Today those are the same five
+    modules twice, reading as a five-module backlog standing beside five
+    excuses. The unexplained count never appeared.
+
+    The expected counts are read out of the gate's own analysis rather than
+    hardcoded, so wiring a module or adding an allowlist entry moves this test
+    with the change instead of reddening it.
+    """
+    result = subprocess.run(
+        [sys.executable, "scripts/ci_unwired_module_gate.py"],
+        capture_output=True, text=True, cwd=REPOSITORY, check=False,
+    )
+    verdict = _verdict(result.stdout)
+
+    reasons, _ = allowed(declaration)
+    unwired, tally = unwired_modules(REPOSITORY)
+    undeclared = [header for header in unwired if header not in reasons]
+
+    assert "explained exclusions" not in verdict, (
+        "the verdict counts every unwired header beside the allowlist that "
+        f"explains it, which reads as a backlog of unfixed modules:\n{verdict}")
+    assert f"{len(undeclared)} unwired and unexplained" in verdict, verdict
+    assert (f"{len(unwired) - len(undeclared)} unwired but explained in "
+            f"{DECLARATION}") in verdict, verdict
+    assert f"{tally['headers'] - len(unwired)} wired" in verdict, verdict
+
+
+def test_the_verdict_lines_header_counts_sum_to_the_total():
+    """A reader must be able to check the arithmetic, so it has to hold.
+
+    Parsed out of the printed sentence rather than recomputed, because the
+    claim under test is about the sentence.
+    """
+    result = subprocess.run(
+        [sys.executable, "scripts/ci_unwired_module_gate.py"],
+        capture_output=True, text=True, cwd=REPOSITORY, check=False,
+    )
+    verdict = _verdict(result.stdout)
+    matched = re.search(
+        r"(\d+) headers? over .*?; (\d+) unwired and unexplained, "
+        r"(\d+) unwired but explained in \S+, (\d+) wired", verdict)
+    assert matched is not None, verdict
+    total, unexplained, explained, wired = (int(g) for g in matched.groups())
+    assert unexplained + explained + wired == total, verdict
+
+
+def test_the_verdict_line_separates_populations_that_were_one_number():
+    """The regression proof: this sentence would have caught the original slip.
+
+    Two unwired headers, one of them explained. The old sentence said
+    "2 unwired, 1 explained exclusions" -- two populations of different sizes,
+    neither of them the one a reader wants. The fixed sentence names the
+    unexplained module as its own count, and it is not the unwired total.
+    """
+    summary = population_summary(
+        {"headers": 3, "production": 2, "tests": 1},
+        unwired=["trainvm/a.hpp", "trainvm/b.hpp"],
+        undeclared=["trainvm/a.hpp"],
+        reasons={"trainvm/b.hpp": "a stated reason for leaving this unwired"},
+        stale=0,
+    )
+    assert "1 unwired and unexplained" in summary, summary
+    assert f"1 unwired but explained in {DECLARATION}" in summary, summary
+    assert "1 wired" in summary, summary
+    assert "2 unwired" not in summary, summary
+
+
+def test_a_stale_allowlist_entry_is_reported_as_its_own_population():
+    """The allowlist is a countdown, so an entry that stopped applying counts."""
+    summary = population_summary(
+        {"headers": 1, "production": 1, "tests": 0},
+        unwired=[],
+        undeclared=[],
+        reasons={"trainvm/gone.hpp": "a stated reason that no longer holds"},
+        stale=1,
+    )
+    assert "1 allowlist entry, 1 no longer applicable" in summary, summary
+
+
+@pytest.mark.parametrize(
+    ("headers", "production", "tests", "expected"),
+    [
+        (
+            0, 0, 0,
+            "0 headers over 0 production and 0 test translation units; "
+            "0 unwired and unexplained, 0 unwired but explained in "
+            f"{DECLARATION}, 0 wired; 0 allowlist entries, 0 no longer applicable",
+        ),
+        (
+            1, 1, 0,
+            "1 header over 1 production and 0 test translation units; "
+            "0 unwired and unexplained, 0 unwired but explained in "
+            f"{DECLARATION}, 1 wired; 0 allowlist entries, 0 no longer applicable",
+        ),
+        (
+            4, 2, 2,
+            "4 headers over 2 production and 2 test translation units; "
+            "0 unwired and unexplained, 0 unwired but explained in "
+            f"{DECLARATION}, 4 wired; 0 allowlist entries, 0 no longer applicable",
+        ),
+    ],
+    ids=["none", "one", "several"],
+)
+def test_the_verdict_line_reads_correctly_at_every_count(
+    headers, production, tests, expected
+):
+    """Singular and plural, at 0, 1 and n.
+
+    "1 headers" is the shape of error that makes a reader distrust the whole
+    line, and every count here moves as the tree grows.
+    """
+    assert population_summary(
+        {"headers": headers, "production": production, "tests": tests},
+        unwired=[], undeclared=[], reasons={}, stale=0,
+    ) == expected
