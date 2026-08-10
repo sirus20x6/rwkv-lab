@@ -1,19 +1,119 @@
 // Package db owns the SQLite datastore: schema, migrations, and typed
 // read/write helpers. Driver is modernc.org/sqlite (pure Go, no cgo) registered
-// under the name "sqlite". WAL mode + a single writer connection keep the
-// ingester and sampler from tripping over each other.
+// under the name "sqlite". WAL mode keeps readers pooled while a logical
+// writer token keeps the ingester and sampler from tripping over each other.
 package db
 
 import (
 	"database/sql"
 	"fmt"
+	"sync"
 
 	_ "modernc.org/sqlite"
 )
 
 // DB wraps *sql.DB with trainboard-specific helpers.
+//
+// SQLite permits exactly one writer per database regardless of how many
+// connections the pool holds, and this package used to state that the
+// application only ever has one without anything making it true. It was not:
+// the ingester's transaction and the 1 Hz sysmon sample are separate
+// goroutines, so a 698,554-event rebuild held a write transaction for minutes
+// while the sampler tried to write on a second pooled connection. The DSN's
+// busy_timeout does not rescue that — it converts an immediate SQLITE_BUSY
+// into a five-second stall and then fails anyway.
+//
+// writer is that missing mechanism: a one-token semaphore every durable write
+// passes through. Holding it blocks (Exec, beginWrite) for writes that must
+// land, and is skipped without waiting (TryExec) for samples whose next value
+// supersedes them. Reads never take it, so the pool keeps serving the live UI
+// underneath a long ingest.
 type DB struct {
 	*sql.DB
+	writer chan struct{}
+}
+
+// acquireWriter waits for the logical writer token.
+func (d *DB) acquireWriter() { d.writer <- struct{}{} }
+
+// tryAcquireWriter takes the token if it is free, and reports whether it did.
+// It never waits: a caller holding a replaceable value would rather drop it
+// than queue behind a multi-minute ingest.
+func (d *DB) tryAcquireWriter() bool {
+	select {
+	case d.writer <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// releaseWriter returns the token. Every acquisition must reach this, on error
+// paths included: a token leaked by a failed transaction wedges every
+// subsequent dashboard write permanently, which is a worse failure than the
+// SQLITE_BUSY it replaced.
+func (d *DB) releaseWriter() { <-d.writer }
+
+// Exec shadows the promoted sql.DB.Exec so every standalone durable write in
+// this package is serialized against ingest without each call site having to
+// remember. Shadowing rather than renaming is deliberate: a caller that
+// forgets a new name still compiles and still contends, and this defect was
+// caused by exactly that kind of unenforced convention.
+func (d *DB) Exec(query string, args ...any) (sql.Result, error) {
+	d.acquireWriter()
+	defer d.releaseWriter()
+	return d.DB.Exec(query, args...)
+}
+
+// TryExec performs a write only if no other writer holds the token, and
+// reports whether it did. It is for rows whose next sample replaces them
+// entirely — losing one is invisible, whereas blocking the sampler behind an
+// ingest stops live telemetry, which is the thing this whole change protects.
+func (d *DB) TryExec(query string, args ...any) (persisted bool, err error) {
+	if !d.tryAcquireWriter() {
+		return false, nil
+	}
+	defer d.releaseWriter()
+	_, err = d.DB.Exec(query, args...)
+	return true, err
+}
+
+// writeTx is a transaction that owns the logical writer token for its
+// lifetime. Commit and Rollback both release it, and release is idempotent so
+// the customary "defer tx.Rollback()" after a successful Commit stays a no-op.
+type writeTx struct {
+	*sql.Tx
+	db       *DB
+	released sync.Once
+}
+
+// beginWrite takes the writer token, then opens the transaction. Ordering
+// matters: taking the token second would let two goroutines both hold open
+// SQLite write transactions, which is the condition being removed.
+func (d *DB) beginWrite() (*writeTx, error) {
+	d.acquireWriter()
+	tx, err := d.DB.Begin()
+	if err != nil {
+		d.releaseWriter()
+		return nil, err
+	}
+	return &writeTx{Tx: tx, db: d}, nil
+}
+
+func (w *writeTx) release() { w.released.Do(w.db.releaseWriter) }
+
+// Commit releases the writer token whether or not the commit succeeded.
+func (w *writeTx) Commit() error {
+	err := w.Tx.Commit()
+	w.release()
+	return err
+}
+
+// Rollback releases the writer token whether or not the rollback succeeded.
+func (w *writeTx) Rollback() error {
+	err := w.Tx.Rollback()
+	w.release()
+	return err
 }
 
 const schemaDDL = `
@@ -206,9 +306,9 @@ END;
 `
 
 // Open opens (creating if needed) the SQLite database and applies WAL pragmas.
-// The application has only one ingester, so writes are naturally serialized;
-// extra connections let WAL readers continue serving the dashboard while a
-// large initial scan or rewritten-log replay holds a write transaction.
+// Writes are serialized by the writer token above, not by the pool; the extra
+// connections exist so WAL readers keep serving the dashboard while a large
+// initial scan or rewritten-log replay holds a write transaction.
 func Open(path string) (*DB, error) {
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)", path)
 	sdb, err := sql.Open("sqlite", dsn)
@@ -217,11 +317,11 @@ func Open(path string) (*DB, error) {
 	}
 	// Do not collapse this to one connection: database/sql would then queue every
 	// handler behind the ingester's transaction even though WAL permits those
-	// reads. Four is enough for the writer plus concurrent live/series/SSE reads
-	// without creating an unbounded localhost connection pool.
+	// reads. Four is enough for the one writer plus concurrent live/series/SSE
+	// reads without creating an unbounded localhost connection pool.
 	sdb.SetMaxOpenConns(4)
 	sdb.SetMaxIdleConns(4)
-	d := &DB{sdb}
+	d := &DB{DB: sdb, writer: make(chan struct{}, 1)}
 	if err := d.migrate(); err != nil {
 		_ = sdb.Close()
 		return nil, err

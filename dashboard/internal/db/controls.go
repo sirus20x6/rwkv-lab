@@ -18,7 +18,7 @@ type Control struct {
 // unit), and their apply-ack is cleared so they re-show as pending. This is the
 // ACID multi-knob commit: the trainer's next poll sees all of them or none.
 func (d *DB) SetControls(runName string, kv map[string]float64, ts float64) error {
-	tx, err := d.DB.Begin()
+	tx, err := d.beginWrite()
 	if err != nil {
 		return err
 	}
