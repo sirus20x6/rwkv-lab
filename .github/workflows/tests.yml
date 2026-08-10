@@ -406,7 +406,13 @@ jobs:
       # in the native job, which has a built trainvm binary.
       - name: Test
         working-directory: dashboard
-        run: go test ./... 2>&1 | tee ../evidence-go.txt
+        # Same reason as the native-scope step below: GitHub runs this with
+        # `bash -e`, not `-o pipefail`, so the pipeline's exit code was tee's
+        # and a failing Go test left this step green. Without this line the
+        # regression tests in internal/db cannot redden CI at all.
+        run: |
+          set -o pipefail
+          go test ./... 2>&1 | tee ../evidence-go.txt
       - name: Publish evidence
         if: always()
         uses: actions/upload-artifact@v4

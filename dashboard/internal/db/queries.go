@@ -119,12 +119,12 @@ func (d *DB) SaveCursor(path string, c Cursor) error {
 // TouchRun: on restart the EOF cursor made the ingester return without ever
 // advancing the browser's version token.
 func (d *DB) PublishCursor(runID int64, lastUpdateTs float64, path string, c Cursor) error {
-	tx, err := d.DB.Begin()
+	tx, err := d.beginWrite()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if err := publishCursorTx(tx, runID, lastUpdateTs, path, c); err != nil {
+	if err := publishCursorTx(tx.Tx, runID, lastUpdateTs, path, c); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -156,12 +156,12 @@ func publishCursorTx(tx *sql.Tx, runID int64, lastUpdateTs float64, path string,
 // checkpoint recovery. Upserts alone cannot remove stale steps beyond the new
 // end of file, which leaves the dashboard counter pinned in the future.
 func (d *DB) ResetRunEvents(runID int64) error {
-	tx, err := d.DB.Begin()
+	tx, err := d.beginWrite()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if err := resetRunEventsTx(tx, runID); err != nil {
+	if err := resetRunEventsTx(tx.Tx, runID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -196,15 +196,15 @@ func resetRunEventsTx(tx *sql.Tx, runID int64) error {
 // half-reset run to either the next ingester scan or an open client.
 func (d *DB) ResetRunEventsAndPublish(runID int64, lastUpdateTs float64,
 	path string, c Cursor) error {
-	tx, err := d.DB.Begin()
+	tx, err := d.beginWrite()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if err := resetRunEventsTx(tx, runID); err != nil {
+	if err := resetRunEventsTx(tx.Tx, runID); err != nil {
 		return err
 	}
-	if err := publishCursorTx(tx, runID, lastUpdateTs, path, c); err != nil {
+	if err := publishCursorTx(tx.Tx, runID, lastUpdateTs, path, c); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -228,7 +228,7 @@ ON CONFLICT(run_id,step) DO UPDATE SET reason=excluded.reason, size_bytes=exclud
 
 // IngestBatch holds a transaction + prepared upserts for one file scan.
 type IngestBatch struct {
-	tx        *sql.Tx
+	tx        *writeTx
 	trainStmt *sql.Stmt
 	evalStmt  *sql.Stmt
 	ckptStmt  *sql.Stmt
@@ -239,12 +239,12 @@ type IngestBatch struct {
 // replacement. Readers therefore see either the complete old generation or
 // the complete new one, never the transient empty state between them.
 func (d *DB) begin(resetRunID int64) (*IngestBatch, error) {
-	tx, err := d.DB.Begin()
+	tx, err := d.beginWrite()
 	if err != nil {
 		return nil, err
 	}
 	if resetRunID != 0 {
-		if err := resetRunEventsTx(tx, resetRunID); err != nil {
+		if err := resetRunEventsTx(tx.Tx, resetRunID); err != nil {
 			_ = tx.Rollback()
 			return nil, fmt.Errorf("reset replacement generation: %w", err)
 		}
@@ -310,7 +310,7 @@ func (b *IngestBatch) Commit() error { return b.tx.Commit() }
 // externally indivisible generation change.
 func (b *IngestBatch) CommitAndPublish(runID int64, lastUpdateTs float64,
 	path string, c Cursor) error {
-	if err := publishCursorTx(b.tx, runID, lastUpdateTs, path, c); err != nil {
+	if err := publishCursorTx(b.tx.Tx, runID, lastUpdateTs, path, c); err != nil {
 		_ = b.tx.Rollback()
 		return err
 	}

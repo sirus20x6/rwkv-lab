@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"trainboard/internal/db"
@@ -84,6 +85,9 @@ type Sampler struct {
 
 	mu     sync.RWMutex
 	latest Snapshot
+
+	// Samples dropped because the datastore's writer was busy; see persist.
+	skipped atomic.Uint64
 }
 
 // New builds a sampler. interval<=0 defaults to 1.5s.
@@ -123,18 +127,36 @@ func (s *Sampler) sampleOnce() {
 	s.persist(snap)
 }
 
+// persist writes the sample to history if the datastore's writer is free, and
+// drops it otherwise. The caller has already published the snapshot in memory,
+// so a dropped sample costs one point on a history sparkline; waiting instead
+// would park the sampler behind a multi-minute ingest transaction and stop the
+// live telemetry the dashboard exists to show. History is downsampled anyway —
+// this row is replaced by the next tick's, which is what makes it droppable.
 func (s *Sampler) persist(snap Snapshot) {
 	if s.db == nil {
 		return
 	}
 	gpuJSON, _ := json.Marshal(snap.GPUs)
 	load := snap.Host.Load1
-	if _, err := s.db.Exec(
+	persisted, err := s.db.TryExec(
 		`INSERT OR REPLACE INTO system_samples(ts,gpu_json,cpu_pct,ram_pct,disk_pct,loadavg) VALUES(?,?,?,?,?,?)`,
-		snap.TS, string(gpuJSON), snap.Host.CPUPct, snap.Host.RAMPct, snap.Host.DiskPct, load); err != nil {
+		snap.TS, string(gpuJSON), snap.Host.CPUPct, snap.Host.RAMPct, snap.Host.DiskPct, load)
+	if err != nil {
 		log.Printf("[sysmon] persist: %v", err)
+		return
+	}
+	if !persisted {
+		// Counted rather than logged: a large rebuild skips these at 1 Hz for
+		// as long as it runs, and per-sample logging would bury the real ones.
+		s.skipped.Add(1)
 	}
 }
+
+// SkippedSamples reports how many samples were dropped because a longer write
+// held the datastore's writer. A nonzero value is normal during an ingest and
+// is the intended behaviour, not an error.
+func (s *Sampler) SkippedSamples() uint64 { return s.skipped.Load() }
 
 // Latest returns a copy of the most recent snapshot.
 func (s *Sampler) Latest() Snapshot {
