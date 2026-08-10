@@ -250,6 +250,25 @@ documentation too.
   `git worktree list` for a branch with recent commits before starting.
 - Commit, open a PR against `main`, wait for green CI, and **merge**. Work that
   is not merged is not done, whatever the card says.
+- Merge with `gh pr merge <n> --squash`, and **not** `--delete-branch`. Delete
+  the local branch by hand afterwards; the remote one is already gone, because
+  `delete_branch_on_merge` is set on the repository.
+
+  `--delete-branch` checks out `main` to do its local cleanup, and `main` is
+  normally held by a sibling worktree — `/thearray/git/moe-mla-card-inputpipe`
+  at the time of writing — so git refuses:
+
+  ```
+  fatal: 'main' is already used by worktree at '/thearray/git/moe-mla-card-inputpipe'
+  ```
+
+  **The merge has already succeeded when that prints.** The message reads as a
+  failed merge, and the tempting responses both cost: re-running the merge finds
+  the PR already merged and produces a different confusing error, and concluding
+  the work did not land sends you off diagnosing a sync problem that does not
+  exist — which is exactly what ten minutes on PR #132 were spent on, from a
+  different cause. The precondition here is permanent, not a race, so every
+  agent meets it eventually.
 - Close the card against its own done-when, item by item. If you landed less
   than it asked for, say so and leave the card open rather than closing it.
 - File a card whenever you notice something worth fixing. A finding that is not
