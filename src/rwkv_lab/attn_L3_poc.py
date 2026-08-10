@@ -32,10 +32,21 @@ sys.modules.setdefault("torchvision", None)
 import os, math, json, time, argparse, torch, torch.nn as nn, torch.nn.functional as F, numpy as np
 from transformers import AutoModelForCausalLM
 from .build_memory_targets import load_token_stream
+from .host_paths import require_host_path, resolve_host_path
 from .rwkv8_deltanet import RWKV8TimeMixDeltaNet
 
-MODEL = "/thearray/git/moe-mla/Qwen3.5-9B-Base"
-DATA = "/thearray/git/babyllm/data/cache/qwen3.6_fwedu_train"
+MODEL_ENV = "MOE_MLA_ATTN_POC_MODEL_DIR"
+MODEL_HISTORICAL_PATH = "/thearray/git/moe-mla/Qwen3.5-9B-Base"
+DATA_ENV = "MOE_MLA_ATTN_POC_TOKENS"
+DATA_HISTORICAL_PATH = "/thearray/git/babyllm/data/cache/qwen3.6_fwedu_train"
+
+# Resolved at import because these are read directly rather than through a
+# flag, so there is no parse step to defer to. resolve_host_path returns the
+# historical path when it exists here and None otherwise, which keeps this
+# host's behaviour identical and leaves the refusal to require_host_path at
+# the point of use -- where it can name the field and the variable.
+MODEL = resolve_host_path(MODEL_ENV, MODEL_HISTORICAL_PATH)
+DATA = resolve_host_path(DATA_ENV, DATA_HISTORICAL_PATH)
 PROJ = ("receptance", "key", "value", "output")   # RADLADS-transferred (frozen in freeze-most)
 
 
@@ -135,8 +146,10 @@ def main():
     jl = open(os.path.join(args.out, "train.jsonl"), "w", buffering=1)
     def emit(rec): jl.write(json.dumps(rec) + "\n")
 
-    print(f"loading {MODEL} ...", flush=True)
-    model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=dtype, low_cpu_mem_usage=True).to(dev).eval()
+    model_dir = require_host_path(
+        MODEL, field="model", env_var=MODEL_ENV)
+    print(f"loading {model_dir} ...", flush=True)
+    model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=dtype, low_cpu_mem_usage=True).to(dev).eval()
     for p in model.parameters():
         p.requires_grad_(False)
     layers = model.model.layers
@@ -148,7 +161,8 @@ def main():
     hd = getattr(model.config, "head_dim", C // n_q)
     print(f"L{L} attention: C={C} n_q={n_q} n_kv={n_kv} head_dim={hd}", flush=True)
 
-    toks = load_token_stream(DATA)
+    toks = load_token_stream(
+        require_host_path(DATA, field="data", env_var=DATA_ENV))
     T = args.seq_len
     rng = np.random.default_rng(0)
     n_all = args.train_windows + args.val_windows

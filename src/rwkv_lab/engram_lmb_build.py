@@ -31,7 +31,14 @@ from typing import Tuple
 
 import numpy as np
 
-DEFAULT_CORPUS = "/thearray/data/engram_tokens.bin"
+from .host_paths import require_host_path, resolve_host_path
+
+CORPUS_ENV = "MOE_MLA_ENGRAM_CORPUS"
+CORPUS_HISTORICAL_PATH = "/thearray/data/engram_tokens.bin"
+
+
+def default_corpus() -> str | None:
+    return resolve_host_path(CORPUS_ENV, CORPUS_HISTORICAL_PATH)
 DEFAULT_VOCAB = 151936
 
 
@@ -156,7 +163,7 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("freq")
-    sp.add_argument("--corpus", default=DEFAULT_CORPUS)
+    sp.add_argument("--corpus", default=default_corpus())
     sp.add_argument("--vocab-size", type=int, default=DEFAULT_VOCAB)
     sp.add_argument("--chunk", type=int, default=50_000_000)
     sp.add_argument("--max-tokens", type=float, default=4e9)
@@ -177,6 +184,10 @@ def main() -> None:
     sp.set_defaults(fn=cmd_alloc)
 
     args = p.parse_args()
+    # Only the freq subcommand takes --corpus; the others never set it.
+    if getattr(args, "corpus", None) is not None or args.cmd == "freq":
+        args.corpus = require_host_path(
+            args.corpus, field="corpus", env_var=CORPUS_ENV, flag="corpus")
     args.fn(args)
 
 

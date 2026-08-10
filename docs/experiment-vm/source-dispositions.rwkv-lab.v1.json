@@ -178,7 +178,7 @@
       ],
       "resume_relevance": "terminal_checkpoint",
       "compatibility_workflow_id": "conversion.attention-l3-poc",
-      "source_sha256": "sha256:9f3ceea46eff1b8122f5932af1b5237853a86fc402b04866ed43252d10eaedf6",
+      "source_sha256": "sha256:5bf3e274bb991394baa61e056a59c7249b7ecbf16656fcecb729a69cf56797f6",
       "family": "conversion_distillation",
       "coverage": "direct",
       "compatibility_workflow_ids": [
@@ -264,7 +264,7 @@
       ],
       "resume_relevance": "none",
       "compatibility_workflow_id": "data.qwen35-conversion-corpus",
-      "source_sha256": "sha256:f7b99a8bdd80236886770eaa11d690ebd23a47140f89dc915cdd9f5952379569",
+      "source_sha256": "sha256:b2a20b05a4b9e01163de11b49000c1839ff19dc3ea85e0605a12aa2ca1d9e2e9",
       "family": "data_cache",
       "coverage": "direct",
       "compatibility_workflow_ids": [
@@ -710,7 +710,7 @@
       ],
       "resume_relevance": "none",
       "compatibility_workflow_id": "data.engram-frequency",
-      "source_sha256": "sha256:8e16b91a665dd5cdc199b1bfb74e59a4c4feefbf9c0327127f53b2da18ed9b79",
+      "source_sha256": "sha256:14be09763ea5b294bbdf83788aac15807ecaa55572e107fcb8cbcbad6378c4a6",
       "family": "data_cache",
       "coverage": "direct",
       "compatibility_workflow_ids": [
