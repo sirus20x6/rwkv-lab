@@ -306,6 +306,82 @@ def test_an_escaping_source_path_is_refused_before_it_is_hashed(tmp_path, sandbo
     assert "must be a normalized repository-relative path" in completed.stdout
 
 
+# --- the words the verdict line prints ------------------------------------
+#
+# Asserted on the message, never on the exit code: on the passing path the two
+# digests are equal, so the label costs nothing and changes no outcome, and on
+# the failing path the exit code is already 1 with either spelling.
+
+
+def _verdict(stdout: str) -> str:
+    lines = [line for line in stdout.splitlines()
+             if line.startswith("disposition pins (")]
+    assert len(lines) == 1, f"expected exactly one verdict line:\n{stdout}"
+    return lines[0]
+
+
+def test_a_clean_catalog_names_one_tree_digest(sandbox):
+    """When the two folds agree there is only one digest and no ambiguity."""
+    completed = _run(sandbox, "--check")
+    verdict = _verdict(completed.stdout)
+    document = json.loads(sandbox[1].read_text(encoding="utf-8"))
+    expected = generator.tree_digest(document["entries"])
+    assert f"4 sources, tree digest {expected}" in verdict, verdict
+
+
+def test_a_drifted_catalog_says_which_digest_is_which(sandbox):
+    """The regression proof: this sentence would have caught the original slip.
+
+    The line printed `tree digest {computed}` -- the fold over pins recomputed
+    from the bytes on disk, which is the digest the catalog *ought* to declare.
+    On a drifted run that is not the catalog's own digest, and the drifted run
+    is the one whose line gets quoted into a card. Both are now named by where
+    they came from.
+    """
+    root, stored = sandbox
+    declared = generator.tree_digest(
+        json.loads(stored.read_text(encoding="utf-8"))["entries"])
+    relative = json.loads(stored.read_text(encoding="utf-8"))["entries"][0][
+        "source_path"]
+    (root / relative).write_text("# edited\n", encoding="utf-8")
+
+    completed = _run((root, stored), "--check")
+    assert completed.returncode == 1, completed.stdout
+    verdict = _verdict(completed.stdout)
+    document = json.loads(stored.read_text(encoding="utf-8"))
+    _, _, refreshed = generator.recompute(document, root)
+    computed = generator.tree_digest(refreshed["entries"])
+
+    assert declared != computed, "the fixture did not move a pin"
+    assert f"as read, the catalog's pins fold to {declared}" in verdict, verdict
+    assert f"the bytes on disk fold to {computed}" in verdict, verdict
+    assert f"tree digest {computed}" not in verdict, verdict
+
+
+@pytest.mark.parametrize(
+    ("count", "expected"),
+    [
+        (0, "0 sources, tree digest sha256:abc"),
+        (1, "1 source, tree digest sha256:abc"),
+        (3, "3 sources, tree digest sha256:abc"),
+    ],
+    ids=["none", "one", "several"],
+)
+def test_the_verdict_line_reads_correctly_at_every_count(count, expected):
+    """Singular and plural, at 0, 1 and n.
+
+    "1 sources" is the shape of error that makes a reader distrust the digest
+    printed beside it, and this count moves whenever a source is classified.
+    """
+    assert generator.digest_summary("sha256:abc", "sha256:abc", count) == expected
+
+
+def test_the_drifted_form_is_also_singular_at_one():
+    assert generator.digest_summary("sha256:a", "sha256:b", 1) == (
+        "1 source; as read, the catalog's pins fold to sha256:a; "
+        "the bytes on disk fold to sha256:b")
+
+
 def test_check_mode_passes_on_the_real_catalogs():
     for catalog in CATALOGS:
         completed = subprocess.run(

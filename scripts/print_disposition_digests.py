@@ -149,6 +149,31 @@ def recompute(
     return drifted, refused, refreshed
 
 
+def digest_summary(declared: str, computed: str, count: int) -> str:
+    """Say which tree digest the number is, in the line that gets quoted.
+
+    This sentence used to read `{n} sources, tree digest {computed}`, where
+    `computed` is the fold over the pins recomputed from the bytes on disk --
+    the digest the catalog *ought* to declare, not the one it does. On a
+    passing run the two are equal and the label costs nothing. On a drifted run
+    they differ, and the drifted run is the one whose line gets pasted into a
+    card; a reader records the recomputed value as the catalog's current tree
+    digest, and this repository already has a history of plausible-looking
+    digests that match nothing.
+
+    So the two are printed side by side exactly when they differ, each named by
+    where it came from. `as read` rather than `declares` because `--write` may
+    already have replaced the pins on disk by the time this line prints.
+    """
+    noun = "source" if count == 1 else "sources"
+    if declared == computed:
+        return f"{count} {noun}, tree digest {computed}"
+    return (
+        f"{count} {noun}; as read, the catalog's pins fold to {declared}; "
+        f"the bytes on disk fold to {computed}"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -186,6 +211,10 @@ def main() -> int:
     document = json.loads(arguments.catalog.read_text(encoding="utf-8"))
     drifted, refused, refreshed = recompute(document, arguments.root)
     computed = tree_digest(refreshed["entries"])
+    # The fold over the pins as checked in, which is what the C++ loader will
+    # compute from this document. It differs from `computed` exactly when a
+    # source's bytes have moved, which is the case whose line gets quoted.
+    declared = tree_digest(document["entries"])
     # A catalog must not store this. It is derivable from entries, so a stored
     # copy carries no information, and it is the one line two independent
     # changes to the same scope are both forced to rewrite. Refusing a document
@@ -223,7 +252,7 @@ def main() -> int:
     print(verdict_line(
         f"disposition pins ({arguments.catalog.name})",
         problems,
-        f"{len(refreshed['entries'])} sources, tree digest {computed}",
+        digest_summary(declared, computed, len(refreshed["entries"])),
     ))
     if refused:
         return 1

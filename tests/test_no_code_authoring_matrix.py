@@ -127,3 +127,85 @@ def test_unsupported_request_must_fail_at_an_explicit_boundary(tmp_path, matrix)
     result = run_validator(write(tmp_path, matrix))
     assert result.returncode == 1
     assert "new_implementation_required" in result.stdout
+
+
+# --- the words the verdict line prints ------------------------------------
+#
+# Asserted on the message, never on the exit code. The defect is a correct
+# computation described loosely: the validator is green with either spelling,
+# so only a wording assertion can catch it coming back.
+
+sys.path.insert(0, str(REPOSITORY))
+from scripts.validate_no_code_authoring_matrix import (  # noqa: E402
+    declared_families,
+    population_summary,
+)
+
+
+def verdict(stdout: str) -> str:
+    lines = [line for line in stdout.splitlines()
+             if line.startswith("no-code authoring matrix:")]
+    assert len(lines) == 1, f"expected exactly one verdict line:\n{stdout}"
+    return lines[0]
+
+
+def test_the_verdict_line_calls_scenarios_scenarios(matrix):
+    """It used to call a count of scenario objects a count of families.
+
+    Nothing enforces one scenario per family, and the sibling receipt gate
+    calls this same quantity "declared scenarios", so a second scenario in an
+    existing family silently overstated family coverage -- the number this gate
+    exists to police. Both populations are now printed, and the expected values
+    are read out of the document so adding a scenario moves this test with the
+    change.
+    """
+    result = run_validator(MATRIX)
+    line = verdict(result.stdout)
+    scenarios = matrix["scenarios"]
+    variants = sum(len(item.get("variants", [])) for item in scenarios)
+    assert f"{len(scenarios)} scenarios over " in line, line
+    assert f"{len(declared_families(scenarios))} families" in line, line
+    assert f"{variants} variants" in line, line
+
+
+def test_the_verdict_line_separates_scenarios_from_families(tmp_path, matrix):
+    """The regression proof: this sentence would have caught the original slip.
+
+    A second scenario in an existing family makes the two counts differ. The
+    old line printed the scenario count under the word "families" and would
+    have claimed five families over a document declaring four.
+    """
+    duplicate = copy.deepcopy(scenario(matrix, "rwkv_lm"))
+    duplicate["id"] = duplicate["id"] + "-second"
+    matrix["scenarios"].append(duplicate)
+
+    result = run_validator(write(tmp_path, matrix))
+    line = verdict(result.stdout)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "5 scenarios over 4 families" in line, line
+
+
+@pytest.mark.parametrize(
+    ("scenarios", "variants", "expected"),
+    [
+        ([], 0, "0 scenarios over 0 families and 0 variants"),
+        (
+            [{"family": "rwkv_lm"}], 1,
+            "1 scenario over 1 family and 1 variant",
+        ),
+        (
+            [{"family": "rwkv_lm"}, {"family": "mageflow"}], 3,
+            "2 scenarios over 2 families and 3 variants",
+        ),
+    ],
+    ids=["none", "one", "several"],
+)
+def test_the_verdict_line_reads_correctly_at_every_count(
+    scenarios, variants, expected
+):
+    """Singular and plural, at 0, 1 and n.
+
+    "1 families" is the shape of error that makes a reader distrust the rest of
+    the line, and every count here moves as the matrix grows.
+    """
+    assert population_summary(scenarios, variants) == expected

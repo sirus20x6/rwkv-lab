@@ -271,6 +271,56 @@ def staleness(
     return now_wired, missing
 
 
+def population_summary(
+    tally: dict[str, int],
+    unwired: list[str],
+    undeclared: list[str],
+    reasons: dict[str, str],
+    stale: int,
+) -> str:
+    """Say which population each number counts, in the line that gets quoted.
+
+    This sentence used to read ``{len(unwired)} unwired, {len(reasons)}
+    explained exclusions``. ``unwired`` is *every* header no production
+    translation unit reaches, explained and unexplained alike; ``reasons`` is
+    the allowlist, which ``staleness()`` forces to be a subset of it. So on a
+    passing run the two are the same five modules counted twice, and the line
+    reads as a five-module backlog standing beside five excuses. The number a
+    reader wants -- unwired and *unexplained* -- is a third variable,
+    ``undeclared``, which never reached this line at all. It is zero on a
+    passing run, which is exactly when one number under two names is
+    indistinguishable from the truth, and exactly why it is printed.
+
+    The three header counts partition every header in the tree, in this order,
+    so they always sum to the total and a reader can check that they do:
+
+    - unwired and unexplained: the failure this gate exists to catch;
+    - unwired but explained: an allowlist entry states why, a recorded decision;
+    - wired: some production translation unit reaches it, transitively or not.
+
+    The allowlist is reported separately because it is a different population
+    -- a countdown of entries, not a count of headers -- and an entry that
+    stopped applying is the other way this gate fails.
+    """
+    headers = tally["headers"]
+    unexplained = len(undeclared)
+    explained = len(unwired) - unexplained
+    wired = headers - len(unwired)
+    entries = len(reasons)
+    # "translation units" stays plural unconditionally: it is the head noun of
+    # a coordination over two counts, and any coordination containing a zero
+    # takes the plural, so there is no count at which the singular is right.
+    return (
+        f"{headers} {'header' if headers == 1 else 'headers'} over "
+        f"{tally['production']} production and {tally['tests']} test "
+        "translation units; "
+        f"{unexplained} unwired and unexplained, "
+        f"{explained} unwired but explained in {DECLARATION}, "
+        f"{wired} wired; {entries} allowlist "
+        f"{'entry' if entries == 1 else 'entries'}, {stale} no longer applicable"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -326,9 +376,9 @@ def main() -> int:
     print(verdict_line(
         "unwired module gate",
         problems,
-        f"{tally['headers']} headers over {tally['production']} production and "
-        f"{tally['tests']} test translation units, "
-        f"{len(unwired)} unwired, {len(reasons)} explained exclusions",
+        population_summary(
+            tally, unwired, undeclared, reasons, len(now_wired) + len(missing)
+        ),
     ))
     return 1 if problems else 0
 

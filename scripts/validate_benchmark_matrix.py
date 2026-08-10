@@ -63,6 +63,30 @@ FORBIDDEN_KEYS = {
 }
 
 
+def population_summary(
+    fixtures: int, families: set, transition_families: set
+) -> str:
+    """Say which population each number counts, in the line that gets quoted.
+
+    The third clause of this sentence used to read `{n} with curriculum
+    transitions`, sitting immediately after "fixtures ... families". It counts
+    family *names*, not fixtures, so one fixture and ten fixtures in the same
+    family both printed `1` -- and the reading a position after "fixtures"
+    invites is the fixture one. Naming the population costs three words and the
+    number stops being ambiguous.
+
+    The participle ("declaring") rather than a verb is deliberate: the count
+    varies, and "1 of those families declare" is the shape of error that makes
+    a reader distrust the rest of the line.
+    """
+    return (
+        f"{fixtures} {'fixture' if fixtures == 1 else 'fixtures'} over "
+        f"{len(families)} {'family' if len(families) == 1 else 'families'}, "
+        f"{len(transition_families)} of those families declaring a "
+        "curriculum-stage transition"
+    )
+
+
 def main() -> int:
     path = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT
     document = json.loads(path.read_text())
@@ -109,7 +133,13 @@ def main() -> int:
                 failures.append(f"{identifier}: reserved key '{key}'")
 
         family = fixture.get("family")
-        families.add(family)
+        # A fixture with no `family` key declares no family. Adding `None` here
+        # inflated the family count this file's verdict line prints -- the file
+        # already knew, and subtracted `{None}` again before reporting
+        # unreviewed families. Guarding on `None` specifically rather than on
+        # `str` keeps a non-string family reportable exactly as it was.
+        if family is not None:
+            families.add(family)
 
         effect_class = fixture.get("effect_class")
         if effect_class not in evidence:
@@ -166,7 +196,8 @@ def main() -> int:
     missing = REQUIRED_FAMILIES - families
     for family in sorted(missing):
         failures.append(f"no benchmark fixture covers family '{family}'")
-    unexpected = families - REQUIRED_FAMILIES - {None}
+    # No `- {None}` any more: nothing puts `None` in this set now.
+    unexpected = families - REQUIRED_FAMILIES
     for family in sorted(unexpected):
         failures.append(f"fixture declares unreviewed family '{family}'")
 
@@ -182,8 +213,7 @@ def main() -> int:
     print(verdict_line(
         "benchmark matrix",
         failures,
-        f"{len(fixtures)} fixtures over {len(families)} families, "
-        f"{len(transition_families)} with curriculum transitions",
+        population_summary(len(fixtures), families, transition_families),
     ))
     return 1 if failures else 0
 

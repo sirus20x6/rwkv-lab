@@ -137,6 +137,43 @@ def _recipe_field(value: object) -> bool:
     )
 
 
+def declared_families(scenarios: object) -> set[str]:
+    """The families the scenarios actually declare.
+
+    One function rather than two so the count the verdict line prints cannot
+    disagree with the set `REQUIRED_FAMILIES` is checked against -- that
+    disagreement is the whole defect this is here to close.
+    """
+    if not isinstance(scenarios, list):
+        return set()
+    return {
+        scenario["family"]
+        for scenario in scenarios
+        if isinstance(scenario, Mapping) and isinstance(scenario.get("family"), str)
+    }
+
+
+def population_summary(scenarios: object, variants: int) -> str:
+    """Say which population each number counts, in the line that gets quoted.
+
+    This sentence used to read `{len(scenarios)} families and {variants}
+    variants` over a count of *scenario* objects. Nothing enforces one scenario
+    per family -- the sibling gate `validate_no_code_authoring_receipt.py`
+    calls this same quantity "declared scenarios" -- so a second scenario in an
+    existing family silently overstated family coverage, which is the number
+    this gate exists to police. The two populations are printed separately
+    because they can genuinely differ, and a reader who sees them equal today
+    can see that they are equal rather than having to assume it.
+    """
+    count = len(scenarios) if isinstance(scenarios, list) else 0
+    families = len(declared_families(scenarios))
+    return (
+        f"{count} {'scenario' if count == 1 else 'scenarios'} over "
+        f"{families} {'family' if families == 1 else 'families'} and "
+        f"{variants} {'variant' if variants == 1 else 'variants'}"
+    )
+
+
 def validate(document: Mapping[str, object]) -> list[str]:
     failures = _walk_reserved_keys(document)
     if document.get("api_version") != "trainvm.no-code-authoring-matrix/v1":
@@ -173,7 +210,7 @@ def validate(document: Mapping[str, object]) -> list[str]:
         scenarios = []
 
     seen_ids: set[str] = set()
-    families: set[str] = set()
+    families = declared_families(scenarios)
     for scenario in scenarios:
         if not isinstance(scenario, Mapping):
             failures.append("scenario entries must be objects")
@@ -184,8 +221,6 @@ def validate(document: Mapping[str, object]) -> list[str]:
         seen_ids.add(identifier)
 
         family = scenario.get("family")
-        if isinstance(family, str):
-            families.add(family)
         if family not in REQUIRED_FAMILIES:
             failures.append(f"{identifier}: unreviewed family {family!r}")
             continue
@@ -278,7 +313,7 @@ def main() -> int:
         verdict_line(
             "no-code authoring matrix",
             failures,
-            f"{len(scenarios)} families and {variants} variants",
+            population_summary(scenarios, variants),
         )
     )
     return 1 if failures else 0
