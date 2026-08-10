@@ -528,6 +528,36 @@ cards record no `result_pr_url`.** An earlier count put it at 56 of 126, so the
 convention is followed more often than it was and is still missed about a fifth
 of the time — recompute rather than quoting either number.
 
+**`--suggest` proposes a PR for the cards recording none**, by title overlap
+against a saved merged-PR listing:
+
+```bash
+gh pr list --state merged --limit 400 --json number,title > merged.json
+python scripts/card_done_pr_check.py --board board.json --suggest merged.json
+```
+
+It prints the score, **the runner-up score**, and both titles. The runner-up is
+the field to read: `0.56 (next 0.08)` is an isolated match, `0.44 (next 0.40)`
+is one of a crowd and needs the diff. Output is advisory and the run exits 0 —
+a suggestion that could fail a check would eventually be applied unread, which
+is the failure this tool exists to stop.
+
+Two methods were measured against each other on the real board before this one
+was kept:
+
+- **Timing correlation** — a PR merged near the card's `updated_at` — is
+  useless here and confidently so. 20 of 33 cards had several candidates inside
+  a 45-minute window, one had **22**, and of the three it matched uniquely
+  **two were wrong**. The board and the merge queue both move in bursts.
+- **Title overlap** proposes 7 for the same population, and two of them
+  independently reproduce matches found by searching PR *bodies* for the card
+  id. Agreement between two unrelated signals is the strongest evidence short
+  of reading the diff; a single confident signal is what timing offered.
+
+Do not lower `--min-overlap` below its 0.30 default to reach more cards. At
+0.30 it already produces one near-tie, and below that it degrades into the
+timing correlation: plenty of matches, no way to tell which are real.
+
 ### Check mergeability BEFORE you read the checks
 
 ```bash

@@ -22,6 +22,9 @@ from scripts.card_done_pr_check import (  # noqa: E402
     NO_PR,
     check_card,
     is_done,
+    suggest,
+    title_overlap,
+    title_tokens,
     main,
     pull_request_number,
     report_lines,
@@ -30,8 +33,9 @@ from scripts.card_done_pr_check import (  # noqa: E402
 MERGED_URL = "https://github.com/sirus20x6/rwkv-lab/pull/245"
 
 
-def done_card(identifier: str, url: str | None = None, **extra) -> dict:
-    card = {"id": identifier, "title": "a card", "claim_status": "done"}
+def done_card(identifier: str, url: str | None = None, title: str = "a card",
+              **extra) -> dict:
+    card = {"id": identifier, "title": title, "claim_status": "done"}
     if url is not None:
         card["result_pr_url"] = url
     card.update(extra)
@@ -140,3 +144,82 @@ def test_a_bare_list_payload_is_accepted(tmp_path):
     board = tmp_path / "board.json"
     board.write_text(json.dumps([done_card("card-1", MERGED_URL)]))
     assert main(["--board", str(board)], lookup=lambda _n: "MERGED") == 0
+
+
+# --- suggestion mode -------------------------------------------------------
+
+
+def pull(number: int, title: str) -> dict:
+    return {"number": number, "title": title}
+
+
+def test_stopwords_alone_never_produce_a_match():
+    """Without this the method collapses into noise.
+
+    Two titles that share only "the", "of" and "for" describe nothing in
+    common. If those counted, every card would match every PR weakly and the
+    ranking would be meaningless — the same worthlessness measured for timing
+    correlation, which was wrong for two of the three cards it matched.
+    """
+    assert title_overlap("The state of the run", "For the sake of it") == 0.0
+    assert title_tokens("the a an of to for") == frozenset()
+
+
+def test_an_identical_title_scores_one_and_an_unrelated_one_scores_zero():
+    assert title_overlap("Remap the vision keys", "Remap the vision keys") == 1.0
+    assert title_overlap("Remap the vision keys", "Bound the skip count") == 0.0
+
+
+def test_the_runner_up_is_reported_so_a_crowded_field_is_visible():
+    """A 0.44 with a 0.40 rival is one of a crowd; a 0.56 with 0.08 is not.
+
+    Reporting only the winner hides the difference a reader needs, and this is
+    the field that made the real board's weakest candidate identifiable.
+    """
+    pulls = [pull(1, "Serve registries from opt so updates need no root"),
+             pull(2, "Serve registries from opt so updates need less root"),
+             pull(3, "Something entirely different about kernels")]
+    hit = suggest({"title": "Move registries out of etc so updates need no root"},
+                  pulls, minimum=0.1)
+    assert hit["number"] == 1
+    assert hit["runner_up"] > 0.3          # the near-duplicate is visible
+    assert hit["runner_up"] < hit["score"]
+
+
+def test_a_match_below_the_floor_is_not_proposed():
+    pulls = [pull(1, "Remap the Qwen vision checkpoint keys at load")]
+    card = {"title": "Bound the runtime skip count"}
+    assert suggest(card, pulls, minimum=0.30) is None
+
+
+def test_a_single_candidate_reports_a_zero_runner_up_rather_than_failing():
+    hit = suggest({"title": "Remap vision keys"},
+                  [pull(1, "Remap vision keys")], minimum=0.1)
+    assert hit["runner_up"] == 0.0
+
+
+def test_suggest_skips_cards_that_already_record_a_pull_request(tmp_path, capsys):
+    board = tmp_path / "board.json"
+    board.write_text(json.dumps({"cards": [
+        done_card("card-has", MERGED_URL, title="Remap vision keys"),
+        done_card("card-none", title="Remap vision keys"),
+    ]}))
+    pulls = tmp_path / "pulls.json"
+    pulls.write_text(json.dumps([pull(96, "Remap vision keys")]))
+
+    assert main(["--board", str(board), "--suggest", str(pulls)]) == 0
+    out = capsys.readouterr().out
+    assert "card-none" in out
+    assert "card-has" not in out
+    assert "1 proposed for 1 cards recording no PR, of 2 done" in out
+
+
+def test_suggest_exits_zero_even_when_it_proposes(tmp_path):
+    """Advisory, deliberately. A suggestion that could fail a run would
+    eventually be applied unread, which is the failure this check exists to
+    stop — a result_pr_url that reads as evidence and is not."""
+    board = tmp_path / "board.json"
+    board.write_text(json.dumps({"cards": [done_card("card-1", title="Remap vision keys")]}))
+    pulls = tmp_path / "pulls.json"
+    pulls.write_text(json.dumps([pull(96, "Remap vision keys")]))
+    assert main(["--board", str(board), "--suggest", str(pulls)]) == 0
