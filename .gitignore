@@ -90,3 +90,8 @@ models/cache/
 # files of stale run output, and that is worth ruling out by shape rather than
 # relying on extension rules to keep coincidentally covering it.
 /evidence/
+
+# Per-worktree ownership marker written by scripts/worktree_sweep_check.py --claim.
+# Ignored so it never appears in the untracked-files check a sweep runs before
+# removing a worktree, where it would read as content worth preserving.
+.claude-agent-owner
