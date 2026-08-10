@@ -269,3 +269,33 @@ def test_unsupported_request_fails_before_a_lease(tmp_path, receipt):
     result = run_validator(write_receipt(tmp_path, receipt))
     assert result.returncode == 1
     assert "unsupported probe acquired an accelerator lease" in result.stdout
+
+
+def test_the_validator_states_a_verdict_in_both_directions(tmp_path, receipt, matrix):
+    """Its last line must say which way it went, and differ between outcomes.
+
+    `tests/test_gate_verdict.py` runs every gate that uses `verdict_line` and
+    checks this end to end, but only for gates that take no arguments. This one
+    needs a receipt and a matrix, so it is named in that file's
+    NEEDS_ARGUMENTS map as the place the property is asserted -- and this is
+    that assertion. Without it the pointer was decoration: the map said "the
+    verdict is checked over there" while nothing over there checked it, which is
+    exactly the shape both files exist to prevent.
+    """
+    good, bad = tmp_path / "ok", tmp_path / "bad"
+    good.mkdir()
+    bad.mkdir()
+
+    passing = run_validator(write_receipt(good, receipt))
+    assert passing.returncode == 0, passing.stdout + passing.stderr
+    passing_last = passing.stdout.strip().splitlines()[-1]
+
+    failing = run_validator(write_receipt(bad, matrix))
+    assert failing.returncode == 1
+    failing_last = failing.stdout.strip().splitlines()[-1]
+
+    assert "PASSED" in passing_last and "FAILED" not in passing_last
+    assert "FAILED" in failing_last
+    assert passing_last != failing_last, (
+        "a reader who sees only the final line must be able to tell the two "
+        "runs apart")
