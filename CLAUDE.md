@@ -617,6 +617,70 @@ The cost of not having this written down was five days: three cards recorded
 work as complete, citing shas, that had never reached main, and nobody noticed
 because the obvious check silently does not work here.
 
+### A branch that is "ahead" is usually stale, not stranded
+
+The checks above answer "did this commit land". This one answers the question
+that usually comes first and is easier to get wrong: **is there anything on
+this branch worth landing at all?**
+
+`git rev-list --count origin/main..<branch>` is the tempting instrument and it
+is worthless here, for the same reason ancestry is. A branch that merged main
+and then had its own work land through a squashed pull request reports commits
+ahead **forever**. "ahead=5" is not five pieces of work; it can be three merge
+commits and two commits that shipped weeks ago.
+
+`git diff origin/main...<branch>` — **three dots** — is worse, because it looks
+like a diff against main and is not. It diffs from the *merge-base*, so on a
+branch that last merged main long ago it describes a tree that no longer
+exists, and it does so in exactly the format you would use to review a change.
+
+**Use two dots, and read the deletion count before anything else:**
+
+```bash
+git diff origin/main <branch> --shortstat
+```
+
+A branch with real unlanded work shows insertions and few deletions. A stale
+one shows a number like these, all measured on 2026-08-10:
+
+| branch | reported "ahead" | `git diff origin/main <branch>` |
+| --- | --- | --- |
+| `integrate` | 5 | 184 files, 2,787 insertions, **36,948 deletions** |
+| `card/qwen36-declarative-migration` | 1 | 408 files, 4,961 insertions, **91,130 deletions** |
+
+Neither had anything unlanded. Both commits on `integrate` were already on main
+— one as `eac8fc4c` via PR #169, the other byte-identical, confirmed with `git
+diff --quiet origin/main HEAD -- <path>`. `card/qwen36-declarative-migration`'s
+single commit shipped through PR #99. **Merging either would have reverted tens
+of thousands of lines of main**, cleanly, including most of the gate scripts
+listed earlier in this file. That is the `1c91acd` hazard reached from a
+different direction: the branch is not carrying work, it is carrying an old
+tree, and git will apply it without complaint.
+
+Three related instruments failed in the same hour, all in the flattering
+direction:
+
+- **A same-path existence check**, defeated by a moved file.
+  `hf-multimodal-sft.recipe-profiles.v1.json` reads as absent at
+  `docs/experiment-vm/` and is present at `docs/experiment-vm/examples/`.
+  Search the basename across the tree, not the path.
+- **An identifier grep with no neighbourhood guard.**
+  `transformer_mla_evaluation_slots` is genuinely absent from main — and so is
+  every other `*_evaluation_slots` symbol, so the zero was guaranteed before
+  the question was asked. The guard the section above prescribes is not
+  optional; when the neighbourhood count is **zero**, your identifier proved
+  nothing at all.
+- Reading the code settled it: main wraps that composition in
+  `with_evaluation_suite()`, a shared helper **ten** compositions use. The
+  commit added four slots inline for one family; main generalised them across
+  ten. Superseded under another name, with the neighbourhood grown past what
+  the commit contained.
+
+Four "stranded work" findings were filed from count-based instruments that
+night and **three were false**. The one that was real looked identical from the
+outside. So do not treat the two-dot diff as a formality to skip when a count
+already told you what you expected to hear — the count is what will be wrong.
+
 ### Before you cherry-pick anything a card calls "stranded"
 
 A sweep of all 239 cards on 2026-08-09 found 173 citing a sha: 125 present on
