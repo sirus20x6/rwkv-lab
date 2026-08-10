@@ -397,6 +397,28 @@ jobs:
         with:
           go-version-file: dashboard/go.mod
           cache-dependency-path: dashboard/go.sum
+      # `go vet` has run here since this job existed; `gofmt` never has, and
+      # four files under dashboard/ were unformatted on pristine main when this
+      # was added. Nothing reported it, because vet and gofmt answer different
+      # questions -- vet looks for suspicious constructs, gofmt for layout, and
+      # a file can be flawless to one and unformatted to the other forever.
+      #
+      # `gofmt -l` prints the offending paths and exits 0 either way, so the
+      # exit code has to be built from its output. A bare `gofmt -l ./...` step
+      # would be a check that cannot fail -- the same shape as the `| tee`
+      # without pipefail two steps below, which let a failing Go test leave
+      # this job green.
+      - name: Formatted
+        working-directory: dashboard
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "FAIL: gofmt would rewrite these files:"
+            echo "$unformatted"
+            echo "Run: gofmt -w \$(gofmt -l .)"
+            exit 1
+          fi
+          echo "gofmt: PASSED — every Go source under dashboard/ is formatted"
       - name: Build and vet
         working-directory: dashboard
         run: |

@@ -159,11 +159,11 @@ func ObservabilityFromCompiledPlan(plan CompiledPlanView) (ObservabilityDeclarat
 }
 
 type WorkerHeartbeatPoint struct {
-	Sequence       uint64 `json:"sequence"`
-	RunID          string `json:"run_id"`
-	NodeID         string `json:"node_id"`
-	AttemptID      string `json:"attempt_id"`
-	Phase string `json:"phase"`
+	Sequence  uint64 `json:"sequence"`
+	RunID     string `json:"run_id"`
+	NodeID    string `json:"node_id"`
+	AttemptID string `json:"attempt_id"`
+	Phase     string `json:"phase"`
 	// ExecutionPhase is "compile", "warmup", or empty outside a phase. Unlike
 	// Phase, which is a free-text operator label, the authority accepted this
 	// only against the attempt's immutable phase requests.
@@ -361,7 +361,7 @@ func heartbeatFromEvent(event Event) (WorkerHeartbeatPoint, error) {
 		AttemptID: event.AttemptID, Phase: payload.Phase,
 		ExecutionPhase: payload.ExecutionPhase,
 		OptimizerStep:  *event.OptimizerStep, ObservedAtNS: payload.ObservedAtNS,
-		AcceptedAtNS:   event.WallTimeNS, WorkerSequence: event.WorkerSequence,
+		AcceptedAtNS: event.WallTimeNS, WorkerSequence: event.WorkerSequence,
 	}, nil
 }
 

@@ -55,10 +55,10 @@ type evaluationMilestone struct {
 	// The universal pre-mutation evidence for this milestone, when the run
 	// publishes it. Its presence at the attempt baseline is what let the
 	// controller record any optimizer step at all beyond that baseline.
-	EvalExamplesArtifactID   string   `json:"eval_examples_artifact_id,omitempty"`
-	EvalExamplesSeriesID     string   `json:"eval_examples_series_id,omitempty"`
-	EvalExampleCount         int      `json:"eval_example_count,omitempty"`
-	EvalExamplesCheckpointID string   `json:"eval_examples_checkpoint_artifact_id,omitempty"`
+	EvalExamplesArtifactID   string `json:"eval_examples_artifact_id,omitempty"`
+	EvalExamplesSeriesID     string `json:"eval_examples_series_id,omitempty"`
+	EvalExampleCount         int    `json:"eval_example_count,omitempty"`
+	EvalExamplesCheckpointID string `json:"eval_examples_checkpoint_artifact_id,omitempty"`
 }
 
 type evaluationTimelineResponse struct {
