@@ -338,6 +338,30 @@ So:
 - **"Do not re-derive" means "do not redo the reasoning", never "do not check
   the facts".** The reasoning is usually still good when the numbers have moved;
   that is the common case, and it is why the block is worth writing at all.
+- **Never write a pin consequence you have not run.** "This needs a new 166th
+  disposition entry, which moves `entries().size() == 165U` and the
+  `reviewed_classification_digest`" appeared on a card and was wrong in both
+  halves: PR #208 added `src/rwkv_lab/rwkv_optimizer_finetune.py` with **no**
+  disposition entry, the catalog still holds 165, and every pin check stayed
+  green. Following it would have added an entry for a file that exists only in
+  this repository — a dangling path in the legacy tree, landing green and
+  breaking whoever first sets `TRAINVM_LEGACY_SOURCE_ROOT`. The section below
+  on adding a script explains why. The check costs seconds and needs no
+  compiler:
+
+  ```bash
+  python scripts/ci_compatibility_pin_gate.py
+  for c in docs/experiment-vm/source-dispositions.*.v1.json; do
+    python scripts/print_disposition_digests.py "$c" --check
+  done
+  ```
+
+  Run it *before* the sentence goes on the card, and the claim is either true
+  or it is not written. This is worth calling out separately from the rule
+  above because a pin claim reads as mechanical fact rather than as a
+  measurement — nobody re-checks an assertion about a digest — and the same
+  sentence will otherwise recur on every card that adds a file under
+  `scripts/` or `src/rwkv_lab/`.
 
 Suspect staleness hardest when a card names a *file path* — paths move and get
 superseded — and when its parent card has other children, because a sibling may
@@ -1000,13 +1024,41 @@ The enumeration is a property of the **legacy** `/thearray/git/moe-mla` checkout
 at the revision each catalog pins, not of this repository. Measured against
 `origin/main` at `3d39122`:
 
-- `source-dispositions.scripts.v1.json` pins `git-sha1:bae678b9`, and its 128
-  entries are *exactly* the 128 top-level `scripts/*.{py,sh}` files in the legacy
-  tree at that revision — set equality, and zero dangling entries. The same
-  scope in this repository holds 146 files, so **18 are unclassified**, among
-  them `scripts/acceptance.sh` and `scripts/generate_trainvm_proto.sh`.
-- `source-dispositions.rwkv-lab.v1.json` has the same shape: 165 entries against
-  171 files in scope here, so 6 are unclassified.
+- `source-dispositions.scripts.v1.json` pins `git-sha1:bae678b9`. Its entries
+  were *exactly* the top-level `scripts/*.{py,sh}` files in the legacy tree at
+  that revision — set equality, zero dangling entries — when that was last
+  measured at 128 entries. It now holds **129**, so one entry has been added
+  since and the set-equality claim against the legacy tree has not been
+  re-checked. The same scope in this repository holds **160** files, so
+  **31 are unclassified**, among them `scripts/acceptance.sh` and
+  `scripts/generate_trainvm_proto.sh`.
+- `source-dispositions.rwkv-lab.v1.json` has the same shape: **165** entries
+  against **173** files in scope here, so **8 are unclassified**.
+
+Those figures were 128/146/18 and 165/171/6 when this section was written, and
+nothing reports the drift — so recompute rather than quoting them. Both scopes
+are declared in the documents themselves (`source_scope`, and note
+`recursive: false` for both, so subdirectories are out of scope and a recursive
+count overstates the gap badly):
+
+```bash
+python - <<'PY'
+import json, pathlib
+for name in ("scripts", "rwkv-lab", "dashboard"):
+    d = json.loads(pathlib.Path(
+        f"docs/experiment-vm/source-dispositions.{name}.v1.json").read_text())
+    scope = d["source_scope"]; root = pathlib.Path(scope["prefix"])
+    exts = set(scope["extensions"])
+    walk = root.rglob("*") if scope.get("recursive") else root.glob("*")
+    files = [f for f in walk if f.suffix in exts and f.is_file()]
+    print(name, "entries", len(d["entries"]), "files", len(files),
+          "unclassified", len(files) - len(d["entries"]))
+PY
+```
+
+**The scripts gap grew from 18 to 31 while one entry was added.** That is the
+direction to watch: the unclassified count is not a backlog draining down, it
+rises every time a card adds a script, which is most of them.
 - `source-dispositions.dashboard.v1.json` pins a different revision and is
   complete for this tree.
 
