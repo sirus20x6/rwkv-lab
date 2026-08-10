@@ -688,7 +688,8 @@ def _permissiveness(
         if not declared and arguments.kwarg is not None:
             # A `**kwargs` double cannot express "required", so this check
             # cannot conclude for one. That is a stated limit rather than a
-            # silent pass -- see `test_delegating_doubles_are_named`.
+            # silent pass -- `test_catch_all_double_members_are_enumerated`
+            # holds the exact list of members it applies to.
             continue
         problems.append(
             f"the runtime requires the keyword {name!r} and the double "
