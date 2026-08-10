@@ -1191,6 +1191,62 @@ plus 24 honest classifications. That is filed as its own card. Until it lands, d
 not budget for a scripts-enumeration tax, and do not rely on the gate to catch an
 unclassified script.
 
+## Do not `pip install -e .` on the training host
+
+`pyproject.toml` declares `transformers>=4.57`. The host runs **4.52.4** — below
+its own package's floor. That is not drift to tidy up in passing, and running
+the install that would "fix" it changes model behaviour.
+
+`fla/models/utils.py` ends like this, byte-identically in flash-linear-attention
+**0.4.1 and 0.5.2** (both wheels read, not inferred):
+
+```python
+_TF_VERSION = transformers.__version__
+_NEED_NEW   = "4.53.3"
+...
+if version.parse(_TF_VERSION) > version.parse(_NEED_NEW):
+    class Cache(FLACache): ...        # layers-based, per-layer token tally
+else:
+    class Cache(LegacyFLACache): ...  # self.states, scalar _seen_tokens
+```
+
+So **`transformers` 4.53.3 is a behavioural switch inside a dependency the
+models use**, and the host sits one minor version below it. `pip install -e
+'.[...]'` honours the declaration, upgrades past 4.53.3, and from that moment
+`fla.models.utils.Cache` is a different class with different state semantics —
+in production, on the machine that runs training. Nothing warns and nothing
+fails; the install command that looks like routine maintenance is the one that
+flips it.
+
+This also explains a discrepancy that otherwise looks like flakiness: the
+`fla`-marked test in `tests/test_vision_loop.py` **passes here and fails in
+CI**, on the same commit. CI installs from the declaration, lands above the
+threshold, and gets the other class. The host passes *because* it is below the
+floor. Neither environment is misconfigured relative to itself.
+
+**The version to check is `transformers`, not `flash-linear-attention`.** The
+fla version does not enter into it — the threshold constant is the same in both
+releases — and an afternoon was spent pinning fla versions against a symptom
+that fla does not control.
+
+```bash
+python -c "import transformers, fla.models.utils as u; \
+print(transformers.__version__, u.Cache.__mro__[1].__name__)"
+```
+
+That prints the version and which implementation you actually got —
+`LegacyFLACache` or `FLACache`. Run it before concluding anything about cache
+behaviour. Do not try to answer it by grepping fla's source for `class Cache`:
+the declaration is indented inside that `if`, so an anchored grep returns
+nothing and reads as "the symbol does not exist", which is a confident zero that
+was never capable of returning anything else.
+
+Whether the declaration should move — the standing proposal is
+`transformers>=4.52,<4.53.3`, the ceiling being the load-bearing half — is
+recorded on `card-2757f59e` and is the user's call, because it governs the
+environment they train in. Until it is made, **leave the host's `transformers`
+alone**, and install into a throwaway virtualenv if you need a different one.
+
 ## C++ diagnostics: trust them only after you have configured a build
 
 The editor's C++ diagnostics come from clangd, which is **clang**. The build is
