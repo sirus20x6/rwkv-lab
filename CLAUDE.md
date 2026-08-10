@@ -231,6 +231,46 @@ had been *retracted*. Everything needed to avoid the wasted start was on the car
 — just not in the part that gets read first. Read the comments, oldest to newest,
 before claiming or delegating.
 
+**A card's "measured, do not re-derive" block is the most dangerous part of it.**
+Good cards save the next reader an investigation by recording what they measured
+— and the better the block, the more it discourages checking. It is an
+instruction to trust a measurement whose age you cannot see.
+
+Four cards were found stale in this way in a single night, and one of them was
+being *dispatched at the time*:
+
+- `card-74b81095` carried four claims under "measured on origin/main, do not
+  re-derive". **All four were wrong.** PR #201 had landed the half they
+  described, under the same parent card, roughly three hours before the card was
+  handed to anyone. The cost was bounded only because the first file the reader
+  opened contradicted claim one; a less central stale claim would have had them
+  re-implement a live mechanism and land it green beside the original, which is
+  the "superseded" shape this file warns about elsewhere.
+- `card-f027ef06`'s stated scope was "add a `WorkerRuntimeEvidence` arm to the
+  oneof and a `service.cpp` handler". Both had shipped; the proto arm is field
+  10 and the handler is at `service.cpp:4999`.
+- `card-b2f647ee` and `card-9b360158` both describe replacing and retiring
+  `src/rwkv_lab/qwen_caption_finetune.py`. `git log origin/main -- <that path>`
+  returns nothing: it has never existed on main. The implementation is real and
+  unmerged, so the cards are accurate about a *branch* while reading as though
+  they described trunk.
+
+So:
+
+- **When you write a measured block, cite the sha you measured at.** "Measured
+  on `origin/main` at `35e62bb6`" lets the next reader run `git log
+  35e62bb6..origin/main --oneline | wc -l` and decide. "Measured on
+  `origin/main`" is a claim about a moment, presented as a standing fact.
+- **When you read one, re-verify the claims your work depends on** — not all of
+  them, the load-bearing ones. It is cheap: these are greps.
+- **"Do not re-derive" means "do not redo the reasoning", never "do not check
+  the facts".** The reasoning is usually still good when the numbers have moved;
+  that is the common case, and it is why the block is worth writing at all.
+
+Suspect staleness hardest when a card names a *file path* — paths move and get
+superseded — and when its parent card has other children, because a sibling may
+have landed the half you are reading about.
+
 **Read the document you are about to add to.** Three cards were filed proposing to
 write down rules that were already written down: two claimed this file did not
 state the base branch for new worktrees (it did, and had for some time), and one
