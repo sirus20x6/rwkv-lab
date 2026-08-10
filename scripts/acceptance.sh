@@ -112,6 +112,15 @@ run_non_gpu_suite python-cpu python3 -m pytest -q -n "${PYTEST_WORKERS:-auto}" \
   --dist worksteal -m "not gpu" tests \
   --junitxml="$evidence_dir/python-cpu.xml"
 
+# What that run did NOT do. A suite can lose coverage without losing a test:
+# every skip here is conditional on a host fact, so an asset that moves or an
+# optional package that stops importing drains coverage while the line above
+# still reports a pass. The count on a real host is a property of the machine
+# and is reported rather than pinned; a reason nobody declared fails.
+run_non_gpu_suite skip-reasons python3 scripts/ci_skip_reason_gate.py \
+  "$evidence_dir/python-cpu.xml" --environment real-host-acceptance \
+  --receipt "$evidence_dir/skip-receipt.json"
+
 if command -v go >/dev/null; then
   run_non_gpu_suite go bash -c \
     'cd "$1/dashboard" && go build ./... && go vet ./... && go test ./...' \

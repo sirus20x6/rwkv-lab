@@ -142,6 +142,27 @@ jobs:
             python -m pytest -q -n auto --dist worksteal -m "not gpu" tests \
             --junitxml=evidence/python-cpu-${{ matrix.python }}.xml
 
+      # What the run above did not do. The coverage gate catches a test file
+      # that contributes nothing and the native exclusion pin catches a suite
+      # that stops running; a collected file whose tests all skip at runtime
+      # passes both, so `1264 passed, 10 skipped` could become
+      # `1000 passed, 274 skipped` with every gate green. Reads the JUnit XML
+      # the step above just wrote -- never the terminal report -- and fails on
+      # a skip reason that is not declared in
+      # docs/experiment-vm/skip-reason-baseline.v1.json, or on a count over
+      # the bound pinned there for this runner.
+      #
+      # if: always() so a failing suite still gets its skip receipt. The two
+      # answer different questions and a red suite is exactly when "what else
+      # stopped running?" is worth asking.
+      - name: Runtime skips are declared and within the pinned bound
+        if: always()
+        run: |
+          python scripts/ci_skip_reason_gate.py \
+            evidence/python-cpu-${{ matrix.python }}.xml \
+            --environment github-hosted-cpu \
+            --receipt evidence/skip-receipt-python-cpu-${{ matrix.python }}.json
+
       - name: Publish evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -189,6 +210,15 @@ jobs:
           python scripts/non_gpu_environment.py \
             python -m pytest -q -m "fla and not gpu" tests \
             --junitxml=evidence/python-fla.xml
+
+      # This job exists to run assertions the CPU job skips, so a skip HERE is
+      # the coverage draining out of the one place that catches it.
+      - name: Runtime skips are declared and within the pinned bound
+        if: always()
+        run: |
+          python scripts/ci_skip_reason_gate.py evidence/python-fla.xml \
+            --environment github-hosted-fla \
+            --receipt evidence/skip-receipt-python-fla.json
 
       - name: Publish evidence
         if: always()
