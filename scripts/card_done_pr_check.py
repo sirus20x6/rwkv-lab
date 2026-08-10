@@ -122,6 +122,55 @@ def check_card(card: dict, lookup) -> CardReport:
     return CardReport(identifier, title, NOT_MERGED, f"#{number} is {state}")
 
 
+# Words that carry no signal when matching a card title to a pull-request
+# title. Without these, two unrelated titles sharing "the" and "for" score a
+# spurious overlap, and the whole method degrades into the timing correlation
+# that was measured and rejected -- see below.
+STOPWORDS = frozenset(
+    "the a an of to for in on and or is are be that this it its with by from "
+    "no not so as at".split())
+
+
+def title_tokens(title: str) -> frozenset[str]:
+    return frozenset(
+        word for word in re.findall(r"[a-z0-9_]+", title.lower())
+        if word not in STOPWORDS and len(word) > 2)
+
+
+def title_overlap(card_title: str, pull_title: str) -> float:
+    """Jaccard overlap of the two titles' significant words."""
+    left, right = title_tokens(card_title), title_tokens(pull_title)
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def suggest(card: dict, pulls: list[dict], minimum: float) -> dict | None:
+    """The best-matching pull request for a card, with its runner-up.
+
+    The runner-up is returned because it is what makes a suggestion readable.
+    A 0.44 match whose nearest rival scores 0.40 is one of a crowd; a 0.56
+    whose rival scores 0.08 is isolated. Reporting only the winner hides
+    exactly the difference a reader needs.
+
+    Measured on this board 2026-08-10: at a 0.30 floor this proposes five
+    candidates for 20 unmatched cards, two of which independently reproduce
+    matches found earlier by searching pull-request bodies. Timing correlation
+    over the same population was wrong for two of the three cards it matched
+    uniquely, which is why proximity in time is not used here at all.
+    """
+    scored = sorted(
+        ((title_overlap(card.get("title") or "", p.get("title") or ""), p)
+         for p in pulls),
+        key=lambda row: row[0], reverse=True)
+    if not scored or scored[0][0] < minimum:
+        return None
+    runner_up = scored[1][0] if len(scored) > 1 else 0.0
+    return {"score": scored[0][0], "runner_up": runner_up,
+            "number": scored[0][1].get("number"),
+            "title": scored[0][1].get("title")}
+
+
 def load_cards(source: str) -> list[dict]:
     payload = json.loads(pathlib.Path(source).read_text(encoding="utf-8"))
     if isinstance(payload, list):
@@ -172,10 +221,40 @@ def main(argv: list[str] | None = None, lookup=None) -> int:
                         help="ask GitHub whether each cited PR merged")
     parser.add_argument("--repo", default=None,
                         help="owner/name passed to gh, when not inferable")
+    parser.add_argument("--suggest", metavar="PULLS_JSON",
+                        help="propose a PR for each card recording none, by "
+                             "title overlap against a saved "
+                             "`gh pr list --state merged --json number,title`")
+    parser.add_argument("--min-overlap", type=float, default=0.30,
+                        help="floor for --suggest (default 0.30)")
     arguments = parser.parse_args(argv)
 
     cards = load_cards(arguments.board)
     done = [card for card in cards if is_done(card)]
+
+    if arguments.suggest:
+        pulls = json.loads(
+            pathlib.Path(arguments.suggest).read_text(encoding="utf-8"))
+        without = [c for c in done if not (c.get("result_pr_url") or "").strip()]
+        proposed = 0
+        for card in without:
+            hit = suggest(card, pulls, arguments.min_overlap)
+            if hit is None:
+                continue
+            proposed += 1
+            print(f"{hit['score']:.2f} (next {hit['runner_up']:.2f})  "
+                  f"{card.get('id')}")
+            print(f"      card: {(card.get('title') or '')[:76]}")
+            print(f"      PR #{hit['number']}: {(hit['title'] or '')[:70]}")
+        # Advisory only: these are candidates for a reader to confirm against
+        # the diff, never evidence. Exit status stays 0 so nothing gates on a
+        # guess -- a suggestion that could fail a run would eventually be
+        # applied unread, which is the failure this whole check exists to stop.
+        print(f"card done-PR suggestions: {proposed} proposed for "
+              f"{len(without)} cards recording no PR, of {len(done)} done; "
+              f"confirm each against the diff before recording it")
+        return 0
+
 
     if lookup is None and arguments.verify_merged:
         def lookup(number: int) -> str:
