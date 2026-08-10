@@ -51,13 +51,31 @@ way to record an exception: a host-specific path in `trainvm/` is always a
 defect, and if that ever stops being true the honest change is to argue it
 here, in this file, rather than to add a line to a JSON document.
 
-The rest of the repository is NOT in scope, and that is a measurement rather
-than an oversight: `src/rwkv_lab` holds 26 files with host-specific roots,
-`dashboard` 8, and `tests` 6 -- argparse defaults and module constants such as
-`_ENGRAM_PATH = Path("/thearray/git/engram/python")`. Extending the scope would
-need either 40 files of work or an allowlist of 40 entries, and an allowlist
-that large is an instrument tuned until the number looks comfortable. Filed
-separately so the decision is reviewable.
+Python: module-level constants only
+-----------------------------------
+`src/rwkv_lab` and `scripts` are now in scope for **module-level string
+constants** and nothing else, on the same no-allowlist terms, because their
+honest count is zero as of the conversion in PR #256.
+
+The wider Python populations are deliberately excluded, and that is a
+measurement rather than an oversight. Across those two scopes there are **24**
+argparse defaults naming a host path and **49** further occurrences in ordinary
+code, several of which are prose inside log lines and f-strings. A gate over
+those needs an allowlist in the dozens -- the instrument-tuned-until-comfortable
+failure that keeps the Python unwired-symbol gate unshipped at 79 entries.
+
+(An earlier version of this file put the whole-repository figure at 40 files.
+That was measured without looking at `scripts/`, which holds 71 of them; the
+real total is 110 files. The correction is on card-ffc44ac4.)
+
+Module constants earn their place because they differ in kind, not degree: they
+are evaluated at **import**, so the file fails on another host before `--help`
+can print anything naming the field or its environment variable. An argparse
+default fails only when the caller omits the flag, and is visible in `--help`.
+That distinction is what makes one population worth a zero-allowlist gate and
+the other worth a card.
+
+`dashboard` (Go) and `tests` remain out of scope entirely.
 
 Usage:
     python scripts/ci_native_host_path_gate.py [--repository .]
@@ -66,6 +84,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import pathlib
 import re
 import sys
@@ -87,6 +106,105 @@ HOST_SPECIFIC = (
     ("/Users/<user>", re.compile(r"/Users/[A-Za-z0-9._-]+")),
     ("/root/", re.compile(r"/root/")),
 )
+
+
+# The Python half. Deliberately narrower than the native half: it checks
+# module-level string constants only, and nothing else.
+#
+# The wider populations were measured and refused. Across `src/rwkv_lab` and
+# `scripts` there are 24 argparse defaults naming a host path and 49 further
+# occurrences in ordinary code, several of which are prose inside log lines.
+# A gate over those needs an allowlist in the dozens, which is an instrument
+# tuned until the number looks comfortable -- the same objection that keeps
+# the Python unwired-symbol gate unshipped at 79 entries.
+#
+# Module-level constants are different in two ways. They are evaluated at
+# import, so the file fails on another host before `--help` can print anything
+# naming the field; and their honest count here is **zero**, so this half ships
+# with no allowlist and no exceptions file, exactly like the native half.
+PYTHON_SCOPES = ("src/rwkv_lab", "scripts")
+
+# `*_HISTORICAL_PATH` and `*_HISTORICAL_ROOT` are the policy working, not
+# violating it: step 2 of the host-path policy is "the historical path, but
+# only when it exists on this host", and that value has to be written down
+# somewhere. The existing sweep tests in tests/test_host_path_defaults.py skip
+# the same substring for the same reason.
+HISTORICAL = re.compile(r"HISTORICAL")
+
+
+def python_sources(repository: pathlib.Path) -> list[pathlib.Path]:
+    """Top-level `.py` files in each Python scope.
+
+    Not recursive, matching the disposition catalogs' own `source_scope`,
+    which declare `recursive: false` for both of these prefixes. A recursive
+    walk would scan subpackages the policy has never been applied to and
+    report a population nobody has classified.
+    """
+    found = []
+    for scope in PYTHON_SCOPES:
+        root = repository / scope
+        if not root.is_dir():
+            continue
+        found.extend(sorted(p for p in root.glob("*.py") if p.is_file()))
+    return found
+
+
+def python_constant_violations(
+        repository: pathlib.Path) -> tuple[list[str], int]:
+    """Module-level string constants naming a host-specific path."""
+    problems: list[str] = []
+    scanned = python_sources(repository)
+    for path in scanned:
+        relative = path.relative_to(repository)
+        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
+        parents: dict[int, "ast.AST"] = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[id(child)] = node
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)):
+                continue
+            assignment = parents.get(id(node))
+            enclosing = parents.get(id(assignment)) if assignment else None
+            # Module-level `NAME = "literal"` and nothing else. That one
+            # restriction is what excludes the forms an exemption list would
+            # otherwise have to enumerate: a docstring's parent is an Expr,
+            # not an Assign; `os.environ.get(VAR, "/thearray/...")` assigns a
+            # Call, so its string is not the assignment's value; and an
+            # argparse default is a keyword inside a call. Mutation testing
+            # established this -- explicit checks for the docstring and
+            # environment cases were written, and deleting them reddened
+            # nothing, because they could never fire. The environment one was
+            # worse than dead: it matched the source *line*, so a comment
+            # mentioning os.environ beside a bare constant would have excused
+            # it.
+            if not (isinstance(assignment, ast.Assign)
+                    and isinstance(enclosing, ast.Module)):
+                continue
+            target = assignment.targets[0]
+            name = target.id if isinstance(target, ast.Name) else ""
+            if HISTORICAL.search(name):
+                continue
+            for label, pattern in HOST_SPECIFIC:
+                match = pattern.search(node.value)
+                if match is None:
+                    continue
+                problems.append(
+                    f"{relative}:{node.lineno}: {name or '<constant>'} is a "
+                    f"module-level constant naming {match.group(0)}, a path "
+                    f"rooted at {label} which exists only on one machine. It "
+                    f"is evaluated at import, so on any other host this file "
+                    f"fails before it can print anything naming the field. "
+                    f"Resolve it through scripts' host_paths.resolve_host_path "
+                    f"with a named environment variable, as PR #103 did -- see "
+                    f"README 'Host-specific path defaults'.")
+                break
+    return problems, len(scanned)
 
 
 def sources(repository: pathlib.Path) -> list[pathlib.Path]:
@@ -147,6 +265,8 @@ def main() -> int:
     repository = pathlib.Path(arguments.repository).resolve()
 
     problems, scanned = violations(repository)
+    python_problems, python_scanned = python_constant_violations(repository)
+    problems = problems + python_problems
     for problem in problems:
         print(f"FAIL: {problem}")
 
@@ -156,14 +276,24 @@ def main() -> int:
         print(f"FAIL: no native sources found under {SCOPE}/, so nothing was checked")
         problems = problems + ["empty scope"]
 
+    if python_scanned == 0:
+        # The same argument, for the half added later. Both scopes have to be
+        # non-empty or the verdict describes a scan that did not happen.
+        print("FAIL: no Python sources found under "
+              f"{', '.join(PYTHON_SCOPES)}, so nothing was checked")
+        problems = problems + ["empty python scope"]
+
     print(verdict_line(
         "native host path gate",
         problems,
         # Neutral tally only. verdict_line supplies PASSED/FAILED, so this half
         # must read true either way -- "carry no path rooted at ..." would be a
         # false sentence on the run that just found one.
-        f"{scanned} native sources under {SCOPE}/ scanned for paths rooted at "
-        f"{', '.join(label for label, _ in HOST_SPECIFIC)}",
+        f"{scanned} native sources under {SCOPE}/ and {python_scanned} "
+        f"top-level Python sources under {', '.join(PYTHON_SCOPES)} scanned "
+        f"for paths rooted at "
+        f"{', '.join(label for label, _ in HOST_SPECIFIC)}; the Python half "
+        f"checks module-level constants only",
     ))
     return 1 if problems else 0
 
