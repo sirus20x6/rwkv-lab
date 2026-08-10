@@ -264,6 +264,16 @@ def declaration_problems(declaration: dict) -> list[str]:
         elif authority == "enforced":
             if not isinstance(environment.get("max_skipped"), int):
                 problems.append(f"{name}: enforced count needs max_skipped")
+            # A bound nobody measured is a guess, and a guessed bound is either
+            # slack forever or red for no reason. Requiring the run it came
+            # from makes the next person raising it say where the new number
+            # came from too, which is the whole difference between a pin and a
+            # number somebody typed.
+            observed = environment.get("observed")
+            if not isinstance(observed, str) or len(observed.strip()) < 24:
+                problems.append(
+                    f"{name}: an enforced max_skipped must record the run it "
+                    "was measured from in 'observed'")
         why = environment.get("why")
         if not isinstance(why, str) or len(why.strip()) < 16:
             problems.append(f"{name}: why must be a stated sentence")

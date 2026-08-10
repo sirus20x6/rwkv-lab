@@ -62,7 +62,8 @@ def declaration(tmp_path: pathlib.Path, **overrides) -> pathlib.Path:
         "authority": "ci_scope_evidence_only",
         "environments": [
             {"name": "bounded", "count_authority": "enforced", "max_skipped": 2,
-             "why": "a fixed runner whose skip set is reproducible"},
+             "why": "a fixed runner whose skip set is reproducible",
+             "observed": "2 skipped in the run this fixture stands for"},
             {"name": "unbounded", "count_authority": "reported",
              "why": "a real host whose asset set differs from the next one"},
         ],
@@ -246,9 +247,30 @@ def test_an_enforced_environment_without_a_bound_is_refused(tmp_path):
     problems = declaration_problems(json.loads(declaration(
         tmp_path,
         environments=[{"name": "x", "count_authority": "enforced",
+                       "why": "a fixed runner whose skip set is reproducible",
+                       "observed": "measured in the run this fixture stands for"}],
+    ).read_text()))
+    assert any("max_skipped" in problem for problem in problems)
+
+
+def test_an_enforced_bound_that_names_no_run_is_refused(tmp_path):
+    """A bound nobody measured is a guess wearing a pin's clothes."""
+    problems = declaration_problems(json.loads(declaration(
+        tmp_path,
+        environments=[{"name": "x", "count_authority": "enforced",
+                       "max_skipped": 7,
                        "why": "a fixed runner whose skip set is reproducible"}],
     ).read_text()))
-    assert problems
+    assert any("observed" in problem for problem in problems)
+
+
+def test_a_reported_environment_needs_no_measurement(tmp_path):
+    """The whole point of 'reported': there is no number to justify."""
+    assert declaration_problems(json.loads(declaration(
+        tmp_path,
+        environments=[{"name": "x", "count_authority": "reported",
+                       "why": "a real host whose asset set differs from the next"}],
+    ).read_text())) == []
 
 
 def test_an_invalid_declaration_fails_the_gate_rather_than_grading_against_it(tmp_path):
