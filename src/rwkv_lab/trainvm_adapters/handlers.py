@@ -54,6 +54,7 @@ from .transformer_mla import (
     TransformerMLATrainConfig,
 )
 from .vision_compressor import VisionTeacherCompressorConfig
+from .vision_eval import VisionEvalPolicy
 from .vision_frozen import VisionFrozenAdapterConfig
 from .vision_native import VisionNativeHeadConfig
 from .vision_student import VisionRWKVStudentConfig
@@ -1738,6 +1739,45 @@ def _rlvr(
     )
 
 
+def _vision_eval_policy(components: WorkerTrainingComponents) -> VisionEvalPolicy:
+    """The vision family's step-zero policy, read from the RESOLVED composition.
+
+    Never from the authored document: an inherited slot is invisible to anything
+    that reads the written text, and the controller compares the published
+    manifest against what the registry resolved.
+
+    This is unconditional, and that is the point. `evaluation_slots()` in
+    `rwkv_lab_worker_contract.cpp` declares all four evaluation slots for all
+    four vision contracts, and the training component registry admits that suite
+    only as a unit -- zero of four or four of four. So a route that quietly
+    skipped the policy when a slot looked absent would arm the gate through its
+    own composition and then be unable to publish the evidence that composition
+    demands: a deadlock at the first crossing with no diagnostic, which is
+    strictly worse than never arming.
+
+    One helper for all four handlers rather than four copies. They resolve
+    identical slots, and four copies would be four places for the next slot
+    rename to be applied in three.
+    """
+
+    evaluator = components.evaluator()
+    qualitative = components.qualitative_samples()
+    return VisionEvalPolicy(
+        identity_field=qualitative.configuration.identity_field,
+        evaluator_component_digest=components.composition.components[
+            "evaluator"
+        ].descriptor_digest,
+        metric_names=tuple(evaluator.configuration.metrics),
+        artifact_renderer_digest=components.composition.components[
+            "artifact_renderer"
+        ].descriptor_digest,
+        qualitative_sample_digest=components.composition.components[
+            "qualitative_samples"
+        ].descriptor_digest,
+        sample_count=qualitative.configuration.sample_count,
+    )
+
+
 def _vision_teacher_compressor(
     invocation: WorkerInvocation,
     components: WorkerTrainingComponents,
@@ -1876,6 +1916,7 @@ def _vision_teacher_compressor(
         worker_step_profiler=step_profiler or NullStepProfiler(),
         worker_observability=observability,
         worker_controls=controls,
+        worker_eval_examples=_vision_eval_policy(components),
     )
     if not isinstance(result, Mapping):
         raise AdapterDispatchError("vision compressor omitted its terminal result")
@@ -2174,6 +2215,7 @@ def _vision_frozen_adapter(
         worker_step_profiler=step_profiler or NullStepProfiler(),
         worker_observability=observability,
         worker_controls=controls,
+        worker_eval_examples=_vision_eval_policy(components),
     )
     if not isinstance(result, Mapping):
         raise AdapterDispatchError("frozen vision omitted its terminal result")
@@ -2374,6 +2416,7 @@ def _vision_native_head(
         worker_step_profiler=step_profiler or NullStepProfiler(),
         worker_observability=observability,
         worker_controls=controls,
+        worker_eval_examples=_vision_eval_policy(components),
     )
     if not isinstance(result, Mapping):
         raise AdapterDispatchError("vision native-head omitted its terminal result")
@@ -2699,6 +2742,7 @@ def _vision_rwkv_student(
         worker_step_profiler=step_profiler or NullStepProfiler(),
         worker_observability=observability,
         worker_controls=controls,
+        worker_eval_examples=_vision_eval_policy(components),
     )
     if not isinstance(result, Mapping):
         raise AdapterDispatchError("vision student omitted its terminal result")

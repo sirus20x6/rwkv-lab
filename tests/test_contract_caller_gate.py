@@ -34,6 +34,7 @@ what CI reads.
 from __future__ import annotations
 
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -176,7 +177,13 @@ def test_dispatch_that_stops_consulting_the_table_reddens_the_gate(
     assert "UNWIRED HANDLER: rwkv_lab.rwkv_rlvr.v1.Train dispatches to _rlvr" in (
         result.stdout
     )
-    assert "0 of 20 implementation modules unreached" in result.stdout
+    # The point is that check 3 stays silent -- zero modules unreached -- not
+    # how many modules there are. Restating the total made this test red the
+    # day an unrelated adapter module was added, which is the rot the
+    # `registry_parity_note` in the arming gate exists to avoid.
+    assert re.search(
+        r"0 of \d+ implementation modules unreached", result.stdout
+    ), result.stdout
 
 
 def test_an_unknown_entrypoint_refuses_rather_than_reporting_zero(

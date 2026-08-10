@@ -20,7 +20,9 @@ def digest(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
-def composition(*, frozen_evaluation: bool = False):
+def composition(*, frozen_evaluation: bool = False,
+                no_pipeline: bool = False,
+                train_selection_for_evaluation: bool = False):
     root = Path(__file__).resolve().parents[1]
     registry = json.loads(
         (root / "docs/experiment-vm/examples/training-components.v1.json").read_text(
@@ -148,6 +150,28 @@ def composition(*, frozen_evaluation: bool = False):
         requested = {
             slot: requested[slot] for slot in ("evaluation_split", "evaluator")
         }
+    if train_selection_for_evaluation:
+        requested["evaluation_split"] = (
+            "deterministic_holdout",
+            {"seed": 7, "held_out_count": 2, "selection": "train"},
+        )
+    if no_pipeline:
+        # What every family whose evaluation corpus is named in its own trainer
+        # configuration resolves to: an evaluator, and no split selector for it
+        # to point at. `validate_evaluation_checkpoint_relationships` REQUIRES
+        # an empty `split_slot` here -- a split-selector view is part of the
+        # declarative data pipeline and is unresolvable without one.
+        requested = {
+            "evaluator": (
+                "scalar_loss",
+                {
+                    "split_slot": "",
+                    "metrics": ["eval.loss"],
+                    "reduction": "weighted_mean",
+                    "maximum_examples": 0,
+                },
+            ),
+        }
     components = {}
     for slot, (name, configuration) in requested.items():
         category = {
@@ -170,7 +194,9 @@ def composition(*, frozen_evaluation: bool = False):
     body = {
         "api_version": "trainvm.resolved-training-composition/v1",
         "components": components,
-        "model_family": "transformer" if frozen_evaluation else "rwkv",
+        "model_family": (
+            "transformer" if (frozen_evaluation or no_pipeline) else "rwkv"
+        ),
         "registry_digest": digest(canonical(registry)),
     }
     return load_resolved_training_composition(
@@ -266,6 +292,40 @@ def test_worker_evaluator_bridge_accepts_production_frozen_validation_split() ->
 
     assert evaluator.configuration.split_slot == "evaluation_split"
     assert evaluator.reduce((2.0, 4.0)) == pytest.approx(3.0)
+
+
+def test_worker_evaluator_bridge_accepts_an_adapter_owned_held_out_corpus() -> None:
+    """The registry's no-pipeline branch, mirrored by the Python accessor.
+
+    Twelve of the registry's stateful routes -- the four vision ones and the
+    eight Transformer MLA ones -- name their evaluation corpus in the adapter's
+    own configuration rather than through a `data_source`, and
+    `validate_evaluation_checkpoint_relationships` requires their evaluator to
+    name an EMPTY `split_slot` in that case. Resolving `""` as a slot raises,
+    so without this branch the accessor refuses every one of those routes --
+    and the accessor is what reads the evaluator provenance an armed route must
+    publish, so the refusal would land after a model load and before any
+    evidence.
+    """
+
+    runtime = WorkerTrainingComponents(composition(no_pipeline=True), "transformer")
+
+    evaluator = runtime.evaluator()
+
+    assert evaluator.configuration.split_slot == ""
+    assert tuple(evaluator.configuration.metrics) == ("eval.loss",)
+
+
+def test_worker_evaluator_bridge_still_refuses_a_split_that_is_not_held_out() -> None:
+    """The relaxation above must not weaken the case it does not cover."""
+
+    runtime = WorkerTrainingComponents(
+        composition(train_selection_for_evaluation=True), "rwkv"
+    )
+    with pytest.raises(
+        AdapterComponentError, match="does not select its validation partition"
+    ):
+        runtime.evaluator()
 
 
 def test_worker_optimizer_and_schedule_resume_the_same_next_update() -> None:

@@ -97,6 +97,12 @@ from rwkv_lab.radio1d_rwkv import (
     tokens_per_tile_for_tile_count,
 )
 from rwkv_lab.rwkv_finetune import load_g1g_fla
+from rwkv_lab.vision_step_zero import (
+    attempt_baseline_gate,
+    caption_eval_examples,
+    publish_attempt_baseline_evidence,
+    refuse_ungated_attempt_baseline,
+)
 from rwkv_lab.vision_compressor_features import (
     CanonicalLatentPrefixProjector,
     FrozenTeacherCompressor,
@@ -1933,6 +1939,7 @@ def multimodal_loss(rwkv: nn.Module, projector: nn.Module, vision: MoonViT,
                     structured_invalid_box_weight: float = 0.0,
                     structured_invalid_box_margin: float = 1.0,
                     return_per_example_ce: bool = False,
+                    return_selected_predictions: bool = False,
                     activation_checkpoint_min_tokens: int = 0,
                     activation_checkpoint_max_layers: int = 0,
                     image_aspect: torch.Tensor | None = None,
@@ -2082,6 +2089,23 @@ def multimodal_loss(rwkv: nn.Module, projector: nn.Module, vision: MoonViT,
             metrics["_eval_coordinate_ce_sum"] = (
                 token_nll * coordinate_weights).sum()
             metrics["_eval_coordinate_ce_count"] = coordinate_weights.sum()
+    if return_selected_predictions:
+        # Teacher-forced next-token predictions at exactly the supervised
+        # positions, for the step-zero eval-examples manifest. Argmax rather
+        # than a sampled continuation because none of the four vision
+        # composition contracts declares a `generation_policy` slot: there is no
+        # authored decode policy that would make a sampled caption
+        # reproducible, and unreproducible evidence is worse than none.
+        #
+        # `batch_positions` is returned beside the tokens because the selected
+        # positions are a flat ragged concatenation over the batch, so a caller
+        # cannot recover which row a token belongs to from the token tensor
+        # alone. Detached and left on device for the same reason the metrics
+        # above are -- the caller is at an evaluation boundary and converts
+        # once.
+        metrics["_eval_selected_predictions"] = selected_logits.argmax(-1).detach()
+        metrics["_eval_selected_targets"] = selected_targets.detach()
+        metrics["_eval_selected_rows"] = batch_positions.detach()
     if (isinstance(projector, RadioFeatureProjector)
             and projector.last_token_counts is not None):
         routed = projector.last_token_counts.float()
@@ -4690,6 +4714,7 @@ def train(
     worker_step_profiler=None,
     worker_observability=None,
     worker_controls=None,
+    worker_eval_examples=None,
 ) -> dict:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", nargs="+", required=True)
@@ -6500,6 +6525,145 @@ def train(
             "state": "training", "step": eval_step, "updated": time.time(),
         })
         return checkpoint_saved
+
+    # Before the loop, so a disagreement with the controller's immutable
+    # attempt baseline is diagnosed as itself rather than as a refused first
+    # crossing after a full teacher/vision stack load.
+    refuse_ungated_attempt_baseline(
+        worker_controls,
+        step,
+        family="Vision frozen adapter",
+        can_publish_baseline_evidence=worker_eval_examples is not None,
+    )
+    gate_baseline = attempt_baseline_gate(worker_controls)
+    if (
+        gate_baseline is None
+        and worker_controls is not None
+        and worker_controls.step_zero_eval_gate_required
+    ):
+        print(
+            "attempt-baseline eval gate: already durable at step "
+            f"{worker_controls.attempt_baseline_optimizer_step}",
+            flush=True,
+        )
+    if gate_baseline is not None:
+        # Scalars, then checkpoint, then examples -- the order the controller's
+        # `validate_eval_examples_gate_provenance` requires, and all three
+        # before the loop below can reach a mutation. The step is the
+        # controller's immutable baseline, never a literal zero: this route
+        # resumes, so keying publication to `step == 0` would owe evidence at a
+        # step a replacement attempt never reaches again while
+        # `pre_optimizer_step` refuses every mutation until it exists.
+        #
+        # This is a dedicated block rather than a call to `run_evaluation`
+        # above: that closure also promotes a best checkpoint, honours the
+        # qualitative cadence, and writes a resume marker keyed to the eval
+        # schedule. None of that is wanted at an attempt baseline, where the
+        # question is only what this exact model predicts on a frozen held-out
+        # spread before anything has moved.
+        baseline_metrics = evaluate(
+            rows, val_indices, rwkv=rwkv, projector=projector, vision=vision,
+            engram=engram, cache_dir=cache_dir,
+            batch_size=(args.eval_batch_size or args.batch),
+            max_examples=args.eval_examples,
+            token_budget=args.eval_batch_tokens,
+            deep_vision=deep_vision, layer_vision=layer_vision,
+            fusion_tower=fusion_tower, fusion_adapter=vision_fusion,
+            fusion_cache_dir=fusion_cache_dir,
+            vision_compressor=vision_compressor,
+            structured_head=structured_head,
+            structured_weight=args.structured_weight,
+            structured_coordinate_weight=args.structured_coordinate_weight,
+            structured_invalid_box_weight=args.structured_invalid_box_weight,
+            structured_invalid_box_margin=args.structured_invalid_box_margin)
+        baseline_loss = _require_finite_metric(
+            "attempt-baseline validation loss", baseline_metrics["loss"])
+        baseline_ppl = _require_finite_metric(
+            "attempt-baseline validation ppl", baseline_metrics["ppl"])
+        log.write(json.dumps({
+            "kind": "eval", "step": gate_baseline, "loss": baseline_loss,
+            "val_loss": baseline_loss, "ppl": baseline_ppl,
+            "reason": "attempt_baseline", "best": False,
+            "sample_artifact": None, "qualitative_complete": True,
+        }) + "\n")
+        _sync_log(log)
+        if worker_observability is not None:
+            worker_observability.publish_if_declared(
+                "eval.loss", baseline_loss, step=gate_baseline)
+            worker_observability.publish_if_declared(
+                "eval.perplexity", baseline_ppl, step=gate_baseline)
+        if args.eval_sample_max_new < 1:
+            raise ValueError(
+                "the attempt-baseline eval gate needs --eval-sample-max-new "
+                "above zero: the controller requires held-out caption evidence "
+                "and greedy decoding is how this route produces it")
+        # The frozen selection this route already has. `write_eval_samples`
+        # picks a stable source-stratified spread out of the held-out indices
+        # and greedily captions it, which is exactly the
+        # image/reference/prediction triple `caption_triplet` renders -- so the
+        # evidence is read back out of the artifact the trainer already writes
+        # rather than produced a second, divergent way.
+        baseline_artifact = write_eval_samples(
+            rows, qualitative_val_indices, step=gate_baseline,
+            ppl=baseline_ppl, rwkv=rwkv, projector=projector, vision=vision,
+            engram=engram, cache_dir=cache_dir, vocab=vocab,
+            prompt=args.prompt, out=out,
+            count=worker_eval_examples.sample_count,
+            max_new=args.eval_sample_max_new,
+            ocr_count=args.eval_ocr_samples,
+            structured_count=args.eval_structured_samples,
+            structured_head=structured_head, deep_vision=deep_vision,
+            layer_vision=layer_vision, sandwich_prompt=args.sandwich_prompt,
+            sandwich_lead_prompt=args.sandwich_lead_prompt, wrappers=wrappers,
+            fusion_tower=fusion_tower, fusion_adapter=vision_fusion,
+            fusion_cache_dir=fusion_cache_dir,
+            vision_compressor=vision_compressor)
+        if baseline_artifact is None:
+            raise ValueError(
+                "the attempt-baseline eval gate found no held-out images to "
+                "caption; the controller requires nonempty evidence")
+        baseline_items = json.loads(
+            Path(baseline_artifact).read_text())["items"]
+        if not baseline_items:
+            raise ValueError(
+                "the attempt-baseline caption artifact carried no items")
+
+        def stage_baseline_checkpoint() -> str:
+            stage_current_checkpoint(gate_baseline)
+            return str(checkpoint_directory)
+
+        publish_attempt_baseline_evidence(
+            worker_controls=worker_controls,
+            worker_observability=worker_observability,
+            policy=worker_eval_examples,
+            baseline=gate_baseline,
+            series_id="vision-frozen-adapter-caption",
+            identities=[str(item["image"]) for item in baseline_items],
+            selector={
+                "dataset_fingerprint": str(args.data_fingerprint),
+                "eval_data": str(args.eval_data or ""),
+                "heldout_rows": len(qualitative_val_indices),
+                "sample_count": worker_eval_examples.sample_count,
+            },
+            examples=caption_eval_examples(
+                [(str(item["image"]), str(item.get("prompt") or ""),
+                  str(item["reference"]), str(item["caption"]))
+                 for item in baseline_items],
+                optimizer_step=gate_baseline),
+            stage_checkpoint=stage_baseline_checkpoint,
+            resume_grade="compatible",
+            state_components=(
+                "component_composition",
+                "control_revision",
+                "data_cursor",
+                "model",
+                "optimizer",
+                "rng_accelerator",
+                "rng_python",
+                "rng_torch",
+            ),
+        )
+        gate_baseline = None
 
     resume_eval_work = _pending_eval_work(
         log_path, step,

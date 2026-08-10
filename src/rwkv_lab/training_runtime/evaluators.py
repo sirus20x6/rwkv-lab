@@ -21,9 +21,22 @@ class ScalarLossEvaluatorConfiguration:
     maximum_examples: int = 0
 
     def __post_init__(self) -> None:
-        if (
-            not self.split_slot
-            or not self.split_slot[0].isalpha()
+        # An EMPTY split slot is the registry's no-pipeline case, not a missing
+        # value. `validate_evaluation_checkpoint_relationships` in
+        # `training_component_registry.cpp` *requires* it empty for any
+        # composition without a `data_source`: a split-selector view is part of
+        # the declarative data pipeline and cannot be resolved without one, so a
+        # family naming its evaluation corpus in the adapter's own configuration
+        # has no slot to point at. Twelve registered routes are in that class
+        # -- the four vision ones and the eight Transformer MLA ones -- and
+        # refusing the empty string here refuses every one of them at the first
+        # read of their evaluator, which is what an armed route does before it
+        # can publish any evidence.
+        #
+        # A non-empty value is still held to the same symbolic-identity rule, so
+        # a typo'd or path-shaped slot name is refused exactly as before.
+        if self.split_slot and (
+            not self.split_slot[0].isalpha()
             or any(
                 not character.isascii()
                 or not (character.isalnum() or character in {"_", "-", ".", ":"})
