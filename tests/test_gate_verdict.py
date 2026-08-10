@@ -34,6 +34,7 @@ GATES = (
     "scripts/ci_compatibility_pin_gate.py",
     "scripts/ci_contract_caller_gate.py",
     "scripts/ci_coverage_gate.py",
+    "scripts/ci_experiment_adapter_gate.py",
     "scripts/ci_gpu_observation_gate.py",
     "scripts/ci_native_host_path_gate.py",
     "scripts/ci_step_zero_arming_gate.py",
