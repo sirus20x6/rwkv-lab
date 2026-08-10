@@ -3,6 +3,15 @@ Description=TrainVM host resource and process authority
 Requires=trainvm-gpu-fault-observer.service
 Requires=trainvm-controller.service
 BindsTo=trainvm-controller.service
+# gpu-watchdog.service is listed here BECAUSE the first ExecCondition below
+# samples it with `systemctl is-active`. This ordering is what makes that
+# sample meaningful: without it, hostd can read the watchdog's state before
+# systemd has settled it, the condition passes, and two processes claim the
+# same GPU -- the exact outcome the condition exists to prevent. So this is a
+# safety interlock, not a startup preference, and it is one half of a pair.
+# Removing the name from this line looks like tidying an obsolete dependency
+# and silently makes the interlock racy. See the ExecCondition comment below;
+# retiring the interlock means removing both lines together, deliberately.
 After=local-fs.target display-manager.service gpu-watchdog.service trainvm-gpu-fault-observer.service trainvm-controller.service
 Before=shutdown.target
 StartLimitIntervalSec=30s
@@ -22,6 +31,13 @@ StateDirectory=trainvm-hostd
 StateDirectoryMode=0700
 # The GPU watchdog and this authority both claim the device; refuse to start
 # rather than race it.
+#
+# What makes this correct is the `After=gpu-watchdog.service` in [Unit] above:
+# `is-active` is a sample of state at one instant, and only the ordering
+# guarantees systemd has settled the watchdog before the sample is taken.
+# Without it this check still runs, still passes, and stops preventing
+# anything -- a condition that cannot fail rather than one that never needs
+# to. The two lines are a pair; neither is safe to remove alone.
 ExecCondition=/usr/bin/sh -c '! /usr/bin/systemctl --quiet is-active gpu-watchdog.service'
 # Boot-scoped GPU authority is checked before any startup work, so the daemon
 # exits through ExecCondition before NVML can load the CUDA driver.
