@@ -1,14 +1,20 @@
-"""The step-zero arming gate must go red for each conjunct independently.
+"""The step-zero arming gate must go red for each condition independently.
 
-`scripts/ci_step_zero_arming_gate.py` asserts a three-conjunct property --
-`required` and `type` and `schema` -- of every eval-examples publication a
-shipped composition declares. A check that tests one conjunct while asserting
-three passes every mutation of the other two, and from the outside it is
-indistinguishable from a correct one: it is green today, green after the
+`scripts/ci_step_zero_arming_gate.py` asserts a five-condition property of every
+eval-examples publication a shipped composition declares: the three conjuncts of
+the arming predicate (`required`, `type`, `schema`, from
+`trainvm/src/eval_examples_contract.cpp`) and the two the publisher separately
+demands of the same declaration (`immutability`, `fingerprint`, from
+`src/rwkv_lab/trainvm_worker/eval_examples.py`). A check that tests one while
+asserting five passes every mutation of the other four, and from the outside it
+is indistinguishable from a correct one: it is green today, green after the
 mutation, and green when a real edit breaks arming.
 
-So each conjunct is mutated separately here and the gate must fail for each.
-That is the only evidence that the conjunction is real.
+So each condition is mutated separately here and the gate must fail for each.
+That is the only evidence that the conjunction is real. The gate checked three
+of the five until `card-20510814`; the two publisher tests below are the
+regression that could not have been observed before, since satisfying only the
+three arms the controller and then deadlocks it.
 
 Two failure modes of this file itself, both already observed while writing it:
 
@@ -44,6 +50,7 @@ GATE = "scripts/ci_step_zero_arming_gate.py"
 CATALOG = "docs/experiment-vm/examples/rwkv-lm.recipe-profiles.v1.json"
 PIN = "docs/experiment-vm/step-zero-arming.v1.json"
 DOCUMENT = "docs/experiment-vm/STEP_ZERO_ARMING.md"
+PUBLISHER = "src/rwkv_lab/trainvm_worker/eval_examples.py"
 
 # The recipe whose declaration is mutated, and the contract it arms. Named
 # rather than indexed so a reordered catalog fails loudly instead of quietly
@@ -60,6 +67,11 @@ def _copy(tmp_path: pathlib.Path) -> pathlib.Path:
     root = tmp_path / "repository"
     (root / "scripts").mkdir(parents=True)
     (root / "docs/experiment-vm").mkdir(parents=True)
+    # The publisher source is an input, not decoration: the gate reads the two
+    # conditions only it states out of this file's AST rather than restating
+    # them, so a copy without it measures three conditions and looks fine.
+    (root / PUBLISHER).parent.mkdir(parents=True)
+    shutil.copy2(REPOSITORY / PUBLISHER, root / PUBLISHER)
     for name in (GATE, "scripts/gate_verdict.py"):
         shutil.copy2(REPOSITORY / name, root / name)
     (root / "scripts/__init__.py").touch()
@@ -246,7 +258,7 @@ def test_the_verdict_line_says_armed_not_able_to_arm(repository: pathlib.Path) -
         if line.strip().startswith("| `")
     ]
     assert rows, f"{DOCUMENT} holds no route rows, so this test proves nothing"
-    armed = sum(1 for row in rows if row[5] != "no")
+    armed = sum(1 for row in rows if row[5].startswith("yes"))
     armable = sum(1 for row in rows if row[5] == "no" and row[4] == "yes")
     blocked = sum(
         1 for row in rows if row[5] == "no" and row[4] != "yes" and row[1] == "yes"
@@ -287,20 +299,23 @@ def test_the_verdict_line_names_partial_arming(repository: pathlib.Path) -> None
         (
             0,
             "0 registered routes (0 stateful); 0 armed today by a shipped "
-            "composition, 0 armable but unarmed (port in place, no shipped "
-            "composition arms it), 0 blocked, 0 not stateful",
+            "composition, 0 would deadlock (arms the controller, the publisher "
+            "refuses the declaration), 0 armable but unarmed (port in place, no "
+            "shipped composition arms it), 0 blocked, 0 not stateful",
         ),
         (
             1,
             "1 registered route (1 stateful); 1 armed today by a shipped "
-            "composition, 0 armable but unarmed (port in place, no shipped "
-            "composition arms it), 0 blocked, 0 not stateful",
+            "composition, 0 would deadlock (arms the controller, the publisher "
+            "refuses the declaration), 0 armable but unarmed (port in place, no "
+            "shipped composition arms it), 0 blocked, 0 not stateful",
         ),
         (
             3,
             "3 registered routes (3 stateful); 3 armed today by a shipped "
-            "composition, 0 armable but unarmed (port in place, no shipped "
-            "composition arms it), 0 blocked, 0 not stateful",
+            "composition, 0 would deadlock (arms the controller, the publisher "
+            "refuses the declaration), 0 armable but unarmed (port in place, no "
+            "shipped composition arms it), 0 blocked, 0 not stateful",
         ),
     ],
     ids=["none", "one", "several"],
@@ -337,3 +352,183 @@ def test_a_wrong_schema_constant_in_the_pin_reddens(repository: pathlib.Path) ->
     result = _run(repository)
     assert result.returncode == 1, result.stdout + result.stderr
     assert "eval_examples_schema" in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("immutability", "immutable"), ("fingerprint", "sha256")],
+    ids=["immutability", "fingerprint"],
+)
+def test_a_publisher_condition_reddens_the_gate_as_a_deadlock(
+    repository: pathlib.Path, field: str, value: str
+) -> None:
+    """The two conditions the predicate does not check, and their own verdict.
+
+    `EvalExamplesPublisher.__init__` refuses a declaration whose `immutability`
+    is not `append_only` or whose `fingerprint` is not `manifest_sha256`, over
+    the same object the arming predicate reads. A composition satisfying only
+    the predicate arms the controller and then cannot publish -- the route
+    deadlocks at its first `pre_optimizer_step` crossing with no diagnostic,
+    which is worse than never arming.
+
+    Both mutated values are the enum defaults in `trainvm/include/trainvm/model.hpp`
+    (`Immutability immutability{}`, `Fingerprint fingerprint{}`), so this is the
+    state a composition reaches by *omitting* the field, not an exotic one.
+
+    The assertion is not merely "red". A gate that folded this into "blocked" or
+    into "no shipped composition arms it" would be red here and still misleading,
+    since the port exists and a composition does publish through it, so the cell
+    text and the summary population are asserted too.
+    """
+
+    catalog = _catalog(repository)
+    broken = 0
+    for recipe in catalog["recipes"]:
+        artifacts = recipe["template_document"]["spec"]["artifacts"]
+        if "eval_examples" not in artifacts:
+            continue
+        assert artifacts["eval_examples"][field] != value, (
+            f"the mutation is a no-op: {field} already is {value!r}, so a red "
+            "verdict below would prove nothing"
+        )
+        artifacts["eval_examples"][field] = value
+        broken += 1
+    # Every arming recipe in the catalog, so the route as a whole reaches the
+    # deadlock state. Breaking one of two would leave it armed by its sibling,
+    # which is a different population and is pinned separately below.
+    assert broken > 1, (
+        f"{CATALOG} no longer holds two arming recipes, so this test cannot "
+        "reach the whole-route deadlock state it exists for"
+    )
+    _write(repository, catalog)
+
+    result = _run(repository)
+    assert result.returncode == 1, (
+        f"mutating {field} left the gate green, so it checks only the three "
+        f"arming conjuncts:\n{result.stdout}{result.stderr}"
+    )
+    assert "the publisher" in result.stdout and field in result.stdout, (
+        f"the gate failed without naming the publisher condition that broke:\n"
+        f"{result.stdout}"
+    )
+    summary = _summary(result.stdout)
+    assert "1 would deadlock" in summary, (
+        "the deadlock population is not counted separately, so a reader cannot "
+        f"tell it from a route that arms nothing:\n{result.stdout}"
+    )
+    assert "10 armed today by a shipped composition" in summary, summary
+    assert "10 blocked" in summary, (
+        "a deadlocking route was counted as blocked; blocked means the port is "
+        f"missing or unusable and nothing arms:\n{summary}"
+    )
+    assert CONTRACT in result.stdout, result.stdout
+
+
+def test_a_sibling_that_still_arms_is_not_a_deadlocked_route(
+    repository: pathlib.Path,
+) -> None:
+    """One recipe deadlocking while its sibling arms is neither state cleanly.
+
+    The route does arm, through the sibling, so counting it as a deadlock would
+    overstate the harm; saying only "armed" would let the broken recipe hide
+    behind the neighbour that kept its declaration -- the failure
+    `test_a_sibling_recipe_cannot_hide_a_broken_one` exists for, reached through
+    a publisher condition rather than a conjunct.
+    """
+
+    catalog = _catalog(repository)
+    _recipe(catalog, RECIPE)["template_document"]["spec"]["artifacts"][
+        "eval_examples"
+    ]["immutability"] = "immutable"
+    _write(repository, catalog)
+
+    result = _run(repository)
+    assert result.returncode == 1, result.stdout + result.stderr
+    summary = _summary(result.stdout)
+    assert "0 would deadlock" in summary, summary
+    assert "1 of those armed in some compositions and not others" in summary, summary
+    assert "the publisher" in result.stdout, result.stdout
+
+
+def test_the_gate_reads_the_publisher_conditions_from_the_publisher(
+    repository: pathlib.Path,
+) -> None:
+    """Not restated here, and not restated in the gate either.
+
+    The gate recovers `{key: value}` from `EvalExamplesPublisher`'s own
+    rejection condition. This drives that extractor over the real source and
+    requires the four conditions it states, so a parse that silently matched
+    nothing -- which would present as "the publisher demands nothing" and check
+    three conditions again -- fails here rather than in production.
+    """
+
+    sys.path.insert(0, str(REPOSITORY))
+    from scripts.ci_step_zero_arming_gate import (
+        EVAL_EXAMPLES_SCHEMA,
+        EVAL_EXAMPLES_TYPE,
+        publisher_requirements,
+    )
+
+    requirements, problems = publisher_requirements(REPOSITORY)
+    assert not problems, problems
+    assert requirements == {
+        "type": EVAL_EXAMPLES_TYPE,
+        "schema": EVAL_EXAMPLES_SCHEMA,
+        "immutability": "append_only",
+        "fingerprint": "manifest_sha256",
+    }, requirements
+
+
+def test_a_publisher_that_moved_off_the_predicate_schema_reddens(
+    repository: pathlib.Path,
+) -> None:
+    """What forces the two authorities to agree.
+
+    The three conjuncts are C++ and the two extra conditions are Python. The
+    only overlap is `type` and `schema`, which both sides state, so that overlap
+    is what a disagreement can be detected on: if the publisher stops accepting
+    the schema the predicate arms on, every arming answer in the table describes
+    a declaration the worker would refuse.
+
+    It doubles as the extractor's own validity check -- a read that matched the
+    wrong node returns a map without these keys and fails here.
+
+    Asserted on the *message*, not on the exit code, and that is load-bearing:
+    with the cross-check removed the gate is still red, because every shipped
+    declaration then reads as a deadlock and the table drifts. A test that
+    accepted any red would pass with the cross-check deleted -- it was observed
+    surviving exactly that mutation -- while a reader was told eleven routes had
+    started deadlocking rather than that the two authorities disagree.
+    """
+
+    source = (repository / PUBLISHER).read_text(encoding="utf-8")
+    mutated = source.replace(
+        'EVAL_EXAMPLES_SCHEMA = "rwkv-lab.eval-examples.v1"',
+        'EVAL_EXAMPLES_SCHEMA = "rwkv-lab.eval-examples.v9"',
+    )
+    assert mutated != source, "the publisher no longer states the schema constant"
+    (repository / PUBLISHER).write_text(mutated, encoding="utf-8")
+
+    result = _run(repository)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "demands schema" in result.stdout, (
+        "the gate went red without saying the publisher and the predicate "
+        f"disagree about the schema:\n{result.stdout}"
+    )
+    assert PUBLISHER in result.stdout, result.stdout
+
+
+def test_a_missing_publisher_source_is_a_failure_not_a_skip(
+    repository: pathlib.Path,
+) -> None:
+    """A gate that cannot read its input must say so, not check less.
+
+    Silently falling back to the three conjuncts is the exact defect this change
+    removes, and an unreadable file is the cheapest way back into it.
+    """
+
+    (repository / PUBLISHER).unlink()
+
+    result = _run(repository)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert PUBLISHER in result.stdout, result.stdout

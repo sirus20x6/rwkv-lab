@@ -53,6 +53,38 @@ for different reasons and are fixed in different files:
    family -- "a declared-but-optional publication leaves it inert, which is the
    exact state this family was in".
 
+Arming is not publishing
+------------------------
+The three conjuncts arm the controller. They do not make the route able to
+satisfy what it has just been armed for. `EvalExamplesPublisher.__init__`
+(`src/rwkv_lab/trainvm_worker/eval_examples.py`) rejects the very same
+declaration unless it *also* carries `immutability: append_only` and
+`fingerprint: manifest_sha256` -- and `adapter_invocation.cpp` hands the worker
+`encode_json(spec.artifacts[logical_name])`, so those two fields come from the
+same artifact object the predicate reads. Both default to a value the publisher
+refuses (`Immutability immutability{}` is `immutable`, `Fingerprint
+fingerprint{}` is `sha256`, in `trainvm/include/trainvm/model.hpp`), so omission
+is not a neutral state.
+
+A document satisfying only the arming three therefore arms the controller and
+then cannot publish: the route deadlocks at its first `pre_optimizer_step`
+crossing, with no diagnostic, which is strictly worse than never arming --
+an inert gate is merely absent, a deadlocked one stops the run. PR #204 paid
+for this the expensive way on RLVR. So the table reports that population
+separately: `no -- arms, then the publisher refuses` is neither "armed" nor the
+same condition as "blocked" (no port, arms nothing), and the two are fixed in
+different files.
+
+The three conjuncts are C++ and the two publisher requirements are Python.
+Neither is restated here. The C++ side is a `required`/`type`/`schema` triple
+this gate already states twice and compares against the pin; the Python side is
+**read out of `eval_examples.py` itself** by `publisher_requirements()`, which
+recovers `{key: value}` from the rejection condition's own AST. What forces the
+two halves to agree is that the extraction must recover `type` and `schema`
+equal to this gate's constants -- so a parse that finds the wrong node, or a
+publisher that moves off `rwkv-lab.eval-examples.v1`, reddens the gate instead
+of quietly checking fewer conditions.
+
 Two traps this gate is built to avoid
 -------------------------------------
 Both produce a confident wrong answer from a token grep for `eval_examples`.
@@ -90,6 +122,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import pathlib
 import sys
@@ -100,6 +133,8 @@ from scripts.gate_verdict import verdict_line  # noqa: E402
 DOCUMENT = "docs/experiment-vm/STEP_ZERO_ARMING.md"
 PIN = "docs/experiment-vm/step-zero-arming.v1.json"
 EXAMPLES = "docs/experiment-vm/examples"
+PUBLISHER = "src/rwkv_lab/trainvm_worker/eval_examples.py"
+PUBLISHER_CLASS = "EvalExamplesPublisher"
 
 BEGIN = "<!-- BEGIN GENERATED ARMING TABLE -->"
 END = "<!-- END GENERATED ARMING TABLE -->"
@@ -126,6 +161,104 @@ EVAL_EXAMPLES_TYPE = "eval_examples"
 # that population and a second copy of the prefix would drift out of agreement
 # with the cell it is meant to detect.
 PARTIALLY_ARMED = "armed, but not everywhere: "
+
+# The "can arm today?" cell, and the "what is missing" prefix, for a route whose
+# only arming compositions satisfy the predicate and not the publisher. Both are
+# constants because the summary counts this population off the cell, exactly as
+# it does for PARTIALLY_ARMED, and a second copy of either string would drift
+# out of agreement with the cell it is meant to detect.
+DEADLOCK_CELL = "no — arms, then the publisher refuses"
+DEADLOCKS = "arms the controller, then the publisher refuses the same declaration: "
+
+
+def publisher_requirements(repository: pathlib.Path) -> tuple[dict[str, str], list[str]]:
+    """What `EvalExamplesPublisher.__init__` demands of the declaration.
+
+    Read out of `eval_examples.py` rather than restated. The publisher rejects
+    with a single `if` whose disjuncts are `declaration.get(<key>) != <value>`,
+    and this recovers that `{key: value}` map from the source's own AST. A third
+    statement of `append_only`/`manifest_sha256` here would be one more fact in
+    two places with nothing forcing agreement -- the defect this gate was filed
+    for, one level up.
+
+    Importing the module instead was rejected: it imports `trainvm.v1.trainvm_pb2`
+    at module scope and raises a `RuntimeError` naming the `trainvm-worker` extra
+    when that is absent, which the seconds-fast schema job does not install. A
+    static read needs nothing.
+
+    The extraction is checked rather than trusted. `rows()` requires the returned
+    map to agree with this gate's own `type`/`schema` constants, which the
+    publisher states too -- so a parse that matched the wrong `if`, or returned
+    nothing, cannot present itself as "no further conditions".
+    """
+    path = repository / PUBLISHER
+    try:
+        source = path.read_text(encoding="utf-8")
+    except OSError as error:
+        return {}, [f"{PUBLISHER}: cannot be read ({error})"]
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as error:
+        return {}, [f"{PUBLISHER}: is not parseable Python ({error})"]
+
+    classes = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == PUBLISHER_CLASS
+    ]
+    if len(classes) != 1:
+        return {}, [
+            (
+                f"{PUBLISHER}: declares {len(classes)} classes named "
+                f"{PUBLISHER_CLASS!r}, this gate reads exactly one"
+            )
+        ]
+
+    found: dict[str, str] = {}
+    for node in ast.walk(classes[0]):
+        if not isinstance(node, ast.Compare) or len(node.ops) != 1:
+            continue
+        if not isinstance(node.ops[0], ast.NotEq):
+            continue
+        call = node.left
+        if (
+            not isinstance(call, ast.Call)
+            or not isinstance(call.func, ast.Attribute)
+            or call.func.attr != "get"
+            or not isinstance(call.func.value, ast.Name)
+            or call.func.value.id != "declaration"
+            or len(call.args) != 1
+        ):
+            continue
+        key, value = call.args[0], node.comparators[0]
+        if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+            continue
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            found[key.value] = value.value
+        elif isinstance(value, ast.Name):
+            # `declaration.get("schema") != EVAL_EXAMPLES_SCHEMA` -- resolve the
+            # module constant, so renaming the literal into a name does not
+            # silently drop a condition.
+            for assignment in tree.body:
+                if (
+                    isinstance(assignment, ast.Assign)
+                    and any(
+                        isinstance(target, ast.Name) and target.id == value.id
+                        for target in assignment.targets
+                    )
+                    and isinstance(assignment.value, ast.Constant)
+                    and isinstance(assignment.value.value, str)
+                ):
+                    found[key.value] = assignment.value.value
+    if not found:
+        return {}, [
+            (
+                f"{PUBLISHER}: no `declaration.get(...) != ...` comparison was "
+                f"found in {PUBLISHER_CLASS}, so this gate cannot tell what the "
+                "publisher demands"
+            )
+        ]
+    return found, []
 
 
 def dictionaries(value: object):
@@ -193,15 +326,25 @@ def contract_of(spec: dict, invoke: dict) -> str | None:
     return contract if isinstance(contract, str) else None
 
 
-def publication_verdict(artifact: object) -> tuple[bool, str]:
-    """Evaluate the three conjuncts, and say which one failed.
+def publication_verdict(
+    artifact: object, requirements: dict[str, str]
+) -> tuple[str, str]:
+    """Evaluate all five conditions, and say which of them failed.
 
-    Reporting the failing conjunct is not decoration. A check that tests one
-    conjunct while asserting three passes every mutation of the other two, and
+    Returns one of three states, because the two ways of failing are different
+    conditions with different fixes and collapsing them is how the previous
+    version of this gate misled a reader:
+
+    - ``armed``   -- predicate and publisher both satisfied;
+    - ``deadlock`` -- predicate satisfied, publisher will refuse it;
+    - ``inert``   -- the predicate is not satisfied, so nothing is armed.
+
+    Reporting the failing condition is not decoration. A check that tests one
+    conjunct while asserting five passes every mutation of the other four, and
     the only way to tell from the outside is whether it can name them.
     """
     if not isinstance(artifact, dict):
-        return False, "the published logical artifact is not declared"
+        return "inert", "the published logical artifact is not declared"
     reasons: list[str] = []
     if artifact.get("type") != EVAL_EXAMPLES_TYPE:
         reasons.append(f"type is {artifact.get('type')!r}, not {EVAL_EXAMPLES_TYPE!r}")
@@ -214,10 +357,27 @@ def publication_verdict(artifact: object) -> tuple[bool, str]:
             f"required is {artifact.get('required', False)!r}, so the publication "
             "is declared but inert"
         )
-    return (not reasons), "; ".join(reasons)
+    if reasons:
+        return "inert", "; ".join(reasons)
+    # The predicate holds. Whether the worker can then publish is a separate
+    # question over the same object, and `type`/`schema` are deliberately
+    # re-evaluated from the publisher's own map: if it has moved off the value
+    # the predicate accepts, `rows()` has already reddened, and skipping them
+    # here would leave the table describing a route that arms and cannot publish.
+    for key, value in sorted(requirements.items()):
+        if artifact.get(key) != value:
+            reasons.append(
+                f"{key} is {artifact.get(key)!r}, and the publisher "
+                f"({PUBLISHER}) refuses anything but {value!r}"
+            )
+    if reasons:
+        return "deadlock", "; ".join(reasons)
+    return "armed", ""
 
 
-def composition_evidence(repository: pathlib.Path) -> tuple[dict, dict, list[str]]:
+def composition_evidence(
+    repository: pathlib.Path, requirements: dict[str, str]
+) -> tuple[dict, dict, dict, list[str]]:
     """Per contract: which shipped documents arm it, and why the others do not.
 
     Every JSON document under `docs/experiment-vm/examples/` is read, recursively.
@@ -225,6 +385,7 @@ def composition_evidence(repository: pathlib.Path) -> tuple[dict, dict, list[str
     parsing silently removes whatever it used to prove.
     """
     arming: dict[str, set[str]] = {}
+    deadlocking: dict[str, list[str]] = {}
     rejected: dict[str, list[str]] = {}
     problems: list[str] = []
     root = repository / EXAMPLES
@@ -260,24 +421,35 @@ def composition_evidence(repository: pathlib.Path) -> tuple[dict, dict, list[str
                     )
                     if not named:
                         continue
-                    armed, reason = publication_verdict(artifact)
-                    if armed:
+                    state, reason = publication_verdict(artifact, requirements)
+                    detail = f"{composition} node {node_name}: {reason}"
+                    if state == "armed":
                         arming.setdefault(contract, set()).add(composition)
+                    elif state == "deadlock":
+                        deadlocking.setdefault(contract, []).append(detail)
                     else:
-                        rejected.setdefault(contract, []).append(
-                            f"{composition} node {node_name}: {reason}"
-                        )
-    return arming, rejected, problems
+                        rejected.setdefault(contract, []).append(detail)
+    return arming, deadlocking, rejected, problems
 
 
-def missing(entry: dict, armed: set[str], rejected: list[str]) -> str:
+def missing(
+    entry: dict, armed: set[str], deadlocking: list[str], rejected: list[str]
+) -> str:
+    shortfall = sorted(deadlocking) + sorted(rejected)
     if armed:
-        if rejected:
+        if shortfall:
             # Some compositions arm and others do not. Saying only "armed"
             # would let a sibling recipe lose its declaration behind a
             # neighbour that kept it.
-            return PARTIALLY_ARMED + "; ".join(sorted(rejected))
+            return PARTIALLY_ARMED + "; ".join(shortfall)
         return "nothing — armed"
+    if deadlocking:
+        # Its own cell text, before the stateful check and before the port
+        # reasons: the port is present and a shipped composition does publish
+        # through it, so every sentence below would be false here. This is the
+        # harmful state -- the controller demands evidence the worker is
+        # structurally unable to supply -- and it must not read as "blocked".
+        return DEADLOCKS + "; ".join(sorted(deadlocking))
     if not entry.get("stateful"):
         # A non-stateful operation mutates nothing, so there is no first
         # optimizer step for the gate to precede. Saying "it declares no
@@ -320,7 +492,28 @@ def rows(repository: pathlib.Path) -> tuple[list[tuple[str, ...]], list[str]]:
             f"{pin.get('eval_examples_schema')!r}, this gate evaluates the "
             f"predicate against {EVAL_EXAMPLES_SCHEMA!r}"
         )
-    arming, rejected, document_problems = composition_evidence(repository)
+    requirements, publisher_problems = publisher_requirements(repository)
+    problems += publisher_problems
+    # What forces the two authorities to agree. The publisher states `type` and
+    # `schema` as well as the two conditions only it states, so a disagreement
+    # with the constants this gate evaluates the predicate against means one of
+    # them moved -- and every arming answer below was computed against a
+    # declaration the other side would refuse. It also validates the extraction
+    # itself: an AST read that matched the wrong node returns a map missing
+    # these, and would otherwise present as "the publisher demands nothing".
+    for key, expected in (
+        ("type", EVAL_EXAMPLES_TYPE),
+        ("schema", EVAL_EXAMPLES_SCHEMA),
+    ):
+        if not publisher_problems and requirements.get(key) != expected:
+            problems.append(
+                f"{PUBLISHER}: {PUBLISHER_CLASS} demands {key} "
+                f"{requirements.get(key)!r}, this gate evaluates the predicate "
+                f"against {expected!r}"
+            )
+    arming, deadlocking, rejected, document_problems = composition_evidence(
+        repository, requirements
+    )
     problems += document_problems
 
     built: list[tuple[str, ...]] = []
@@ -343,8 +536,15 @@ def rows(repository: pathlib.Path) -> tuple[list[tuple[str, ...]], list[str]]:
                 "yes" if entry.get("evaluator_slots") else "no",
                 "yes" if entry.get("checkpoint_outputs") else "no",
                 port_cell,
-                ("yes — " + ", ".join(sorted(armed))) if armed else "no",
-                missing(entry, armed, rejected.get(contract, [])),
+                ("yes — " + ", ".join(sorted(armed)))
+                if armed
+                else (DEADLOCK_CELL if deadlocking.get(contract) else "no"),
+                missing(
+                    entry,
+                    armed,
+                    deadlocking.get(contract, []),
+                    rejected.get(contract, []),
+                ),
             )
         )
     return built, problems
@@ -409,17 +609,25 @@ def population_summary(built: list[tuple[str, ...]]) -> str:
     second population is empty, which is exactly when a single number under two
     names is indistinguishable from either -- and exactly why it is printed.
 
-    The four counts partition the routes, in this order, so they always sum to
+    The five counts partition the routes, in this order, so they always sum to
     the total and a reader can check that they do:
 
-    - armed: some shipped composition satisfies all three conjuncts;
+    - armed: some shipped composition satisfies all five conditions;
+    - would deadlock: a shipped composition satisfies the three predicate
+      conjuncts and none satisfies the publisher, so the route arms and then
+      cannot publish. Printed even at zero, for the same reason the armable
+      count is: a population that is absent today is indistinguishable from one
+      that is not counted, and this one is the harmful direction;
     - armable but unarmed: the adapter's port is usable, no composition arms it;
     - blocked: stateful, and the port is missing or unusable;
     - not stateful: nothing mutates, so there is no first optimizer step to gate.
     """
     total = len(built)
     stateful = sum(1 for row in built if row[1] == "yes")
-    armed = sum(1 for row in built if row[5] != "no")
+    armed = sum(1 for row in built if row[5].startswith("yes"))
+    # Counted off the cell, like `partial` below, so the line cannot claim a
+    # different deadlock set than the table shows.
+    deadlock = sum(1 for row in built if row[5] == DEADLOCK_CELL)
     # Counted off the cell `missing()` writes, so the summary cannot claim a
     # different partial set than the table shows.
     partial = sum(1 for row in built if row[6].startswith(PARTIALLY_ARMED))
@@ -427,7 +635,7 @@ def population_summary(built: list[tuple[str, ...]]) -> str:
     blocked = sum(
         1 for row in built if row[5] == "no" and row[4] != "yes" and row[1] == "yes"
     )
-    inert = total - armed - armable - blocked
+    inert = total - armed - deadlock - armable - blocked
 
     armed_clause = f"{armed} armed today by a shipped composition"
     if partial:
@@ -436,7 +644,9 @@ def population_summary(built: list[tuple[str, ...]]) -> str:
         armed_clause += f", {partial} of those armed in some compositions and not others"
     return (
         f"{total} registered {'route' if total == 1 else 'routes'} "
-        f"({stateful} stateful); {armed_clause}, {armable} armable but unarmed "
+        f"({stateful} stateful); {armed_clause}, {deadlock} would deadlock "
+        f"(arms the controller, the publisher refuses the declaration), "
+        f"{armable} armable but unarmed "
         f"(port in place, no shipped composition arms it), {blocked} blocked, "
         f"{inert} not stateful"
     )
