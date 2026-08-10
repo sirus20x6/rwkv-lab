@@ -132,14 +132,34 @@ def main() -> int:
             if key in FORBIDDEN_KEYS:
                 failures.append(f"{identifier}: reserved key '{key}'")
 
+        # `family` is what ties a fixture to the roadmap: this file fails when a
+        # family the roadmap names has no fixture, and a fixture that names no
+        # family answers that question for nobody. Every other field a fixture
+        # is expected to carry was already checked -- an unknown `effect_class`
+        # fails by name, a duplicate `id` fails -- so `family` being the one
+        # that could simply be absent read as deliberate and was not.
+        #
+        # A missing family is silent in the worst way: the fixture still counts
+        # as a fixture, still has its evidence checked, and contributes to no
+        # family, so a roadmap family can go uncovered while a fixture that was
+        # meant to cover it sits right there passing.
         family = fixture.get("family")
-        # A fixture with no `family` key declares no family. Adding `None` here
-        # inflated the family count this file's verdict line prints -- the file
-        # already knew, and subtracted `{None}` again before reporting
-        # unreviewed families. Guarding on `None` specifically rather than on
-        # `str` keeps a non-string family reportable exactly as it was.
-        if family is not None:
+        if family is None:
+            failures.append(
+                f"{identifier}: declares no family. A fixture's family is what "
+                f"ties it to the roadmap, and one that names none cannot cover "
+                f"anything.")
+        elif not isinstance(family, str) or not family.strip():
+            failures.append(
+                f"{identifier}: family must be a non-empty string, got "
+                f"{family!r}")
+        else:
             families.add(family)
+        # The guard above still matters beyond the failure it raises. This
+        # function collects failures and keeps going, so a run that reports a
+        # family-less fixture also prints its verdict line -- and adding `None`
+        # to `families` inflated the count on that very line. Reporting a defect
+        # while miscounting because of it is the shape worth avoiding.
 
         effect_class = fixture.get("effect_class")
         if effect_class not in evidence:

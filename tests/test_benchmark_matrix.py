@@ -171,12 +171,22 @@ def test_the_transition_count_does_not_move_with_fixtures_in_one_family(
     assert original.split("fixtures over", 1)[1] == line.split("fixtures over", 1)[1]
 
 
-def test_a_fixture_with_no_family_key_is_not_counted_as_a_family(tmp_path, matrix):
-    """`families.add(family)` was unconditional, so a missing key counted as one.
+def test_a_fixture_with_no_family_key_fails_and_is_not_counted_as_a_family(
+        tmp_path, matrix):
+    """Two properties, and the second is why the first is not enough.
 
-    That is a computation defect rather than a wording one: the file already
-    knew, subtracting `{None}` again before reporting unreviewed families, so
-    the only place `None` ever reached was the count this line prints.
+    A fixture that names no family is now a failure: `family` is what ties a
+    fixture to the roadmap, this file fails when a roadmap family has no
+    fixture, and every other expected field was already checked -- so `family`
+    being the one that could simply be absent read as deliberate and was not.
+    This test previously asserted `returncode == 0` for exactly this input,
+    which is how the silence was pinned rather than found.
+
+    The older property still holds and is still asserted: the run that reports
+    the defect also prints its verdict line, and `families.add(None)` inflated
+    the count on that very line. Reporting a defect while miscounting because
+    of it is the shape worth avoiding, so the guard is not redundant with the
+    failure -- it is what keeps the failing run's own numbers honest.
     """
     orphan = copy.deepcopy(matrix["fixtures"][0])
     orphan["id"] = orphan["id"] + "-orphan"
@@ -188,8 +198,30 @@ def test_a_fixture_with_no_family_key_is_not_counted_as_a_family(tmp_path, matri
                 if "family" in fixture}
     result = run_validator(write(tmp_path, matrix))
     line = verdict(result.stdout)
-    assert result.returncode == 0, result.stdout + result.stderr
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"{orphan['id']}: declares no family" in result.stdout
     assert f"{len(matrix['fixtures'])} fixtures over {len(families)} families" in line
+
+
+@pytest.mark.parametrize("family", ["", "   ", 7, [], None])
+def test_a_family_that_is_not_a_usable_name_fails(tmp_path, matrix, family):
+    """Absent, empty and wrong-typed all fail, rather than only the absent case.
+
+    Parametrized because the guard is two branches and a rule that only caught
+    `None` would leave `"family": ""` passing -- a fixture that ties itself to
+    a roadmap entry named by the empty string, which is the same defect wearing
+    a key.
+    """
+    broken = copy.deepcopy(matrix["fixtures"][0])
+    broken["id"] = broken["id"] + "-broken"
+    broken["family"] = family
+    broken["declares_curriculum_transition"] = False
+    matrix["fixtures"].append(broken)
+
+    result = run_validator(write(tmp_path, matrix))
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert broken["id"] in result.stdout
 
 
 @pytest.mark.parametrize(
