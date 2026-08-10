@@ -438,6 +438,20 @@ target_compile_options(cache_namespace_tests PRIVATE
 )
 target_link_libraries(cache_namespace_tests PRIVATE trainvm_core)
 add_test(NAME cache_namespace_tests COMMAND cache_namespace_tests)
+# Drives the Python driver identity through the validator that judges it, so
+# the character set is stated once, in cache_namespace.cpp, rather than copied
+# into the Python suite. Needs the repository root to reach the fixture script.
+add_executable(driver_identity_namespace_tests
+  tests/driver_identity_namespace_tests.cpp)
+target_compile_options(driver_identity_namespace_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_compile_definitions(driver_identity_namespace_tests PRIVATE
+  TRAINVM_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+target_link_libraries(driver_identity_namespace_tests PRIVATE trainvm_core)
+add_test(NAME driver_identity_namespace_tests
+  COMMAND driver_identity_namespace_tests)
 add_executable(cache_namespace_authority_tests
   tests/cache_namespace_authority_tests.cpp)
 target_compile_options(cache_namespace_authority_tests PRIVATE

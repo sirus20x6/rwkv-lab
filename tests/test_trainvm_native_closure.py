@@ -64,17 +64,24 @@ REPOSITORY = pathlib.Path(__file__).resolve().parent.parent
 BUILDER_PATH = REPOSITORY / "scripts" / "build_trainvm_runtime_closure.py"
 
 
-def _load_builder():
-    specification = importlib.util.spec_from_file_location(
-        "build_trainvm_runtime_closure", BUILDER_PATH
-    )
+def _load_module(name: str, path: pathlib.Path):
+    specification = importlib.util.spec_from_file_location(name, path)
     assert specification is not None and specification.loader is not None
     module = importlib.util.module_from_spec(specification)
     specification.loader.exec_module(module)
     return module
 
 
-builder = _load_builder()
+builder = _load_module("build_trainvm_runtime_closure", BUILDER_PATH)
+
+
+# The identities the native `driver_identity_namespace_tests` is driven over.
+# Shared rather than duplicated so this suite and that one cannot disagree
+# about what the guard emits.
+driver_identity_fixture = _load_module(
+    "driver_identity_fixture",
+    REPOSITORY / "trainvm" / "tests" / "driver_identity_fixture.py",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -778,22 +785,39 @@ def test_a_rebuild_that_changed_the_module_is_rejected(tree, driver):
 
 
 def test_a_driver_identity_is_a_legal_downstream_identity(driver):
-    """`fixed_public_identity` in trainvm/src/cache_namespace.cpp accepts it.
+    """The identity is a version token and a build ID, never the report line.
 
-    The identity reaches the cache namespace claim through
-    `compute_compatibility_digest`, and that validator allows only
-    `[A-Za-z0-9._+:-]`. The v3 whole-line form contained a space, `(`, `)` and
-    `@`, so it could not have been claimed at all.
+    Legality itself is not asserted here. `fixed_public_identity` in
+    trainvm/src/cache_namespace.cpp is the only statement of which characters a
+    cache namespace claim may carry, and `driver_identity_namespace_tests`
+    drives *this* function's real output through *that* real validator --
+    widen or narrow the character set and it moves, change the identity's shape
+    and it moves. This test used to restate the character set in Python, which
+    passed whichever way `fixed_public_identity` was edited: it pinned today's
+    answer rather than the rule.
+
+    What is left is the producer's own half of the contract, which no C++ test
+    can see: the transform runs at all. The v3 defect was the identity being
+    the whole `/proc/driver/nvidia/version` line -- a shape, not a character --
+    and reintroducing it fails here as well as natively.
     """
 
-    allowed = set(
-        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-+:"
-    )
     driver(driver_version="610.43.03", note_bytes=build_id_note(b"\x55" * 20))
     identity = guard.driver_identity()
-    assert identity is not None
-    assert not set(identity) - allowed
-    assert set(guard.driver_report() or "") - allowed
+    report = guard.driver_report()
+    assert identity == "610.43.03+gnu-build-id:" + "55" * 20
+    assert report is not None and identity != report
+
+    # And the shape the native validator is driven over is this one. A fixture
+    # that drifted off the real host's report would leave the cross-language
+    # agreement looking checked while checking something else.
+    produced = driver_identity_fixture.identities()
+    assert any(
+        record["report"].startswith("NVRM version:")
+        and record["identity"].startswith("610.43.03+gnu-build-id:")
+        for record in produced
+    )
+    assert all(record["identity"] != record["report"] for record in produced)
 
 
 def test_a_driver_without_a_build_id_falls_back_to_the_version(tree, driver):
