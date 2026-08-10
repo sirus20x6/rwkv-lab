@@ -370,7 +370,8 @@ have landed the half you are reading about.
 ### One command answers "do the cited paths still hold": `card_anchor_check.py`
 
 The rule above is a convention, and conventions here have a poor record — the
-merged-PR reference that 56 of 126 Done cards ignore is the standing example.
+merged-PR reference that 37 of 168 Done cards still ignore is the standing
+example, and `card_done_pr_check.py` below is what recounts it.
 Worse, "cite the sha" only reaches cards written after it, and the 200+ already
 filed are the ones that will go stale. So there is also a mechanical check, and
 it needs nothing added to any card:
@@ -490,6 +491,42 @@ read. So:
 
 A card in Done is a promise that `git grep` against `origin/main` will find the
 thing. Anything weaker belongs in a comment.
+
+**One command checks it: `card_done_pr_check.py`.** Like `card_anchor_check.py`
+it reads a saved board rather than the repository, so it is a review-time tool
+and not a CI gate — nothing in a pull request can see a card.
+
+```bash
+python scripts/card_done_pr_check.py --board board.json
+python scripts/card_done_pr_check.py --board board.json --verify-merged
+```
+
+It separates three failures that need different responses, which is the whole
+point of running it rather than eyeballing the column:
+
+- **NO PR RECORDED** — Done with no `result_pr_url`. Reported, but does not
+  fail the run: 37 cards are in this state and a permanently red check is one
+  everybody learns to ignore. The work is probably on main; what is lost is the
+  cheap way to confirm it.
+- **MALFORMED** — a `result_pr_url` that is not a pull-request URL. **Worse
+  than an absent one, because it reads as evidence.** Its first run against a
+  real board found one: a card recording
+  `https://github.com/sirus20x6/rwkv-lab/tree/dashboard/declarative-vm-fsm`,
+  a *branch* URL, and pointing at the stale branch this file warns about at the
+  top. A commit URL is the same trap — under squash merging the sha it names is
+  exactly the thing that proves nothing.
+- **NOT MERGED** — a cited pull request that is open, or closed unmerged. The
+  card says done and the evidence it cites disagrees.
+
+The last two exit non-zero; they are defects in the record rather than gaps in
+it. The summary line states the population as well as the findings, because
+zero findings over zero recognised cards and zero findings over 168 are
+otherwise the same sentence.
+
+Measured across this project's five boards on 2026-08-10: **37 of 168 Done
+cards record no `result_pr_url`.** An earlier count put it at 56 of 126, so the
+convention is followed more often than it was and is still missed about a fifth
+of the time — recompute rather than quoting either number.
 
 ### Check mergeability BEFORE you read the checks
 
@@ -718,8 +755,9 @@ Two numbers from that sweep are worth carrying:
 - An automated line-matching pass triaged all 173. Hand review of the 44
   ambiguous ones **overturned 31 — 70% — in both directions.** Line-matching
   triages; it cannot conclude.
-- 56 of 126 Done cards record no merged-PR reference at all, so for those the
-  citation is the only trail and it is the unreliable kind.
+- 56 of 126 Done cards recorded no merged-PR reference at the time of that
+  sweep — 37 of 168 today — so for those the citation is the only trail and
+  it is the unreliable kind. `card_done_pr_check.py` reports the current set.
 
 **`1c91acd` must never be cherry-picked.** It is cited on two cards that both
 read as done. It sets, on `deploy/trainvm-hostd.service`:
@@ -1098,6 +1136,8 @@ at the revision each catalog pins, not of this repository. Measured against
   `scripts/generate_trainvm_proto.sh`.
 - `source-dispositions.rwkv-lab.v1.json` has the same shape: **165** entries
   against **173** files in scope here, so **8 are unclassified**.
+- `source-dispositions.dashboard.v1.json` pins a different revision and is
+  complete for this tree.
 
 Those figures were 128/146/18 and 165/171/6 when this section was written, and
 nothing reports the drift — so recompute rather than quoting them. Both scopes
@@ -1123,8 +1163,6 @@ PY
 **The scripts gap grew from 18 to 31 while one entry was added.** That is the
 direction to watch: the unclassified count is not a backlog draining down, it
 rises every time a card adds a script, which is most of them.
-- `source-dispositions.dashboard.v1.json` pins a different revision and is
-  complete for this tree.
 
 Nothing reports those gaps. `print_disposition_digests.py --check` only walks the
 entries the document lists and hashes the files they name, so a file with *no*
