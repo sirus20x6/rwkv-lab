@@ -1,0 +1,154 @@
+{
+  "api_version": "trainvm.skip-reason-baseline/v1",
+  "authority": "ci_scope_evidence_only",
+  "comment": "Every skip in this repository is runtime-conditional on a host or environment fact -- a CUDA device, an installed asset, an importable optional package -- so the skip count can move without anybody touching the code, and nothing recorded that it had. The coverage gate catches a test FILE that contributes nothing and validate_native_ci_exclusions.py catches a native SUITE that stops running; a collected file whose twenty tests all call pytest.skip() at runtime passes both. This file declares every reason a bound run may produce, and scripts/ci_skip_reason_gate.py reads a run's JUnit XML and fails on a reason that matches none of them. Reasons are anchored regular expressions rather than literals because several are f-strings and interpolate at the front, the middle and the end; the gate refuses a pattern that is not anchored, one that carries a wildcard behind fewer than 24 literal characters, and one that matches its canary strings, because a pattern that matches too much is the single failure that would make this whole gate decorative. Adding an entry here is the deliberate act: it costs one line and one stated reason, and it is the human glance the gate exists to force. This declaration carries no authority over what runs or what skips; the tests do.",
+  "gate": "scripts/ci_skip_reason_gate.py",
+  "scope": "the non-GPU pytest runs listed under environments. The GPU job is deliberately NOT bound: two of its reasons are built at runtime from a device probe (`triton_status()[1]`, `receipt[\"reason\"]` in tests/test_sm120_kernels.py), so their text is a property of the card in the machine rather than of the source, and pinning them would either churn per device or need a wildcard wide enough to defeat the check. It is also unreached today -- vars.TRAINVM_SELF_HOSTED is unset, recorded in docs/experiment-vm/gpu-grader-observations.v1.json -- so a pin there would be pinning nothing.",
+  "environments": [
+    {
+      "name": "github-hosted-cpu",
+      "count_authority": "enforced",
+      "max_skipped": 22,
+      "where": ".github/workflows/tests.yml, job python-cpu (both matrix interpreters)",
+      "why": "a hosted ubuntu-latest runner with a fixed install line and no accelerator, so its skip set is reproducible run to run and a count bound means something there",
+      "observed": "22 skipped over 11 distinct reasons on BOTH 3.11 and 3.12, run 31345026412 at 959f553d, with 2023 passed. Measured rather than guessed: the first commit pinned 0 so the run would print the real number. All 11 reasons were already declared below, which is the evidence that the declared set really is derivable from the source rather than from one machine."
+    },
+    {
+      "name": "github-hosted-fla",
+      "count_authority": "enforced",
+      "max_skipped": 1,
+      "where": ".github/workflows/tests.yml, job python-fla",
+      "why": "the same hosted image with flash-linear-attention installed, running only the fla-marked selection; a skip here means the assertions this job exists to run are not running",
+      "observed": "1 skipped, 0 passed, 2083 deselected, run 31345026412 at 959f553d. The job's single fla-marked test skips on `requires the optional fla dependency` even though the job installs the package, so the assertion runs in NO job -- the exact failure this gate was built to find, found on its first real run. Filed as card-a702bb37.",
+      "countdown": "this 1 is a recorded hole, not a budget. It is pinned above 0 only because a permanently red job is one everybody learns to ignore; it comes back to 0 when card-a702bb37 lands, and like the unwired-module allowlist this entry should be written expecting to delete it."
+    },
+    {
+      "name": "real-host-acceptance",
+      "count_authority": "reported",
+      "where": "scripts/acceptance.sh, its python-cpu suite",
+      "why": "the skip set on a real host is a function of that machine's devices, assets and optional packages, so a pinned count would be correct on one workstation and wrong on the next; a permanently red gate is one everybody learns to ignore, and the novel-reason half is enforced here regardless, which is the half worth having"
+    }
+  ],
+  "reasons": [
+    {
+      "pattern": "^trainvm gate binary not built in this checkout \\(PATH is deliberately not consulted\\); build it with: .+$",
+      "why": "the native gate binary is gitignored, so a checkout that has not built it cannot grade against it; the build command is interpolated into the reason",
+      "needs": "native_build"
+    },
+    {
+      "pattern": "^no trainvm binary in this checkout; enumeration ran without it$",
+      "why": "the step-zero enumeration cross-check needs the native binary's lifecycle declarations to compare against",
+      "needs": "native_build"
+    },
+    {
+      "pattern": "^this trainvm binary does not publish lifecycle declarations$",
+      "why": "an older binary predates the declarations the cross-check reads, and grading against it would compare with nothing",
+      "needs": "native_build"
+    },
+    {
+      "pattern": "^requires the optional rosa_soft extension$",
+      "why": "rosa_soft is an optional compiled extension that is not part of any install line here",
+      "needs": "optional_package"
+    },
+    {
+      "pattern": "^requires the optional fla dependency$",
+      "why": "flash-linear-attention is deliberately absent from the CPU job and installed only in the fla job, which is what makes that job's coverage real",
+      "needs": "optional_package"
+    },
+    {
+      "pattern": "^isolated Mage-Flow environment is not active$",
+      "why": "the Mage-Flow layers live in a separate environment that is not installed alongside this package",
+      "needs": "optional_package"
+    },
+    {
+      "pattern": "^could not import 'torchao': .+$",
+      "why": "torchao is an optional quantization dependency; the tail is the interpreter's own ImportError text, which varies by version",
+      "needs": "optional_package"
+    },
+    {
+      "pattern": "^could not import 'torch': .+$",
+      "why": "torch is installed in every job that runs these tests, so this firing at all is worth seeing; the tail is the interpreter's ImportError text",
+      "needs": "optional_package"
+    },
+    {
+      "pattern": "^could not import 'PIL\\.Image': .+$",
+      "why": "Pillow arrives with the vision extra, so this fires wherever that extra was not installed",
+      "needs": "optional_package"
+    },
+    {
+      "pattern": "^could not import 'mage_flow\\.models\\.modules\\._attn_backend': .+$",
+      "why": "the Mage-Flow attention backend is part of that separate environment",
+      "needs": "optional_package"
+    },
+    {
+      "pattern": "^AO3 corpus or RWKV vocabulary is not present on this host$",
+      "why": "the input-pipeline tests read a real corpus that exists only on the training workstation",
+      "needs": "host_asset"
+    },
+    {
+      "pattern": "^host AO3 corpus or RWKV tokenizer is not available: .+$",
+      "why": "the benchmark runner's corpus fixture names which of the two is missing, so the tail varies with the host",
+      "needs": "host_asset"
+    },
+    {
+      "pattern": "^ztok's Python binding is not importable \\(it lives in the ztok repository, not this checkout\\); .+$",
+      "why": "the ztok binding is built in another repository; the tail reports where the search looked",
+      "needs": "host_asset"
+    },
+    {
+      "pattern": "^no ztok to cross-check: .+$",
+      "why": "the vocabulary cross-check needs a ztok build to compare against, and names which resolution step failed",
+      "needs": "host_asset"
+    },
+    {
+      "pattern": "^production Qwen assets are not installed on this test host$",
+      "why": "the caption parity fixture hashes real production weights, which are not distributed with the repository",
+      "needs": "host_asset"
+    },
+    {
+      "pattern": "^torch\\.distributed unavailable$",
+      "why": "the post-training test needs a gloo process group, which some builds of torch do not carry",
+      "needs": "optional_runtime"
+    },
+    {
+      "pattern": "^\\S+ needs \\S+, absent in this job$",
+      "why": "the gate-verdict test drives each gate and skips the ones whose input this job does not have; the gate name interpolates at the FRONT of the reason, which is why entries here are expressions rather than prefixes",
+      "needs": "host_asset"
+    },
+    {
+      "pattern": "^this interpreter's runtime cannot be sealed: .+$",
+      "why": "the runtime-closure builder refuses an interpreter whose files are group- or world-writable, and names the offending path",
+      "needs": "host_filesystem"
+    },
+    {
+      "pattern": "^the runtime closure is a Linux deployment artifact$",
+      "why": "the sealed closure is a Linux deployment artifact and the test says so rather than asserting something false elsewhere",
+      "needs": "linux_host"
+    },
+    {
+      "pattern": "^probe could not import the module: .*$",
+      "why": "the accelerator-mask probe runs a child interpreter and reports its stderr tail when the module under test would not import there",
+      "needs": "optional_package"
+    },
+    {
+      "pattern": "^needs \\S+=1; this test deliberately runs a child WITHOUT the accelerator mask, which the rest of this module exists to forbid$",
+      "why": "the one test that must run unmasked is opt-in twice over, and names the variable that authorizes it",
+      "needs": "accelerator_access"
+    },
+    {
+      "pattern": "^no NVIDIA device files on this host$",
+      "why": "the device-file assertions have nothing to assert against on a machine with no NVIDIA nodes",
+      "needs": "accelerator_device"
+    },
+    {
+      "pattern": "^this is the explicitly authorized accelerator phase$",
+      "why": "the mask assertions are inverted during the authorized GPU phase, so they stand down rather than fail there",
+      "needs": "accelerator_access"
+    },
+    {
+      "pattern": "^accelerator tests require \\S+=1$",
+      "why": "tests/conftest.py marks every gpu-marked item skipped unless accelerator access was explicitly granted, so a caller that forgets the marker expression still gets a default-deny",
+      "needs": "accelerator_access"
+    }
+  ]
+}
