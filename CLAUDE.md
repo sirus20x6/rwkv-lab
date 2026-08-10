@@ -25,6 +25,50 @@ only as current as your last fetch. Do not branch from `HEAD` — the primary
 checkout is not necessarily on main, and cannot always be, because git allows a
 branch in one worktree at a time and a sibling checkout may hold main.
 
+### The same fact makes the primary checkout unsafe to READ
+
+The paragraph above is about where you branch from. The sharper hazard is what
+you learn by opening a file there, and it has already produced a confident,
+specific, false finding.
+
+Measured 2026-08-10: `/thearray/git/moe-mla-dashboard-vm` is on
+`dashboard/declarative-vm-fsm` — a branch whose pull request merged long ago —
+**248 commits behind `origin/main`**, with 150 untracked files. It is not
+neglect and it is not fixable by switching: `/thearray/git/moe-mla-card-inputpipe`
+holds `main`, and git allows a branch in one worktree at a time. Whichever
+worktree loses that race is stale by construction, and this one lost it.
+
+So a file read from the primary checkout describes a world that is a quarter of
+a thousand commits gone. What that cost, concretely: `WorkerToController` in
+`src/trainvm/v1/trainvm_pb2.py` there has nine fields and no `runtime_evidence`,
+and constructing one raises `ValueError: Protocol message WorkerToController has
+no "runtime_evidence" field`. On `origin/main` that field exists, numbered 10.
+The conclusion drawn from the stale read — that `publish_runtime_evidence` can
+never work — was wrong, specific, and would have sent someone to rewrite a
+working transport.
+
+**Read through the ref, or from a worktree you created from it:**
+
+```bash
+git show origin/main:<path>          # a single file
+git grep -n '<pattern>' origin/main -- <paths>
+```
+
+`git grep` accepts a revision and most greps do not, which is why the habit has
+to be deliberate: `grep -rn foo src/` in the primary checkout answers a question
+about a retired branch and looks identical to an answer about main.
+
+What caught it was not care, it was **disagreement**: the card being worked said
+tests call that method and CI is green, so "the call always raises" could not be
+true. A lone confident reading of one file has no error detection in it. When
+something you read implies a shipped path is broken, prefer the hypothesis that
+you read the wrong tree.
+
+There is deliberately no guard. A hook cannot be landed by a pull request here
+(`core.hooksPath` is user-global, outside every repository), and the tempting
+predicate — refuse when `HEAD` is not main — would fire in every legitimate card
+worktree, which is all of them. The affordable instrument is the habit above.
+
 ### This checkout is a worktree of `/thearray/git/moe-mla`. Do not use `EnterWorktree`
 
 `/thearray/git/moe-mla-dashboard-vm` is not a sibling clone of
