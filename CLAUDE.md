@@ -973,6 +973,41 @@ calibration case above, applied to the side of the comparison that is prose
 rather than code, and it is the side that gets skipped because querying it
 feels like reading rather than measuring.
 
+**A syntactic property is not a behavioural one, and a grep only reaches the
+first.** The same failure again, between two facts about the *code* rather
+than between code and prose. "Is this a module-level constant" is syntax. "Can
+anything override it" is behaviour. They look like one question and, on
+2026-08-10, differed by 110 to 1.
+
+That investigation produced four populations in a row, each measured
+confidently and each wrong, before the answer settled:
+
+| pass | reported | why it was wrong |
+| --- | --- | --- |
+| 1 | 40 files | never looked at `scripts/`, which holds 71 of them |
+| 2 | 19 sites | counted `*_HISTORICAL_PATH` — the value the policy *requires* |
+| 3 | 4 sites | matched `NAME = "literal"`, skipped `NAME = Path("literal")` |
+| 4 | 32 sites | 28 of them feed an `argparse` default and are overridable |
+| — | **1 site** | the rest are overridable, or ad-hoc scripts with no `argparse` |
+
+The one real defect was `_ENGRAM_PATH` in `build_engram_patch.py`, which
+drives `sys.path.insert` at import — and it was named in the *first
+paragraph* of the card that started the whole thing. Three rounds of
+measurement buried it under populations of 40, 19 and 32.
+
+Two things generalise. **A predicate over syntax will not answer a question
+about consequences** — to know whether a constant matters, you have to know
+what reads it, which means following it, which means opening the file.
+And **when a count keeps moving, stop counting**: four passes each produced a
+plausible number, and only reading four files produced the right one. A
+population that changes every time you sharpen the instrument is telling you
+the instrument is the wrong kind, not that it needs another pass.
+
+The cost of getting this wrong is not just wasted conversions. A gate was
+written, tested and nearly merged on the strength of pass 3's "the honest
+count is now zero"; pass 4 showed it would have shipped reporting PASSED over
+32 live instances of the defect it existed to catch.
+
 ### Mutation testing: the baseline row is not a formality
 
 There is no mutation-testing harness in this repository — the practice is to
