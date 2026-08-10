@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -796,6 +797,113 @@ void prior_boot_fence_is_stale_without_poisoning_journal() {
           "a stale prior-boot fence does not poison unrelated journal reads");
 }
 
+// The card this qualifies ("Prevent post-reboot journal authority poisoning")
+// asks for sustained dashboard reads with hostd reconciliation active, not one
+// read after one rejected fence. The reported symptom was latching: the
+// controller served ListRuns correctly at first and became permanently
+// unreadable "within seconds", because `corrupt()` sets `authority_poisoned_`,
+// which the SQLite authorizer consults on every prepare from then on. A
+// single-read assertion therefore passes against the broken build too -- the
+// first read is the one that always worked. This drives hostd's real
+// reconciliation entry point repeatedly against a journal whose retained lease
+// row carries a prior boot id, and reads the dashboard's own ListRuns surface
+// between every attempt, for a window wider than the one the symptom appeared
+// in.
+void sustained_dashboard_reads_survive_prior_boot_reconciliation() {
+  Fixture fixture;
+  constexpr std::string_view next_boot =
+      "cccccccc-cccc-cccc-cccc-cccccccccccc";
+
+  // What the dashboard's ListRuns handler actually touches: the journal
+  // identity it stamps on the response, and the bounded run projection scan.
+  // Both are ordinary prepares, so both are denied once the journal is
+  // poisoned.
+  struct DashboardRead final {
+    std::string journal_id;
+    std::size_t runs{};
+    std::size_t authority_events{};
+    bool operator==(const DashboardRead&) const = default;
+  };
+  const auto list_runs = [](const Journal& journal) -> DashboardRead {
+    const std::vector<RunProjection> projections =
+        journal.run_projections({.observed_states = {},
+                                 .labels = {},
+                                 .after = std::nullopt,
+                                 .limit = 50U});
+    return {.journal_id = journal.journal_id(),
+            .runs = projections.size(),
+            .authority_events = journal.events_for_run("run-001").size()};
+  };
+
+  const DashboardRead before_reboot = list_runs(*fixture.journal);
+  require(!before_reboot.journal_id.empty(),
+          "the fixture journal is readable before the reboot");
+
+  // Fake the reboot the way the host does: the retained lease row keeps the
+  // boot id it was acquired under, and everything attested at startup -- the
+  // host grant identity and the authority time samples hostd reconciles with
+  // -- carries the new one. Leaving the time source on the old boot id would
+  // instead trip the earlier, already non-poisoning "fence time disagrees with
+  // retained host boot authority" guard, and this test would pass against the
+  // broken build without ever reaching the branch it is about.
+  fixture.attestor.reset();
+  fixture.journal.reset();
+  fixture.journal = std::make_unique<Journal>(
+      fixture.authority.database(), fixture.authority.identity(),
+      HostGrantEnforcement::required,
+      HostIdentity{.host_id = "host-001", .boot_id = std::string(next_boot)});
+  fixture.time->value.boot_id = std::string(next_boot);
+
+  const DashboardRead first_after_reboot = list_runs(*fixture.journal);
+  require(first_after_reboot == before_reboot,
+          "the first post-reboot dashboard read still serves the same runs");
+
+  // hostd reconciliation: constructing the fence attestor is the startup
+  // handshake, and it registers the controller fence, which takes the logical
+  // fence snapshot over the retained prior-boot lease row. That is the call
+  // that used to poison the journal.
+  const auto reconcile = [&fixture]() -> std::string {
+    try {
+      fixture.rebuild_attestor(fixture.controller);
+    } catch (const std::exception& error) {
+      return error.what();
+    }
+    return {};
+  };
+
+  constexpr auto kWindow = std::chrono::seconds(3);
+  constexpr std::size_t kMinimumRounds = 250U;
+  const auto started = std::chrono::steady_clock::now();
+  std::size_t rounds = 0U;
+  std::size_t reconciliations_that_succeeded = 0U;
+  while (rounds < kMinimumRounds ||
+         std::chrono::steady_clock::now() - started < kWindow) {
+    ++rounds;
+    if (reconcile().empty()) ++reconciliations_that_succeeded;
+    DashboardRead observed;
+    try {
+      observed = list_runs(*fixture.journal);
+    } catch (const std::exception& error) {
+      throw std::runtime_error(
+          "dashboard run reads stopped working after " +
+          std::to_string(rounds) +
+          " hostd reconciliation attempts against a prior-boot fence: " +
+          error.what());
+    }
+    if (observed != before_reboot) {
+      throw std::runtime_error(
+          "dashboard run reads changed under hostd reconciliation at round " +
+          std::to_string(rounds));
+    }
+  }
+  require(reconciliations_that_succeeded == 0U,
+          "a prior-boot fence is never accepted as live reconciliation");
+  require(rounds >= kMinimumRounds,
+          "the sustained window ran the intended number of rounds");
+  require(list_runs(*fixture.journal) == before_reboot,
+          "dashboard run reads still work after the sustained window");
+}
+
 void restart_rotates_controller_generation_without_losing_fence() {
   Fixture fixture;
   const HostdSessionChallengeClaim old_claim = fixture.attestor->claim();
@@ -868,6 +976,8 @@ int main() {
     std::cout << "PASS long-lived-renewal-head\n";
     prior_boot_fence_is_stale_without_poisoning_journal();
     std::cout << "PASS prior-boot-stale-fence\n";
+    sustained_dashboard_reads_survive_prior_boot_reconciliation();
+    std::cout << "PASS prior-boot-sustained-dashboard-reads\n";
     restart_rotates_controller_generation_without_losing_fence();
     std::cout << "PASS restart-generation\n";
     dynamic_attestor_tracks_current_scoped_controller_read_only();
