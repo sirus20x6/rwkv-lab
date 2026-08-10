@@ -106,6 +106,31 @@ OperationAuthoringDeclaration rwkv_scratch_authoring() {
   return authoring;
 }
 
+// The eight Transformer MLA routes share one authoring declaration, for the
+// same reason they share one composition contract: a per-route copy is eight
+// places for the port to be declared in seven of them. The port is `required`
+// so a composition cannot invoke these contracts and quietly omit the
+// publication -- but that field is not what arms the controller. Only the
+// *artifact*'s own `required: true`, in the composition document, satisfies
+// `invocation_requires_step_zero_eval_gate`; `require_artifact_contract` ties
+// type and schema to this port and nothing else. The HF family sat inert for
+// exactly that reason.
+OperationAuthoringDeclaration transformer_mla_authoring() {
+  OperationAuthoringDeclaration authoring = checkpoint_authoring();
+  authoring.outputs.emplace(
+      "eval_examples",
+      OperationPortDescriptor{
+          .type = OperationPortType::artifact,
+          .required = true,
+          .artifact_type = ArtifactType::eval_examples,
+          .artifact_schema = "rwkv-lab.eval-examples.v1",
+          .description =
+              "Required same-attempt checkpoint-bound held-out next-token "
+              "prediction evidence at the attempt baseline.",
+      });
+  return authoring;
+}
+
 OperationAuthoringDeclaration mageflow_authoring() {
   OperationAuthoringDeclaration authoring = checkpoint_authoring();
   authoring.outputs.emplace(
@@ -1148,7 +1173,8 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
                                adapter == "rwkv-lab.transformer-mla-engram"
                                    ? transformer_mla_engram_composition()
                                    : transformer_mla_composition(),
-                               resumable_training_lifecycle()));
+                               resumable_training_lifecycle(),
+                               transformer_mla_authoring()));
   }
   profiles.push_back(profile(
       key("rwkv-lab.vision-teacher-compressor",

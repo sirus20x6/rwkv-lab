@@ -2031,10 +2031,32 @@ def test_transformer_mla_handler_binds_paths_profile_and_compatible_checkpoint(
         publishes={"checkpoint": {}},
     )
     required_implementations = []
+    # The four evaluation slots `transformer_mla_composition()` declares. The
+    # handler reads them with no `get`, because a route whose composition
+    # contract declares them cannot resolve without them -- so a double that
+    # omitted one would be modelling a composition the registry refuses.
     components = SimpleNamespace(
         require_implementation=lambda slot, **values: required_implementations.append(
             (slot, values)
-        )
+        ),
+        evaluator=lambda: SimpleNamespace(
+            configuration=SimpleNamespace(metrics=["eval.loss", "eval.perplexity"])
+        ),
+        qualitative_samples=lambda: SimpleNamespace(
+            configuration=SimpleNamespace(
+                identity_field="window_offset", sample_count=8
+            )
+        ),
+        composition=SimpleNamespace(
+            components={
+                slot: SimpleNamespace(descriptor_digest="sha256:" + character * 64)
+                for slot, character in (
+                    ("evaluator", "a"),
+                    ("artifact_renderer", "b"),
+                    ("qualitative_samples", "c"),
+                )
+            }
+        ),
     )
     profiler = SimpleNamespace()
     observability = SimpleNamespace()
@@ -2068,12 +2090,24 @@ def test_transformer_mla_handler_binds_paths_profile_and_compatible_checkpoint(
             },
         )
     ]
+    eval_policy = keyword_arguments["worker_eval_examples"]
     assert keyword_arguments == {
         "worker_components": components,
         "worker_step_profiler": profiler,
         "worker_observability": observability,
         "worker_controls": controls,
+        "worker_eval_examples": eval_policy,
     }
+    # Delivered, and carrying the resolved composition's provenance rather than
+    # anything read out of the authored document. Without this the route arms
+    # its controller-side gate and then has nothing to publish with, which
+    # deadlocks the attempt instead of failing it.
+    assert eval_policy.evaluator_component_digest == "sha256:" + "a" * 64
+    assert eval_policy.artifact_renderer_digest == "sha256:" + "b" * 64
+    assert eval_policy.qualitative_sample_digest == "sha256:" + "c" * 64
+    assert eval_policy.metric_names == ("eval.loss", "eval.perplexity")
+    assert eval_policy.identity_field == "window_offset"
+    assert eval_policy.sample_count == 8
     assert result.optimizer_step == 10
     assert result.checkpoint_requests[0].resume_grade == "compatible"
     assert "topology" in result.checkpoint_requests[0].state_components

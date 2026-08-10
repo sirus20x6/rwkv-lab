@@ -140,7 +140,11 @@
       "checkpoint_outputs": [
         "checkpoint"
       ],
-      "eval_examples_output": null
+      "eval_examples_output": {
+        "output_name": "eval_examples",
+        "required": true,
+        "artifact_schema": "rwkv-lab.eval-examples.v1"
+      }
     },
     {
       "contract": "rwkv_lab.transformer_mla_engram.v1.Train",
@@ -152,7 +156,11 @@
       "checkpoint_outputs": [
         "checkpoint"
       ],
-      "eval_examples_output": null
+      "eval_examples_output": {
+        "output_name": "eval_examples",
+        "required": true,
+        "artifact_schema": "rwkv-lab.eval-examples.v1"
+      }
     },
     {
       "contract": "rwkv_lab.transformer_mla_fsp.v1.Train",
@@ -164,7 +172,11 @@
       "checkpoint_outputs": [
         "checkpoint"
       ],
-      "eval_examples_output": null
+      "eval_examples_output": {
+        "output_name": "eval_examples",
+        "required": true,
+        "artifact_schema": "rwkv-lab.eval-examples.v1"
+      }
     },
     {
       "contract": "rwkv_lab.transformer_mla_full_backbone.v1.Train",
@@ -176,7 +188,11 @@
       "checkpoint_outputs": [
         "checkpoint"
       ],
-      "eval_examples_output": null
+      "eval_examples_output": {
+        "output_name": "eval_examples",
+        "required": true,
+        "artifact_schema": "rwkv-lab.eval-examples.v1"
+      }
     },
     {
       "contract": "rwkv_lab.transformer_mla_mtp.v1.Train",
@@ -188,7 +204,11 @@
       "checkpoint_outputs": [
         "checkpoint"
       ],
-      "eval_examples_output": null
+      "eval_examples_output": {
+        "output_name": "eval_examples",
+        "required": true,
+        "artifact_schema": "rwkv-lab.eval-examples.v1"
+      }
     },
     {
       "contract": "rwkv_lab.transformer_mla_mutor.v1.Train",
@@ -200,7 +220,11 @@
       "checkpoint_outputs": [
         "checkpoint"
       ],
-      "eval_examples_output": null
+      "eval_examples_output": {
+        "output_name": "eval_examples",
+        "required": true,
+        "artifact_schema": "rwkv-lab.eval-examples.v1"
+      }
     },
     {
       "contract": "rwkv_lab.transformer_mla_parallel.v1.Train",
@@ -212,7 +236,11 @@
       "checkpoint_outputs": [
         "checkpoint"
       ],
-      "eval_examples_output": null
+      "eval_examples_output": {
+        "output_name": "eval_examples",
+        "required": true,
+        "artifact_schema": "rwkv-lab.eval-examples.v1"
+      }
     },
     {
       "contract": "rwkv_lab.transformer_mla_rwkv8.v1.Train",
@@ -224,7 +252,11 @@
       "checkpoint_outputs": [
         "checkpoint"
       ],
-      "eval_examples_output": null
+      "eval_examples_output": {
+        "output_name": "eval_examples",
+        "required": true,
+        "artifact_schema": "rwkv-lab.eval-examples.v1"
+      }
     },
     {
       "contract": "rwkv_lab.vision_frozen_adapter.v1.Train",

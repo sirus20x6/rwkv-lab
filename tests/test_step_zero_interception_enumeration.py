@@ -102,16 +102,24 @@ MUTATION_RECEIVERS = frozenset({"optimizer", "optimizers", "opt", "optim"})
 # removal is a visible commit. A reporting-only test would be wallpaper within
 # a week; an entry here is a named debt with an owner.
 #
-# It started at nineteen of twenty stateful profiles, which is worth stating
-# plainly rather than burying: scratch-RWKV was the only route that reached the
-# boundary when this file landed. It is fourteen now -- scratch-RWKV, HF
-# multimodal SFT and the four vision routes cross it. An allowlist that begins
-# by covering almost everything is a
-# weak instrument -- it cannot fail until someone removes an entry -- and the
-# argument for keeping it anyway is that the alternative fails *every* run from
-# day one, which teaches people to ignore the suite rather than to fix it. The
-# stale-entry check below is what gives it teeth in the meantime: the moment a
-# trainer gains a boundary, this list must shrink or CI goes red.
+# It started at nineteen of twenty stateful profiles: scratch-RWKV was the only
+# route that reached the boundary when this file landed. An allowlist that
+# begins by covering almost everything is a weak instrument -- it cannot fail
+# until someone removes an entry -- and the argument for keeping it anyway is
+# that the alternative fails *every* run from day one, which teaches people to
+# ignore the suite rather than to fix it. The stale-entry check below is what
+# gives it teeth in the meantime: the moment a trainer gains a boundary, this
+# list must shrink or CI goes red.
+#
+# **How many entries are left is the length of this dict, and is deliberately
+# not restated here.** The comment used to carry a running count and a list of
+# which routes had been cleared, and both went stale the ordinary way: each
+# agent removed an entry and left the prose, so it claimed "fourteen" while the
+# dict held three. A reader who trusts a stale count mis-scopes their own card,
+# which is worse than a comment that says nothing. So the invariant is written
+# down -- it can only shrink, and the check below reddens CI the moment it is
+# owed a removal -- and the count is left to `len(UNMAPPED_INTERCEPTION)`,
+# which cannot rot (card-bd05daff).
 UNMAPPED_INTERCEPTION: dict[str, str] = {
     "rwkv_lab.mageflow_appearance_expert.v1.Train":
         "mage_flow_expert_train.py mutates without reaching the boundary",

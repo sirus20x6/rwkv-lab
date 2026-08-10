@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import math
 import shutil
@@ -1063,8 +1064,130 @@ def _full_attn_indices(cfg: TrainConfig) -> list[int]:
     return manifest["full_attn_layer_indices"]
 
 
+def select_heldout_windows(
+    eval_start: int, eval_end: int, sequence_length: int, sample_count: int
+) -> tuple[int, ...]:
+    """Choose the frozen held-out window offsets, deterministically.
+
+    Evenly-spaced disjoint windows over the evaluation range, keyed to nothing
+    but the range, the context width and the count. That makes the selection a
+    pure function of the composition and the corpus, so a replacement attempt
+    against the same inputs draws the same windows and its evidence is
+    comparable with the attempt it replaced -- which is the whole point of
+    freezing a selection rather than sampling one.
+
+    Deliberately not seeded from ``cfg.seed``. The training stream is already
+    seeded from it and folds ``start_step`` in; a held-out selection that moved
+    with the resume point would make two attempts of one run incomparable.
+    """
+
+    width = sequence_length + 1
+    if width < 2 or sample_count < 1:
+        raise ValueError("held-out window geometry is invalid")
+    span = eval_end - eval_start
+    stride = span // sample_count
+    if stride < width:
+        raise ValueError(
+            "evaluation range holds fewer than "
+            f"{sample_count} disjoint {width}-token windows"
+        )
+    return tuple(eval_start + index * stride for index in range(sample_count))
+
+
+def _selection_digest(value: object) -> str:
+    """Digest a JSON-serialisable description of a frozen selection."""
+
+    return "sha256:" + hashlib.sha256(
+        json.dumps(
+            value, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+@torch.no_grad()
+def build_transformer_mla_eval_examples(
+    model,
+    arr: np.memmap,
+    offsets: tuple[int, ...],
+    *,
+    sequence_length: int,
+    device: torch.device,
+    optimizer_step: int,
+) -> tuple[Any, ...]:
+    """Render the frozen held-out windows as typed step-zero evidence.
+
+    Modality-appropriate for a causal text route: the input is the held-out
+    context, the target is the token that actually follows it, and the
+    prediction is the token this model would emit there. It is next-token
+    evidence rather than free generation because these routes declare no
+    ``generation_policy`` slot -- there is no authored decode policy to make a
+    sampled continuation reproducible, and unreproducible evidence is worse than
+    none.
+    """
+
+    from rwkv_lab.trainvm_worker.eval_examples import EvalEvidencePart, EvalExample
+
+    if (
+        isinstance(optimizer_step, bool)
+        or not isinstance(optimizer_step, int)
+        or optimizer_step < 0
+    ):
+        raise ValueError("Transformer MLA held-out optimizer step is invalid")
+    was_training = model.training
+    model.eval()
+    text_model = _text_model(model)
+    examples: list[Any] = []
+    try:
+        for offset in offsets:
+            window = np.asarray(
+                arr[offset : offset + sequence_length + 1], dtype=np.int64
+            )
+            if window.shape[0] != sequence_length + 1:
+                raise ValueError("held-out window ran past the evaluation range")
+            prompt = window[:-1]
+            target = int(window[-1])
+            input_ids = torch.from_numpy(prompt).unsqueeze(0).to(device)
+            hidden = _last_hidden(text_model(input_ids=input_ids, use_cache=False))
+            logits = model.lm_head(hidden[:, -1, :])
+            if logits.ndim != 2 or logits.shape[0] != 1:
+                raise ValueError("Transformer MLA held-out head emitted invalid logits")
+            prediction = int(logits[0].argmax().item())
+            identity = str(offset)
+            examples.append(
+                EvalExample(
+                    example_id=f"window-{identity}:step:{optimizer_step}",
+                    heldout_item_id=identity,
+                    heldout_item_digest="sha256:"
+                    + hashlib.sha256(window.tobytes()).hexdigest(),
+                    input=(
+                        EvalEvidencePart(
+                            kind="text",
+                            # Bounded on purpose: a 2048-token context does not
+                            # fit the manifest's per-part text budget, and the
+                            # window digest above is what actually identifies
+                            # the held-out item.
+                            text="token_ids_tail: "
+                            + " ".join(str(int(token)) for token in prompt[-32:]),
+                        ),
+                    ),
+                    target=(
+                        EvalEvidencePart(kind="text", text=f"token_id: {target}"),
+                    ),
+                    prediction=(
+                        EvalEvidencePart(kind="text", text=f"token_id: {prediction}"),
+                    ),
+                )
+            )
+    finally:
+        model.train(was_training)
+    return tuple(examples)
+
+
 def refuse_ungated_attempt_baseline(
-    worker_controls: Any | None, start_step: int
+    worker_controls: Any | None,
+    start_step: int,
+    *,
+    can_publish_baseline_evidence: bool = False,
 ) -> None:
     """Refuse a resume the controller's attempt baseline does not admit.
 
@@ -1089,11 +1212,21 @@ def refuse_ungated_attempt_baseline(
     evidence side of the gate meeting the controller's side, and a disagreement
     between them is refused before any parameter moves.
 
-    A gate the controller requires and this attempt has not satisfied is
-    refused here too, rather than at the first crossing thousands of tokens
-    later. That refusal is not a way to skip the crossing: the crossing happens
-    on every step regardless, and a controller that replayed durable evidence
-    from its journal on reconnect reports the gate satisfied and this returns.
+    A gate the controller requires that this attempt can neither satisfy nor
+    ever publish is refused here, rather than at the first crossing thousands of
+    tokens later. ``can_publish_baseline_evidence`` is what separates the two
+    cases, and getting it wrong is expensive in both directions. Before these
+    routes could publish, an unsatisfied gate was terminal and refusing it early
+    was strictly right. Now that they can, an unconditional refusal would reject
+    every *armed* fresh attempt before it had the chance to publish the very
+    evidence the refusal complains is missing -- a deadlock the trainer creates
+    for itself, and the exact failure mode arming a route is supposed to avoid.
+    So the refusal is now scoped to the case where nothing downstream will ever
+    publish: no eval-examples policy was handed to this run.
+
+    Neither branch is a way to skip the crossing. It happens on every step
+    regardless, and a controller that replayed durable evidence from its journal
+    on reconnect reports the gate satisfied and this returns.
     """
 
     if worker_controls is None:
@@ -1107,11 +1240,13 @@ def refuse_ungated_attempt_baseline(
     if (
         worker_controls.step_zero_eval_gate_required
         and not worker_controls.step_zero_eval_gate_satisfied
+        and not can_publish_baseline_evidence
     ):
         raise ValueError(
             "Transformer MLA cannot mutate: the controller requires durable "
-            f"attempt-baseline evidence at step {baseline} and none is "
-            "recorded for this attempt"
+            f"attempt-baseline evidence at step {baseline}, none is recorded "
+            "for this attempt, and this run was given no eval-examples policy "
+            "to publish it with"
         )
 
 
@@ -1125,6 +1260,7 @@ def train(
     worker_step_profiler: Any | None = None,
     worker_observability: Any | None = None,
     worker_controls: Any | None = None,
+    worker_eval_examples: Any | None = None,
 ) -> dict[str, object]:
     # Imported here rather than at module scope, following qwen_ao3_cpt.py: this
     # trainer also runs standalone from its own CLI on hosts without the
@@ -1985,7 +2121,32 @@ def train(
     # Before the baseline evaluation and long before the loop, so a disagreement
     # with the controller's immutable attempt baseline is diagnosed as itself
     # rather than as a refused first crossing after a full model load.
-    refuse_ungated_attempt_baseline(worker_controls, start_step)
+    refuse_ungated_attempt_baseline(
+        worker_controls,
+        start_step,
+        can_publish_baseline_evidence=worker_eval_examples is not None,
+    )
+
+    # The controller gates this attempt at an immutable baseline step: zero for
+    # a fresh attempt, the resume checkpoint's step for a replacement one. It is
+    # deliberately not a literal zero. Keying publication to `step == 0`
+    # deadlocks every resumed attempt -- the evidence would be owed at a step the
+    # attempt will never reach again, while `pre_optimizer_step` refuses every
+    # mutation until it exists. All eight of these profiles resume, so that is
+    # the common case here rather than the exotic one.
+    gate_baseline: int | None = None
+    if worker_controls is not None and worker_controls.step_zero_eval_gate_required:
+        if worker_controls.step_zero_eval_gate_satisfied:
+            # A reconnect or replacement worker whose evidence the controller
+            # replayed from its journal must not republish it. That never
+            # licenses skipping the pre-mutation boundary itself.
+            print(
+                "attempt-baseline eval gate: already durable at step "
+                f"{worker_controls.attempt_baseline_optimizer_step}",
+                flush=True,
+            )
+        else:
+            gate_baseline = worker_controls.attempt_baseline_optimizer_step
 
     if worker_components is not None:
         trainvm_weight_decay = worker_components.weight_decay_schedule(optimizer)
@@ -2111,11 +2272,126 @@ def train(
             }
         sys.exit(0)
 
+    def publish_attempt_baseline_examples(baseline: int) -> None:
+        """Publish the attempt-baseline evidence the controller is waiting on.
+
+        Ordering, not decoration. ``do_eval`` above published the declared
+        ``eval.*`` scalars at this step, and the controller's
+        ``validate_eval_examples_gate_provenance`` requires both a prior durable
+        declared scalar *and* a prior durable checkpoint artifact at the
+        manifest's own step before it will accept the examples. So: scalars,
+        then checkpoint, then examples -- and all three before the loop below
+        can reach a mutation.
+        """
+
+        from rwkv_lab.trainvm_worker.checkpoint import CheckpointPublicationRequest
+        from rwkv_lab.trainvm_worker.eval_examples import (
+            EvalExamplesPublicationRequest,
+        )
+
+        if worker_controls is None or worker_eval_examples is None:
+            raise ValueError(
+                "Transformer MLA requires controls and an eval-examples policy "
+                "for its attempt-baseline gate"
+            )
+        offsets = select_heldout_windows(
+            eval_start, eval_end, cfg.seq_len, worker_eval_examples.sample_count
+        )
+        with (
+            worker_observability.keepalive(baseline, "checkpointing")
+            if worker_observability is not None
+            else nullcontext()
+        ):
+            staging = save_checkpoint(
+                baseline, mla_modules, optimizer, cfg, model=model,
+                engram_modules=engram_modules, optimizer_host=optimizer_host,
+                optimizer_aux=optimizer_aux,
+                plateau_state=plateau_ctrl.state_dict(),
+                component_evidence=component_evidence,
+                component_composition_digest=component_composition_digest,
+                worker_control_state=worker_controls.checkpoint_state(),
+            )
+        published = worker_controls.publish_policy_checkpoint(
+            CheckpointPublicationRequest(
+                source_directory=staging,
+                optimizer_step=baseline,
+                resume_grade="compatible",
+                state_components=(
+                    "component_composition",
+                    "control_revision",
+                    "lr_schedule",
+                    "model",
+                    "optimizer",
+                    "optimizer_groups",
+                    "plateau_state",
+                    "topology",
+                ),
+            )
+        )
+        worker_controls.publish_evaluation_examples(
+            EvalExamplesPublicationRequest(
+                output_name="eval_examples",
+                optimizer_step=baseline,
+                series_id="transformer-mla-next-token",
+                identity_field=worker_eval_examples.identity_field,
+                identities_digest=_selection_digest(
+                    [str(offset) for offset in offsets]
+                ),
+                selector_digest=_selection_digest({
+                    "eval_end": eval_end,
+                    "eval_start": eval_start,
+                    "sample_count": worker_eval_examples.sample_count,
+                    "sequence_length": cfg.seq_len,
+                    "tokens_bin": cfg.tokens_bin,
+                    "total_tokens_in_bin": cfg.total_tokens_in_bin,
+                }),
+                evaluator_component_digest=(
+                    worker_eval_examples.evaluator_component_digest
+                ),
+                metric_names=worker_eval_examples.metric_names,
+                checkpoint_artifact_id=published.artifact_id,
+                checkpoint_manifest_digest=published.manifest_sha256,
+                # This family's composition contract declares no
+                # `generation_policy` slot, so there is no authored decode
+                # policy to carry a digest of. The frozen evaluation manifest's
+                # policy digest is composed instead, from the three resolved
+                # components that decide what was evaluated and how it is
+                # rendered. Cadence is absent on purpose: an evaluation-schedule
+                # change must leave this digest where it was, or two revisions
+                # of one experiment stop being comparable.
+                policy_digest=_selection_digest({
+                    "artifact_renderer":
+                        worker_eval_examples.artifact_renderer_digest,
+                    "evaluator":
+                        worker_eval_examples.evaluator_component_digest,
+                    "qualitative_sample":
+                        worker_eval_examples.qualitative_sample_digest,
+                }),
+                examples=build_transformer_mla_eval_examples(
+                    model,
+                    arr,
+                    offsets,
+                    sequence_length=cfg.seq_len,
+                    device=device,
+                    optimizer_step=baseline,
+                ),
+                parent_artifact_ids=(published.artifact_id,),
+            )
+        )
+        print(
+            f"attempt-baseline eval gate: published {len(offsets)} held-out "
+            f"windows at step {baseline}",
+            flush=True,
+        )
+
     # Baseline eval (at whatever step we resumed from) before continuing training
     if _interrupt_flag["count"] > 0:
         return finish_interrupted(start_step)
     print("baseline eval...")
     do_eval(start_step)
+    if gate_baseline is not None:
+        publish_attempt_baseline_examples(gate_baseline)
+        gate_baseline = None
     if _interrupt_flag["count"] > 0:
         return finish_interrupted(start_step)
 
