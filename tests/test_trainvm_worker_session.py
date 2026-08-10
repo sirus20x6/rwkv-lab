@@ -26,6 +26,7 @@ from rwkv_lab.trainvm_worker import (
     ExecutionPhase,
     ExecutionPhaseDisposition,
     LifecycleDisposition,
+    WorkerCancellationRequested,
     WorkerControlError,
     WorkerControlRuntime,
     WorkerSession,
@@ -1076,3 +1077,149 @@ def test_runtime_evidence_transport_matches_the_protocol_message() -> None:
         "worker_sequence",
     ):
         assert derived not in wire.WorkerRuntimeEvidence.DESCRIPTOR.fields_by_name
+
+
+def _checkpoint_attempt(run_directory: Path) -> tuple[FakeController, WorkerSession, object]:
+    """A real session over a controller that has already queued a checkpoint.
+
+    `publish_requested_checkpoint_directory` is the entry point nine trainers
+    call -- `mage_flow_expert_train`, `mage_flow_pretrain`,
+    `mage_flow_terminal_train`, `qwen_ao3_cpt`, `train_mla`, `vision_train`,
+    `vision_native_train`, `vision_rwkv_student_train` and
+    `vision_teacher_compressor` -- and coverage over the whole non-GPU suite
+    recorded both of its statements unexecuted. Everything below drives the real
+    runtime, the real `CheckpointPublisher` and the real session; only the
+    controller on the far side of the wire is a stand-in, and it decides nothing
+    the worker is being tested for.
+    """
+
+    controller = FakeController(
+        invocation=step_zero_invocation(run_directory), send_checkpoint=True
+    )
+    session = WorkerSession(
+        load_worker_bootstrap(bootstrap_document()), connector=controller
+    )
+    invocation = session.start()
+    assert controller.control_sent.wait(2)
+    return controller, session, controls_from_invocation(session, invocation)
+
+
+def test_requested_checkpoint_directory_publishes_and_acknowledges(
+    tmp_path: Path,
+) -> None:
+    """The path all nine callers take, end to end over a real session."""
+
+    controller, session, controls = _checkpoint_attempt(tmp_path)
+    source = tmp_path / "checkpoint-step-11"
+    source.mkdir()
+    (source / "state.pt").write_bytes(b"trainer-state")
+
+    published = controls.publish_requested_checkpoint_directory(
+        str(source),
+        optimizer_step=11,
+        resume_grade="terminal_checkpoint",
+        state_components=("model", "optimizer", "rng_torch"),
+    )
+
+    assert published is not None
+    assert published.artifact_id
+    assert published.manifest_sha256.startswith("sha256:")
+    session.finish("node.completed", {"ok": True}, optimizer_step=11)
+    acknowledgement = next(
+        message.checkpoint_ack
+        for message in controller.received
+        if message.WhichOneof("message") == "checkpoint_ack"
+    )
+    assert (
+        acknowledgement.disposition
+        == wire.CheckpointAcknowledgement.DISPOSITION_APPLIED
+    )
+    assert acknowledgement.optimizer_step == 11
+    assert acknowledgement.artifact_id == published.artifact_id
+    session.close()
+
+
+def test_requested_checkpoint_refuses_an_untyped_request(tmp_path: Path) -> None:
+    """A pending checkpoint command does not license an untyped publication.
+
+    The refusal is the runtime's, not the publisher's: a double would have
+    accepted the mapping and published nothing, which is how this stayed
+    unexecuted.
+    """
+
+    controller, session, controls = _checkpoint_attempt(tmp_path)
+    with pytest.raises(WorkerControlError, match="typed immutable request"):
+        controls.publish_requested_checkpoint(
+            {"source_directory": str(tmp_path), "optimizer_step": 11}
+        )
+    session.close()
+
+
+def test_a_failed_checkpoint_publication_rejects_the_queued_command(
+    tmp_path: Path,
+) -> None:
+    """Publication failure must reach the controller, not just the trainer.
+
+    The worker owes the authority an answer for every command it consumed, so
+    the branch acknowledges REJECTED with a diagnostic and re-raises. Nothing
+    executed it before: a controls double raises straight out of the trainer and
+    the acknowledgement never happens.
+    """
+
+    controller, session, controls = _checkpoint_attempt(tmp_path)
+    with pytest.raises(Exception) as failure:
+        controls.publish_requested_checkpoint_directory(
+            str(tmp_path / "no-such-checkpoint-directory"),
+            optimizer_step=11,
+            resume_grade="terminal_checkpoint",
+            state_components=("model",),
+        )
+    assert not isinstance(failure.value, WorkerControlError)
+
+    session.finish("node.failed", {"ok": False}, optimizer_step=0)
+    acknowledgement = next(
+        message.checkpoint_ack
+        for message in controller.received
+        if message.WhichOneof("message") == "checkpoint_ack"
+    )
+    assert (
+        acknowledgement.disposition
+        == wire.CheckpointAcknowledgement.DISPOSITION_REJECTED
+    )
+    assert [diagnostic.code for diagnostic in acknowledgement.diagnostics] == [
+        "checkpoint.publication_failed"
+    ]
+    session.close()
+
+
+def test_poll_initialization_observes_a_cancel_before_step_one() -> None:
+    """Cancellation before the first step is answered, not swallowed.
+
+    `poll_initialization` exists so a cancel that arrives before step one is not
+    acknowledged against a fictitious optimizer step. Its cancel branch was
+    unexecuted, so the acknowledgement it owes the authority was never observed.
+    """
+
+    controller = FakeController(send_cancel=True)
+    session = WorkerSession(
+        load_worker_bootstrap(bootstrap_document()), connector=controller
+    )
+    invocation = session.start()
+    controls = controls_from_invocation(session, invocation)
+    assert controller.control_sent.wait(2)
+
+    with pytest.raises(WorkerCancellationRequested, match="operator stop"):
+        controls.poll_initialization()
+
+    session.finish("node.completed", {"ok": True}, optimizer_step=0)
+    acknowledgement = next(
+        message.lifecycle_ack
+        for message in controller.received
+        if message.WhichOneof("message") == "lifecycle_ack"
+    )
+    assert acknowledgement.kind == wire.LifecycleAcknowledgement.KIND_CANCEL
+    assert (
+        acknowledgement.disposition == wire.LifecycleAcknowledgement.DISPOSITION_APPLIED
+    )
+    assert acknowledgement.optimizer_step == 0
+    session.close()
