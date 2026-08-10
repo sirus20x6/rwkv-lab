@@ -1,7 +1,7 @@
 {
   "api_version": "trainvm.compatibility-workflows/v1",
   "authority": "compatibility_evidence_only",
-  "classification_surface_digest": "sha256:cd60ebaa597ec0b9dd4e5576129aa3be2741dcef20c1073fb32600dd2edcdadf",
+  "classification_surface_digest": "sha256:722866c35c55b147d91664d293c0a9533005090249df756a7cecdc4d3293c4eb",
   "source_digests": [
     {
       "source_path": "dashboard/internal/server/alerts_handlers.go",
@@ -341,7 +341,7 @@
     },
     {
       "source_path": "src/rwkv_lab/attn_L3_poc.py",
-      "source_sha256": "sha256:9f3ceea46eff1b8122f5932af1b5237853a86fc402b04866ed43252d10eaedf6"
+      "source_sha256": "sha256:5bf3e274bb991394baa61e056a59c7249b7ecbf16656fcecb729a69cf56797f6"
     },
     {
       "source_path": "src/rwkv_lab/build_corpus.py",
@@ -357,7 +357,7 @@
     },
     {
       "source_path": "src/rwkv_lab/build_qwen35_data.py",
-      "source_sha256": "sha256:f7b99a8bdd80236886770eaa11d690ebd23a47140f89dc915cdd9f5952379569"
+      "source_sha256": "sha256:b2a20b05a4b9e01163de11b49000c1839ff19dc3ea85e0605a12aa2ca1d9e2e9"
     },
     {
       "source_path": "src/rwkv_lab/config.py",
@@ -397,7 +397,7 @@
     },
     {
       "source_path": "src/rwkv_lab/engram_lmb_build.py",
-      "source_sha256": "sha256:8e16b91a665dd5cdc199b1bfb74e59a4c4feefbf9c0327127f53b2da18ed9b79"
+      "source_sha256": "sha256:14be09763ea5b294bbdf83788aac15807ecaa55572e107fcb8cbcbad6378c4a6"
     },
     {
       "source_path": "src/rwkv_lab/eval_baseline.py",

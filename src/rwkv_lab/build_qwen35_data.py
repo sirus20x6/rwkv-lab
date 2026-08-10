@@ -32,10 +32,17 @@ from pathlib import Path
 
 import numpy as np
 
+from .host_paths import require_host_path, resolve_host_path
+
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
-DEFAULT_TOKENIZER = "/thearray/git/moe-mla/Qwen3.5-9B-Base"
+TOKENIZER_ENV = "MOE_MLA_QWEN35_TOKENIZER_DIR"
+TOKENIZER_HISTORICAL_PATH = "/thearray/git/moe-mla/Qwen3.5-9B-Base"
+
+
+def default_tokenizer() -> str | None:
+    return resolve_host_path(TOKENIZER_ENV, TOKENIZER_HISTORICAL_PATH)
 
 
 def flat_writer(out_dir: Path, eos_id: int):
@@ -141,7 +148,7 @@ def build_source(repo, field, out_root, tok, tok_label, eos_id,
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--tokenizer_path", default=DEFAULT_TOKENIZER)
+    p.add_argument("--tokenizer_path", default=default_tokenizer())
     p.add_argument("--label", default="qwen3.5")
     p.add_argument("--out_root", default="/thearray/git/babyllm/data/cache")
     p.add_argument("--batch_docs", type=int, default=1000)
@@ -151,6 +158,9 @@ def main():
     p.add_argument("--max-docs", dest="max_docs", type=int, default=0,
                    help="smoke test: stop after N docs per source (0 = full run)")
     args = p.parse_args()
+    args.tokenizer_path = require_host_path(
+        args.tokenizer_path, field="tokenizer_path",
+        env_var=TOKENIZER_ENV, flag="tokenizer_path")
 
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(args.tokenizer_path, use_fast=True)

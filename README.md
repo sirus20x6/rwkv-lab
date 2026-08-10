@@ -1077,6 +1077,10 @@ caller *did* supply is still validated.
 | `MOE_MLA_TEACHER_MODEL_DIR` | 9B teacher for `build_memory_targets.py` |
 | `MOE_MLA_CKPT` | trained MLA checkpoint for `verify_engram.py` |
 | `MAGE_FLOW_BASE_PATH` | locally cached Mage-Flow-Base weights |
+| `MOE_MLA_ATTN_POC_MODEL_DIR` | base checkpoint for `attn_L3_poc.py` |
+| `MOE_MLA_ATTN_POC_TOKENS` | packed token stream for `attn_L3_poc.py` |
+| `MOE_MLA_QWEN35_TOKENIZER_DIR` | tokenizer for `build_qwen35_data.py --tokenizer_path` |
+| `MOE_MLA_ENGRAM_CORPUS` | packed corpus for `engram_lmb_build.py freq --corpus` |
 
 `MOE_MLA_TEACHER_MODEL_DIR` is deliberately separate from `MOE_MLA_MODEL_DIR`
 even though both are reached through a flag spelled `--model-dir`. They name
