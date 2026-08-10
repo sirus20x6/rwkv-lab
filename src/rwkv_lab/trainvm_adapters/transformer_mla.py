@@ -316,4 +316,82 @@ class TransformerMLATrainConfig:
         )
 
 
-__all__ = ["PROFILE_ADAPTERS", "TransformerMLATrainConfig"]
+def _digest_string(value: object, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 71
+        or not value.startswith("sha256:")
+        or any(character not in "0123456789abcdef" for character in value[7:])
+    ):
+        raise ValueError(f"{label} must be a sha256: digest")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class TransformerMLAEvalPolicy:
+    """The composition-derived half of MLA's attempt-baseline eval evidence.
+
+    Split the way :class:`~rwkv_lab.trainvm_adapters.rlvr.RLVRHeldoutEvalPolicy`
+    is split, and for the same reason: everything here is decided by the
+    *resolved* training composition and is therefore knowable in the handler,
+    before a model or a token corpus is opened. The data-derived half -- which
+    held-out windows were drawn and what the model predicted for them -- is not
+    here, because it is not decidable until ``train_mla.train`` has memory-mapped
+    the corpus and knows where the evaluation range begins.
+
+    ``RWKVTextEvalPolicy`` is the other candidate template and is the wrong one
+    twice over. It bounds every held-out token to ``0 <= token < 65_536``, which
+    is the scratch-RWKV vocabulary and not the Qwen tokenizer these routes
+    convert against, so a legitimate MLA window would be refused as invalid. And
+    it carries a ``generation_policy_digest``, while this family's composition
+    contract declares no ``generation_policy`` slot -- there would be no digest
+    to put there. So the frozen evaluation manifest's ``policy_digest`` is
+    *composed* by the trainer from the renderer, the held-out selector and the
+    evaluator, exactly as RLVR composes its own.
+
+    The evaluation cadence is deliberately not an input to any of this. A
+    schedule change must leave the digest where it was, or two revisions of the
+    same experiment stop being comparable for a reason that has nothing to do
+    with what was evaluated.
+    """
+
+    identity_field: str
+    evaluator_component_digest: str
+    metric_names: tuple[str, ...]
+    artifact_renderer_digest: str
+    qualitative_sample_digest: str
+    sample_count: int
+
+    def __post_init__(self) -> None:
+        for label in (
+            "evaluator_component_digest",
+            "artifact_renderer_digest",
+            "qualitative_sample_digest",
+        ):
+            _digest_string(getattr(self, label), label)
+        if (
+            not isinstance(self.identity_field, str)
+            or not self.identity_field
+            or len(self.identity_field.encode("utf-8")) > 256
+        ):
+            raise ValueError("Transformer MLA eval identity field is required")
+        if (
+            not isinstance(self.metric_names, tuple)
+            or not self.metric_names
+            or self.metric_names != tuple(sorted(set(self.metric_names)))
+            or any(
+                not isinstance(metric, str) or not metric
+                for metric in self.metric_names
+            )
+        ):
+            raise ValueError(
+                "Transformer MLA eval metric names must be nonempty, sorted and unique"
+            )
+        _integer(self.sample_count, "sample_count", 1, 512)
+
+
+__all__ = [
+    "PROFILE_ADAPTERS",
+    "TransformerMLAEvalPolicy",
+    "TransformerMLATrainConfig",
+]

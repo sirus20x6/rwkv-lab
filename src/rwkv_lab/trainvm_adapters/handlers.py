@@ -48,7 +48,11 @@ from .rwkv_scratch import (
     RWKVTextEvalPolicy,
     prepare_registered_corpus,
 )
-from .transformer_mla import PROFILE_ADAPTERS, TransformerMLATrainConfig
+from .transformer_mla import (
+    PROFILE_ADAPTERS,
+    TransformerMLAEvalPolicy,
+    TransformerMLATrainConfig,
+)
 from .vision_compressor import VisionTeacherCompressorConfig
 from .vision_frozen import VisionFrozenAdapterConfig
 from .vision_native import VisionNativeHeadConfig
@@ -2832,6 +2836,30 @@ def _transformer_mla(
     )
     from rwkv_lab.train_mla import train
 
+    # Read from the RESOLVED composition, never from the authored document: an
+    # inherited slot is invisible to anything that reads the written text, and
+    # the controller compares the published manifest against what the registry
+    # resolved. Every one of these slots is declared by
+    # `transformer_mla_composition()`, so this cannot be conditional -- a route
+    # that silently skipped the policy would arm the gate and then deadlock,
+    # unable to publish the evidence its own composition demands.
+    evaluator = components.evaluator()
+    qualitative = components.qualitative_samples()
+    eval_policy = TransformerMLAEvalPolicy(
+        identity_field=qualitative.configuration.identity_field,
+        evaluator_component_digest=components.composition.components[
+            "evaluator"
+        ].descriptor_digest,
+        metric_names=tuple(evaluator.configuration.metrics),
+        artifact_renderer_digest=components.composition.components[
+            "artifact_renderer"
+        ].descriptor_digest,
+        qualitative_sample_digest=components.composition.components[
+            "qualitative_samples"
+        ].descriptor_digest,
+        sample_count=qualitative.configuration.sample_count,
+    )
+
     trainer_config = replace(
         config.trainer_configuration(),
         resume=(str(resume) if resume is not None else ""),
@@ -2842,6 +2870,7 @@ def _transformer_mla(
         worker_step_profiler=step_profiler or NullStepProfiler(),
         worker_observability=observability,
         worker_controls=controls,
+        worker_eval_examples=eval_policy,
     )
     if not isinstance(result, Mapping):
         raise AdapterDispatchError("Transformer MLA trainer omitted its terminal result")
