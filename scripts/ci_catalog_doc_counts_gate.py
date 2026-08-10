@@ -92,6 +92,7 @@ from scripts.gate_verdict import verdict_line  # noqa: E402
 DOCUMENT = "docs/experiment-vm/COMPATIBILITY_CATALOG.md"
 CATALOG = "docs/experiment-vm/compatibility-workflows.v1.json"
 DISPOSITIONS = "docs/experiment-vm/source-dispositions.{scope}.v1.json"
+HEADER = "trainvm/include/trainvm/compatibility_catalog.hpp"
 
 # One entry per figure the document states about the catalog.
 #
@@ -146,8 +147,117 @@ CLAIMS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+# The document also spells out three closed sets by name rather than by count,
+# and those are the drift-prone half: adding an enumerator is a C++ edit that
+# compiles, passes, and leaves the sentence describing the old set. A count
+# claim at least has a chance of looking wrong to a reader; a list that is
+# missing its newest member reads exactly like a correct one.
+#
+# `pattern` must contain exactly one group named `items`, spanning the prose
+# list. The named values are taken from the backticked identifiers inside it,
+# so the surrounding wording ("and", commas, line breaks) is free to change --
+# only the set and its order are asserted.
+#
+# `enum` names a C++ enum in HEADER. The truth deliberately comes from the
+# header rather than from the values the catalog JSON happens to use: an
+# enumerator that no entry uses is still part of the closed set, and measuring
+# from the JSON would make this gate agree with a document that had quietly
+# dropped one.
+#
+# Unlike the count claims these are reported, never repaired. --write splices
+# digits; rewriting a prose list would mean guessing where in the sentence a
+# new name belongs and whether the surrounding paragraph still reads true, and
+# a gate that reworded documentation to make itself pass would be the exact
+# failure this file exists to prevent.
+ENUM_CLAIMS: tuple[tuple[str, str, str], ...] = (
+    (
+        "closed family list",
+        r"Its closed families are (?P<items>[^.]+)\.",
+        "WorkflowFamily",
+    ),
+    (
+        "closed observed-invocation list",
+        r"The closed\s+observed values are (?P<items>[^.]+)\.",
+        "ObservedInvocationKind",
+    ),
+    (
+        "closed resume-evidence list",
+        r"Its values\s+are (?P<items>[^.]+)\.",
+        "CompatibilityResumeEvidence",
+    ),
+)
+
+
 def read(path: pathlib.Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def enum_members(header: str, name: str) -> list[str] | None:
+    """The enumerators of `enum class <name>`, in declaration order.
+
+    Returns None when the enum is absent, which is a different failure from an
+    empty one and is reported differently: a renamed enum must not read as a
+    set that lost all its members.
+    """
+    source = re.sub(r"//[^\n]*", "", header)
+    source = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
+    match = re.search(
+        r"enum\s+class\s+" + re.escape(name) + r"\s*(?::[^{]*)?\{(?P<body>[^}]*)\}",
+        source,
+    )
+    if match is None:
+        return None
+    members = []
+    for part in match.group("body").split(","):
+        # Drop any `= value` initialiser; the name is what the document quotes.
+        member = part.strip().split("=")[0].strip()
+        if member:
+            members.append(member)
+    return members
+
+
+def evaluate_enum_claims(document: str, header: str) -> list[str]:
+    """Check every prose list in ENUM_CLAIMS against its C++ enum."""
+    problems: list[str] = []
+    for label, pattern, enum in ENUM_CLAIMS:
+        members = enum_members(header, enum)
+        if members is None:
+            problems.append(
+                f"{HEADER}: no `enum class {enum}` found, so the {label} in "
+                f"{DOCUMENT} cannot be checked. The enum was renamed or moved; "
+                f"update ENUM_CLAIMS so the list stays checked.")
+            continue
+        matches = list(re.finditer(pattern, document))
+        if len(matches) != 1:
+            problems.append(
+                f"{DOCUMENT}: the {label} matched {len(matches)} times, "
+                f"expected exactly one. The sentence this gate reads was "
+                f"reworded or removed; update the pattern in ENUM_CLAIMS "
+                f"({pattern!r}) so the list stays checked. {enum} declares "
+                f"{', '.join(members)}.")
+            continue
+        stated = re.findall(r"`([A-Za-z_][A-Za-z_0-9]*)`", matches[0].group("items"))
+        if stated == members:
+            continue
+        missing = [member for member in members if member not in stated]
+        extra = [name for name in stated if name not in members]
+        if missing or extra:
+            detail = []
+            if missing:
+                detail.append(f"missing {', '.join(missing)}")
+            if extra:
+                detail.append(f"names {', '.join(extra)} which {enum} does not declare")
+            problems.append(
+                f"{DOCUMENT}: the {label} {' and '.join(detail)}")
+        else:
+            # Same members, different order. Called out separately because the
+            # document presents these as the enum's own order, and a reader
+            # comparing the two by eye would not see a set difference at all.
+            problems.append(
+                f"{DOCUMENT}: the {label} states the same names as {enum} in a "
+                f"different order: document has {', '.join(stated)}, {enum} "
+                f"declares {', '.join(members)}")
+    return problems
 
 
 def unique_source_paths(catalog: dict) -> set[str]:
@@ -265,6 +375,17 @@ def main() -> int:
     claim_problems, repairs = evaluate(document, measurements)
     problems += claim_problems
 
+    header_path = repository / HEADER
+    if header_path.exists():
+        problems += evaluate_enum_claims(document, read(header_path))
+    else:
+        # Not a skip. A missing header means the lists below are unchecked, and
+        # an unchecked check that stays green is the state this gate exists to
+        # end -- so say so and fail.
+        problems.append(
+            f"{HEADER}: not found, so the {len(ENUM_CLAIMS)} closed-set lists "
+            f"in {DOCUMENT} were not checked")
+
     for problem in problems:
         print(f"FAIL: {problem}")
 
@@ -279,7 +400,9 @@ def main() -> int:
         "catalog document counts gate",
         problems,
         f"{len(CLAIMS)} stated figures checked against {measurements['entries']} "
-        f"entries over {measurements['unique_sources']} unique source files",
+        f"entries over {measurements['unique_sources']} unique source files, and "
+        f"{len(ENUM_CLAIMS)} closed-set lists checked against their enums in "
+        f"{HEADER}",
     ))
     return 1 if problems else 0
 
