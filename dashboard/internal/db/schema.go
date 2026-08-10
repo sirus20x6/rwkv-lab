@@ -5,6 +5,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"sync"
@@ -28,10 +29,51 @@ import (
 // land, and is skipped without waiting (TryExec) for samples whose next value
 // supersedes them. Reads never take it, so the pool keeps serving the live UI
 // underneath a long ingest.
+//
+// pool is unexported and no longer embedded, which is what makes the token
+// unavoidable rather than merely conventional. While *sql.DB was embedded the
+// token held only because every author remembered it: any package with a
+// *db.DB could write d.DB.Exec(...) or d.DB.Begin() and contend with ingest
+// exactly as before, which is the same unenforced-convention shape as the
+// defect the token was added to fix. Unexporting makes that call site
+// inexpressible outside this package instead of merely discouraged; the
+// forwarders below re-offer the pooled read surface callers actually used, and
+// deliberately do not re-offer Exec, Begin, BeginTx or Prepare.
 type DB struct {
-	*sql.DB
+	pool   *sql.DB
 	writer chan struct{}
 }
+
+// Query, QueryRow and their context forms forward to the pool untouched:
+// readers must NOT take the writer token, because WAL exists precisely so the
+// live UI keeps being served underneath a multi-minute ingest transaction.
+// They are hand-written forwarders rather than promotion because promotion is
+// all-or-nothing — it would carry Exec, Begin, BeginTx and Prepare with it.
+func (d *DB) Query(query string, args ...any) (*sql.Rows, error) {
+	return d.pool.Query(query, args...)
+}
+
+func (d *DB) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return d.pool.QueryContext(ctx, query, args...)
+}
+
+func (d *DB) QueryRow(query string, args ...any) *sql.Row {
+	return d.pool.QueryRow(query, args...)
+}
+
+func (d *DB) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	return d.pool.QueryRowContext(ctx, query, args...)
+}
+
+// Close and Ping are lifecycle, not writes, and every caller of Open needs
+// them.
+func (d *DB) Close() error { return d.pool.Close() }
+
+func (d *DB) Ping() error { return d.pool.Ping() }
+
+// Stats reports pool statistics. It is a diagnostic: the pool must keep more
+// than one connection so reads survive a long ingest, and a test asserts that.
+func (d *DB) Stats() sql.DBStats { return d.pool.Stats() }
 
 // acquireWriter waits for the logical writer token.
 func (d *DB) acquireWriter() { d.writer <- struct{}{} }
@@ -62,7 +104,7 @@ func (d *DB) releaseWriter() { <-d.writer }
 func (d *DB) Exec(query string, args ...any) (sql.Result, error) {
 	d.acquireWriter()
 	defer d.releaseWriter()
-	return d.DB.Exec(query, args...)
+	return d.pool.Exec(query, args...)
 }
 
 // TryExec performs a write only if no other writer holds the token, and
@@ -74,7 +116,7 @@ func (d *DB) TryExec(query string, args ...any) (persisted bool, err error) {
 		return false, nil
 	}
 	defer d.releaseWriter()
-	_, err = d.DB.Exec(query, args...)
+	_, err = d.pool.Exec(query, args...)
 	return true, err
 }
 
@@ -92,7 +134,7 @@ type writeTx struct {
 // SQLite write transactions, which is the condition being removed.
 func (d *DB) beginWrite() (*writeTx, error) {
 	d.acquireWriter()
-	tx, err := d.DB.Begin()
+	tx, err := d.pool.Begin()
 	if err != nil {
 		d.releaseWriter()
 		return nil, err
@@ -321,7 +363,7 @@ func Open(path string) (*DB, error) {
 	// reads without creating an unbounded localhost connection pool.
 	sdb.SetMaxOpenConns(4)
 	sdb.SetMaxIdleConns(4)
-	d := &DB{DB: sdb, writer: make(chan struct{}, 1)}
+	d := &DB{pool: sdb, writer: make(chan struct{}, 1)}
 	if err := d.migrate(); err != nil {
 		_ = sdb.Close()
 		return nil, err
