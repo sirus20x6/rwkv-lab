@@ -212,7 +212,21 @@ jobs:
           # "importing it and driving its Cache type works on CPU", which is
           # true only once triton is present.
           pip install triton
-          pip install flash-linear-attention
+          # Pinned, and the pin is load-bearing rather than caution. Once the
+          # import above started working, the assertion ran for the first time
+          # and FAILED against the then-latest 0.5.2:
+          #
+          #   assert stacked._seen_tokens == 7
+          #   +  where 0 = Cache(layers=[FLALayer])._seen_tokens
+          #
+          # 0.4.1 is what the development environment has, so an unpinned job
+          # was exercising a different library from the one anyone writes
+          # against -- a second thing the silent skip hid. Pinning restores the
+          # job's stated purpose (drive the INSTALLED Cache) against the
+          # version this code supports; it does not narrow what the test
+          # asserts. Moving to 0.5.x is real work on stack_legacy_fla_caches
+          # and is filed as its own card.
+          pip install 'flash-linear-attention==0.4.1'
 
       - name: The fla-marked assertions run against the installed package
         run: |
