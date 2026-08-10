@@ -17,6 +17,20 @@ distinct wordings:
     pins match referenced paths  the premise the unique-source count rests on
     --write splices only digits  the fixer
 
+The document also states three closed sets by *name*, and those drift the same
+way for a different reason: adding an enumerator is a C++ edit that compiles
+and passes, and nothing looks at the sentence. A count at least has a chance of
+looking wrong to a reader; a list missing its newest member reads exactly like
+a correct one. Those are checked against the enums in the header, and the tests
+are again arranged by mechanism:
+
+    enum gains a member          the drift, with the document untouched
+    document names a non-member  the same disagreement from the other side
+    same names, different order  reported as its own kind, because a reader
+                                 comparing by eye sees no set difference at all
+    enum renamed / header absent an unreadable truth is a failure, never a skip
+    --write never edits a list   the fixer stops at digits
+
 Each one is separately mutation-tested; see the PR that added this file for the
 table of which tests redden per mutation.
 """
@@ -36,6 +50,7 @@ REPOSITORY = pathlib.Path(__file__).resolve().parents[1]
 GATE = REPOSITORY / "scripts/ci_catalog_doc_counts_gate.py"
 DOCUMENT = "docs/experiment-vm/COMPATIBILITY_CATALOG.md"
 CATALOG = "docs/experiment-vm/compatibility-workflows.v1.json"
+HEADER = "trainvm/include/trainvm/compatibility_catalog.hpp"
 
 _spec = importlib.util.spec_from_file_location("ci_catalog_doc_counts_gate", GATE)
 assert _spec is not None and _spec.loader is not None
@@ -52,10 +67,16 @@ def run(repository: pathlib.Path, *arguments: str) -> subprocess.CompletedProces
 
 @pytest.fixture
 def tree(tmp_path: pathlib.Path) -> pathlib.Path:
-    """A copy of just the documents the gate reads.
+    """A copy of just the files the gate reads.
 
     Copying the whole repository would make every test in this file slow enough
-    to be skipped over; the gate opens four files and nothing else.
+    to be skipped over; the gate opens these and nothing else.
+
+    The C++ header is one of them: the gate checks the document's three closed
+    sets against the enums declared there, and treats a missing header as a
+    failure rather than a skip. Leaving it out of this fixture therefore fails
+    every test in the file for the same uninformative reason -- which is how it
+    was found, and is worth knowing if you add a file the gate reads.
     """
     root = tmp_path / "repository"
     (root / "docs/experiment-vm").mkdir(parents=True)
@@ -64,6 +85,8 @@ def tree(tmp_path: pathlib.Path) -> pathlib.Path:
         shutil.copy(name, root / "docs/experiment-vm" / name.name)
     shutil.copy(REPOSITORY / CATALOG, root / CATALOG)
     shutil.copy(REPOSITORY / DOCUMENT, root / DOCUMENT)
+    (root / HEADER).parent.mkdir(parents=True)
+    shutil.copy(REPOSITORY / HEADER, root / HEADER)
     return root
 
 
@@ -266,3 +289,120 @@ def test_write_leaves_an_unmatched_claim_alone(tree):
     assert result.returncode == 1
     assert "WROTE" not in result.stdout
     assert document_of(tree) == document
+
+
+def header_of(root: pathlib.Path) -> str:
+    return (root / HEADER).read_text(encoding="utf-8")
+
+
+def test_every_enum_claim_matches_the_document_exactly_once():
+    """The same emptiness guard as the CLAIMS test above, for the list half.
+
+    An ENUM_CLAIMS table that became empty would make the gate pass on any
+    document, and the verdict line would still say the lists were checked --
+    the specific way a gate turns into wallpaper.
+    """
+    assert len(gate.ENUM_CLAIMS) == 3
+    document = document_of(REPOSITORY)
+    header = header_of(REPOSITORY)
+    for label, pattern, enum in gate.ENUM_CLAIMS:
+        import re
+        assert len(re.findall(pattern, document)) == 1, label
+        assert gate.enum_members(header, enum), enum
+
+
+def test_a_new_enumerator_reddens_an_untouched_document(tree):
+    """The drift this half exists to catch, reproduced forward.
+
+    Nothing in the document changes. The enum gains a member, which is a C++
+    edit that compiles and passes, and the sentence listing the closed set
+    becomes wrong without being touched.
+    """
+    header = header_of(tree)
+    assert "  control_plane,\n};" in header, "the enum under test was restructured"
+    (tree / HEADER).write_text(
+        header.replace("  control_plane,\n};", "  control_plane,\n  brand_new_family,\n};"),
+        encoding="utf-8")
+
+    result = run(tree)
+    assert result.returncode == 1
+    assert "closed family list missing brand_new_family" in result.stdout
+    assert "FAILED" in result.stdout
+
+
+def test_a_name_the_enum_does_not_declare_fails(tree):
+    """The other direction: the prose gains a name the closed set never had."""
+    document = document_of(tree).replace(
+        "and `control_plane`.", "`control_plane`, and `imaginary_family`.")
+    assert "imaginary_family" in document, "the sentence under test was not rewritten"
+    (tree / DOCUMENT).write_text(document, encoding="utf-8")
+
+    result = run(tree)
+    assert result.returncode == 1
+    assert ("closed family list names imaginary_family which WorkflowFamily does "
+            "not declare" in result.stdout)
+
+
+def test_the_same_names_in_a_different_order_fail_and_say_so(tree):
+    """Order is asserted, and is reported as its own kind of disagreement.
+
+    A reader comparing the two by eye sees no set difference here, so a message
+    about a missing or extra name would send them looking for the wrong thing.
+    """
+    header = header_of(tree)
+    assert "  none,\n  restart_only," in header, "the enum under test was restructured"
+    (tree / HEADER).write_text(
+        header.replace("  none,\n  restart_only,", "  restart_only,\n  none,"),
+        encoding="utf-8")
+
+    result = run(tree)
+    assert result.returncode == 1
+    assert "in a different order" in result.stdout
+    assert "missing" not in result.stdout
+
+
+def test_a_renamed_enum_fails_rather_than_reading_as_an_empty_set(tree):
+    """A renamed enum must not look like a closed set that lost every member.
+
+    `enum_members` returns None rather than [] for exactly this: an absent enum
+    and an empty one are different failures, and the message has to send the
+    reader to ENUM_CLAIMS rather than to the document.
+    """
+    header = header_of(tree)
+    (tree / HEADER).write_text(
+        header.replace("enum class WorkflowFamily {", "enum class WorkflowFamilyV2 {"),
+        encoding="utf-8")
+
+    result = run(tree)
+    assert result.returncode == 1
+    assert "no `enum class WorkflowFamily` found" in result.stdout
+    assert "update ENUM_CLAIMS" in result.stdout
+
+
+def test_a_missing_header_fails_rather_than_silently_skipping(tree):
+    """An unchecked check that stays green is the state this gate ends."""
+    (tree / HEADER).unlink()
+
+    result = run(tree)
+    assert result.returncode == 1
+    assert "3 closed-set lists" in result.stdout
+    assert "were not checked" in result.stdout
+
+
+def test_write_does_not_rewrite_a_prose_list(tree):
+    """--write splices digits. A disagreeing list is reported, never repaired.
+
+    Rewriting one would mean guessing where in the sentence a new name belongs
+    and whether the paragraph around it still reads true -- a gate editing
+    documentation to make itself pass is the failure this file exists to stop.
+    """
+    header = header_of(tree)
+    (tree / HEADER).write_text(
+        header.replace("  control_plane,\n};", "  control_plane,\n  brand_new_family,\n};"),
+        encoding="utf-8")
+    before = document_of(tree)
+
+    result = run(tree, "--write")
+    assert result.returncode == 1
+    assert "WROTE" not in result.stdout
+    assert document_of(tree) == before, "the document must not be edited"
