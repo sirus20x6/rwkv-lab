@@ -1,0 +1,33 @@
+# CPU-reference smoke suite for the imported RWKV architecture prototypes.
+# Launch with: python -m rwkv_lab.config run experiments/rwkv_prototype_suite.yaml
+name: RWKV prototype architecture suite
+prototype:
+  output_dir: runs/rwkv-prototype-suite
+  tasks:
+    - name: rwkv8
+      kind: model_probe
+      architecture: rwkv8
+      model: {vocab_size: 256, d_model: 16, n_layers: 2, head_size: 16}
+      batch: 1
+      sequence_length: 8
+
+    - name: kan-rwkv
+      kind: model_probe
+      architecture: kan_rwkv
+      model: {vocab_size: 256, d_model: 16, n_layers: 2, head_size: 16, grid_size: 5}
+      batch: 1
+      sequence_length: 8
+
+    - name: blt-rwkv7
+      kind: model_probe
+      architecture: blt_rwkv7
+      model: {vocab_size: 256, d_model: 16, n_layers: 2, max_patch: 8}
+      batch: 1
+      sequence_length: 8
+
+    - name: rosa-blt
+      kind: model_probe
+      architecture: rosa_blt
+      model: {vocab_size: 256, d_model: 16, n_layers: 2, head_size: 16, max_patch: 8}
+      batch: 1
+      sequence_length: 8

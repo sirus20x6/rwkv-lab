@@ -41,6 +41,7 @@ one RWKV-native vision student—is documented in
 | Understand the available research levers | [What's in the box](#whats-in-the-box) · [`TRAINING_LEVERS.md`](TRAINING_LEVERS.md) |
 | Train the image captioner | [Multimodal captioning](#multimodal-captioning) · [`vision_train.py`](src/rwkv_lab/vision_train.py) |
 | Run a conversion experiment | [Conversion pipeline](#pipeline) · [validated conversion result](#highlight-result-gdn-rwkv-7-lossless-conversion) |
+| Probe RWKV-8, BLT, ROSA, and KAN variants | [`RWKV_PROTOTYPE_SUITE.md`](docs/RWKV_PROTOTYPE_SUITE.md) · [`rwkv_prototype_suite.yaml`](experiments/rwkv_prototype_suite.yaml) |
 | Monitor training | [`dashboard/README.md`](dashboard/README.md) |
 | Prepare or deduplicate image data | [`UNLABELED_IMAGE_DEDUP.md`](docs/UNLABELED_IMAGE_DEDUP.md) · [`scripts/`](scripts/) |
 | Run tests | [Quick start](#quick-start) · [`scripts/test_parallel.sh`](scripts/test_parallel.sh) |
@@ -72,6 +73,16 @@ go -C dashboard test ./...
 The package uses a `src/` layout, so installed entry points run as
 `python -m rwkv_lab.<module>`. For development without an editable install,
 prefix commands with `PYTHONPATH=src`.
+
+The architecture-prototype suite can be launched without writing a Python
+driver:
+
+```bash
+python -m rwkv_lab.config run experiments/rwkv_prototype_suite.yaml
+```
+
+It probes RWKV-8, dynamic BLT ChannelMix, ROSA+BLT, and KAN-RWKV through the
+same declarative runner and writes a structured summary under `runs/`.
 
 ## Multimodal captioning
 

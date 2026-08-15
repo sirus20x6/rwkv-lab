@@ -401,6 +401,10 @@ def _run_conversion(cfg):
 
 def run(cfg_path: str):
     cfg = load(cfg_path)
+    if "prototype" in cfg:
+        from rwkv_lab.prototype_suite import run_prototype_suite
+
+        return run_prototype_suite(cfg)
     if "conversion" in cfg:
         return _run_conversion(cfg)
     kind, data = resolve_data(cfg)
