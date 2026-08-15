@@ -105,7 +105,21 @@ class BLTRWKV7LanguageModel(nn.Module):
         self.ln_out = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, vocab_size, bias=False)
 
-    def forward(self, ids: torch.Tensor, states: Optional[list] = None, return_state: bool = False, target_bytes: Optional[torch.Tensor] = None):
+    def forward(
+        self,
+        ids: torch.Tensor,
+        states: Optional[list] = None,
+        return_state: bool = False,
+        target_bytes: Optional[torch.Tensor] = None,
+        return_hidden: bool = False,
+        hidden_only: bool = False,
+        return_aux: bool = False,
+        reset_mask: Optional[torch.Tensor] = None,
+    ):
+        if reset_mask is not None:
+            raise ValueError("BLT-RWKV-7 does not yet support reset-mask packing")
+        if return_state and (return_hidden or hidden_only or return_aux):
+            raise ValueError("stateful decoding cannot request training outputs")
         x = self.emb(ids)
 
         v_first = None
@@ -130,12 +144,20 @@ class BLTRWKV7LanguageModel(nn.Module):
                     x, v_first = block(x, v_first=v_first)
 
         x = self.ln_out(x)
+        entropy_aux = sum(entropy_losses, x.new_zeros(()))
+        if hidden_only:
+            return (x, entropy_aux) if return_aux else x
         logits = self.head(x)
 
         if return_state:
             return logits, next_states
+        if return_hidden:
+            output = (logits, x)
+            return (output, entropy_aux) if return_aux else output
         if target_bytes is not None:
             return logits, entropy_losses
+        if return_aux:
+            return logits, entropy_aux
         return logits
 
 

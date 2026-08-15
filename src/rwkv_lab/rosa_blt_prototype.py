@@ -161,6 +161,10 @@ class BLT_ROSA_LanguageModel(nn.Module):
         self,
         ids: torch.Tensor,
         target_bytes: Optional[torch.Tensor] = None,
+        return_hidden: bool = False,
+        hidden_only: bool = False,
+        return_aux: bool = False,
+        reset_mask: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, list[torch.Tensor]]]:
         """Parallel forward pass.
 
@@ -172,6 +176,8 @@ class BLT_ROSA_LanguageModel(nn.Module):
             logits: Next-byte logits [B, T, vocab_size].
             entropy_losses: List of entropy prediction losses per layer (if target_bytes provided).
         """
+        if reset_mask is not None:
+            raise ValueError("ROSA+BLT does not yet support reset-mask packing")
         x = self.emb(ids)
 
         v_first = None
@@ -183,8 +189,16 @@ class BLT_ROSA_LanguageModel(nn.Module):
                 entropy_losses.append(e_loss)
 
         x = self.ln_out(x)
+        entropy_aux = sum(entropy_losses, x.new_zeros(()))
+        if hidden_only:
+            return (x, entropy_aux) if return_aux else x
         logits = self.head(x)
 
+        if return_hidden:
+            output = (logits, x)
+            return (output, entropy_aux) if return_aux else output
         if target_bytes is not None:
             return logits, entropy_losses
+        if return_aux:
+            return logits, entropy_aux
         return logits

@@ -342,6 +342,13 @@ class KANRWKVLanguageModel(nn.Module):
         self.head = nn.Linear(d_model, vocab_size, bias=False)
 
         self.apply(self._init)
+        for block in self.blocks:
+            if not block.deepembed:
+                continue
+            if block.de_proj is not None:
+                nn.init.zeros_(block.de_proj.weight)
+            else:
+                nn.init.zeros_(block.de_emb.weight)
 
     def _init(self, m: nn.Module) -> None:
         if isinstance(m, nn.Linear):
@@ -356,7 +363,14 @@ class KANRWKVLanguageModel(nn.Module):
         ids: torch.Tensor,
         states: Optional[list] = None,
         return_state: bool = False,
+        return_hidden: bool = False,
+        hidden_only: bool = False,
+        reset_mask: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, list]]:
+        if reset_mask is not None:
+            raise ValueError("KAN-RWKV prototype does not yet support reset-mask packing")
+        if return_state and (return_hidden or hidden_only):
+            raise ValueError("stateful decoding cannot request training hidden outputs")
         x = self.emb(ids)
 
         v_first = None
@@ -387,8 +401,12 @@ class KANRWKVLanguageModel(nn.Module):
                 )
 
         x = self.ln_out(x)
+        if hidden_only:
+            return x
         logits = self.head(x)
 
         if return_state:
             return logits, next_states
+        if return_hidden:
+            return logits, x
         return logits

@@ -80,6 +80,60 @@ against the current core:
   construction;
 - CPU probes explicitly select the deterministic Python reference kernel, so
   an installed FLA/Triton stack cannot receive CPU tensors accidentally.
+- RWKV-8 and KAN-RWKV DeepEmbed gates now use a trainable identity
+  initialization; the model-wide initializer previously randomized the output
+  gate, while zeroing both low-rank factors would have prevented learning.
 
 The focused architecture suite is covered by `tests/test_prototype_suite.py`
 and the imported model-specific tests.
+
+## Real-corpus pretraining
+
+The architectures are also first-class `rwkv_pretrain` models. They use the
+same corpus sampler, fixed step-0 validation, optimizer stack, learning-rate
+schedules, gradient accumulation, checkpoints, exact resume state, JSONL
+telemetry, campaign registry, and dashboard ingestion as the baseline model.
+
+Use the checked-in equal-budget comparison:
+
+```bash
+python -m rwkv_lab.config run experiments/rwkv_architecture_pretrain.example.yaml
+```
+
+That configuration builds one document-aware UTF-8 byte corpus and compares
+`rwkv7`, `rwkv8`, `blt_rwkv7`, `rosa_blt`, and `kan_rwkv` on identical data,
+seeds, model dimensions, and budgets. Generated corpora, checkpoints, and run
+artifacts remain ignored under `models/cache/` and `runs/`.
+
+The relevant model fields are:
+
+```yaml
+model:
+  architecture: rwkv8       # rwkv7 | rwkv8 | blt_rwkv7 | rosa_blt | kan_rwkv
+  vocab_size: 256
+  d_model: 128
+  n_layers: 4
+  head_size: 32
+```
+
+BLT models must use `data.encoding: bytes` and `vocab_size: 256`. Their entropy
+heads are optimized with `blt_entropy_weight`; training and evaluation records
+also report entropy loss, mean predicted entropy, and average dynamic patch
+length. RWKV-8 and KAN-RWKV may instead use the ordinary World-token corpus and
+65,536-token vocabulary.
+
+Checkpoints record the architecture, vocabulary, dimensions, DeepEmbed shape,
+BLT patch controls, KAN spline controls, and ROSA memory size. Resume refuses a
+topology mismatch before loading weights. Resumed runs append to `train.jsonl`
+so dashboard history is preserved rather than replaced.
+
+The imported architectures initially exclude levers whose semantics have not
+been qualified on their blocks, including recurrent-depth wrappers, Engram,
+state-offset tuning, online memory, and routing-free MoE. Unsupported
+combinations fail during argument validation instead of silently degrading to
+the baseline.
+
+Declarative campaign trials are written as direct children of `runs/` using
+`campaign-ID--arm--seed-NNNN` names. This matches trainboard's ingestion
+contract, so each arm has an ordinary live loss/throughput graph in addition to
+its campaign-registry comparison.

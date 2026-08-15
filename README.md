@@ -82,7 +82,9 @@ python -m rwkv_lab.config run experiments/rwkv_prototype_suite.yaml
 ```
 
 It probes RWKV-8, dynamic BLT ChannelMix, ROSA+BLT, and KAN-RWKV through the
-same declarative runner and writes a structured summary under `runs/`.
+same declarative runner and writes a structured summary under `runs/`. For
+real-corpus, checkpointed training through `rwkv_pretrain`, launch
+[`rwkv_architecture_pretrain.example.yaml`](experiments/rwkv_architecture_pretrain.example.yaml).
 
 ## Multimodal captioning
 

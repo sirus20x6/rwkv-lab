@@ -113,6 +113,34 @@ def build(docs, out_prefix):
           f"(median {int(np.median(lens))} tok) -> {bin_path} + {off_path}")
 
 
+def build_bytes(docs, out_prefix):
+    """Write UTF-8 bytes as uint16 token IDs with exact document offsets.
+
+    uint16 keeps the on-disk contract shared with the World-token trainer while
+    restricting IDs to 0..255 for BLT entropy heads.
+    """
+    bin_path = out_prefix + ".bin"
+    offsets = []
+    position = 0
+    lengths = []
+    with open(bin_path, "wb") as handle:
+        for document in docs:
+            encoded = document.encode("utf-8")
+            if not encoded:
+                continue
+            offsets.append(position)
+            values = np.frombuffer(encoded, dtype=np.uint8).astype(np.uint16)
+            values.tofile(handle)
+            position += len(values)
+            lengths.append(len(values))
+    if not offsets:
+        raise ValueError("byte corpus contains no nonempty documents")
+    off_path = out_prefix + ".off.npy"
+    np.save(off_path, np.asarray(offsets, dtype=np.uint64))
+    print(f"{position/1e6:.2f}M UTF-8 bytes, {len(offsets)} docs "
+          f"(median {int(np.median(lengths))} bytes) -> {bin_path} + {off_path}")
+
+
 def pack_context_buckets(bin_path, off_path, sizes, out_prefix):
     """Semantic sequence packing into standard context buckets. Documents are NEVER split
     (except those longer than the largest bucket, which are chunked at it): each row of a bucket
@@ -216,7 +244,13 @@ def resolve_corpus(spec: dict, cache_dir="models/cache"):
         return bin_path, (off_path if doc_b and os.path.exists(off_path) else None)
     docs = gather_mixture(spec["sources"], spec.get("cap_mb", 12.0))
     print(f"resolve_corpus: {len(docs)} docs from {len(spec['sources'])} source(s) -> cache {key}", flush=True)
-    build(docs, prefix)
+    encoding = str(spec.get("encoding", "world"))
+    if encoding == "world":
+        build(docs, prefix)
+    elif encoding == "bytes":
+        build_bytes(docs, prefix)
+    else:
+        raise ValueError(f"unknown corpus encoding {encoding!r}; expected 'world' or 'bytes'")
     return bin_path, (off_path if doc_b else None)
 
 
@@ -244,13 +278,14 @@ def main():
     ap.add_argument("--dataset", default="", help="HF dataset name (streaming); empty = local files")
     ap.add_argument("--patterns", default="/workspace/rwkv-lab/**/*.py,/workspace/rwkv-lab/**/*.md")
     ap.add_argument("--cap-mb", type=float, default=12.0)
+    ap.add_argument("--encoding", choices=("world", "bytes"), default="world")
     args = ap.parse_args()
     if args.dataset:
         docs = gather_hf(args.dataset, args.cap_mb)
     else:
         docs = gather_local(args.patterns.split(","), args.cap_mb)
     print(f"gathered {len(docs)} documents", flush=True)
-    build(docs, args.out)
+    (build_bytes if args.encoding == "bytes" else build)(docs, args.out)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ Schema:
       cap_mb: 50
     seeds: 4
     model: {d_model: 256, n_layers: 4, head_size: 64}
+           # optional: architecture: rwkv8; vocab_size: 65536
     train: {steps: 3000, lr: 3e-3, batch: 64, seq_len: 512, minutes: 10}
     configs:                          # name -> LoopedRWKV/aux kwargs
       baseline: {}
@@ -23,6 +24,9 @@ from __future__ import annotations
 import argparse, json, os, subprocess, sys, time
 from pathlib import Path
 import yaml
+
+
+_SOURCE_ROOT = str(Path(__file__).resolve().parents[1])
 
 
 def load(path: str) -> dict:
@@ -65,7 +69,15 @@ _LM_FLAG.update({"state_offset": "--state-offset",
                  "routing_free_balance": "--routing-free-balance",
                  "byte_aware_vocab": "--byte-aware-vocab",
                  "byte_aware_max_bytes": "--byte-aware-max-bytes",
-                 "byte_aware_dim": "--byte-aware-dim"})
+                 "byte_aware_dim": "--byte-aware-dim",
+                 "architecture": "--architecture",
+                 "vocab_size": "--vocab-size",
+                 "blt_threshold": "--blt-threshold",
+                 "blt_max_patch": "--blt-max-patch",
+                 "blt_entropy_weight": "--blt-entropy-weight",
+                 "kan_grid_size": "--kan-grid-size",
+                 "kan_spline_order": "--kan-spline-order",
+                 "rosa_memory_size": "--rosa-memory-size"})
 
 
 def _read_train_log(path: str, mode: str) -> tuple[dict, list, dict]:
@@ -107,7 +119,11 @@ def _execute_trial(cmd, out_dir, *, campaign_id, arm_id, seed, budget, mode,
     from rwkv_lab import registry
     started = time.time()
     try:
-        subprocess.run(cmd, env={**os.environ, "PYTHONPATH": "src"}, check=True)
+        inherited_pythonpath = os.environ.get("PYTHONPATH", "")
+        pythonpath = os.pathsep.join(
+            part for part in (_SOURCE_ROOT, inherited_pythonpath) if part
+        )
+        subprocess.run(cmd, env={**os.environ, "PYTHONPATH": pythonpath}, check=True)
         metrics, series, profile = _read_train_log(os.path.join(out_dir, "train.jsonl"), mode)
         profile["train_seconds"] = time.time() - started
         metrics["train_seconds"] = profile["train_seconds"]
@@ -210,6 +226,8 @@ def _lm_command(data_args, off_path, out_dir, model, train, lever, seed, save_pa
     cmd = [*prefix, *data_args, "--out", out_dir,
            "--d-model", str(model.get("d_model", 512)), "--n-layers", str(model.get("n_layers", 8)),
            "--head-size", str(model.get("head_size", 64)), "--batch", str(train.get("batch", 16)),
+           "--architecture", str(model.get("architecture", "rwkv7")),
+           "--vocab-size", str(model.get("vocab_size", 65536)),
            "--seq-len", str(train.get("seq_len", 1024)), "--lr", str(train.get("lr", 6e-4)),
            "--optimizer", str(train.get("optimizer", "adamw")),
            "--weight-decay", str(train.get("weight_decay", 0.1)), "--seed", str(seed),
@@ -220,6 +238,16 @@ def _lm_command(data_args, off_path, out_dir, model, train, lever, seed, save_pa
     if train.get("init_g1g"): cmd += ["--init-g1g", str(train["init_g1g"])]
     elif train.get("resume"): cmd += ["--resume", str(train["resume"])]
     if train.get("warmup"): cmd += ["--warmup", str(train["warmup"])]
+    for key, flag in (
+        ("val_windows", "--val-windows"),
+        ("eval_every", "--eval-every"),
+        ("log_every", "--log-every"),
+        ("grad_clip", "--grad-clip"),
+        ("gpu_data", "--gpu-data"),
+        ("gpu_data_cap_gb", "--gpu-data-cap-gb"),
+    ):
+        if key in train:
+            cmd += [flag, str(train[key])]
     if train.get("ctx_curriculum"):
         cmd += ["--ctx-curriculum", str(train["ctx_curriculum"])]
     if train.get("cpu_prefetch") is False:
@@ -238,6 +266,16 @@ def _lm_command(data_args, off_path, out_dir, model, train, lever, seed, save_pa
     if distributed != "none": cmd += ["--distributed", distributed]
     if distributed == "fsdp2":
         cmd += ["--fsdp-prefetch-depth", str(train.get("fsdp_prefetch_depth", 1))]
+    for key, flag in (
+        ("blt_threshold", "--blt-threshold"),
+        ("blt_max_patch", "--blt-max-patch"),
+        ("blt_entropy_weight", "--blt-entropy-weight"),
+        ("kan_grid_size", "--kan-grid-size"),
+        ("kan_spline_order", "--kan-spline-order"),
+        ("rosa_memory_size", "--rosa-memory-size"),
+    ):
+        if key in model:
+            cmd += [flag, str(model[key])]
     if train.get("activation_checkpointing"): cmd += ["--activation-checkpointing"]
     if train.get("cpu_offload"): cmd += ["--cpu-offload"]
     if train.get("lr_schedule"): cmd += ["--lr-schedule", str(train["lr_schedule"])]
@@ -273,7 +311,7 @@ def _lm_command(data_args, off_path, out_dir, model, train, lever, seed, save_pa
 
 
 def _run_lm_campaign(configs, model, train, data_args, off_path, *, task, seeds=1,
-                     db=None, campaign_name=""):
+                     db=None, campaign_name="", runs_dir="runs"):
     from rwkv_lab import experiment as E, registry
     campaign_cfg = {"mode": "lm", "model": model, "train": train, "configs": configs,
                     "seeds": seeds, "data_args": data_args, "doc_offsets": off_path,
@@ -289,7 +327,13 @@ def _run_lm_campaign(configs, model, train, data_args, off_path, *, task, seeds=
     try:
         for name, lever in configs.items():
             for seed in range(int(seeds)):
-                out_dir = os.path.join("runs", f"campaign_{cid}", name, f"seed_{seed:04d}")
+                safe_name = "".join(
+                    character if character.isalnum() or character in "-_" else "-"
+                    for character in name
+                ).strip("-") or "arm"
+                out_dir = os.path.join(
+                    runs_dir, f"campaign-{cid}--{safe_name}--seed-{seed:04d}"
+                )
                 save_path = os.path.join(out_dir, "ckpt.pt")
                 cmd = _lm_command(data_args, off_path, out_dir, model, train, lever, seed, save_path)
                 print(f"[config] LM campaign={cid} arm='{name}' seed={seed}: {' '.join(cmd[2:])}", flush=True)
@@ -316,7 +360,8 @@ def _run_lm(data, cfg):
     return _run_lm_campaign(cfg["configs"], cfg.get("model", {}), cfg.get("train", {}),
                             ["--data", bin_path], off_path, task=f"lm:{Path(bin_path).name}",
                             seeds=int(cfg.get("seeds", 1)), db=cfg.get("registry_db"),
-                            campaign_name=str(cfg.get("name", "LM campaign")))
+                            campaign_name=str(cfg.get("name", "LM campaign")),
+                            runs_dir=str(cfg.get("runs_dir", "runs")))
 
 
 def _dict_cli_args(values: dict) -> list[str]:
@@ -399,6 +444,26 @@ def _run_conversion(cfg):
     return cid
 
 
+def _validate_lm_architecture_config(cfg):
+    """Fail before corpus construction when an architecture/data contract is invalid."""
+    if "data" not in cfg or "task" in cfg["data"]:
+        return
+    model = cfg.get("model", {})
+    encoding = str(cfg["data"].get("encoding", "world"))
+    for name, lever in cfg.get("configs", {"baseline": {}}).items():
+        architecture = str(lever.get("architecture", model.get("architecture", "rwkv7")))
+        vocab_size = int(lever.get("vocab_size", model.get("vocab_size", 65536)))
+        if architecture in ("blt_rwkv7", "rosa_blt"):
+            if encoding != "bytes":
+                raise ValueError(
+                    f"config {name!r}: {architecture} requires data.encoding: bytes"
+                )
+            if vocab_size != 256:
+                raise ValueError(
+                    f"config {name!r}: {architecture} requires vocab_size: 256"
+                )
+
+
 def run(cfg_path: str):
     cfg = load(cfg_path)
     if "prototype" in cfg:
@@ -407,6 +472,7 @@ def run(cfg_path: str):
         return run_prototype_suite(cfg)
     if "conversion" in cfg:
         return _run_conversion(cfg)
+    _validate_lm_architecture_config(cfg)
     kind, data = resolve_data(cfg)
     return (_run_synthetic if kind == "synthetic" else _run_lm)(data, cfg)
 

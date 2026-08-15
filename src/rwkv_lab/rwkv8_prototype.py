@@ -189,6 +189,13 @@ class RWKV8LanguageModel(nn.Module):
 
         # Default initialization standard for RWKV
         self.apply(self._init)
+        for block in self.blocks:
+            if not block.deepembed:
+                continue
+            if block.de_proj is not None:
+                nn.init.zeros_(block.de_proj.weight)
+            else:
+                nn.init.zeros_(block.de_emb.weight)
 
     def _init(self, m: nn.Module) -> None:
         if isinstance(m, nn.Linear):
@@ -203,6 +210,9 @@ class RWKV8LanguageModel(nn.Module):
         ids: torch.Tensor,
         states: Optional[list] = None,
         return_state: bool = False,
+        return_hidden: bool = False,
+        hidden_only: bool = False,
+        reset_mask: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, list]]:
         """Forward pass supporting both parallel sequence training and recurrent step execution.
 
@@ -212,6 +222,10 @@ class RWKV8LanguageModel(nn.Module):
                     ((wkv_matrix_state, time_shift_state_att), shift_state_ffn)
             return_state: If True, returns the updated recurrent states.
         """
+        if reset_mask is not None:
+            raise ValueError("RWKV-8 prototype does not yet support reset-mask packing")
+        if return_state and (return_hidden or hidden_only):
+            raise ValueError("stateful decoding cannot request training hidden outputs")
         x = self.emb(ids)
 
         v_first = None
@@ -242,8 +256,12 @@ class RWKV8LanguageModel(nn.Module):
                 )
 
         x = self.ln_out(x)
+        if hidden_only:
+            return x
         logits = self.head(x)
 
         if return_state:
             return logits, next_states
+        if return_hidden:
+            return logits, x
         return logits

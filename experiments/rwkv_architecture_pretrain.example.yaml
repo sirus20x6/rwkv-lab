@@ -1,0 +1,42 @@
+# Real-corpus, equal-budget architecture comparison. Every arm uses identical
+# UTF-8 byte data, validation windows, optimizer settings, and seeds.
+name: RWKV architecture pretraining comparison
+data:
+  encoding: bytes
+  sources:
+    - kind: local
+      patterns: ["README.md", "docs/**/*.md"]
+      weight: 1.0
+  doc_boundary: true
+  cap_mb: 8
+seeds: 3
+model:
+  architecture: rwkv7
+  vocab_size: 256
+  d_model: 128
+  n_layers: 4
+  head_size: 32
+  blt_threshold: 3.5
+  blt_max_patch: 16
+  blt_entropy_weight: 0.1
+  kan_grid_size: 5
+  kan_spline_order: 3
+  rosa_memory_size: 4
+train:
+  steps: 2000
+  batch: 32
+  seq_len: 256
+  lr: 6e-4
+  warmup: 100
+  optimizer: adamw
+  weight_decay: 0.1
+  lr_schedule: cosine
+  val_windows: 40
+  eval_every: 100
+  log_every: 10
+configs:
+  baseline: {}
+  rwkv8: {architecture: rwkv8}
+  blt-rwkv7: {architecture: blt_rwkv7}
+  rosa-blt: {architecture: rosa_blt}
+  kan-rwkv: {architecture: kan_rwkv}

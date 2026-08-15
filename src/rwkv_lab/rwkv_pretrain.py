@@ -450,6 +450,132 @@ class RWKV7Small(nn.Module):
         return logits, next_states
 
 
+PRETRAIN_ARCHITECTURES = ("rwkv7", "rwkv8", "blt_rwkv7", "rosa_blt", "kan_rwkv")
+BYTE_PRETRAIN_ARCHITECTURES = frozenset(("blt_rwkv7", "rosa_blt"))
+
+
+def build_prototype_pretrain_model(
+    architecture: str,
+    *,
+    vocab_size: int,
+    d_model: int,
+    n_layers: int,
+    head_size: int,
+    deepembed: bool = False,
+    de_dim: int = 0,
+    blt_threshold: float = 3.5,
+    blt_max_patch: int = 16,
+    kan_grid_size: int = 5,
+    kan_spline_order: int = 3,
+    rosa_memory_size: int = 4,
+) -> nn.Module:
+    """Construct an imported architecture with the common pretrainer contract."""
+    if architecture not in PRETRAIN_ARCHITECTURES or architecture == "rwkv7":
+        raise ValueError(f"not a prototype pretrain architecture: {architecture!r}")
+    if d_model % head_size:
+        raise ValueError("d_model must be divisible by head_size")
+    if n_layers < 2:
+        raise ValueError("prototype pretraining requires at least two RWKV layers")
+    if architecture in BYTE_PRETRAIN_ARCHITECTURES and vocab_size != 256:
+        raise ValueError(f"{architecture} requires vocab_size=256 for its byte entropy head")
+
+    if architecture == "rwkv8":
+        from rwkv_lab.rwkv8_prototype import RWKV8LanguageModel
+
+        return RWKV8LanguageModel(
+            vocab_size=vocab_size,
+            d_model=d_model,
+            n_layers=n_layers,
+            head_size=head_size,
+            deepembed=deepembed,
+            de_dim=(de_dim or None),
+        )
+    if architecture == "kan_rwkv":
+        from rwkv_lab.kan_rwkv import KANRWKVLanguageModel
+
+        return KANRWKVLanguageModel(
+            vocab_size=vocab_size,
+            d_model=d_model,
+            n_layers=n_layers,
+            head_size=head_size,
+            deepembed=deepembed,
+            de_dim=(de_dim or None),
+            grid_size=kan_grid_size,
+            spline_order=kan_spline_order,
+        )
+    if architecture == "blt_rwkv7":
+        from rwkv_lab.toy_blt_train import BLTRWKV7LanguageModel
+
+        return BLTRWKV7LanguageModel(
+            vocab_size=vocab_size,
+            d_model=d_model,
+            n_layers=n_layers,
+            threshold=blt_threshold,
+            max_patch=blt_max_patch,
+        )
+    from rwkv_lab.rosa_blt_prototype import BLT_ROSA_LanguageModel
+
+    return BLT_ROSA_LanguageModel(
+        vocab_size=vocab_size,
+        d_model=d_model,
+        n_layers=n_layers,
+        head_size=head_size,
+        threshold=blt_threshold,
+        max_patch=blt_max_patch,
+        rosa_M=rosa_memory_size,
+    )
+
+
+def pretrain_architecture_identity(
+    *,
+    architecture: str,
+    vocab_size: int,
+    d_model: int,
+    n_layers: int,
+    head_size: int,
+    deepembed: bool,
+    de_dim: int,
+    blt_threshold: float,
+    blt_max_patch: int,
+    kan_grid_size: int,
+    kan_spline_order: int,
+    rosa_memory_size: int,
+) -> dict:
+    """Return topology fields that must match for exact checkpoint resume."""
+    return {
+        "architecture": architecture,
+        "vocab_size": vocab_size,
+        "d_model": d_model,
+        "n_layers": n_layers,
+        "head_size": head_size,
+        "deepembed": deepembed,
+        "de_dim": de_dim,
+        "blt_threshold": blt_threshold if architecture in BYTE_PRETRAIN_ARCHITECTURES else None,
+        "blt_max_patch": blt_max_patch if architecture in BYTE_PRETRAIN_ARCHITECTURES else None,
+        "kan_grid_size": kan_grid_size if architecture == "kan_rwkv" else None,
+        "kan_spline_order": kan_spline_order if architecture == "kan_rwkv" else None,
+        "rosa_memory_size": rosa_memory_size if architecture == "rosa_blt" else None,
+    }
+
+
+def validate_pretrain_resume_architecture(saved: dict | None, current: dict) -> None:
+    """Reject a checkpoint whose model topology differs from the requested run."""
+    saved = dict(saved or {})
+    saved.setdefault("architecture", "rwkv7")
+    saved.setdefault("vocab_size", 65536)
+    mismatches = {
+        key: (saved.get(key), value)
+        for key, value in current.items()
+        if saved.get(key) != value
+    }
+    if mismatches:
+        details = ", ".join(
+            f"{key}: checkpoint={old!r}, requested={new!r}"
+            for key, (old, new) in sorted(mismatches.items())
+        )
+        raise ValueError(f"checkpoint architecture mismatch ({details})")
+
+
 def _adamw8bit(params, lr, wd, paged):
     """bitsandbytes 8-bit AdamW (blockwise-quantized moment states, ~75% optimizer-memory cut at
     ~fp32 quality). paged=True routes state through CUDA unified memory to ride out OOM spikes on
@@ -678,6 +804,17 @@ def main():
                          "batch scales reciprocally to keep tokens/update constant")
     ap.add_argument("--d-model", type=int, default=512); ap.add_argument("--n-layers", type=int, default=6)
     ap.add_argument("--head-size", type=int, default=64)
+    ap.add_argument("--architecture", default="rwkv7", choices=PRETRAIN_ARCHITECTURES,
+                    help="trainable model family; BLT variants require a byte corpus and vocab 256")
+    ap.add_argument("--vocab-size", type=int, default=65536,
+                    help="token vocabulary size (use 256 for byte-level BLT variants)")
+    ap.add_argument("--blt-threshold", type=float, default=3.5)
+    ap.add_argument("--blt-max-patch", type=int, default=16)
+    ap.add_argument("--blt-entropy-weight", type=float, default=0.1,
+                    help="auxiliary next-byte entropy-head loss for BLT architectures")
+    ap.add_argument("--kan-grid-size", type=int, default=5)
+    ap.add_argument("--kan-spline-order", type=int, default=3)
+    ap.add_argument("--rosa-memory-size", type=int, default=4)
     ap.add_argument("--lr", type=float, default=6e-4); ap.add_argument("--seq-len", type=int, default=512)
     ap.add_argument("--batch", type=int, default=16); ap.add_argument("--grad-clip", type=float, default=1.0)
     ap.add_argument("--minutes", type=float, default=10.0); ap.add_argument("--steps", type=int, default=0)
@@ -803,6 +940,47 @@ def main():
     ap.add_argument("--lmtp-cooldown-fraction", type=float, default=0.0,
                     help="linearly decay LMTP weight from this fraction to zero at the horizon")
     args = ap.parse_args()
+    if args.vocab_size < 2 or args.vocab_size > 65536:
+        ap.error("--vocab-size must be in [2, 65536] for the uint16 corpus format")
+    if args.architecture in BYTE_PRETRAIN_ARCHITECTURES and args.vocab_size != 256:
+        ap.error(f"--architecture {args.architecture} requires --vocab-size 256")
+    if args.blt_entropy_weight < 0:
+        ap.error("--blt-entropy-weight cannot be negative")
+    if args.blt_max_patch < 1 or args.kan_grid_size < 1 or args.kan_spline_order < 1:
+        ap.error("BLT patch and KAN spline dimensions must be positive")
+    if args.rosa_memory_size < 1:
+        ap.error("--rosa-memory-size must be positive")
+    prototype_architecture = args.architecture != "rwkv7"
+    if prototype_architecture:
+        unsupported = []
+        for enabled, flag in (
+            (args.init_g1g, "--init-g1g"),
+            (args.loop_count > 1 or args.loop_hyper or args.loop_cart_anchor or args.loop_deq
+             or args.loop_fp_halt or args.loop_adaptive_halt, "--loop-*"),
+            (args.seed_chain, "--seed-chain"),
+            (args.engram, "--engram"),
+            (args.online_memory, "--online-memory"),
+            (args.state_offset, "--state-offset"),
+            (args.routing_free_moe, "--routing-free-moe"),
+            (args.byte_aware_vocab, "--byte-aware-vocab"),
+            (args.u_mup_base_width, "--u-mup-base-width"),
+            (args.balance_state, "--balance-state"),
+        ):
+            if enabled:
+                unsupported.append(flag)
+        if unsupported:
+            ap.error(f"--architecture {args.architecture} does not yet support: "
+                     + ", ".join(unsupported))
+        if args.architecture in BYTE_PRETRAIN_ARCHITECTURES and args.ctx_buckets:
+            ap.error("byte-level BLT architectures currently require a flat corpus, not --ctx-buckets")
+        if args.architecture in BYTE_PRETRAIN_ARCHITECTURES and args.deepembed:
+            ap.error("BLT architectures already replace ChannelMix and do not support --deepembed")
+        if args.architecture in ("rwkv8", "kan_rwkv") and (
+            args.de_mode != "out" or args.de_shift or args.de_emb_res
+        ):
+            ap.error("prototype DeepEmbed currently supports only output mode without shift/residual")
+        if args.fused_channelmix and args.architecture not in ("rwkv7", "rwkv8"):
+            ap.error("--fused-channelmix is only qualified for RWKV7/RWKV8 ChannelMix")
     if args.loop_iter_readout:
         ap.error("--loop-iter-readout is only supported in convert_train.py "
                  "(this harness implements no per-iteration readout loss)")
@@ -894,7 +1072,9 @@ def main():
     if args.distributed == "fsdp2" and dist.world_size == 1:
         ap.error("--distributed fsdp2 must be launched with torchrun and WORLD_SIZE > 1")
     os.makedirs(args.out, exist_ok=True)
-    jl = open(os.path.join(args.out, "train.jsonl"), "w", buffering=1) if dist.is_primary \
+    log_path = os.path.join(args.out, "train.jsonl")
+    log_mode = "a" if args.resume and os.path.exists(log_path) else "w"
+    jl = open(log_path, log_mode, buffering=1) if dist.is_primary \
         else open(os.devnull, "w")
     emit = lambda r: jl.write(json.dumps(r) + "\n")
     dev = dist.device; T = args.seq_len
@@ -927,6 +1107,27 @@ def main():
     torch.manual_seed(args.seed); rng = np.random.default_rng(args.seed + dist.rank)
 
     lk = loop_kwargs(args)
+    if dev == "cpu":
+        os.environ.setdefault("RWKV8_FORCE_PYREF", "1")
+    deepembed_active = bool(args.deepembed) and not args.init_g1g and args.architecture in (
+        "rwkv7", "rwkv8", "kan_rwkv"
+    )
+    architecture_identity = pretrain_architecture_identity(
+        architecture=args.architecture,
+        vocab_size=args.vocab_size,
+        d_model=args.d_model,
+        n_layers=args.n_layers,
+        head_size=args.head_size,
+        deepembed=deepembed_active,
+        de_dim=args.de_dim,
+        blt_threshold=args.blt_threshold,
+        blt_max_patch=args.blt_max_patch,
+        kan_grid_size=args.kan_grid_size,
+        kan_spline_order=args.kan_spline_order,
+        rosa_memory_size=args.rosa_memory_size,
+    )
+    if resume_blob is not None:
+        validate_pretrain_resume_architecture(resume_blob.get("arch"), architecture_identity)
     u_mup_cfg = None
     if args.init_g1g:                                        # continued pretraining from pretrained g1g
         from rwkv_lab.native_g1g import load_g1g_native, add_loops
@@ -943,16 +1144,32 @@ def main():
         if args.online_memory or args.u_mup_base_width:
             print("warn: --online-memory/--u-mup ignored for g1g init (from-scratch only)", flush=True)
     else:
-        model = RWKV7Small(65536, args.d_model, args.n_layers, args.head_size, lk,
-                           att_kw={"balance_state": args.balance_state},
-                           seed_chain=bool(args.seed_chain), deepembed=bool(args.deepembed),
-                           de_dim=args.de_dim, de_mode=args.de_mode, de_shift=bool(args.de_shift),
-                           de_emb_res=bool(args.de_emb_res),
-                           routing_free_kw=({"n_experts": args.routing_free_experts,
-                                             "rank": args.routing_free_rank,
-                                             "threshold": args.routing_free_threshold,
-                                             "balance_interpolation": args.routing_free_balance}
-                                            if args.routing_free_moe else None))
+        if args.architecture == "rwkv7":
+            model = RWKV7Small(args.vocab_size, args.d_model, args.n_layers, args.head_size, lk,
+                               att_kw={"balance_state": args.balance_state},
+                               seed_chain=bool(args.seed_chain), deepembed=deepembed_active,
+                               de_dim=args.de_dim, de_mode=args.de_mode, de_shift=bool(args.de_shift),
+                               de_emb_res=bool(args.de_emb_res),
+                               routing_free_kw=({"n_experts": args.routing_free_experts,
+                                                 "rank": args.routing_free_rank,
+                                                 "threshold": args.routing_free_threshold,
+                                                 "balance_interpolation": args.routing_free_balance}
+                                                if args.routing_free_moe else None))
+        else:
+            model = build_prototype_pretrain_model(
+                args.architecture,
+                vocab_size=args.vocab_size,
+                d_model=args.d_model,
+                n_layers=args.n_layers,
+                head_size=args.head_size,
+                deepembed=deepembed_active,
+                de_dim=args.de_dim,
+                blt_threshold=args.blt_threshold,
+                blt_max_patch=args.blt_max_patch,
+                kan_grid_size=args.kan_grid_size,
+                kan_spline_order=args.kan_spline_order,
+                rosa_memory_size=args.rosa_memory_size,
+            )
         if args.byte_aware_vocab:
             from rwkv_lab.tokenizer_experiments import (install_byte_aware_embedding,
                                                          load_world_token_bytes)
@@ -986,8 +1203,11 @@ def main():
         model = model.to(dev, torch.bfloat16)
         if args.seed_chain:
             print("Future-Seed: cross-layer state chaining ON (s_0^L = s_T^{L-1})", flush=True)
-        if args.deepembed:
-            if args.de_mode == "hidden":
+        if deepembed_active:
+            if args.architecture in ("rwkv8", "kan_rwkv"):
+                w = args.de_dim if args.de_dim > 0 else args.d_model * 4
+                what = f"prototype FFN hidden gate width {w}"
+            elif args.de_mode == "hidden":
                 r = args.de_dim if args.de_dim > 0 else 32
                 w, what = r * r, f"hidden gate rank {r}"
             else:
@@ -996,8 +1216,8 @@ def main():
             print(f"DeepEmbed: {what}"
                   + (" + de-shift" if args.de_shift and args.de_mode == "hidden" else "")
                   + (" + emb-residual" if args.de_emb_res and args.de_mode == "hidden" else "")
-                  + f" — {args.n_layers} tables of 65536x{w}"
-                  f" ({args.n_layers * 65536 * w / 1e6:.0f}M sparse params)", flush=True)
+                  + f" — {args.n_layers} tables of {args.vocab_size}x{w}"
+                  f" ({args.n_layers * args.vocab_size * w / 1e6:.0f}M sparse params)", flush=True)
     head_tied = False
     if args.tie_head_until and resume_head_tied:
         tie_embedding_head(model)
@@ -1101,12 +1321,12 @@ def main():
             # so recall never crosses packed-document boundaries.
             bid = args.engram_boundary_id if args.engram_boundary_id >= 0 else \
                 (1 if args.ctx_buckets else None)
-            lmb, esites = enable_engram(model, 65536, args.d_model, args.head_size, args.n_layers,
+            lmb, esites = enable_engram(model, args.vocab_size, args.d_model, args.head_size, args.n_layers,
                                         loop_count=args.loop_count, d_row=args.engram_drow,
                                         rows=args.engram_rows, sites=args.engram_sites,
                                         boundary_id=bid)
             print(f"engram: LMB sites={esites} d_row={args.engram_drow} "
-                  f"rows={min(args.engram_rows, 65536)} boundary_id={bid} "
+                  f"rows={min(args.engram_rows, args.vocab_size)} boundary_id={bid} "
                   f"(+{sum(p.numel() for p in lmb.parameters())/1e6:.2f}M params)", flush=True)
     if args.online_memory and not args.init_g1g and args.online_memory_kernel != "eager":
         if args.compile or args.distributed == "fsdp2":
@@ -1131,7 +1351,7 @@ def main():
                 print(f"online-memory kernel: eager (compiled candidate rejected: {report})", flush=True)
     nparam = sum(p.numel() for p in model.parameters())
     seed_chain = bool(args.seed_chain) and not args.init_g1g  # g1g branch ignores the flag
-    tag = f"scratch-L{args.n_layers}d{args.d_model}-loop{args.loop_count}" + \
+    tag = f"{args.architecture}-scratch-L{args.n_layers}d{args.d_model}-loop{args.loop_count}" + \
           ("".join(k for k, v in [("H", args.loop_hyper), ("C", args.loop_cart_anchor),
            ("Q", args.loop_deq), ("F", args.loop_fp_halt), ("A", args.loop_adaptive_halt),
            ("R", args.loop_iter_readout)] if v) or "") + \
@@ -1151,9 +1371,21 @@ def main():
            if args.nvfp4 else "") + \
           ("-mixctx" if args.ctx_buckets else "")
     print(f"model {tag}: {nparam/1e6:.1f}M params  loop_kw={lk}", flush=True)
-    json.dump({"loop_count": args.loop_count, "n_layers": args.n_layers, "mode": tag,
+    json.dump({"architecture": args.architecture, "vocab_size": args.vocab_size,
+               "loop_count": args.loop_count, "n_layers": args.n_layers, "mode": tag,
                "seed_chain": seed_chain, "engram": lmb is not None,
-               "deepembed": bool(args.deepembed) and not args.init_g1g,
+               "deepembed": deepembed_active and not args.init_g1g,
+               "blt_threshold": (args.blt_threshold
+                                 if args.architecture in BYTE_PRETRAIN_ARCHITECTURES else None),
+               "blt_max_patch": (args.blt_max_patch
+                                 if args.architecture in BYTE_PRETRAIN_ARCHITECTURES else None),
+               "blt_entropy_weight": (args.blt_entropy_weight
+                                      if args.architecture in BYTE_PRETRAIN_ARCHITECTURES else 0.0),
+               "kan_grid_size": args.kan_grid_size if args.architecture == "kan_rwkv" else None,
+               "kan_spline_order": (args.kan_spline_order
+                                    if args.architecture == "kan_rwkv" else None),
+               "rosa_memory_size": (args.rosa_memory_size
+                                    if args.architecture == "rosa_blt" else None),
                "u_mup_base_width": args.u_mup_base_width if u_mup_cfg is not None else 0,
                "online_memory": args.online_memory_mode if args.online_memory and not args.init_g1g else "",
                "state_offset": bool(args.state_offset) and not args.init_g1g,
@@ -1162,11 +1394,16 @@ def main():
                "nvfp4": bool(args.nvfp4),
                "mixed_ctx": bool(args.ctx_buckets),
                "params_m": round(nparam / 1e6, 2)}, open(os.path.join(args.out, "loop_rw.json"), "w"))
+    emit({"kind": "run_config", "step": resume_step_hint,
+          "architecture": args.architecture, "vocab_size": args.vocab_size,
+          "d_model": args.d_model, "n_layers": args.n_layers,
+          "head_size": args.head_size, "params": nparam,
+          "resuming": bool(args.resume)})
 
     heads = None
     if any(w > 0 for w in [args.nextlat_weight, args.top_weight, args.lmtp_weight,
                            args.bst_weight, args.jtp_weight]):
-        heads = LookaheadSystem(args.d_model, 65536, nextlat_weight=args.nextlat_weight,
+        heads = LookaheadSystem(args.d_model, args.vocab_size, nextlat_weight=args.nextlat_weight,
                                 top_weight=args.top_weight, lmtp_weight=args.lmtp_weight,
                                 bst_weight=args.bst_weight, jtp_weight=args.jtp_weight,
                                 lm_head=model.head).to(dev, torch.bfloat16)
@@ -1190,6 +1427,9 @@ def main():
         bkt_gpu = args.gpu_data != "off" and tot_gb <= args.gpu_data_cap_gb and not args.engram
         for b in meta["buckets"]:
             arr = np.fromfile(b["bin"], dtype=np.uint16).astype(np.int32).reshape(b["rows"], b["T"])
+            if args.vocab_size < 65536 and arr.size and int(arr.max()) >= args.vocab_size:
+                ap.error(f"context bucket {b['bin']} contains token IDs outside --vocab-size "
+                         f"{args.vocab_size}")
             t = torch.from_numpy(arr)
             if bkt_gpu:
                 t = t.to(dev)
@@ -1205,7 +1445,12 @@ def main():
         val_toks, train_docs = toks, None
     else:
         toks = np.memmap(args.data, dtype=np.uint16, mode="r")
+        if args.vocab_size < 65536 and len(toks) and int(toks.max()) >= args.vocab_size:
+            ap.error(f"corpus contains token IDs outside --vocab-size {args.vocab_size}")
         n_val = args.val_windows * (T + 1)                 # eval windows are T+1 wide
+        if len(toks) < n_val + T + 1:
+            ap.error(f"corpus has {len(toks)} tokens; need at least {n_val + T + 1} "
+                     "for fixed validation plus one training window")
         val_toks, train_toks = toks[:n_val], toks[n_val:]
         # FIXED val windows: deterministic evenly-spaced offsets, computed once — evals never
         # consume the training RNG and always score the same windows.
@@ -1314,7 +1559,7 @@ def main():
                 recall = None
                 if lmb is not None:
                     from rwkv_lab.engram_lmb import token_rosa_recall, RecallResult
-                    recall = token_rosa_recall(xc[:, :T], 65536, lmb.boundary_id)
+                    recall = token_rosa_recall(xc[:, :T], args.vocab_size, lmb.boundary_id)
                     recall = RecallResult(*(v.to(dev) for v in recall))
                 x = xc.to(dev)
                 lg = (model(x[:, :T], precomputed_recall=recall)
@@ -1338,7 +1583,7 @@ def main():
                         if lmb is not None:   # rows are CPU-side when engram is on
                             from rwkv_lab.engram_lmb import token_rosa_recall, RecallResult
                             xi = xc[:, :-1].cpu()
-                            rr = token_rosa_recall(xi, 65536, lmb.boundary_id)
+                            rr = token_rosa_recall(xi, args.vocab_size, lmb.boundary_id)
                             recall = RecallResult(rr.recalled, rr.valid & (xi != 0), rr.mlen, rr.dist)
                             recall = RecallResult(*(v.to(dev) for v in recall))
                         x = xc if xc.is_cuda else xc.to(dev)
@@ -1353,6 +1598,26 @@ def main():
             readout_restore(readout)
             model.train()
             return tot / max(cnt, 1)
+
+    def architecture_eval_metrics() -> dict:
+        metrics = {"architecture": args.architecture}
+        if args.architecture not in BYTE_PRETRAIN_ARCHITECTURES:
+            return metrics
+        patch_lengths = []
+        entropies = []
+        for block in model.blocks:
+            patch_ids = getattr(block.ffn, "last_patch_ids", None)
+            entropy = getattr(block.ffn, "last_entropy", None)
+            if patch_ids is not None and patch_ids.numel():
+                patch_count = int(patch_ids[0].max()) + 1
+                patch_lengths.append(patch_ids.shape[1] / max(patch_count, 1))
+            if entropy is not None and entropy.numel():
+                entropies.append(float(entropy.float().mean()))
+        if patch_lengths:
+            metrics["blt_avg_patch_length"] = sum(patch_lengths) / len(patch_lengths)
+        if entropies:
+            metrics["blt_mean_entropy"] = sum(entropies) / len(entropies)
+        return metrics
 
     sparse_vocab_params = []
     sparse_engram_params = []
@@ -1403,9 +1668,13 @@ def main():
             from rwkv_lab.distributed import load_checkpoint
             ck = load_checkpoint(args.resume, model, opt)
             step = int(ck.get("step", 0))
+            validate_pretrain_resume_architecture(ck.get("arch"), architecture_identity)
         else:
             ck = resume_blob
-            model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"]); step = ck.get("step", 0)
+            validate_pretrain_resume_architecture(ck.get("arch"), architecture_identity)
+            model.load_state_dict(ck["model"])
+            opt.load_state_dict(ck["opt"])
+            step = ck.get("step", 0)
         if heads is not None and ck.get("heads") is not None:
             heads.load_state_dict(ck["heads"])
         if ema is not None:                  # saved EMA if present, else re-seed from loaded weights
@@ -1524,13 +1793,13 @@ def main():
                 ridx = torch.from_numpy(recall_rng.integers(b["n_val"], b["rows"], size=b["B"]))
                 ids = b["data"][ridx].long()
                 xin = ids[:, :-1]
-                rr = token_rosa_recall(xin, 65536, lmb.boundary_id)
+                rr = token_rosa_recall(xin, args.vocab_size, lmb.boundary_id)
                 rr = RecallResult(rr.recalled, rr.valid & (xin != 0), rr.mlen, rr.dist)
                 return ids.pin_memory(), RecallResult(*(v.pin_memory() for v in rr))
         else:
             def _prefetch_engram():
                 ids = train_batch_cpu(args.batch, width=width, sampler_rng=recall_rng)
-                rr = token_rosa_recall(ids[:, :T], 65536, lmb.boundary_id)
+                rr = token_rosa_recall(ids[:, :T], args.vocab_size, lmb.boundary_id)
                 return ids.pin_memory(), RecallResult(*(v.pin_memory() for v in rr))
 
         recall_future = recall_pool.submit(_prefetch_engram)
@@ -1561,11 +1830,21 @@ def main():
             warm_ids = torch.zeros(
                 warm_batch, warm_seq, dtype=torch.long, device=dev
             )
-            warm_hidden = fwd(warm_ids, hidden_only=True)
+            if args.architecture in BYTE_PRETRAIN_ARCHITECTURES:
+                warm_hidden, warm_arch_aux = fwd(
+                    warm_ids,
+                    hidden_only=True,
+                    target_bytes=warm_ids,
+                    return_aux=True,
+                )
+            else:
+                warm_hidden, warm_arch_aux = fwd(warm_ids, hidden_only=True), None
             from rwkv_lab.fused_ce import lmhead_cross_entropy
             warm_loss = lmhead_cross_entropy(
                 warm_hidden, model.head, warm_ids, fused=True
             )
+            if warm_arch_aux is not None:
+                warm_loss = warm_loss + args.blt_entropy_weight * warm_arch_aux
             warm_loss.backward()
         opt.zero_grad(set_to_none=True)
         torch.set_rng_state(cpu_rng)
@@ -1579,7 +1858,9 @@ def main():
         if args.steps and step >= args.steps: break
         if not args.steps and (time.time() - t0) / 60.0 >= args.minutes: break
         if step % args.eval_every == 0:
-            vl = val_loss(); emit({"kind": "eval", "step": step, "loss": vl, "val_loss": vl, "ppl": math.exp(vl)})
+            vl = val_loss(); emit({"kind": "eval", "step": step, "loss": vl,
+                                   "val_loss": vl, "ppl": math.exp(vl),
+                                   **architecture_eval_metrics()})
             print(f"[{step}] val {vl:.4f} (ppl {math.exp(vl):.2f})  {(time.time()-t0)/60:.1f}min", flush=True)
         train_seq_len, train_batch_size = context_batch_for_step(
             context_stages, step=step, total_steps=context_horizon or 1,
@@ -1646,18 +1927,31 @@ def main():
             # The ordinary path skips RWKV7Small's full vocabulary output and lets
             # fused CE reuse its bf16 logit allocation during backward. Engram's
             # sparse copy-head mutates logits, so it retains the compatible path.
+            architecture_aux_loss = None
             if lmb is None:
-                hidden = fwd(xin, hidden_only=True)
+                if args.architecture in BYTE_PRETRAIN_ARCHITECTURES:
+                    hidden, architecture_aux_loss = fwd(
+                        xin,
+                        hidden_only=True,
+                        target_bytes=xin,
+                        return_aux=True,
+                    )
+                else:
+                    hidden = fwd(xin, hidden_only=True)
                 from rwkv_lab.fused_ce import lmhead_cross_entropy
-                loss = lmhead_cross_entropy(hidden, model.head, tgt, fused=True,
-                                            ignore_index=(0 if buckets is not None else None))
+                lm_loss = lmhead_cross_entropy(hidden, model.head, tgt, fused=True,
+                                               ignore_index=(0 if buckets is not None else None))
+                loss = lm_loss
+                if architecture_aux_loss is not None:
+                    loss = loss + args.blt_entropy_weight * architecture_aux_loss
                 out = (None, hidden) if heads else None
             else:
                 out = fwd(xin, return_hidden=bool(heads),
                           precomputed_recall=precomputed_recall)
                 lg = (out[0] if heads else out).float()
-                loss = F.cross_entropy(lg.reshape(-1, lg.size(-1)), tgt.reshape(-1),
-                                       ignore_index=(0 if buckets is not None else -100))
+                lm_loss = F.cross_entropy(lg.reshape(-1, lg.size(-1)), tgt.reshape(-1),
+                                          ignore_index=(0 if buckets is not None else -100))
+                loss = lm_loss
             if heads:                                        # + weighted aux (latent-prediction) loss
                 loss = loss + heads.compute(out[1], x, model.emb, model.head)["aux_total"]
             if args.routing_free_moe and not args.init_g1g:
@@ -1709,9 +2003,15 @@ def main():
             tail_ema.update(step)
         if step % args.log_every == 0:
             emit({"kind": "train", "step": step, "loss": float(loss.detach()),
+                  "lm_loss": float(lm_loss.detach()),
+                  "architecture": args.architecture,
+                  **({"blt_entropy_loss": float(architecture_aux_loss.detach())}
+                     if architecture_aux_loss is not None else {}),
                   "gnorm": float(gn.detach()),
                   "lr": lr, "tok_per_sec": int(seen / max(time.time() - t0, 1e-6))})
-    vl = val_loss(); emit({"kind": "eval", "step": step, "loss": vl, "val_loss": vl, "ppl": math.exp(vl)})
+    vl = val_loss(); emit({"kind": "eval", "step": step, "loss": vl,
+                           "val_loss": vl, "ppl": math.exp(vl),
+                           **architecture_eval_metrics()})
     if recall_pool is not None:
         recall_pool.shutdown(wait=False, cancel_futures=True)
     if cpu_prefetcher is not None:
@@ -1719,10 +2019,9 @@ def main():
     emit({"kind": "checkpoint", "step": step})
     if args.save:
         # Self-describing architecture is shared by ordinary .pt and FSDP2/DCP checkpoints.
-        arch = {"d_model": args.d_model, "n_layers": args.n_layers,
-                         "head_size": args.head_size, "seed_chain": seed_chain,
-                         "deepembed": bool(args.deepembed) and not args.init_g1g,
-                         "de_dim": args.de_dim, "de_mode": args.de_mode,
+        arch = {**architecture_identity, "seed_chain": seed_chain,
+                         "deepembed": deepembed_active and not args.init_g1g,
+                         "de_mode": args.de_mode,
                          "de_shift": bool(args.de_shift), "de_emb_res": bool(args.de_emb_res),
                          "u_mup_base_width": args.u_mup_base_width,
                          "u_mup_base_depth": args.u_mup_base_depth,
