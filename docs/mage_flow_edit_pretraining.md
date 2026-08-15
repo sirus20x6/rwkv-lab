@@ -54,14 +54,14 @@ Preparation scans and decodes every image, applies EXIF orientation, rejects
 missing/corrupt/non-caption rows and aspect ratios above 4:1, removes duplicates
 and truncated captions, and writes a receipt beside each canonical manifest.
 The default source is the append-only Qwen caption file under
-`/workspace/datasets/private_web/web_forum/subweb_forums`. Preparation freezes the
+`/workspace/datasets/private_web/reddit/subreddits`. Preparation freezes the
 earliest valid prefix at a single EOF, then performs a deterministic seeded
 split targeting 5000 training images and 128 held-out images. Each generated
 manifest is a durable snapshot. Override the locations with
 `MAGE_FLOW_REDDIT_ROOT`, `MAGE_FLOW_CAPTION_SOURCE`, and
 `MAGE_FLOW_ARTIFACT_SOURCE`.
 
-For the Web Forum quick test, artifact screening is strict: unscanned images and
+For the Reddit quick test, artifact screening is strict: unscanned images and
 any image with a watermark or censorship flag are excluded. The preparer
 requests 5000 train rows plus 128 eval rows, but safely uses the largest
 available clean training count rounded down to a multiple of eight while the
@@ -70,7 +70,7 @@ scanner catches up.
 ## Launch
 
 ```bash
-runs/mage_flow_edit_web_forum_cpt_plan/launch.sh
+runs/mage_flow_edit_reddit_cpt_plan/launch.sh
 ```
 
 The default 10240-token pack measures and includes both image and Qwen text
@@ -78,7 +78,7 @@ tokens; it normally holds two 1024-square generation examples. With gradient
 accumulation 4, one optimizer step sees about eight images per GPU. On the
 96 GB RTX PRO 6000, start with this setting. Increase
 `packed_sequence_tokens` only after measuring peak memory with the real model.
-The Web Forum quick test is exactly one epoch. With two images per pack and four
+The Reddit quick test is exactly one epoch. With two images per pack and four
 packs per optimizer step, the launcher computes `train_rows / 8` steps from
 the prepared clean manifest: 625 steps at 5000 images. It uses a reduced
 `2e-6` learning rate, 40 warmup steps, evaluation every 100 steps over 32

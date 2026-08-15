@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--photo-train",
         type=Path,
-        default=Path("/workspace/datasets/private_web/web_forum/trainer-ready-3500"),
+        default=Path("/workspace/datasets/private_web/reddit/trainer-ready-3500"),
     )
     parser.add_argument(
         "--animation-train",
@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--photo-eval",
         type=Path,
-        default=Path("/workspace/datasets/private_web/web_forum/trainer-eval-128"),
+        default=Path("/workspace/datasets/private_web/reddit/trainer-eval-128"),
     )
     parser.add_argument(
         "--animation-eval",
@@ -216,12 +216,12 @@ def main() -> None:
         (animation_train,)
         if args.animation_only_train
         else (
-            Export(args.photo_train, "photo", "web_forum_qwen36_audit", "audit"),
+            Export(args.photo_train, "photo", "reddit_qwen36_audit", "audit"),
             animation_train,
         )
     )
     eval_exports = (
-        Export(args.photo_eval, "photo", "web_forum_qwen36_audit", "audit"),
+        Export(args.photo_eval, "photo", "reddit_qwen36_audit", "audit"),
         Export(
             args.animation_eval,
             "animation",

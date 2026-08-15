@@ -3,17 +3,17 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${MAGE_FLOW_PYTHON_BIN:-$REPO_ROOT/.venv-mage-flow/bin/python}"
-REDDIT_ROOT="${MAGE_FLOW_REDDIT_ROOT:-/workspace/datasets/private_web/web_forum/subweb_forums}"
+REDDIT_ROOT="${MAGE_FLOW_REDDIT_ROOT:-/workspace/datasets/private_web/reddit/subreddits}"
 CAPTION_SOURCE="${MAGE_FLOW_CAPTION_SOURCE:-$REDDIT_ROOT/qwen3.6-35b-a3b-test-4096.captions.partial.jsonl}"
 ARTIFACT_SOURCE="${MAGE_FLOW_ARTIFACT_SOURCE:-$REDDIT_ROOT/qwen3.6-35b-a3b-test-4096.artifacts.partial.jsonl}"
-DATA_DIR="${MAGE_FLOW_DATA_DIR:-$REPO_ROOT/curated_vision/mage_flow_edit_web_forum_cpt}"
-RUN_DIR="${MAGE_FLOW_RUN_DIR:-$REPO_ROOT/runs/mage_flow_edit_web_forum_cpt_plan}"
-OUTPUT_DIR="${MAGE_FLOW_OUTPUT_DIR:-$REPO_ROOT/runs/mage_flow_edit_web_forum_cpt}"
+DATA_DIR="${MAGE_FLOW_DATA_DIR:-$REPO_ROOT/curated_vision/mage_flow_edit_reddit_cpt}"
+RUN_DIR="${MAGE_FLOW_RUN_DIR:-$REPO_ROOT/runs/mage_flow_edit_reddit_cpt_plan}"
+OUTPUT_DIR="${MAGE_FLOW_OUTPUT_DIR:-$REPO_ROOT/runs/mage_flow_edit_reddit_cpt}"
 
 mkdir -p "$DATA_DIR"
 
 PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
-"$PYTHON_BIN" -m rwkv_lab.mage_flow_pretrain prepare-web_forum \
+"$PYTHON_BIN" -m rwkv_lab.mage_flow_pretrain prepare-reddit \
   --captions "$CAPTION_SOURCE" \
   --artifact-manifest "$ARTIFACT_SOURCE" \
   --image-root "$REDDIT_ROOT" \

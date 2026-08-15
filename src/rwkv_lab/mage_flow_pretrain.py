@@ -177,7 +177,7 @@ def canonical_caption_row(
         "stage1_source",
         "caption_variant",
         "aesthetic_score",
-        "subweb_forum",
+        "subreddit",
         "caption_model",
         "watermarks",
         "censorship",
@@ -296,7 +296,7 @@ def prepare_manifest(
     return report
 
 
-def prepare_web_forum_split(
+def prepare_reddit_split(
     caption_path: Path,
     image_root: Path,
     train_output: Path,
@@ -314,7 +314,7 @@ def prepare_web_forum_split(
     allow_smaller_train: bool = False,
     train_count_multiple: int = 1,
 ) -> dict[str, Any]:
-    """Freeze an append-only Web Forum caption prefix into exact train/eval splits."""
+    """Freeze an append-only Reddit caption prefix into exact train/eval splits."""
     from collections import Counter
 
     caption_path = caption_path.expanduser().resolve()
@@ -356,7 +356,7 @@ def prepare_web_forum_split(
         relative_path = _first_text(raw, ("relative_path", "image", "image_path"))
         if relative_path is None:
             return line_number, None, "missing_image"
-        subweb_forum = Path(relative_path).parts[0] if Path(relative_path).parts else ""
+        subreddit = Path(relative_path).parts[0] if Path(relative_path).parts else ""
         artifact = artifacts.get(relative_path)
         if require_clean_artifacts:
             if artifact is None:
@@ -366,8 +366,8 @@ def prepare_web_forum_split(
         prepared = {
             **raw,
             "image": relative_path,
-            "source": f"web_forum/{subweb_forum}" if subweb_forum else "web_forum",
-            "subweb_forum": subweb_forum,
+            "source": f"reddit/{subreddit}" if subreddit else "reddit",
+            "subreddit": subreddit,
             "caption_model": raw.get("model"),
         }
         if artifact is not None:
@@ -464,7 +464,7 @@ def prepare_web_forum_split(
         ),
     }
     _json_dump(
-        train_output.parent / "web_forum_split.report.json",
+        train_output.parent / "reddit_split.report.json",
         report,
     )
     return report
@@ -1767,25 +1767,25 @@ def _build_parser() -> argparse.ArgumentParser:
     prep.add_argument("--workers", type=int, default=16)
     prep.add_argument("--no-verify-images", action="store_true")
 
-    web_forum = sub.add_parser(
-        "prepare-web_forum",
-        help="freeze an append-only Web Forum caption JSONL into exact train/eval splits",
+    reddit = sub.add_parser(
+        "prepare-reddit",
+        help="freeze an append-only Reddit caption JSONL into exact train/eval splits",
     )
-    web_forum.add_argument("--captions", required=True, type=Path)
-    web_forum.add_argument("--image-root", required=True, type=Path)
-    web_forum.add_argument("--train-output", required=True, type=Path)
-    web_forum.add_argument("--eval-output", required=True, type=Path)
-    web_forum.add_argument("--artifact-manifest", type=Path)
-    web_forum.add_argument("--train-count", type=int, default=5_000)
-    web_forum.add_argument("--eval-count", type=int, default=128)
-    web_forum.add_argument("--pixel-budget", type=int, default=1024 * 1024)
-    web_forum.add_argument("--max-side", type=int, default=2048)
-    web_forum.add_argument("--max-aspect-ratio", type=float, default=4.0)
-    web_forum.add_argument("--workers", type=int, default=16)
-    web_forum.add_argument("--seed", type=int, default=42)
-    web_forum.add_argument("--require-clean-artifacts", action="store_true")
-    web_forum.add_argument("--allow-smaller-train", action="store_true")
-    web_forum.add_argument("--train-count-multiple", type=int, default=1)
+    reddit.add_argument("--captions", required=True, type=Path)
+    reddit.add_argument("--image-root", required=True, type=Path)
+    reddit.add_argument("--train-output", required=True, type=Path)
+    reddit.add_argument("--eval-output", required=True, type=Path)
+    reddit.add_argument("--artifact-manifest", type=Path)
+    reddit.add_argument("--train-count", type=int, default=5_000)
+    reddit.add_argument("--eval-count", type=int, default=128)
+    reddit.add_argument("--pixel-budget", type=int, default=1024 * 1024)
+    reddit.add_argument("--max-side", type=int, default=2048)
+    reddit.add_argument("--max-aspect-ratio", type=float, default=4.0)
+    reddit.add_argument("--workers", type=int, default=16)
+    reddit.add_argument("--seed", type=int, default=42)
+    reddit.add_argument("--require-clean-artifacts", action="store_true")
+    reddit.add_argument("--allow-smaller-train", action="store_true")
+    reddit.add_argument("--train-count-multiple", type=int, default=1)
 
     plan = sub.add_parser("plan", help="write a pinned resumable run directory")
     plan.add_argument("--train-manifest", required=True, type=Path)
@@ -1830,8 +1830,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         print(json.dumps(report, indent=2, sort_keys=True))
         return
-    if args.action == "prepare-web_forum":
-        report = prepare_web_forum_split(
+    if args.action == "prepare-reddit":
+        report = prepare_reddit_split(
             args.captions,
             args.image_root,
             args.train_output,

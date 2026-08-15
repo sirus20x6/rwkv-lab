@@ -24,10 +24,10 @@ report_matches() {
 
 report_matches \
   'personal machine paths are tracked' \
-  '/thearray(/|$)|/home/user(/|$)'
+  '/thearray(/|$)|/home/sirus(/|$)'
 report_matches \
   'private dataset provenance is tracked' \
-  '(^|[^[:alnum:]_])(private_web|restricted|animation|private_text|community_gallery|tagged_animation|adult[ _-]?dataset)([^[:alnum:]_]|$)'
+  '(^|[^[:alnum:]_])(porn|nsfw|hentai|ao3|civitai|gelbooru|adult[ _-]?dataset)([^[:alnum:]_]|$)'
 
 tracked_private_roots=$(git ls-files | grep -E \
   '^(data|dataset|datasets|corpora|private|local|models|runs|artifacts|checkpoints|weights|downloads|cache|caches)/' || true)
@@ -38,7 +38,7 @@ if [[ -n "$tracked_private_roots" ]]; then
 fi
 
 tracked_sensitive_names=$(git ls-files | grep -Ei \
-  '(^|/)(private_web|restricted|animation|private_text|community_gallery|tagged_animation)([^/]*)(/|$)' || true)
+  '(^|/)(porn|nsfw|hentai|ao3|civitai|gelbooru)([^/]*)(/|$)' || true)
 if [[ -n "$tracked_sensitive_names" ]]; then
   printf 'privacy check failed: tracked filenames disclose private provenance\n' >&2
   printf '%s\n' "$tracked_sensitive_names" >&2

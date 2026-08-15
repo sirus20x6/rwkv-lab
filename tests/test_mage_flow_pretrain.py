@@ -15,7 +15,7 @@ from rwkv_lab.mage_flow_pretrain import (
     latent_tokens,
     native_size,
     prepare_manifest,
-    prepare_web_forum_split,
+    prepare_reddit_split,
     prepare_run,
     rectified_flow_loss,
     rectified_flow_path,
@@ -135,12 +135,12 @@ def test_parallel_manifest_preparation_deduplicates(tmp_path):
     assert len(output.read_text().splitlines()) == 1
 
 
-def test_web_forum_split_freezes_valid_prefix_and_holds_out_eval(tmp_path):
+def test_reddit_split_freezes_valid_prefix_and_holds_out_eval(tmp_path):
     from PIL import Image
 
     rows = []
     for index in range(6):
-        relative = f"subweb_forum/image-{index}.png"
+        relative = f"subreddit/image-{index}.png"
         image = tmp_path / relative
         image.parent.mkdir(exist_ok=True)
         Image.new("RGB", (640, 480), (index, 0, 0)).save(image)
@@ -158,7 +158,7 @@ def test_web_forum_split_freezes_valid_prefix_and_holds_out_eval(tmp_path):
     artifacts.write_text(
         json.dumps(
             {
-                "relative_path": "subweb_forum/image-0.png",
+                "relative_path": "subreddit/image-0.png",
                 "watermarks": ["mark"],
                 "censorship": [],
             }
@@ -168,7 +168,7 @@ def test_web_forum_split_freezes_valid_prefix_and_holds_out_eval(tmp_path):
     train = tmp_path / "prepared" / "train.jsonl"
     eval_ = tmp_path / "prepared" / "eval.jsonl"
 
-    report = prepare_web_forum_split(
+    report = prepare_reddit_split(
         source,
         tmp_path,
         train,
@@ -189,22 +189,22 @@ def test_web_forum_split_freezes_valid_prefix_and_holds_out_eval(tmp_path):
     assert {row["image_id"] for row in train_rows}.isdisjoint(
         row["image_id"] for row in eval_rows
     )
-    assert all(row["source"] == "web_forum/subweb_forum" for row in train_rows + eval_rows)
+    assert all(row["source"] == "reddit/subreddit" for row in train_rows + eval_rows)
 
-    extra = tmp_path / "subweb_forum" / "later.png"
+    extra = tmp_path / "subreddit" / "later.png"
     Image.new("RGB", (640, 480), "blue").save(extra)
     with source.open("a") as handle:
         handle.write(
             json.dumps(
                 {
-                    "relative_path": "subweb_forum/later.png",
+                    "relative_path": "subreddit/later.png",
                     "caption": "A later append.",
                     "finish_reason": "stop",
                 }
             )
             + "\n"
         )
-    prepare_web_forum_split(
+    prepare_reddit_split(
         source,
         tmp_path,
         train,
@@ -219,7 +219,7 @@ def test_web_forum_split_freezes_valid_prefix_and_holds_out_eval(tmp_path):
     assert eval_.read_text() == first_eval
 
 
-def test_web_forum_split_strict_artifacts_excludes_flags_and_rounds_train(tmp_path):
+def test_reddit_split_strict_artifacts_excludes_flags_and_rounds_train(tmp_path):
     from PIL import Image
 
     source_rows = []
@@ -251,7 +251,7 @@ def test_web_forum_split_strict_artifacts_excludes_flags_and_rounds_train(tmp_pa
     train = tmp_path / "prepared" / "train.jsonl"
     eval_ = tmp_path / "prepared" / "eval.jsonl"
 
-    report = prepare_web_forum_split(
+    report = prepare_reddit_split(
         source,
         tmp_path,
         train,
