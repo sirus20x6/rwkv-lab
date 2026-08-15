@@ -16,9 +16,12 @@ Enable the versioned pre-commit hook after cloning:
 git config core.hooksPath .githooks
 ```
 
-The same privacy check runs in CI. If it fails, move the data out of the
-repository or replace the machine-specific default with an explicit input.
-Do not add a broad exception to make a private experiment public.
+The same privacy check runs in CI. The pre-push hook also refuses history that
+is not descended from one of the rewritten remote branches, preventing an old
+worktree from restoring pre-cleanup objects. If either check fails, move the
+data out of the repository or replace the machine-specific default with an
+explicit input. Do not add a broad exception to make a private experiment
+public.
 
 Language-model vocabulary assets may naturally contain sensitive words. The
 guard excludes the reviewed vocabulary asset from content matching, but not

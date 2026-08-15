@@ -12,6 +12,7 @@ report_matches() {
   local matches
   matches=$(git grep -nI -E "$pattern" -- \
     ':!scripts/check_repository_privacy.sh' \
+    ':!.githooks/pre-push' \
     ':!src/rwkv_lab/assets/rwkv_vocab_v20230424.txt' 2>/dev/null || true)
   if [[ -n "$matches" ]]; then
     printf 'privacy check failed: %s\n' "$label" >&2

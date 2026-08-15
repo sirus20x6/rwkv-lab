@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+zero=0000000000000000000000000000000000000000
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+while read -r local_ref local_oid remote_ref remote_oid; do
+  [[ "$local_oid" != "$zero" ]] || continue
+
+  rewritten_base=false
+  for base in \
+    refs/remotes/origin/main \
+    refs/remotes/origin/agent/multimodal-training-pipeline \
+    refs/remotes/origin/worktree-audit-bugfixes; do
+    if git rev-parse --verify -q "$base" >/dev/null &&
+       git merge-base --is-ancestor "$base" "$local_oid"; then
+      rewritten_base=true
+      break
+    fi
+  done
+  if [[ "$rewritten_base" != true ]]; then
+    printf 'push rejected: %s is not based on rewritten privacy-safe history\n' \
+      "$local_ref" >&2
+    printf 'fetch origin and rebase/cherry-pick the work onto a rewritten remote branch\n' >&2
+    exit 1
+  fi
+
+  findings=$(git grep -nI -E \
+    '/thearray(/|$)|/home/sirus(/|$)|(^|[^[:alnum:]_])(porn|nsfw|hentai|ao3|civitai|gelbooru|adult[ _-]?dataset)([^[:alnum:]_]|$)' \
+    "$local_oid" -- \
+    ':!scripts/check_repository_privacy.sh' \
+    ':!.githooks/pre-push' \
+    ':!src/rwkv_lab/assets/rwkv_vocab_v20230424.txt' 2>/dev/null || true)
+  if [[ -n "$findings" ]]; then
+    printf 'push rejected: %s contains private paths or provenance\n' "$local_ref" >&2
+    printf '%s\n' "$findings" | cut -d: -f2,3 | sort -u >&2
+    exit 1
+  fi
+done
