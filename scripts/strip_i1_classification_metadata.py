@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--root",
         type=Path,
-        default=Path("/workspace/git/datasets/i1"),
+        default=Path("/workspace/datasets/i1"),
     )
     return parser.parse_args()
 

@@ -185,12 +185,12 @@ def _last_hidden(outputs):
 @dataclass
 class TrainConfig:
     # Model / data
-    model_dir: str = "/workspace/git/moe-mla/Qwen3.6-35B-A3B"
-    patch_dir: str = "/workspace/git/moe-mla/converted"
+    model_dir: str = "/workspace/rwkv-lab/Qwen3.6-35B-A3B"
+    patch_dir: str = "/workspace/rwkv-lab/converted"
     tokens_bin: str = "/workspace/data/engram_tokens.bin"
     total_tokens_in_bin: int = 75_306_005_724   # from the manifest
     eval_tokens: int = 100_000_000              # held out from the tail
-    out_dir: str = "/workspace/git/moe-mla/runs/mla_ft_v1"
+    out_dir: str = "/workspace/rwkv-lab/runs/mla_ft_v1"
     resume: str = ""                            # path to a previous ckpt.pt, or "" to start fresh from SVD init
     resume_warmup_steps: int = 100              # re-warmup lr linearly over this many steps after resume
                                                 # (Adam's v_t adapted to small updates at the end of the prior run;

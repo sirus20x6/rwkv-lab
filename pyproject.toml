@@ -66,9 +66,6 @@ Repository = "https://github.com/sirus20x6/rwkv-lab"
 ltx23-lora = "rwkv_lab.ltx23_lora:main"
 mage-flow-pretrain = "rwkv_lab.mage_flow_pretrain:main"
 mage-flow-expert-train = "rwkv_lab.mage_flow_expert_train:main"
-private_text-cpt-prepare = "rwkv_lab.private_text_cpt_data:main"
-private_text-cpt-tokens = "rwkv_lab.private_text_cpt_tokens:main"
-qwen-private_text-cpt = "rwkv_lab.qwen_private_text_cpt:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

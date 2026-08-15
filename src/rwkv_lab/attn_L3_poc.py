@@ -34,7 +34,7 @@ from transformers import AutoModelForCausalLM
 from .build_memory_targets import load_token_stream
 from .rwkv8_deltanet import RWKV8TimeMixDeltaNet
 
-MODEL = "/workspace/git/moe-mla/Qwen3.5-9B-Base"
+MODEL = "/workspace/rwkv-lab/Qwen3.5-9B-Base"
 DATA = "/workspace/git/babyllm/data/cache/qwen3.6_fwedu_train"
 PROJ = ("receptance", "key", "value", "output")   # RADLADS-transferred (frozen in freeze-most)
 

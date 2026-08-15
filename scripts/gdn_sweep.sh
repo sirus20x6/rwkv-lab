@@ -7,7 +7,7 @@
 # improvement, so each layer's banked ckpt is always its true minimum regardless of
 # when we stop. Advances layer-by-layer with no human input.
 set -u
-cd /workspace/git/moe-mla || exit 1
+cd /workspace/rwkv-lab || exit 1
 PY=.venv/bin/python
 export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src"
 DATA=/workspace/git/babyllm/data/cache/qwen3.6_fwedu_train

@@ -2,7 +2,7 @@
 
 ## Source of truth
 
-Each run is a directory `/workspace/git/moe-mla/runs/<name>/` containing:
+Each run is a directory `/workspace/rwkv-lab/runs/<name>/` containing:
 - `train.jsonl` — newline-delimited events, one per line, field `kind ∈ {train, eval, checkpoint}`.
 - `step_NNNNNN/config.json` — sidecar TrainConfig dump (architecture panel reads this).
 - `step_NNNNNN/ckpt.pt` — weights (we only stat its size/mtime).

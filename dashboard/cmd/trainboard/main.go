@@ -29,7 +29,7 @@ import (
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:9124", "listen address (localhost only by default)")
-	repo := flag.String("repo", "/workspace/git/moe-mla", "moe-mla repo root")
+	repo := flag.String("repo", "/workspace/rwkv-lab", "moe-mla repo root")
 	runs := flag.String("runs", "", "runs dir (default <repo>/runs)")
 	dbPath := flag.String("db", "", "sqlite path (default <repo>/dashboard/trainboard.db)")
 	imageRoots := flag.String("image-roots", "/thearray",

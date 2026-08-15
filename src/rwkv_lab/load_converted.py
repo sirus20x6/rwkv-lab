@@ -8,8 +8,8 @@ Usage:
     from .load_converted import load_converted_model
 
     model = load_converted_model(
-        model_dir="/workspace/git/moe-mla/Qwen3.6-35B-A3B",
-        patch_dir="/workspace/git/moe-mla/converted",
+        model_dir="/workspace/rwkv-lab/Qwen3.6-35B-A3B",
+        patch_dir="/workspace/rwkv-lab/converted",
         device_map="auto",
         freeze_non_mla=True,
     )
@@ -102,8 +102,8 @@ def _load_attn_from_patch(patch: dict[str, torch.Tensor], mla: MLAAttention,
 
 
 def load_converted_model(
-    model_dir: str = "/workspace/git/moe-mla/Qwen3.6-35B-A3B",
-    patch_dir: str = "/workspace/git/moe-mla/converted",
+    model_dir: str = "/workspace/rwkv-lab/Qwen3.6-35B-A3B",
+    patch_dir: str = "/workspace/rwkv-lab/converted",
     device_map: str | dict = "auto",
     dtype: torch.dtype = torch.bfloat16,
     freeze_non_mla: bool = True,
@@ -289,7 +289,7 @@ def _smoke() -> None:
     from transformers import AutoTokenizer
 
     model, new_modules = load_converted_model(freeze_non_mla=False)
-    tok = AutoTokenizer.from_pretrained("/workspace/git/moe-mla/Qwen3.6-35B-A3B")
+    tok = AutoTokenizer.from_pretrained("/workspace/rwkv-lab/Qwen3.6-35B-A3B")
 
     prompt = "The fundamental theorem of calculus states that"
     ids = tok(prompt, return_tensors="pt").to(next(model.parameters()).device)

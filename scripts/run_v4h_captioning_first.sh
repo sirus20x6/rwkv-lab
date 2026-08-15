@@ -24,7 +24,7 @@
 # state from the RADIO1D run and resets ONLY the vision bridge, which is the
 # one component whose input width changed.
 set -uo pipefail
-cd /workspace/git/moe-mla
+cd /workspace/rwkv-lab
 
 PYTHON_BIN="${VISION_PYTHON:-/usr/bin/python}"
 export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src"

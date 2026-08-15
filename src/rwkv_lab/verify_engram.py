@@ -21,8 +21,8 @@ from .train_mla import chunked_ce
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mla-ckpt", default="/workspace/git/moe-mla/runs/mla_ft_50m_v4/step_001735/ckpt.pt")
-    ap.add_argument("--engram-patch-dir", default="/workspace/git/moe-mla/engram_converted_v2")
+    ap.add_argument("--mla-ckpt", default="/workspace/rwkv-lab/runs/mla_ft_50m_v4/step_001735/ckpt.pt")
+    ap.add_argument("--engram-patch-dir", default="/workspace/rwkv-lab/engram_converted_v2")
     ap.add_argument("--seq-len", type=int, default=512)
     ap.add_argument("--batch-size", type=int, default=1)
     args = ap.parse_args()

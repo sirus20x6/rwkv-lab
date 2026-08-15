@@ -20,6 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Reject private paths and dataset provenance
+        run: scripts/check_repository_privacy.sh
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}

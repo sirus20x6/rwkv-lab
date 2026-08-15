@@ -1751,7 +1751,7 @@ def evaluate(text_model, lm_head, toks, n_windows, T, device, seed=12345, chunk=
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model-dir", default="/workspace/git/moe-mla/Qwen3.5-9B-Base")
+    ap.add_argument("--model-dir", default="/workspace/rwkv-lab/Qwen3.5-9B-Base")
     ap.add_argument("--patch-dir", default="", help="MLA patch dir (converted_9b_bkv_mtp); empty=base")
     ap.add_argument("--prior-rwkv-layers", default="", help="already-converted RWKV layers to load")
     ap.add_argument("--init-rwkv-ckpt", default="",

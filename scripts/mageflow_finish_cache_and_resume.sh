@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-repo=/workspace/git/moe-mla
+repo=/workspace/rwkv-lab
 python_bin="$repo/.venv-mage-flow/bin/python"
 module=rwkv_lab.mage_flow_terminal_train
 cache_root=/mnt/hypercard/mageflow-cache/mageflow-steps-00005501-00012228

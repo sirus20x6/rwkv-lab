@@ -28,7 +28,7 @@
 # (cache_path uses realpath, the cache tool uses abspath -- they diverge only
 # for links, which would send warmed features to a key the trainer never reads).
 set -euo pipefail
-cd /workspace/git/moe-mla
+cd /workspace/rwkv-lab
 
 CACHE=/workspace/downloads/cache/moe-mla/radio1d_captioning_first
 THRESHOLD=49          # must match --radio-adaptive-token-threshold in the resume script

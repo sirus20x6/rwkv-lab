@@ -19,7 +19,7 @@
   },
   "schema": "rwkv-lab.mage-flow-domain-window-schedule.v1",
   "seed": 42,
-  "train_manifest": "/workspace/git/datasets/midjourney-v6-recap-continuation-30pct-b-512-1024/train.jsonl",
+  "train_manifest": "/workspace/datasets/midjourney-v6-recap-continuation-30pct-b-512-1024/train.jsonl",
   "window_maximum_steps": 1000,
   "window_minimum_steps": 500,
   "windows": [

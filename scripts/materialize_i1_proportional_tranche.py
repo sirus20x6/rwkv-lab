@@ -14,7 +14,7 @@ from typing import Any, Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT = Path("/workspace/git/datasets/i1")
+DEFAULT_OUTPUT = Path("/workspace/datasets/i1")
 DEFAULT_REUSE_WORK = ROOT / "datasets/captioning_first_work"
 TARGET_ROWS = 97_819
 SEED = 20_260_730

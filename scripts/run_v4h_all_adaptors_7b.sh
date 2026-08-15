@@ -2,7 +2,7 @@
 # C-RADIOv4-H all-teacher run:
 #   SigLIP2-g 1536 + SAM3 1024 + lossless compact DINOv3 1536 = RWKV 4096.
 set -uo pipefail
-cd /workspace/git/moe-mla || exit 1
+cd /workspace/rwkv-lab || exit 1
 
 PYTHON_BIN="${VISION_PYTHON:-/usr/bin/python}"
 export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src"

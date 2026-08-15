@@ -6,11 +6,11 @@ GPU-accelerated, real-time training dashboard for the RWKV-Lab conversion projec
 ## Run
 
 ```bash
-go -C /workspace/git/moe-mla/dashboard run ./cmd/trainboard
+go -C /workspace/rwkv-lab/dashboard run ./cmd/trainboard
 # open http://127.0.0.1:9124
 ```
 
-Reads `/workspace/git/moe-mla/runs/`. Ingests all `train.jsonl` logs + system telemetry into a local
+Reads `/workspace/rwkv-lab/runs/`. Ingests all `train.jsonl` logs + system telemetry into a local
 SQLite DB (`trainboard.db`). GPU-light — safe to run alongside live training.
 The one-second shared snapshot reads conversion quality from ingestion-time rollups plus one batched
 codec query; it does not fan out KPI/count queries per layer. Run-sidecar and campaign/dataset discovery

@@ -1,17 +1,17 @@
 {
   "domain": "animation",
-  "train_manifest": "/workspace/git/datasets/midjourney-v6-recap-continuation-30pct-b-512-1024/train.jsonl",
-  "eval_manifest": "/workspace/git/datasets/midjourney-v6-recap-continuation-30pct-b-512-1024/eval.jsonl",
-  "expert_checkpoint": "/workspace/git/moe-mla/runs/mage_flow_terminal_experts_init_v1/mageflow-animation-terminal-expert.safetensors",
+  "train_manifest": "/workspace/datasets/midjourney-v6-recap-continuation-30pct-b-512-1024/train.jsonl",
+  "eval_manifest": "/workspace/datasets/midjourney-v6-recap-continuation-30pct-b-512-1024/eval.jsonl",
+  "expert_checkpoint": "/workspace/rwkv-lab/runs/mage_flow_terminal_experts_init_v1/mageflow-animation-terminal-expert.safetensors",
   "expert_checkpoints": {
-    "photo": "/workspace/git/moe-mla/runs/mage_flow_terminal_experts_init_v1/mageflow-photo-terminal-expert.safetensors",
-    "animation": "/workspace/git/moe-mla/runs/mage_flow_terminal_experts_init_v1/mageflow-animation-terminal-expert.safetensors"
+    "photo": "/workspace/rwkv-lab/runs/mage_flow_terminal_experts_init_v1/mageflow-photo-terminal-expert.safetensors",
+    "animation": "/workspace/rwkv-lab/runs/mage_flow_terminal_experts_init_v1/mageflow-animation-terminal-expert.safetensors"
   },
-  "domain_window_schedule": "/workspace/git/moe-mla/experiments/mageflow_terminal_alternating_epoch_schedule.json",
-  "output_dir": "/workspace/git/moe-mla/runs/mage_flow_terminal_tread_loop_epoch_v1",
+  "domain_window_schedule": "/workspace/rwkv-lab/experiments/mageflow_terminal_alternating_epoch_schedule.json",
+  "output_dir": "/workspace/rwkv-lab/runs/mage_flow_terminal_tread_loop_epoch_v1",
   "model_id": "microsoft/Mage-Flow-Base",
   "model_revision": "59a9cfd58cf6ecef28245852c6bdace3f12428a2",
-  "model_path": "/workspace/git/ob/text-generation-webui/models/Mage-Flow-Base",
+  "model_path": "/workspace/models/Mage-Flow-Base",
   "official_source_revision": "ef932e2cc3e94bb026d937a6cffae65492adc0fb",
   "shared_backbone_checkpoint": null,
   "resume_from": null,

@@ -21,10 +21,10 @@ from PIL import Image
 
 from rwkv_lab.mage_flow_adaptation import prepare_domain_manifest
 
-DEFAULT_ROUTING = Path("/workspace/git/datasets/midjourney-v6-recap-routing")
-DEFAULT_OUTPUT = Path("/workspace/git/datasets/midjourney-v6-recap-stage-100k")
+DEFAULT_ROUTING = Path("/workspace/datasets/midjourney-v6-recap-routing")
+DEFAULT_OUTPUT = Path("/workspace/datasets/midjourney-v6-recap-stage-100k")
 DEFAULT_PRIOR_EVAL = Path(
-    "/workspace/git/datasets/mageflow-anima-balanced-animation-holdout-128/eval.jsonl"
+    "/workspace/datasets/mageflow-anima-balanced-animation-holdout-128/eval.jsonl"
 )
 DEFAULT_REPO = "Photoroom/midjourney-v6-recap"
 DEFAULT_REVISION = "21c628db81401da88c5b33507230528cf3fe4a12"

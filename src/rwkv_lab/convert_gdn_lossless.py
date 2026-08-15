@@ -91,7 +91,7 @@ def _self_test():
     dev, dtype = "cuda", torch.bfloat16
     print("loading Qwen3.5-9B ...", flush=True)
     model = AutoModelForCausalLM.from_pretrained(
-        "/workspace/git/moe-mla/Qwen3.5-9B-Base", dtype=dtype, low_cpu_mem_usage=True).to(dev).eval()
+        "/workspace/rwkv-lab/Qwen3.5-9B-Base", dtype=dtype, low_cpu_mem_usage=True).to(dev).eval()
     toks = load_token_stream("/workspace/git/babyllm/data/cache/qwen3.6_fwedu_train")
 
     def eval_ppl(n=16, T=1024, seed=0):

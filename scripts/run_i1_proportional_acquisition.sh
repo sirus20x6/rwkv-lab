@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo=/workspace/git/moe-mla
-output=/workspace/git/datasets/i1
+repo=/workspace/rwkv-lab
+output=/workspace/datasets/i1
 logs="$output/logs"
 rate="${I1_DOWNLOAD_MIB_PER_SECOND:-8}"
 

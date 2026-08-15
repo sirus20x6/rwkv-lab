@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # OCR-curriculum phase: location crops, balanced OCR sampler, and all OCR evals.
 set -euo pipefail
-cd /workspace/git/moe-mla
+cd /workspace/rwkv-lab
 
 export V4H_TRAIN="${V4H_TRAIN:-curated_vision/captioning_ocr_fixed_train.jsonl}"
 export V4H_EVAL="${V4H_EVAL:-curated_vision/captioning_ocr_fixed_eval.jsonl}"

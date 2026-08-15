@@ -17,7 +17,7 @@ import duckdb
 
 DEFAULT_REPO = "Photoroom/midjourney-v6-recap"
 DEFAULT_REVISION = "21c628db81401da88c5b33507230528cf3fe4a12"
-DEFAULT_OUTPUT = Path("/workspace/git/datasets/midjourney-v6-recap-routing")
+DEFAULT_OUTPUT = Path("/workspace/datasets/midjourney-v6-recap-routing")
 CLASSIFIER_VERSION = "caption-medium-v1"
 
 ANIMATION_PATTERN = (

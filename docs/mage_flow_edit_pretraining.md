@@ -54,7 +54,7 @@ Preparation scans and decodes every image, applies EXIF orientation, rejects
 missing/corrupt/non-caption rows and aspect ratios above 4:1, removes duplicates
 and truncated captions, and writes a receipt beside each canonical manifest.
 The default source is the append-only Qwen caption file under
-`/workspace/git/datasets/private_web/web_forum/subweb_forums`. Preparation freezes the
+`/workspace/datasets/private_web/web_forum/subweb_forums`. Preparation freezes the
 earliest valid prefix at a single EOF, then performs a deterministic seeded
 split targeting 5000 training images and 128 held-out images. Each generated
 manifest is a durable snapshot. Override the locations with

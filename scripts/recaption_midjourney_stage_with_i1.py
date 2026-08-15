@@ -22,10 +22,10 @@ from repair_midjourney_i1_alignment import (
 )
 
 
-DEFAULT_STAGE = Path("/workspace/git/datasets/i1")
-DEFAULT_CAPTIONS = Path("/workspace/git/moe-mla/i1-captions/midjourneyv6")
+DEFAULT_STAGE = Path("/workspace/datasets/i1")
+DEFAULT_CAPTIONS = Path("/workspace/rwkv-lab/i1-captions/midjourneyv6")
 DEFAULT_SOURCE = Path(
-    "/workspace/git/moe-mla/datasets/i1_full_sources/midjourneyv6"
+    "/workspace/rwkv-lab/datasets/i1_full_sources/midjourneyv6"
 )
 
 

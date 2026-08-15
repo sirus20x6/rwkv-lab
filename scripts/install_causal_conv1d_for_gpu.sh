@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VENV="${PRIVATE_TEXT_CPT_VENV:-$ROOT/.venv-private_text-cpt}"
+VENV="${CAPTION_CPT_VENV:-$ROOT/.venv-caption-cpt}"
 VERSION="${CAUSAL_CONV1D_VERSION:-1.6.2.post1}"
 BUILD_ROOT="$(mktemp -d)"
 trap 'rm -rf "$BUILD_ROOT"' EXIT

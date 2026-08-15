@@ -10,8 +10,8 @@ initialized embeddings that need to be learned from scratch. Per the paper:
     inits, which are sensible.
 
 Output:
-    /workspace/git/moe-mla/engram_converted/patch.safetensors
-    /workspace/git/moe-mla/engram_converted/manifest.json
+    /workspace/rwkv-lab/engram_converted/patch.safetensors
+    /workspace/rwkv-lab/engram_converted/manifest.json
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ from engram_ext.engram_module import EngramConfig, EngramModule  # noqa: E402
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out-dir", default="/workspace/git/moe-mla/engram_converted_l2_l19")
+    ap.add_argument("--out-dir", default="/workspace/rwkv-lab/engram_converted_l2_l19")
     ap.add_argument("--layer-indices", nargs="+", type=int, default=[2, 19])
     ap.add_argument("--hidden-size", type=int, default=2048)
     ap.add_argument("--n-embed-per-ngram", type=int, default=512,
@@ -47,7 +47,7 @@ def main() -> None:
                          "0=legacy GPU-resident tables.")
     ap.add_argument("--max-ngram-size", type=int, default=3)
     ap.add_argument("--n-head-per-ngram", type=int, default=8)
-    ap.add_argument("--tokenizer", default="/workspace/git/moe-mla/Qwen3.6-35B-A3B",
+    ap.add_argument("--tokenizer", default="/workspace/rwkv-lab/Qwen3.6-35B-A3B",
                     help="Use the local Qwen3.6 tokenizer path; its vocab is identical to Qwen3.5")
     ap.add_argument("--disable-compression", type=int, default=1,
                     help="1=hash raw token-ids (preserve case/punct for code); "

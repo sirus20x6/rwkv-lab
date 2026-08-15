@@ -15,7 +15,7 @@ from typing import Any
 
 from rwkv_lab.mage_flow_adaptation import prepare_domain_manifest
 
-DEFAULT_OUTPUT = Path("/workspace/git/datasets/mageflow-expert-manifests")
+DEFAULT_OUTPUT = Path("/workspace/datasets/mageflow-expert-manifests")
 
 
 @dataclass(frozen=True)
@@ -31,12 +31,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--photo-train",
         type=Path,
-        default=Path("/workspace/git/datasets/private_web/web_forum/trainer-ready-3500"),
+        default=Path("/workspace/datasets/private_web/web_forum/trainer-ready-3500"),
     )
     parser.add_argument(
         "--animation-train",
         type=Path,
-        default=Path("/workspace/git/datasets/tagged_animation-trainer-all"),
+        default=Path("/workspace/datasets/tagged_animation-trainer-all"),
     )
     parser.add_argument(
         "--animation-only-train",
@@ -59,12 +59,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--photo-eval",
         type=Path,
-        default=Path("/workspace/git/datasets/private_web/web_forum/trainer-eval-128"),
+        default=Path("/workspace/datasets/private_web/web_forum/trainer-eval-128"),
     )
     parser.add_argument(
         "--animation-eval",
         type=Path,
-        default=Path("/workspace/git/datasets/tagged_animation-eval-128"),
+        default=Path("/workspace/datasets/tagged_animation-eval-128"),
     )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument(

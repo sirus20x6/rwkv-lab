@@ -35,7 +35,7 @@ import numpy as np
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
-DEFAULT_TOKENIZER = "/workspace/git/moe-mla/Qwen3.5-9B-Base"
+DEFAULT_TOKENIZER = "/workspace/rwkv-lab/Qwen3.5-9B-Base"
 
 
 def flat_writer(out_dir: Path, eos_id: int):

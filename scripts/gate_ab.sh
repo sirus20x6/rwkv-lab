@@ -13,7 +13,7 @@
 # driver shell -> wait failed -> all 4 launched at once -> OOM). All four land on the
 # dashboard as gate_ab_<mode>. Watch: http://127.0.0.1:9124
 set -u
-cd /workspace/git/moe-mla || exit 1
+cd /workspace/rwkv-lab || exit 1
 PY=.venv/bin/python
 export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src"
 DATA=/workspace/git/babyllm/data/cache/qwen3.6_fwedu_train

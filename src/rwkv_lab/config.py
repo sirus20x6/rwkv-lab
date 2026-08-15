@@ -9,7 +9,7 @@ Schema:
       task: recall:16                 # (a) synthetic diagnostic — OR —
       sources:                        # (b) LM corpus (weighted mixture, tokenized+cached via ztok)
         - {kind: hf,    name: wikitext, weight: 0.7}
-        - {kind: local, patterns: ["/workspace/git/moe-mla/**/*.py"], weight: 0.3}
+        - {kind: local, patterns: ["/workspace/rwkv-lab/**/*.py"], weight: 0.3}
       doc_boundary: true
       cap_mb: 50
     seeds: 4
@@ -409,7 +409,7 @@ def run(cfg_path: str):
 
 # Corpora for the board's LM-mode launches (doc-boundary, cached by spec hash).
 _LOCAL_LM_SPEC = {"sources": [{"kind": "local",
-                               "patterns": ["/workspace/git/moe-mla/**/*.py", "/workspace/git/moe-mla/**/*.md"],
+                               "patterns": ["/workspace/rwkv-lab/**/*.py", "/workspace/rwkv-lab/**/*.md"],
                                "weight": 1.0}], "cap_mb": 8.0, "doc_boundary": True}
 # Open-PerfectBlend (Apache 2.0): ~788k chat/math/code/instruction conversations (~1.4GB text,
 # 388M World tokens) flattened to role-tagged plain text — real headroom for LM lever A/Bs.

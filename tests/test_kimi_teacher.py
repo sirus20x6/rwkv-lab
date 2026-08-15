@@ -28,7 +28,7 @@ def test_selection_is_length_first_with_narrow_junk_penalties(tmp_path):
     evaluation = tmp_path / "eval.jsonl"
     queue = tmp_path / "queue.jsonl"
     write_jsonl(train, [
-        {"image": "adult.jpg", "text": "x " * 500,
+        {"image": "long-source.jpg", "text": "x " * 500,
          "stage1_source": "eight_hour_restricted_video"},
         {"image": "short.jpg", "text": "a concise scene",
          "stage1_source": "eight_hour_i1_pexels"},

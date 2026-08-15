@@ -26,7 +26,7 @@
 # It quarantines best/ and resets eval claims — correct, since ppl 4.169 was
 # measured on 128-tok/tile features and is not comparable to what follows.
 set -uo pipefail
-cd /workspace/git/moe-mla
+cd /workspace/rwkv-lab
 
 # Match scripts/run_radio1d_captioning_first.sh: rwkv_lab is not installed, it
 # is imported from ./src, and the run is guarded by a lock so two launchers can

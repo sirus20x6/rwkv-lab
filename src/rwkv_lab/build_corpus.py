@@ -242,7 +242,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--dataset", default="", help="HF dataset name (streaming); empty = local files")
-    ap.add_argument("--patterns", default="/workspace/git/moe-mla/**/*.py,/workspace/git/moe-mla/**/*.md")
+    ap.add_argument("--patterns", default="/workspace/rwkv-lab/**/*.py,/workspace/rwkv-lab/**/*.md")
     ap.add_argument("--cap-mb", type=float, default=12.0)
     args = ap.parse_args()
     if args.dataset:

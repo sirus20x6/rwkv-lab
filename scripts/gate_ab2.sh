@@ -16,7 +16,7 @@
 # gate_ab2_<arm>. Final ranking = offline paired re-eval of best/ ckpts (fp32 CE,
 # 256 windows), NOT the in-training numbers. Watch: http://127.0.0.1:9124
 set -u
-cd /workspace/git/moe-mla || exit 1
+cd /workspace/rwkv-lab || exit 1
 PY=.venv/bin/python
 export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src"
 DATA=/workspace/git/babyllm/data/cache/qwen3.6_fwedu_train

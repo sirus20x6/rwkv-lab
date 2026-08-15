@@ -5,7 +5,7 @@
 # just costs more wall-clock; the LM-head val at equal steps answers "does the auxiliary
 # prediction signal improve the representation?" independent of its compute cost.
 set -u
-cd /workspace/git/moe-mla
+cd /workspace/rwkv-lab
 export PYTHONPATH=src PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 D=${DATA:-models/g1g_tokens_big.bin}; STEPS=${STEPS:-4000}
 COMMON="--data $D --steps $STEPS --d-model 512 --n-layers 6 --batch 16 --seq-len 512 --eval-every 200 --seed 0"

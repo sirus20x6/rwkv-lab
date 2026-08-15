@@ -3,7 +3,7 @@
 # snapping contract. The revision is passed explicitly so this writer and the
 # trainer cannot silently drift to different defaults.
 set -euo pipefail
-cd /workspace/git/moe-mla
+cd /workspace/rwkv-lab
 
 exec python scripts/cache_v4h_native.py \
   --manifest curated_vision/captioning_ocr_fixed_train.jsonl \

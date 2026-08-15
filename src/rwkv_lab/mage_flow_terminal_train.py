@@ -152,7 +152,7 @@ class TerminalExpertTrainConfig:
     model_id: str = MAGE_FLOW_BASE_ID
     model_revision: str = MAGE_FLOW_BASE_REVISION
     model_path: str | None = (
-        "/workspace/git/ob/text-generation-webui/models/Mage-Flow-Base"
+        "/workspace/models/Mage-Flow-Base"
     )
     official_source_revision: str = MAGE_SOURCE_REVISION
     max_steps: int = 2_000

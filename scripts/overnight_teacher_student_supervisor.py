@@ -92,7 +92,7 @@ def maintain_dedupe() -> None:
         if not active(unit):
             start_unit(unit, [str(ROOT / ".venv/bin/python"),
                 str(ROOT / "scripts/build_unlabeled_image_manifest.py"),
-                "--root", "/workspace/git/datasets/private_web", "--db", str(DEDUP_DB),
+                "--root", "/workspace/datasets/private_web", "--db", str(DEDUP_DB),
                 "--manifest", str(DEDUP_MANIFEST), "--phase", "hash"])
             emit("dedupe_resumed", pending=pending)
     else:

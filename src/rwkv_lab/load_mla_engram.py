@@ -5,8 +5,8 @@ modules for param-group management.
 
 Usage:
     model, mla_mods, eng_mods = load_mla_engram(
-        mla_trained_ckpt="/workspace/git/moe-mla/runs/mla_ft_50m_v4/step_001735/ckpt.pt",
-        engram_patch_dir="/workspace/git/moe-mla/engram_converted",
+        mla_trained_ckpt="/workspace/rwkv-lab/runs/mla_ft_50m_v4/step_001735/ckpt.pt",
+        engram_patch_dir="/workspace/rwkv-lab/engram_converted",
     )
 """
 from __future__ import annotations
@@ -78,10 +78,10 @@ def _apply_engram_patch(engram_mods, engram_patch: dict[str, torch.Tensor],
 
 
 def load_mla_engram(
-    model_dir: str = "/workspace/git/moe-mla/Qwen3.6-35B-A3B",
-    mla_patch_dir: str = "/workspace/git/moe-mla/converted",
+    model_dir: str = "/workspace/rwkv-lab/Qwen3.6-35B-A3B",
+    mla_patch_dir: str = "/workspace/rwkv-lab/converted",
     mla_trained_ckpt: Optional[str] = None,
-    engram_patch_dir: str = "/workspace/git/moe-mla/engram_converted",
+    engram_patch_dir: str = "/workspace/rwkv-lab/engram_converted",
     device_map: str = "cuda:0",
     dtype: torch.dtype = torch.bfloat16,
 ):

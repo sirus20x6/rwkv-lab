@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build new OCR/manifests beside the active run's immutable inputs.
 set -euo pipefail
-cd /workspace/git/moe-mla
+cd /workspace/rwkv-lab
 
 # The mixer derives its DoclingMatix target from the non-OCR source counts, so
 # a hardcoded row count silently over-materializes whenever the mix changes

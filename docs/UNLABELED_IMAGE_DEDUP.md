@@ -1,6 +1,6 @@
 # Unlabeled Local Image Deduplication
 
-The local adult corpus at `/workspace/git/datasets/private_web` is an image-and-video
+The local private corpus at `/workspace/datasets/private_web` is an image-and-video
 tree. The first vision-distillation pass intentionally considers still-image
 files only. Videos and PDFs are ignored rather than decoded or frame-sampled.
 
@@ -40,31 +40,31 @@ Run individual phases so expensive work can be scheduled independently:
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/build_unlabeled_image_manifest.py \
-  --root /workspace/git/datasets/private_web \
+  --root /workspace/datasets/private_web \
   --db /workspace/downloads/cache/moe-mla/local_private_web_image_dedup.sqlite \
   --manifest curated_vision/local_private_web_unlabeled_dedup.jsonl \
   --phase inventory --workers 8
 
 PYTHONPATH=src .venv/bin/python scripts/build_unlabeled_image_manifest.py \
-  --root /workspace/git/datasets/private_web \
+  --root /workspace/datasets/private_web \
   --db /workspace/downloads/cache/moe-mla/local_private_web_image_dedup.sqlite \
   --manifest curated_vision/local_private_web_unlabeled_dedup.jsonl \
   --phase exact --workers 8
 
 PYTHONPATH=src .venv/bin/python scripts/build_unlabeled_image_manifest.py \
-  --root /workspace/git/datasets/private_web \
+  --root /workspace/datasets/private_web \
   --db /workspace/downloads/cache/moe-mla/local_private_web_image_dedup.sqlite \
   --manifest curated_vision/local_private_web_unlabeled_dedup.jsonl \
   --phase hash --workers 8
 
 PYTHONPATH=src .venv/bin/python scripts/build_unlabeled_image_manifest.py \
-  --root /workspace/git/datasets/private_web \
+  --root /workspace/datasets/private_web \
   --db /workspace/downloads/cache/moe-mla/local_private_web_image_dedup.sqlite \
   --manifest curated_vision/local_private_web_unlabeled_dedup.jsonl \
   --phase cluster --phash-distance 4 --min-side 256
 
 PYTHONPATH=src .venv/bin/python scripts/build_unlabeled_image_manifest.py \
-  --root /workspace/git/datasets/private_web \
+  --root /workspace/datasets/private_web \
   --db /workspace/downloads/cache/moe-mla/local_private_web_image_dedup.sqlite \
   --manifest curated_vision/local_private_web_unlabeled_dedup.jsonl \
   --phase export

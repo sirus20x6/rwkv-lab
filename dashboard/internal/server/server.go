@@ -21,8 +21,8 @@ import (
 // Config is the immutable wiring for a Server.
 type Config struct {
 	Addr     string           // e.g. "127.0.0.1:9124"
-	RunsDir  string           // /workspace/git/moe-mla/runs
-	RepoRoot string           // /workspace/git/moe-mla
+	RunsDir  string           // /workspace/rwkv-lab/runs
+	RepoRoot string           // /workspace/rwkv-lab
 	Static   fs.FS            // front-end assets (web.Static())
 	DB       *db.DB           // datastore
 	Sampler  *sysmon.Sampler  // live telemetry

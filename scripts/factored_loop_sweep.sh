@@ -4,7 +4,7 @@
 # turn loops on more selectively. Same from-scratch model/data/seed as loop_sweep.sh, so this is
 # a direct scalar-vs-factored comparison at each depth. Scalar c2/c3/c4 come from loop_sweep.sh.
 set -u
-cd /workspace/git/moe-mla
+cd /workspace/rwkv-lab
 export PYTHONPATH=src PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 D=${DATA:-models/g1g_tokens_big.bin}; MIN=${MIN:-10}
 COMMON="--data $D --minutes $MIN --d-model 512 --n-layers 6 --batch 16 --seq-len 512 --eval-every 40 --seed 0"

@@ -19,14 +19,14 @@ See **STACK.md** for API cheat-sheets and **DATA_MODEL.md** for the schema + JSO
 ## Run / build
 
 ```bash
-go -C /workspace/git/moe-mla/dashboard run ./cmd/trainboard      # dev
-go -C /workspace/git/moe-mla/dashboard build -o trainboard ./cmd/trainboard
-go -C /workspace/git/moe-mla/dashboard vet ./...
+go -C /workspace/rwkv-lab/dashboard run ./cmd/trainboard      # dev
+go -C /workspace/rwkv-lab/dashboard build -o trainboard ./cmd/trainboard
+go -C /workspace/rwkv-lab/dashboard vet ./...
 ```
 
 - **Port `9124`** — memorable, not the banned 8080 (global rule), adjacent to the evo board 9123. Bind
   `127.0.0.1` only, no auth (localhost dev tool, same posture as v1).
-- Reads `/workspace/git/moe-mla/runs/` (the same logs v1 reads). SQLite file lives at
+- Reads `/workspace/rwkv-lab/runs/` (the same logs v1 reads). SQLite file lives at
   `dashboard/trainboard.db` (gitignore-able; rebuilt from JSONL on demand).
 - **GPU-light & safe beside live training** — only file reads + `nvidia-smi` shell-outs; never touches CUDA.
 

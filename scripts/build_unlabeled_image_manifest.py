@@ -36,7 +36,7 @@ IMAGE_SUFFIXES = {
     ".png", ".tif", ".tiff", ".webp",
 }
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_IMAGE_ROOT = Path("/workspace/git/datasets/private_web")
+DEFAULT_IMAGE_ROOT = Path("/workspace/datasets/private_web")
 DEFAULT_DATABASE = Path(
     "/workspace/downloads/cache/moe-mla/local_private_web_image_dedup.sqlite")
 DEFAULT_MANIFEST = PROJECT_ROOT / "curated_vision/local_private_web_unlabeled_dedup.jsonl"

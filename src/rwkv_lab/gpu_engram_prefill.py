@@ -21,12 +21,12 @@ Multi-corpus schedule: corpora are processed in the order given. Earlier
 corpora establish a base; later corpora refine. Example:
 
     python gpu_engram_prefill.py \\
-      --engram-patch-dir /workspace/git/moe-mla/engram_converted_l3_l19 \\
-      --resume-from-ckpt /workspace/git/moe-mla/runs/phase3_engram_l3_l19/step_007178/ckpt.pt \\
+      --engram-patch-dir /workspace/rwkv-lab/engram_converted_l3_l19 \\
+      --resume-from-ckpt /workspace/rwkv-lab/runs/phase3_engram_l3_l19/step_007178/ckpt.pt \\
       --corpus /workspace/data/engram_tokens.bin:79940000000 \\
       --corpus /workspace/data/non_cvevc_tokens.bin:29284583603 \\
       --batch-size 8192 --steps-per-corpus 20000 --lr 5e-4 \\
-      --out /workspace/git/moe-mla/engram_prefilled
+      --out /workspace/rwkv-lab/engram_prefilled
 
 Output: a safetensors patch in --out plus a manifest.json, loadable by
 train_mla.py via --engram-patch-dir (just like the fresh init patch).
@@ -275,9 +275,9 @@ def train_on_corpus(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model-dir", default="/workspace/git/moe-mla/Qwen3.6-35B-A3B")
+    ap.add_argument("--model-dir", default="/workspace/rwkv-lab/Qwen3.6-35B-A3B")
     ap.add_argument("--engram-patch-dir",
-                    default="/workspace/git/moe-mla/engram_converted_l3_l19",
+                    default="/workspace/rwkv-lab/engram_converted_l3_l19",
                     help="patch that defines the Engram architecture "
                          "(vocab sizes, dim, layer ids, hash config).")
     ap.add_argument("--resume-from-ckpt", default="",
@@ -300,7 +300,7 @@ def main() -> None:
     ap.add_argument("--save-every", type=int, default=2000,
                     help="save a checkpoint every N steps within a corpus.")
     ap.add_argument("--seed", type=int, default=4242)
-    ap.add_argument("--out", default="/workspace/git/moe-mla/engram_prefilled")
+    ap.add_argument("--out", default="/workspace/rwkv-lab/engram_prefilled")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default="bf16",
                     help="dtype for Engram tables. bf16 halves memory; fp32 is safer.")

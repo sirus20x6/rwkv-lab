@@ -8,12 +8,12 @@ param groups.
 
 Usage (1M-token test from our 57M MLA checkpoint, Engram freshly patched):
     python train_mla_engram.py \
-        --mla-ckpt /workspace/git/moe-mla/runs/mla_ft_50m_v4/step_001735/ckpt.pt \
-        --engram-patch-dir /workspace/git/moe-mla/engram_converted \
+        --mla-ckpt /workspace/rwkv-lab/runs/mla_ft_50m_v4/step_001735/ckpt.pt \
+        --engram-patch-dir /workspace/rwkv-lab/engram_converted \
         --tokens-bin /workspace/data/non_cvevc_tokens.bin \
         --total-tokens-in-bin 29284583603 \
         --max-steps 30 --log-every 1 --eval-every 10 --save-every 30 \
-        --out-dir /workspace/git/moe-mla/runs/mla_engram_1m_test
+        --out-dir /workspace/rwkv-lab/runs/mla_engram_1m_test
 """
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ from .safe_torch import safe_torch_load
 class EngramTrainConfig(TrainConfig):
     # Additional knobs for the combined run
     mla_ckpt: str = ""                          # path to a prior MLA-only checkpoint
-    engram_patch_dir: str = "/workspace/git/moe-mla/engram_converted"
+    engram_patch_dir: str = "/workspace/rwkv-lab/engram_converted"
     engram_lr_mult: float = 5.0                 # paper: 5x lr for embedding tables
 
 

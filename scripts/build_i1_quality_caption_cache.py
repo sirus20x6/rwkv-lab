@@ -18,18 +18,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--metadata",
         type=Path,
-        default=Path("/workspace/git/datasets/i1/metadata.jsonl"),
+        default=Path("/workspace/datasets/i1/metadata.jsonl"),
     )
     parser.add_argument(
         "--captions-root",
         type=Path,
-        default=Path("/workspace/git/moe-mla/i1-captions"),
+        default=Path("/workspace/rwkv-lab/i1-captions"),
     )
     parser.add_argument(
         "--output",
         type=Path,
         default=Path(
-            "/workspace/git/datasets/i1/work/quality_viewer_captions.sqlite3"
+            "/workspace/datasets/i1/work/quality_viewer_captions.sqlite3"
         ),
     )
     parser.add_argument("--force", action="store_true")

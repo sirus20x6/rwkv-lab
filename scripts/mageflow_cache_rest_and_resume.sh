@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-repo=/workspace/git/moe-mla
+repo=/workspace/rwkv-lab
 python_bin="$repo/.venv-mage-flow/bin/python"
 module=rwkv_lab.mage_flow_terminal_train
 run_dir="$repo/runs/mage_flow_terminal_tread_loop_repa_fixed_v2"
 status_file="$run_dir/status.json"
 source_config="$repo/experiments/mageflow_terminal_repa_fixed_v2.json"
 shared_entries=/mnt/hypercard/mageflow-cache/mageflow-steps-00000501-00005500/entries
-full_manifest=/workspace/git/datasets/midjourney-v6-recap-continuation-30pct-b-512-1024/train.jsonl
+full_manifest=/workspace/datasets/midjourney-v6-recap-continuation-30pct-b-512-1024/train.jsonl
 next_cache=/mnt/hypercard/mageflow-cache/mageflow-steps-00005501-00012228
 target_step=5500
 final_step=12228

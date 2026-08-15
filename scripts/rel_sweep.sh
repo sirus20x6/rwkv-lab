@@ -12,7 +12,7 @@
 # (all defaults now), muon-lr 4e-6, io-first weights (w-block 20 / w-lmce 1 / smt 0 / dmt 0,
 # no codec), scalar gate loop-4 (loop capacity is added later at consolidation via --loop-hyper).
 set -u
-cd /workspace/git/moe-mla || exit 1
+cd /workspace/rwkv-lab || exit 1
 PY=.venv/bin/python
 export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src"
 DATA=/workspace/git/babyllm/data/cache/qwen3.6_fwedu_train

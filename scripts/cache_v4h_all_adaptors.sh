@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd /workspace/git/moe-mla
+cd /workspace/rwkv-lab
 
 # Every shard loads its own full C-RADIOv4-H copy, so without an explicit
 # device they all land on cuda:0 and fight over one card's memory. Shards are

@@ -32,10 +32,10 @@ from scripts.materialize_midjourney_v6_expert_stage import (
     write_jsonl,
 )
 
-DEFAULT_ROUTING = Path("/workspace/git/datasets/midjourney-v6-recap-routing")
-DEFAULT_CURRENT_STAGE = Path("/workspace/git/datasets/midjourney-v6-recap-stage-100k")
+DEFAULT_ROUTING = Path("/workspace/datasets/midjourney-v6-recap-routing")
+DEFAULT_CURRENT_STAGE = Path("/workspace/datasets/midjourney-v6-recap-stage-100k")
 DEFAULT_OUTPUT = Path(
-    "/workspace/git/datasets/midjourney-v6-recap-continuation-30pct-512-1024"
+    "/workspace/datasets/midjourney-v6-recap-continuation-30pct-512-1024"
 )
 DEFAULT_REPO = "Photoroom/midjourney-v6-recap"
 DEFAULT_REVISION = "21c628db81401da88c5b33507230528cf3fe4a12"

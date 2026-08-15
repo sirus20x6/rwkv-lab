@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--root",
         type=Path,
-        default=Path("/workspace/git/datasets/i1"),
+        default=Path("/workspace/datasets/i1"),
         help="Dataset root containing metadata.jsonl and train.jsonl.",
     )
     parser.add_argument("--batch-size", type=int, default=256)

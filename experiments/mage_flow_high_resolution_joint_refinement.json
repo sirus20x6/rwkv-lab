@@ -7,9 +7,9 @@
     "fresh_optimizer": true
   },
   "data": {
-    "train_manifest": "/workspace/git/datasets/mageflow-expert-manifests/train.jsonl",
+    "train_manifest": "/workspace/datasets/mageflow-expert-manifests/train.jsonl",
     "train_manifest_sha256": "bd0012f28469506896c5a7e8e999bbfb7d799d1ee0919ddded9cb77c1890c2c5",
-    "eval_manifest": "/workspace/git/datasets/mageflow-expert-manifests/eval.jsonl",
+    "eval_manifest": "/workspace/datasets/mageflow-expert-manifests/eval.jsonl",
     "eval_manifest_sha256": "eb54598a15fee202f27714bb4a4373a7a5563314edc4a64229c8ce73158f03d0",
     "no_upscale": true,
     "max_side": 2048,

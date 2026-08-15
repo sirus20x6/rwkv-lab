@@ -118,7 +118,7 @@ def find_gdn_layer(model, layer_idx: int):
 # ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model-dir", default="/workspace/git/moe-mla/Qwen3.5-9B-Base")
+    ap.add_argument("--model-dir", default="/workspace/rwkv-lab/Qwen3.5-9B-Base")
     ap.add_argument("--layer", type=int, required=True, help="GDN layer index to extract")
     ap.add_argument("--data", required=True, help="shard dir or tokens.bin (val split)")
     ap.add_argument("--seq-len", type=int, default=2048)

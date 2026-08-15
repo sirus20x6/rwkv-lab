@@ -18,7 +18,7 @@ var trainingScripts = []string{
 	"convert_train.py", "distill_consolidate.py", "drive_isolation.py",
 	"train_mla.py", "train_mla_engram.py", "rlvr_train.py", "rlvr_campaign.py",
 	"recursive_improve.py", "adapter_recursive.py", "posttrain_train.py", "posttrain_campaign.py",
-	"vision_train.py", "vision_cache.py", "qwen_private_text_cpt.py", "mage_flow_pretrain.py",
+	"vision_train.py", "vision_cache.py", "mage_flow_pretrain.py",
 	"mage_flow_expert_train.py",
 }
 
@@ -36,7 +36,6 @@ var trainingModules = map[string]string{
 	"adapter_recursive.py":      "rwkv_lab.adapter_recursive",
 	"vision_train.py":           "rwkv_lab.vision_train",
 	"vision_cache.py":           "rwkv_lab.vision_cache",
-	"qwen_private_text_cpt.py":           "rwkv_lab.qwen_private_text_cpt",
 	"mage_flow_pretrain.py":     "rwkv_lab.mage_flow_pretrain",
 	"mage_flow_expert_train.py": "rwkv_lab.mage_flow_expert_train",
 }
@@ -118,8 +117,7 @@ func readProcs(runsDir string) []Proc {
 		if v, ok := argValue(cmdline, "--out-dir", "--out", "--output"); ok {
 			pr.RunName = filepath.Base(v)
 		}
-		if script == "qwen_private_text_cpt.py" ||
-			script == "mage_flow_pretrain.py" ||
+		if script == "mage_flow_pretrain.py" ||
 			script == "mage_flow_expert_train.py" {
 			if v, ok := argValue(cmdline, "--config"); ok {
 				if raw, err := os.ReadFile(v); err == nil {

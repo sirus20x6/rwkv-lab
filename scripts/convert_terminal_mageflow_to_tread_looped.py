@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
         "--model-path",
         type=Path,
         default=Path(
-            "/workspace/git/ob/text-generation-webui/models/Mage-Flow-Base"
+            "/workspace/models/Mage-Flow-Base"
         ),
         help="Local mirrored Mage-Flow weights; no separate source checkout is used.",
     )

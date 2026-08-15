@@ -17,7 +17,7 @@ includes the 12 backbone blocks and the three terminal-expert blocks.
 The isolated environment is:
 
 ```text
-/workspace/git/moe-mla/.venv-mage-flow-fa4
+/workspace/rwkv-lab/.venv-mage-flow-fa4
 ```
 
 It is a clone of `.venv-mage-flow` with:
@@ -57,7 +57,7 @@ The next run can enable the runtime stack with:
   "compile_transformer_dynamic": false,
   "float8_training": false,
   "float8_recipe": "tensorwise",
-  "encoder_cache_dir": "/workspace/git/moe-mla/caches/mage_flow_encoders",
+  "encoder_cache_dir": "/workspace/rwkv-lab/caches/mage_flow_encoders",
   "encoder_cache_mode": "read_only",
   "offload_cached_encoders": true
 }
@@ -127,8 +127,8 @@ Entries use atomically published safetensors.
 Build or resume the cache while the GPU is available:
 
 ```bash
-MAGE_FLOW_VENV=/workspace/git/moe-mla/.venv-mage-flow-fa4 \
-  /workspace/git/moe-mla/.venv-mage-flow-fa4/bin/python \
+MAGE_FLOW_VENV=/workspace/rwkv-lab/.venv-mage-flow-fa4 \
+  /workspace/rwkv-lab/.venv-mage-flow-fa4/bin/python \
   -m rwkv_lab.mage_flow_expert_train cache-encoders \
   --config /absolute/path/to/train_config.json
 ```

@@ -8,7 +8,7 @@
 # post-norm final hidden). Objectives: NextLat (predict future latent), TOP (token-order
 # prediction), L-MTP (leap multi-token), Belief-State (fwd+bwd), JTP (joint multi-token).
 set -u
-cd /workspace/git/moe-mla
+cd /workspace/rwkv-lab
 export PYTHONPATH=src PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 D=${DATA:-models/g1g_tokens_big.bin}; MIN=${MIN:-10}
 COMMON="--data $D --minutes $MIN --d-model 512 --n-layers 6 --batch 16 --seq-len 512 --eval-every 40 --seed 0"

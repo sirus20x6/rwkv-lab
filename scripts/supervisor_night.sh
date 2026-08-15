@@ -17,11 +17,11 @@
 set -u
 
 RUN=phase3_engram_l3_l19
-DIR=/workspace/git/moe-mla/runs/$RUN
+DIR=/workspace/rwkv-lab/runs/$RUN
 LOG=$DIR/supervisor.log
-CONFIG_PATCH=/workspace/git/moe-mla/converted_bkv
-ENGRAM_PATCH=/workspace/git/moe-mla/engram_converted_l3_l19
-VENV=/workspace/git/moe-mla/.venv
+CONFIG_PATCH=/workspace/rwkv-lab/converted_bkv
+ENGRAM_PATCH=/workspace/rwkv-lab/engram_converted_l3_l19
+VENV=/workspace/rwkv-lab/.venv
 
 STAGES=(6740 9740 15740)
 STAGE_LABELS=("10M probe" "100M continuation" "500M continuation")
@@ -60,7 +60,7 @@ launch_training() {
     local resume_ckpt="$1"
     local max_steps="$2"
     local label="$3"
-    cd /workspace/git/moe-mla
+    cd /workspace/rwkv-lab
     log "launching $label: resume=$resume_ckpt max_steps=$max_steps"
     source "$VENV/bin/activate"
     export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src"

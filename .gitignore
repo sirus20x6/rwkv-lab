@@ -5,11 +5,17 @@ __pycache__/
 .venv/
 .venv-mage-flow/
 .venv-mage-flow-fa4/
+.venv-*/
 .external/
 .ipynb_checkpoints/
+.env
+.env.*
+!.env.example
 
 # --- Caches / local tool metadata ---
 caches/
+cache/
+downloads/
 .uv_cache/
 .hf_cache/
 .codex
@@ -25,6 +31,9 @@ engram*/
 mem_targets/
 runs/
 research/
+artifacts/
+checkpoints/
+weights/
 # weight/state blobs anywhere (lenses, plans, patches, ckpts)
 *.pt
 *.pth
@@ -58,19 +67,22 @@ legacy/
 experiments.db
 models/cache/
 
-# --- Local multimodal corpora, generated manifests, and model trees ---
-# These directories contain multi-GB/TB downloads, extracted images, local
-# absolute paths, generated review packs, and third-party dataset metadata.
+# --- Private/local data ---
+# Keep every corpus and generated dataset product below one of these generic
+# roots. Source code receives paths through configuration or environment
+# variables; local provenance and machine paths never belong in Git.
+/data/
+/dataset/
 /datasets/
+/corpora/
+/private/
+/local/
 /models/
-/curated_vision/
-/RESTRICTED_Manga/
-/i1-captions/
-/joy-captioning-*/
-/restricted-video-still-caption-grid-only/
-/restricted_scene_animes_*/
-/quality_review_pack/
-/quality_review_updated/
+/review-packs/
+/generated-manifests/
+*.partial.jsonl
+*.manifest.local.txt
+*.receipt.local.json
 
 # Local dashboard process state.
 /dashboard/trainboard.pid

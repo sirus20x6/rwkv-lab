@@ -3,7 +3,7 @@
 # Baseline -> plain Muon -> Muon + each spectral lever. Each run writes runs/g1g_<name>/train.jsonl
 # (live in trainboard). Same seed/data/window so final val loss is comparable across levers.
 set -u
-cd /workspace/git/moe-mla
+cd /workspace/rwkv-lab
 export PYTHONPATH=src
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 M=models/rwkv7-g1g-1.5b.pth; D=${DATA:-models/g1g_tokens_big.bin}
